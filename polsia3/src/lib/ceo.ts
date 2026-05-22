@@ -9,24 +9,21 @@ import { runTakyonRuntimeReasoning } from "./takyon-runtime";
 import { businessWorkspaceContext } from "./business-workspace";
 import { executeAiProvider } from "./ai-provider";
 import { loadLocalSecrets } from "./secrets";
-import { getTakyonWorkflowSpec, takyonCapabilityGroups } from "./takyon-registry";
+import { getTakyonWorkflowSpec, takyonCapabilityGroups, takyonWorkflowRegistry } from "./takyon-registry";
 import { preflightCapabilityGroups } from "./tool-availability";
 import { enqueueWorkflowJob } from "./workflow-jobs";
 
-const CEO_BUSINESS_WORKFLOWS = [
-  "business_marketing_context",
-  "business_search_visibility",
-  "business_conversion_review",
-  "business_content_engine",
-  "business_outreach_pipeline",
-  "business_paid_media_review",
-  "business_measurement_plan"
-] as const;
+const CEO_ACTION_EXCLUDED_WORKFLOWS = new Set(["ceo_wakeup"]);
 
-type CeoBusinessWorkflowId = (typeof CEO_BUSINESS_WORKFLOWS)[number];
+function ceoActionWorkflowSpecs() {
+  return takyonWorkflowRegistry
+    .filter((workflow) => workflow.dispatchable && !CEO_ACTION_EXCLUDED_WORKFLOWS.has(workflow.workflowId))
+    .sort((a, b) => b.priority - a.priority);
+}
 
-function isCeoBusinessWorkflowId(value: string): value is CeoBusinessWorkflowId {
-  return (CEO_BUSINESS_WORKFLOWS as readonly string[]).includes(value);
+function isCeoActionWorkflowId(value: string) {
+  const spec = getTakyonWorkflowSpec(value);
+  return Boolean(spec?.dispatchable && !CEO_ACTION_EXCLUDED_WORKFLOWS.has(value));
 }
 
 function useRemoteRuntime() {
@@ -71,91 +68,216 @@ function extractJsonObjects(text: string) {
 
 function ceoBusinessActions(text: string) {
   const parsed = extractJsonObjects(text).reverse();
-  const actions: Array<{ workflow_id: CeoBusinessWorkflowId; reason: string }> = [];
+  const actions: Array<{ workflow_id: string; reason: string }> = [];
   for (const object of parsed) {
     const raw = Array.isArray(object.next_actions) ? object.next_actions : [];
     for (const item of raw) {
       const record = asRecord(item);
       const workflowId = typeof record.workflow_id === "string" ? record.workflow_id.trim() : "";
-      if (!isCeoBusinessWorkflowId(workflowId)) continue;
+      if (!isCeoActionWorkflowId(workflowId)) continue;
       const reason = typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : "ceo_recommended_business_skill";
       if (actions.some((action) => action.workflow_id === workflowId)) continue;
       actions.push({ workflow_id: workflowId, reason });
-      if (actions.length >= 2) return actions;
+      if (actions.length >= 4) return actions;
     }
     if (actions.length) return actions;
   }
   return actions;
 }
 
-async function queueCeoBusinessActions(input: { businessId: string; reportId: string; reportText: string }) {
-  const actions = ceoBusinessActions(input.reportText);
-  const queued = [];
-  const sql = db();
-  for (const action of actions) {
-    const spec = getTakyonWorkflowSpec(action.workflow_id);
-    if (!spec) continue;
+type QueuedCeoWorkflow =
+  | { workflow_id: string; status: "queued"; jobId: string; reason: string; dependencyOf?: string }
+  | { workflow_id: string; status: "skipped_existing"; existingStatus: string; jobId: string; reason: string; dependencyOf?: string }
+  | { workflow_id: string; status: "blocked"; reason: string; error: string; missing: string[]; dependencyOf?: string }
+  | { workflow_id: string; status: "blocked_dependency"; reason: string; dependencyOf: string }
+  | { workflow_id: string; status: "invalid"; reason: string; dependencyOf?: string };
 
-    const recent = await sql<{ id: string; status: string }[]>`
+async function findCoveringWorkflow(input: { businessId: string; workflowId: string; repeatable: boolean; dependency: boolean }) {
+  const sql = db();
+  if (input.dependency || !input.repeatable) {
+    const rows = await sql<{ id: string; status: string }[]>`
       SELECT id, status
       FROM workflow_jobs
       WHERE business_id = ${input.businessId}
-        AND workflow_id = ${action.workflow_id}
+        AND workflow_id = ${input.workflowId}
         AND status IN ('queued', 'running', 'completed')
-        AND updated_at >= now() - interval '24 hours'
       ORDER BY updated_at DESC
       LIMIT 1
     `;
-    if (recent[0]) {
-      queued.push({
-        workflow_id: action.workflow_id,
-        status: "skipped_recent",
-        existingStatus: recent[0].status,
-        jobId: recent[0].id,
-        reason: action.reason
-      });
-      continue;
-    }
+    return rows[0] ?? null;
+  }
 
-    const block = await preflightCapabilityGroups({
-      workflowId: action.workflow_id,
-      groups: takyonCapabilityGroups(action.workflow_id),
+  const rows = await sql<{ id: string; status: string }[]>`
+    SELECT id, status
+    FROM workflow_jobs
+    WHERE business_id = ${input.businessId}
+      AND workflow_id = ${input.workflowId}
+      AND (
+        status IN ('queued', 'running')
+        OR (status = 'completed' AND updated_at >= now() - interval '24 hours')
+      )
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+async function queueCeoWorkflowWithDependencies(input: {
+  businessId: string;
+  reportId: string;
+  workflowId: string;
+  reason: string;
+  dependencyOf?: string;
+  path?: string[];
+}): Promise<{ ready: boolean; queued: QueuedCeoWorkflow[] }> {
+  const spec = getTakyonWorkflowSpec(input.workflowId);
+  if (!spec?.dispatchable || CEO_ACTION_EXCLUDED_WORKFLOWS.has(input.workflowId)) {
+    return {
+      ready: false,
+      queued: [
+        {
+          workflow_id: input.workflowId,
+          status: "invalid",
+          reason: input.reason,
+          dependencyOf: input.dependencyOf
+        }
+      ]
+    };
+  }
+
+  const path = input.path ?? [];
+  if (path.includes(input.workflowId)) {
+    return {
+      ready: false,
+      queued: [
+        {
+          workflow_id: input.workflowId,
+          status: "invalid",
+          reason: `Dependency cycle: ${[...path, input.workflowId].join(" -> ")}`,
+          dependencyOf: input.dependencyOf
+        }
+      ]
+    };
+  }
+
+  const queued: QueuedCeoWorkflow[] = [];
+  let dependenciesReady = true;
+  for (const dependency of spec.dependencies) {
+    const dependencyResult = await queueCeoWorkflowWithDependencies({
       businessId: input.businessId,
-      profileId: null
+      reportId: input.reportId,
+      workflowId: dependency,
+      reason: `Dependency for ${input.workflowId}.`,
+      dependencyOf: input.workflowId,
+      path: [...path, input.workflowId]
     });
-    if (block) {
-      await createEvent({
-        businessId: input.businessId,
-        kind: "tool.capability_blocked",
-        subjectType: "business_document",
-        subjectId: input.reportId,
-        payload: block
-      });
-      queued.push({
-        workflow_id: action.workflow_id,
-        status: "blocked",
-        reason: action.reason,
-        error: block.error,
-        missing: block.missing
-      });
-      continue;
-    }
+    queued.push(...dependencyResult.queued);
+    if (!dependencyResult.ready) dependenciesReady = false;
+  }
 
-    const job = await enqueueWorkflowJob({
-      companyId: input.businessId,
-      profileId: null,
-      workflowId: action.workflow_id,
-      lane: spec.lane,
-      dependencies: spec.dependencies,
-      priority: spec.priority,
-      maxAttempts: spec.maxAttempts,
-      payload: {
-        source: "ceo_wakeup",
-        source_report_id: input.reportId,
-        reason: action.reason
-      }
+  if (!dependenciesReady) {
+    return {
+      ready: false,
+      queued: [
+        ...queued,
+        {
+          workflow_id: input.workflowId,
+          status: "blocked_dependency",
+          reason: input.reason,
+          dependencyOf: input.dependencyOf ?? input.workflowId
+        }
+      ]
+    };
+  }
+
+  const existing = await findCoveringWorkflow({
+    businessId: input.businessId,
+    workflowId: input.workflowId,
+    repeatable: Boolean(spec.repeatable),
+    dependency: Boolean(input.dependencyOf)
+  });
+  if (existing) {
+    return {
+      ready: true,
+      queued: [
+        ...queued,
+        {
+          workflow_id: input.workflowId,
+          status: "skipped_existing",
+          existingStatus: existing.status,
+          jobId: existing.id,
+          reason: input.reason,
+          dependencyOf: input.dependencyOf
+        }
+      ]
+    };
+  }
+
+  const block = await preflightCapabilityGroups({
+    workflowId: input.workflowId,
+    groups: takyonCapabilityGroups(input.workflowId),
+    businessId: input.businessId,
+    profileId: null
+  });
+  if (block) {
+    await createEvent({
+      businessId: input.businessId,
+      kind: "tool.capability_blocked",
+      subjectType: "business_document",
+      subjectId: input.reportId,
+      payload: block
     });
-    queued.push({ workflow_id: action.workflow_id, status: "queued", jobId: job.id, reason: action.reason });
+    return {
+      ready: false,
+      queued: [
+        ...queued,
+        {
+          workflow_id: input.workflowId,
+          status: "blocked",
+          reason: input.reason,
+          error: block.error,
+          missing: block.missing,
+          dependencyOf: input.dependencyOf
+        }
+      ]
+    };
+  }
+
+  const job = await enqueueWorkflowJob({
+    companyId: input.businessId,
+    profileId: null,
+    workflowId: input.workflowId,
+    lane: spec.lane,
+    dependencies: spec.dependencies,
+    priority: spec.priority,
+    maxAttempts: spec.maxAttempts,
+    payload: {
+      source: "ceo_wakeup",
+      source_report_id: input.reportId,
+      reason: input.reason,
+      dependency_of: input.dependencyOf ?? null
+    }
+  });
+  return {
+    ready: true,
+    queued: [
+      ...queued,
+      { workflow_id: input.workflowId, status: "queued", jobId: job.id, reason: input.reason, dependencyOf: input.dependencyOf }
+    ]
+  };
+}
+
+async function queueCeoBusinessActions(input: { businessId: string; reportId: string; reportText: string }) {
+  const actions = ceoBusinessActions(input.reportText);
+  const queued: QueuedCeoWorkflow[] = [];
+  for (const action of actions) {
+    const result = await queueCeoWorkflowWithDependencies({
+      businessId: input.businessId,
+      reportId: input.reportId,
+      workflowId: action.workflow_id,
+      reason: action.reason
+    });
+    queued.push(...result.queued);
   }
 
   if (queued.length) {
@@ -199,7 +321,7 @@ async function runLocalMacCeoReasoning(prompt: string) {
 
 export async function runCeoReasoning(input: { businessId: string }) {
   const sql = db();
-  const [companyRows, documentRows, jobRows, memoryRows, workspace] = await Promise.all([
+  const [companyRows, documentRows, jobRows, conversationRows, memoryRows, workspace] = await Promise.all([
     sql<{ name: string; public_pitch: string | null }[]>`
       SELECT b.name, cs.public_pitch
       FROM businesses b
@@ -221,6 +343,14 @@ export async function runCeoReasoning(input: { businessId: string }) {
       ORDER BY created_at DESC
       LIMIT 20
     `,
+    sql<{ source: string; author_label: string; body: string; status: string; received_at: string; thread_title: string; thread_url: string | null }[]>`
+      SELECT m.source, m.author_label, m.body, m.status, m.received_at::text, t.title AS thread_title, t.url AS thread_url
+      FROM business_conversation_messages m
+      JOIN business_conversation_threads t ON t.id = m.thread_id
+      WHERE m.business_id = ${input.businessId}
+      ORDER BY m.received_at DESC
+      LIMIT 20
+    `,
     listBusinessMemory({ businessId: input.businessId, limit: 12 }),
     businessWorkspaceContext({ businessId: input.businessId })
   ]);
@@ -235,6 +365,9 @@ export async function runCeoReasoning(input: { businessId: string }) {
     "",
     "Recent documents:",
     ...documentRows.map((document) => `## ${document.title} (${document.kind})\n${document.content.slice(0, 1600)}`),
+    "",
+    "Recent conversation responses:",
+    ...conversationRows.map((message) => `- ${message.status} ${message.source} ${message.received_at} ${message.thread_title}${message.thread_url ? ` ${message.thread_url}` : ""}: ${message.author_label}: ${message.body.slice(0, 900)}`),
     "",
     "Business memory:",
     ...memoryRows
@@ -261,12 +394,16 @@ export async function runCeoReasoning(input: { businessId: string }) {
     "Track strategy, positioning, pricing ideas, customer objections, distribution lessons, product lessons, and recovery lessons when evidence supports them.",
     "Do not claim vendor side effects unless listed as completed.",
     "",
-    "Optional bounded business skill actions:",
-    "If a no-side-effect business skill would materially improve the CEO's ability to inspect and decide, append one final fenced JSON block.",
-    "Choose at most two workflow ids from this list only:",
-    CEO_BUSINESS_WORKFLOWS.join(", "),
-    "Avoid recommending a business skill if a fresh completed or active version is already visible in jobs/documents/workspace.",
-    "The JSON shape is: {\"next_actions\":[{\"workflow_id\":\"business_marketing_context\",\"reason\":\"short evidence-grounded reason\"}]}",
+    "Optional bounded workflow actions:",
+    "If deterministic work should run next, append one final fenced JSON block. The runner validates capabilities and queues missing workflow dependencies first.",
+    "Product/value delivery and outreach/demand creation are standing obligations. Do not use planning-only reviews as substitutes for missing product, site, checkout, auth, or distribution work.",
+    "Choose at most four workflow ids from the central registry below:",
+    ...ceoActionWorkflowSpecs().map(
+      (workflow) =>
+        `- ${workflow.workflowId}: ${workflow.description} (depends: ${workflow.dependencies.length ? workflow.dependencies.join(", ") : "none"})`
+    ),
+    "Avoid recommending a workflow if a fresh completed or active version is already visible in jobs/documents/workspace.",
+    "The JSON shape is: {\"next_actions\":[{\"workflow_id\":\"foundation\",\"reason\":\"short evidence-grounded reason\"}]}",
     "Use {\"next_actions\":[]} when no business skill should be queued."
   ].join("\n");
 

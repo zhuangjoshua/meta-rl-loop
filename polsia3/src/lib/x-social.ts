@@ -1,4 +1,5 @@
 import { getAppEnv } from "./env";
+import { preflightResponseAwareDistribution } from "./business-conversations";
 import { markSocialPostFailed, markSocialPostPublished, recordReadySocialPost, xPostAllowance } from "./social-posts";
 import { assertTakyonRunnable } from "./takyon-control";
 import { xCapability } from "./tool-availability";
@@ -28,6 +29,20 @@ export async function runXSocialLane(input: { businessId: string; profileId?: st
       status: "blocked" as const,
       reason: allowance.reason,
       allowance,
+      publishAttempted: false
+    };
+  }
+
+  const responseBlock = await preflightResponseAwareDistribution({
+    businessId: input.businessId,
+    profileId: input.profileId ?? null,
+    workflowId: "x_social"
+  });
+  if (responseBlock) {
+    return {
+      status: "blocked" as const,
+      reason: responseBlock.reason,
+      responseCheck: responseBlock,
       publishAttempted: false
     };
   }

@@ -146,6 +146,18 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     description: "Research current communities, channels, customer language, and distribution angles."
   },
   {
+    workflowId: "conversation_watch",
+    lane: "community",
+    priority: 57,
+    dependencies: [],
+    stages: ["distribution", "learning"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    maxAttempts: 1,
+    description: "Refresh per-business watched conversation threads and normalize inbound replies before more outward distribution."
+  },
+  {
     workflowId: "outreach_copy",
     lane: "outreach",
     priority: 63,
@@ -192,9 +204,21 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     description: "Review the visible funnel and write a CRO experiment backlog."
   },
   {
+    workflowId: "business_product_design",
+    lane: "website",
+    priority: 89,
+    dependencies: ["foundation"],
+    stages: ["product_foundation", "conversion", "learning"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create an Open Design-inspired webpage and app design brief without running external design daemons."
+  },
+  {
     workflowId: "business_content_engine",
     lane: "outreach",
-    priority: 61,
+    priority: 60,
     dependencies: ["foundation", "business_marketing_context"],
     stages: ["distribution", "conversion"],
     capabilityAny: ["anthropic", "openai"],
@@ -206,7 +230,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
   {
     workflowId: "business_outreach_pipeline",
     lane: "outreach",
-    priority: 60,
+    priority: 59,
     dependencies: ["foundation", "community_research", "business_marketing_context"],
     stages: ["distribution", "conversion"],
     capabilityAny: ["anthropic", "openai"],
@@ -218,7 +242,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
   {
     workflowId: "business_paid_media_review",
     lane: "meta_seedance",
-    priority: 59,
+    priority: 58,
     dependencies: ["foundation", "business_marketing_context"],
     stages: ["distribution", "conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
@@ -230,7 +254,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
   {
     workflowId: "business_measurement_plan",
     lane: "website",
-    priority: 58,
+    priority: 57,
     dependencies: ["foundation"],
     stages: ["conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],

@@ -1,8 +1,10 @@
 import { db } from "./db";
 import { toJson } from "./json";
 import { enqueueWorkflowJob } from "./workflow-jobs";
+import { getDistributionResponseCheckPolicy } from "./business-conversations";
 
 const businessCeoCronPrefix = "ceo_wakeup:";
+const businessConversationCronPrefix = "conversation_watch:";
 
 export type CronJobRow = {
   job_key: string;
@@ -39,6 +41,10 @@ function cronBusinessProfileId(job: CronJobRow) {
 
 function isBusinessCeoCronJob(jobKey: string) {
   return jobKey.startsWith(businessCeoCronPrefix);
+}
+
+function isBusinessConversationCronJob(jobKey: string) {
+  return jobKey.startsWith(businessConversationCronPrefix);
 }
 
 function nextDailyUtcDate(time: string) {
@@ -104,6 +110,51 @@ export async function ensureBusinessCeoCronJob(input: {
   `;
 }
 
+export async function ensureBusinessConversationCronJob(input: {
+  businessId: string;
+  ownerProfileId: string;
+  slug: string;
+  name: string;
+}) {
+  const policy = await getDistributionResponseCheckPolicy(input.businessId);
+  const sql = db();
+  const jobKey = `${businessConversationCronPrefix}${input.businessId}`;
+  if (!policy.enabled) {
+    await sql`DELETE FROM cron_jobs WHERE job_key = ${jobKey}`;
+    return;
+  }
+  const intervalSeconds = Math.max(900, Math.min(Number(process.env.TAKYON_CONVERSATION_WATCH_SECONDS || 3600), 24 * 60 * 60));
+  await sql`
+    INSERT INTO cron_jobs (job_key, status, schedule_type, interval_seconds, daily_time_utc, default_limit, next_run_at, metadata)
+    VALUES (
+      ${jobKey},
+      'active',
+      'interval',
+      ${intervalSeconds},
+      NULL,
+      1,
+      now() + make_interval(secs => ${intervalSeconds}),
+      ${sql.json(toJson({
+        scope: "business",
+        kind: "conversation_watch",
+        business_id: input.businessId,
+        owner_profile_id: input.ownerProfileId,
+        business_slug: input.slug,
+        business_name: input.name,
+        description: "Check this business's watched conversations before more outward distribution."
+      }))}
+    )
+    ON CONFLICT (job_key) DO UPDATE
+    SET status = 'active',
+        schedule_type = 'interval',
+        interval_seconds = EXCLUDED.interval_seconds,
+        daily_time_utc = NULL,
+        default_limit = 1,
+        metadata = EXCLUDED.metadata,
+        updated_at = now()
+  `;
+}
+
 export async function reconcileBusinessCeoCronJobs(input: { profileId?: string | null } = {}) {
   const sql = db();
   const activeBusinesses = input.profileId
@@ -129,6 +180,12 @@ export async function reconcileBusinessCeoCronJobs(input: { profileId?: string |
       slug: business.slug,
       name: business.name
     });
+    await ensureBusinessConversationCronJob({
+      businessId: business.id,
+      ownerProfileId: business.owner_profile_id,
+      slug: business.slug,
+      name: business.name
+    });
   }
 
   await sql`
@@ -139,6 +196,17 @@ export async function reconcileBusinessCeoCronJobs(input: { profileId?: string |
   await sql`
     DELETE FROM cron_jobs cj
     WHERE cj.job_key LIKE ${`${businessCeoCronPrefix}%`}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM businesses b
+        WHERE b.id::text = cj.metadata->>'business_id'
+          AND b.status = 'active'
+      )
+  `;
+
+  await sql`
+    DELETE FROM cron_jobs cj
+    WHERE cj.job_key LIKE ${`${businessConversationCronPrefix}%`}
       AND NOT EXISTS (
         SELECT 1
         FROM businesses b
@@ -220,6 +288,8 @@ export async function dispatchDueCronJobs(input: { dispatcherId: string; limit?:
     try {
       if (isBusinessCeoCronJob(job.job_key)) {
         await enqueueBusinessCeoWakeup(job);
+      } else if (isBusinessConversationCronJob(job.job_key)) {
+        await enqueueBusinessConversationWatch(job);
       } else if (job.job_key === "agent_runner") {
         // The local worker performs the long-running claims. The cron tick only records the pulse.
       } else {
@@ -247,6 +317,20 @@ async function enqueueBusinessCeoWakeup(job: CronJobRow) {
     workflowId: "ceo_wakeup",
     lane: "ceo",
     priority: 45,
+    payload: { reason: "cron", cron_job_key: job.job_key }
+  });
+}
+
+async function enqueueBusinessConversationWatch(job: CronJobRow) {
+  const businessId = cronBusinessId(job);
+  if (!businessId) throw new Error(`Business conversation cron job ${job.job_key} is missing metadata.business_id.`);
+  await enqueueWorkflowJob({
+    companyId: businessId,
+    profileId: cronBusinessProfileId(job),
+    workflowId: "conversation_watch",
+    lane: "community",
+    priority: 57,
+    maxAttempts: 1,
     payload: { reason: "cron", cron_job_key: job.job_key }
   });
 }

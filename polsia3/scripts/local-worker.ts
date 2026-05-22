@@ -5,6 +5,7 @@ import { isBusinessSkillWorkflowId, runBusinessSkillWorkflow } from "../src/lib/
 import { runCeoReasoning } from "../src/lib/ceo";
 import { observeCampaignAndCustomerLearning } from "../src/lib/campaign-learning";
 import { runCommunityResearch } from "../src/lib/community";
+import { runConversationWatch } from "../src/lib/business-conversations";
 import { db } from "../src/lib/db";
 import { ConfigurationError, IntegrationCallError } from "../src/lib/errors";
 import { createEvent } from "../src/lib/events";
@@ -387,6 +388,13 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
     if (job.workflow_id === "community_research") {
       const result = await runCommunityResearch({ businessId: job.business_id });
       await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "community.research", output: result });
+      await finishAgentRun({ runId: run.id, status: "completed", output: result });
+      return completeWorkflowJob({ jobId: job.id, status: "completed", result });
+    }
+
+    if (job.workflow_id === "conversation_watch") {
+      const result = await runConversationWatch({ businessId: job.business_id, profileId: job.profile_id });
+      await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "conversation.watch", output: result });
       await finishAgentRun({ runId: run.id, status: "completed", output: result });
       return completeWorkflowJob({ jobId: job.id, status: "completed", result });
     }

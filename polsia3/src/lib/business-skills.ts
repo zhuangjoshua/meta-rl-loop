@@ -35,6 +35,14 @@ const BUSINESS_SKILL_CONFIGS = {
     memoryKey: "business-conversion-review",
     description: "Conversion funnel review and small experiment backlog."
   },
+  business_product_design: {
+    file: "business-product-design.md",
+    title: "Business Product Design",
+    documentTitle: "Business Product Design",
+    workspacePath: "product/design-brief.md",
+    memoryKey: "business-product-design",
+    description: "Open Design-inspired webpage and app design brief, design-system guidance, and UI QA checklist."
+  },
   business_content_engine: {
     file: "business-content-engine.md",
     title: "Business Content Engine",
@@ -118,7 +126,7 @@ function providerPolicy() {
 
 async function loadBusinessState(input: { businessId: string; profileId?: string | null }) {
   const sql = db();
-  const [business, documents, jobs, campaigns, communityTargets, leads, posts, mediaJobs, revenue, paymentLinks, memories, workspace, capabilities] = await Promise.all([
+  const [business, documents, jobs, campaigns, communityTargets, leads, conversations, posts, mediaJobs, revenue, paymentLinks, memories, workspace, capabilities] = await Promise.all([
     sql`
       SELECT b.id, b.name, b.slug, b.status, cs.public_title, cs.public_pitch, cs.status AS site_status, cs.config AS site_config
       FROM businesses b
@@ -159,6 +167,14 @@ async function loadBusinessState(input: { businessId: string; profileId?: string
       FROM leads
       WHERE business_id = ${input.businessId}
       ORDER BY created_at DESC
+      LIMIT 20
+    `,
+    sql`
+      SELECT m.source, m.author_label, m.body, m.status, m.received_at, t.title AS thread_title, t.url AS thread_url
+      FROM business_conversation_messages m
+      JOIN business_conversation_threads t ON t.id = m.thread_id
+      WHERE m.business_id = ${input.businessId}
+      ORDER BY m.received_at DESC
       LIMIT 20
     `,
     sql`
@@ -204,6 +220,7 @@ async function loadBusinessState(input: { businessId: string; profileId?: string
     campaigns,
     communityTargets,
     leads,
+    conversations,
     posts,
     mediaJobs,
     revenue,

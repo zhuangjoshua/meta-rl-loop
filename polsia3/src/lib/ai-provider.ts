@@ -50,6 +50,7 @@ export async function executeAiProvider(input: {
   model: string;
   messages: AiMessage[];
   maxOutputTokens: number;
+  signal?: AbortSignal;
 }) {
   const provider = input.provider.toLowerCase();
   if (provider === "openai") return executeOpenAi(input);
@@ -57,7 +58,14 @@ export async function executeAiProvider(input: {
   throw new ConfigurationError(`Unsupported AI provider: ${input.provider}`);
 }
 
-async function executeOpenAi(input: { model: string; messages: AiMessage[]; maxOutputTokens: number }) {
+function requestSignal(timeoutMs: number, signal?: AbortSignal) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!signal) return timeoutSignal;
+  if (signal.aborted) return signal;
+  return AbortSignal.any([signal, timeoutSignal]);
+}
+
+async function executeOpenAi(input: { model: string; messages: AiMessage[]; maxOutputTokens: number; signal?: AbortSignal }) {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) throw new ConfigurationError("OPENAI_API_KEY is not configured.");
   const { system, conversation } = splitSystem(input.messages);
@@ -76,7 +84,7 @@ async function executeOpenAi(input: { model: string; messages: AiMessage[]; maxO
       })),
       max_output_tokens: input.maxOutputTokens
     }),
-    signal: AbortSignal.timeout(60_000)
+    signal: requestSignal(60_000, input.signal)
   });
   const json = await response.json().catch(() => null);
   if (!response.ok) {
@@ -93,7 +101,7 @@ async function executeOpenAi(input: { model: string; messages: AiMessage[]; maxO
   };
 }
 
-async function executeAnthropic(input: { model: string; messages: AiMessage[]; maxOutputTokens: number }) {
+async function executeAnthropic(input: { model: string; messages: AiMessage[]; maxOutputTokens: number; signal?: AbortSignal }) {
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) throw new ConfigurationError("ANTHROPIC_API_KEY is not configured.");
   const { system, conversation } = splitSystem(input.messages);
@@ -115,7 +123,7 @@ async function executeAnthropic(input: { model: string; messages: AiMessage[]; m
       "content-type": "application/json"
     },
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(60_000)
+    signal: requestSignal(60_000, input.signal)
   });
   const json = (await response.json().catch(() => null)) as
     | { id?: string; content?: Array<{ type?: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number }; error?: { message?: string } }

@@ -36,6 +36,7 @@ type TakyonBusinessWorkspaceProps = {
   model: TakyonDashboardModel;
   leverAction: FormAction;
   chatAction: FormAction;
+  settingsAction: FormAction;
   endAction: FormAction;
 };
 
@@ -560,9 +561,10 @@ function ModalShell({
   );
 }
 
-export function TakyonBusinessWorkspace({ model, leverAction, chatAction, endAction }: TakyonBusinessWorkspaceProps) {
+export function TakyonBusinessWorkspace({ model, leverAction, chatAction, settingsAction, endAction }: TakyonBusinessWorkspaceProps) {
   const [lever, setLever] = useState<Lever | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [openTask, setOpenTask] = useState<TakyonTaskItem | null>(null);
   const [openDoc, setOpenDoc] = useState<TakyonDocumentItem | null>(null);
   const [docsOpen, setDocsOpen] = useState(false);
@@ -647,9 +649,9 @@ export function TakyonBusinessWorkspace({ model, leverAction, chatAction, endAct
             <button type="button" className="takyon-company-end" title="End app operations" aria-label="End app operations" onClick={() => setShutdownOpen(true)}>
               <Power size={15} />
             </button>
-            <a href={`/dashboard/businesses/${model.company.id}`} title="Settings">
+            <button type="button" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
               <Settings size={16} />
-            </a>
+            </button>
           </nav>
         </header>
 
@@ -1041,6 +1043,50 @@ export function TakyonBusinessWorkspace({ model, leverAction, chatAction, endAct
               <textarea name="reason" rows={3} placeholder="Reason for ending this app" defaultValue="Operator ended this generated app." />
               <button type="submit" className="takyon-danger-button">
                 End app
+              </button>
+            </form>
+          </div>
+        </ModalShell>
+      ) : null}
+
+      {settingsOpen ? (
+        <ModalShell onClose={() => setSettingsOpen(false)}>
+          <div className="takyon-modal-head">
+            <div>
+              <Settings size={16} />
+              <h2>Business settings</h2>
+            </div>
+            <button type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">
+              <X size={15} />
+            </button>
+          </div>
+          <div className="takyon-modal-body">
+            <form action={settingsAction} className="takyon-settings-form">
+              <label className="takyon-toggle-row">
+                <input
+                  type="checkbox"
+                  name="responseCheck"
+                  defaultChecked={model.distributionPolicy.responseCheckEnabled}
+                />
+                <span aria-hidden />
+                <strong>Handle replies before distribution</strong>
+              </label>
+              <div className="takyon-policy-grid">
+                <div>
+                  <span>threads</span>
+                  <strong>{model.distributionPolicy.activeThreads}</strong>
+                </div>
+                <div>
+                  <span>unresolved</span>
+                  <strong>{model.distributionPolicy.unresolvedMessages}</strong>
+                </div>
+                <div>
+                  <span>stale</span>
+                  <strong>{model.distributionPolicy.staleThreads}</strong>
+                </div>
+              </div>
+              <button type="submit" className="takyon-primary-button">
+                Save
               </button>
             </form>
           </div>

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { notFound } from "next/navigation";
 import { requireProfile } from "@/lib/auth";
+import { explainResponseAwareBlock, preflightResponseAwareDistribution, setDistributionResponseCheckPolicy } from "@/lib/business-conversations";
 import { getCompanyForProfile } from "@/lib/companies";
 import { endCompanyOperations } from "@/lib/company-shutdown";
 import { createEvent } from "@/lib/events";
@@ -22,6 +23,8 @@ const leverMap: Record<string, LeverConfig> = {
   outreach: { workflowId: "outreach_copy", lane: "outreach", title: "Refresh leads" },
   ads: { workflowId: "meta_seedance", lane: "meta_seedance", title: "Generate Sora creative" }
 };
+
+const responseAwareLevers = new Set(["twitter", "outreach", "ads"]);
 
 async function requireCompanyAccess(companyId: string) {
   const profile = await requireProfile();
@@ -51,6 +54,23 @@ export async function startTakyonLeverFromForm(companyId: string, formData: Form
   const config = leverMap[lever];
   if (!config) return;
 
+  if (responseAwareLevers.has(lever)) {
+    const block = await preflightResponseAwareDistribution({
+      businessId: companyId,
+      profileId: profile.id,
+      workflowId: config.workflowId
+    });
+    if (block) {
+      await explainResponseAwareBlock({
+        businessId: companyId,
+        profileId: profile.id,
+        reason: block.reason
+      });
+      revalidatePath(`/dashboard/companies/${companyId}`);
+      return;
+    }
+  }
+
   const job = await enqueueWorkflowJob({
     companyId,
     profileId: profile.id,
@@ -78,6 +98,22 @@ export async function startTakyonLeverFromForm(companyId: string, formData: Form
     source: "system"
   });
 
+  revalidatePath(`/dashboard/companies/${companyId}`);
+}
+
+export async function updateTakyonDistributionPolicyFromForm(companyId: string, formData: FormData) {
+  const { profile } = await requireCompanyAccess(companyId);
+  const enabled = formData.get("responseCheck") === "on";
+  await setDistributionResponseCheckPolicy({ businessId: companyId, profileId: profile.id, enabled });
+  await createInboxMessage({
+    companyId,
+    profileId: profile.id,
+    authorLabel: "Takyon",
+    body: enabled
+      ? "Response-aware distribution is on for this business."
+      : "Response-aware distribution is off for this business.",
+    source: "system"
+  });
   revalidatePath(`/dashboard/companies/${companyId}`);
 }
 

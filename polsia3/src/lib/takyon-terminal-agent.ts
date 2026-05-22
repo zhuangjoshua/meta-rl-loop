@@ -312,15 +312,19 @@ export async function runTakyonTerminalAgent(input: {
   recentBusinessSlug?: string | null;
   recentTurns?: TakyonTerminalRecentTurn[];
   terminalHelp: string;
+  signal?: AbortSignal;
 }): Promise<TakyonTerminalAgentTurn> {
   loadLocalSecrets();
+  input.signal?.throwIfAborted();
   const scopedSlug = input.currentBusinessSlug ?? input.recentBusinessSlug ?? null;
   const scopedBusiness = await businessContext(input.profileId, scopedSlug);
+  input.signal?.throwIfAborted();
   const selfDescription = await buildTakyonSelfDescription({
     profileId: input.profileId,
     businessId: scopedBusiness?.business.id ?? null,
     terminalHelp: input.terminalHelp
   });
+  input.signal?.throwIfAborted();
 
   if (asksForSelfDescription(input.text)) {
     return {
@@ -358,6 +362,7 @@ export async function runTakyonTerminalAgent(input: {
       provider,
       model: terminalModel(provider),
       maxOutputTokens: 900,
+      signal: input.signal,
       messages: [
         { role: "system", content: stableDoctrine() },
         {
@@ -376,6 +381,7 @@ export async function runTakyonTerminalAgent(input: {
     });
     return { ...coerceTurn(parseJsonObject(response.text), response.text), source: "model" };
   } catch (error) {
+    if (input.signal?.aborted) throw error;
     return {
       source: "local",
       reply: `Takyon terminal agent could not complete that turn: ${error instanceof Error ? error.message : String(error)}`,

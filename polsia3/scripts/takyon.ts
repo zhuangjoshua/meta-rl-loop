@@ -138,6 +138,18 @@ const ansi = {
   electricBlue: "\x1b[38;2;0;176;255m"
 };
 
+const theme = {
+  brand: ansi.electricBlue,
+  primary: ansi.electricBlue,
+  secondary: ansi.cyan,
+  skill: ansi.cyan,
+  control: ansi.gray,
+  muted: ansi.gray,
+  success: ansi.green,
+  warning: ansi.yellow,
+  danger: ansi.red
+};
+
 function color(text: string, code: string) {
   return colorEnabled ? `${code}${text}${ansi.reset}` : text;
 }
@@ -193,17 +205,28 @@ function inputRule() {
 }
 
 function inputPromptLabel(currentBusiness: string | null) {
-  const scope = currentBusiness ? color(currentBusiness, ansi.cyan) : dim("terminal");
-  return `${color("takyon", ansi.brightMagenta)}${dim("/")}${scope}`;
+  const scope = currentBusiness ? color(currentBusiness, theme.secondary) : dim("terminal");
+  return `${color("takyon", theme.brand)}${dim("/")}${scope}`;
+}
+
+function inputBarTop(currentBusiness: string | null) {
+  const width = shellFrameWidth();
+  const label = ` ${inputPromptLabel(currentBusiness)} `;
+  const fill = Math.max(0, width - visibleLength(label));
+  const left = Math.floor(fill / 2);
+  const right = fill - left;
+  return `${color("─".repeat(left), theme.muted)}${label}${color("─".repeat(right), theme.muted)}`;
 }
 
 function inputPrompt(currentBusiness: string | null) {
-  void currentBusiness;
-  return `${inputRule()}\n${color(">", ansi.cyan)} `;
+  if (!output.isTTY) return `${inputPromptLabel(currentBusiness)} > `;
+  return `${inputBarTop(currentBusiness)}\n${color("›", theme.primary)} `;
 }
 
 function closeInputBox() {
-  if (output.isTTY) console.log(inputRule());
+  if (!output.isTTY) return;
+  const width = shellFrameWidth();
+  console.log(color("─".repeat(width), theme.muted));
 }
 
 function statusColor(status: string) {
@@ -231,7 +254,7 @@ function printCapabilities(capabilities: ToolCapability[], json: boolean) {
     if (!capability.canRun && capability.missing.length) console.log(`  ${color("Missing:", ansi.yellow)} ${capability.missing.join(", ")}`);
     for (const report of capability.reports.filter((item) => !item.ok)) {
       const source = `${report.source}:${report.key}`;
-      console.log(`  ${color("Source:", ansi.magenta)} ${source}${report.missing.length ? ` missing ${report.missing.join(", ")}` : ""}`);
+      console.log(`  ${color("Source:", theme.secondary)} ${source}${report.missing.length ? ` missing ${report.missing.join(", ")}` : ""}`);
       if (report.detail) console.log(`    ${dim(report.detail)}`);
     }
     if (!capability.canRun && capability.setup.length) {
@@ -284,7 +307,7 @@ function printCampaigns(campaigns: Awaited<ReturnType<typeof listBusinessCampaig
     return;
   }
   for (const campaign of campaigns) {
-    console.log(`${color(campaign.slug.padEnd(34), ansi.magenta)} ${bold(campaign.name)} ${dim("(")}${paintStatus(campaign.status)}, ${campaign.kind}${dim(")")}`);
+    console.log(`${color(campaign.slug.padEnd(34), theme.secondary)} ${bold(campaign.name)} ${dim("(")}${paintStatus(campaign.status)}, ${campaign.kind}${dim(")")}`);
   }
 }
 
@@ -292,10 +315,10 @@ type AutopilotPlan = Awaited<ReturnType<typeof runBusinessAutopilot>>;
 
 function printAutopilotPlan(plan: AutopilotPlan, json: boolean) {
   if (json) return print(plan, true);
-  console.log(`${tag("ceo", ansi.brightMagenta)} ${bold("Takyon plan:")} ${plan.business.name} ${dim(`(${plan.business.slug})`)}`);
-  for (const reason of plan.reasons) console.log(`  ${color("-", ansi.brightMagenta)} ${reason}`);
-  console.log(`${color("CEO wakeup:", ansi.brightMagenta)} ${plan.ceoWakeupJobId ? shortId(plan.ceoWakeupJobId) : color("not queued", ansi.yellow)}`);
-  if (plan.campaignId) console.log(`${color("Campaign:", ansi.magenta)} ${shortId(plan.campaignId)}`);
+  console.log(`${tag("ceo", theme.primary)} ${bold("Takyon plan:")} ${plan.business.name} ${dim(`(${plan.business.slug})`)}`);
+  for (const reason of plan.reasons) console.log(`  ${color("-", theme.primary)} ${reason}`);
+  console.log(`${color("CEO wakeup:", theme.primary)} ${plan.ceoWakeupJobId ? shortId(plan.ceoWakeupJobId) : color("not queued", ansi.yellow)}`);
+  if (plan.campaignId) console.log(`${color("Campaign:", theme.secondary)} ${shortId(plan.campaignId)}`);
 
   const queued = plan.queued.filter((item) => item.status === "queued");
   const existing = plan.queued.filter((item) => item.status === "already_present");
@@ -327,7 +350,7 @@ function printAutopilotPlan(plan: AutopilotPlan, json: boolean) {
 function workflowLine(job: WorkflowJobRow) {
   const status = color(job.status.padEnd(9), statusColor(job.status));
   const workflow = color(job.workflow_id.padEnd(34), ansi.cyan);
-  const lane = color(job.lane.padEnd(34), ansi.magenta);
+  const lane = color(job.lane.padEnd(34), theme.secondary);
   const attempts = `${job.attempts}/${job.max_attempts}`;
   const updated = dim(new Date(job.updated_at).toLocaleTimeString());
   return `${status} ${workflow} ${lane} p${job.priority} attempts ${attempts} ${updated} ${dim(shortId(job.id))}`;
@@ -364,9 +387,9 @@ function printHarnessCommands(commands: TakyonHarnessCommand[], json: boolean) {
     return;
   }
   for (const command of commands) {
-    const scope = command.requiresBusiness ? color("business", ansi.magenta) : color("global", ansi.gray);
+    const scope = command.requiresBusiness ? color("business", theme.secondary) : color("global", ansi.gray);
     const band = command.priorityBand ? color(command.priorityBand, ansi.cyan) : dim("unbanded");
-    console.log(`${color(`/${command.name}`.padEnd(18), ansi.brightMagenta)} ${scope} ${band} ${command.description ?? ""}`);
+    console.log(`${color(`/${command.name}`.padEnd(18), theme.primary)} ${scope} ${band} ${command.description ?? ""}`);
     if (command.allowedTools.length) console.log(`  ${dim("tools:")} ${command.allowedTools.join(", ")}`);
     console.log(`  ${dim(command.path)}`);
   }
@@ -390,7 +413,7 @@ function cronScope(job: CronJobRow) {
   if (metadata.scope === "business") {
     const slug = typeof metadata.business_slug === "string" ? metadata.business_slug : "";
     const name = typeof metadata.business_name === "string" ? metadata.business_name : "";
-    return `${color("business", ansi.magenta)} ${slug || name || String(metadata.business_id ?? "")}`;
+    return `${color("business", theme.secondary)} ${slug || name || String(metadata.business_id ?? "")}`;
   }
   if (job.job_key === "agent_runner") return `${color("system", ansi.gray)} local worker pulse`;
   return color("system", ansi.gray);
@@ -426,7 +449,7 @@ function printRuntimeStatus(status: TakyonRuntimeStatus, json: boolean) {
   console.log(`  ${color("node", ansi.cyan)} ${nodeMark}  ${color("tsx", ansi.cyan)} ${tsxMark}`);
   console.log(`  ${color("worker", ansi.cyan)} queued ${status.worker.queued}, running ${status.worker.running}, blocked ${status.worker.blocked}, failed ${status.worker.failed}`);
   console.log(`  ${color("cron", ansi.cyan)} ${status.cron.active} active, ${status.cron.paused} paused, ${status.cron.due} due`);
-  console.log(`  ${color("harness", ansi.brightMagenta)} ${status.harness.commandCount} commands at ${status.harness.root}`);
+  console.log(`  ${color("harness", theme.primary)} ${status.harness.commandCount} commands at ${status.harness.root}`);
   console.log(`  ${color("remote", ansi.gray)} ${status.remoteRuntime.enabled ? "enabled" : "off"} ${status.remoteRuntime.configured ? dim("ARGON_RUNTIME_URL configured") : dim("no URL needed")}`);
   if (status.missing.length) {
     console.log(`  ${color("missing", ansi.yellow)} ${status.missing.join(", ")}`);
@@ -446,6 +469,9 @@ type SlashCommandEntry = {
 const builtInSlashCommands: SlashCommandEntry[] = [
   { name: "businesses", kind: "control", description: "List businesses" },
   { name: "use", kind: "control", description: "Attach a business session", requiresBusiness: false },
+  { name: "create", kind: "control", description: "Create and start a new business; /create <name> --pitch <pitch> [--budget-usd 100]" },
+  { name: "build", kind: "control", description: "Alias for /create <name> --pitch <pitch> [--budget-usd 100]" },
+  { name: "delete", kind: "control", description: "Delete business rows/workspaces; dry-run unless confirm is included" },
   { name: "runtimes", kind: "control", description: "Show local runtime, cron, and worker status" },
   { name: "cron", kind: "control", description: "Show or run local cron; try /cron status" },
   { name: "commands", kind: "control", description: "List available slash skills" },
@@ -488,6 +514,11 @@ function slashPrefix(line: string) {
   return line.slice(1).trimStart().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
+function shouldShowSlashPalette(line: string) {
+  if (!line.startsWith("/")) return false;
+  return !/\s/.test(line.slice(1));
+}
+
 function visibleSlashEntries(entries: SlashCommandEntry[], currentBusiness: string | null) {
   return entries.filter((entry) => !entry.requiresBusiness || Boolean(currentBusiness));
 }
@@ -499,34 +530,41 @@ function slashMatches(entries: SlashCommandEntry[], line: string, currentBusines
   return visible.filter((entry) => entry.name.toLowerCase().startsWith(prefix));
 }
 
-function renderSlashPalette(entries: SlashCommandEntry[], line: string, currentBusiness: string | null) {
+function slashPalettePageSize() {
+  return Math.max(6, Math.min(18, (output.rows || 24) - 8));
+}
+
+function renderSlashPalette(entries: SlashCommandEntry[], line: string, currentBusiness: string | null, offset = 0) {
   const prefix = slashPrefix(line);
   const matches = slashMatches(entries, line, currentBusiness);
   const visibleCount = visibleSlashEntries(entries, currentBusiness).length;
   const width = Math.max(58, Math.min((output.columns || 96) - 6, 96));
   const inner = width - 4;
-  const maxRows = Math.max(5, Math.min(10, (output.rows || 24) - 8));
+  const maxRows = slashPalettePageSize();
+  const start = Math.max(0, Math.min(offset, Math.max(0, matches.length - maxRows)));
+  const end = Math.min(matches.length, start + maxRows);
   const title = prefix ? `/${prefix}` : "/";
-  const header = `${bold("Takyon")} ${dim("slash")} ${color(title, ansi.cyan)} ${dim(`${matches.length}/${visibleCount}`)}`;
+  const header = `${color("Takyon", theme.brand)} ${dim("slash")} ${color(title, theme.primary)} ${dim(`${matches.length}/${visibleCount}`)}`;
   const context = currentBusiness
-    ? `${dim("business")} ${color(currentBusiness, ansi.cyan)}`
-    : `${dim("attach")} ${color("/use <business>", ansi.cyan)}`;
+    ? `${dim("business")} ${color(currentBusiness, theme.secondary)}`
+    : `${dim("attach")} ${color("/use <business>", theme.primary)}`;
+  const scrollHint = matches.length > maxRows ? `  ${start + 1}-${end} ↑/↓ scroll` : "";
   const hint = currentBusiness
-    ? dim("return runs  tab completes  plain text chats")
-    : dim("business skills appear after /use");
-  const borderTop = color(`.${"-".repeat(width - 2)}.`, ansi.gray);
-  const borderBottom = color(`'${"-".repeat(width - 2)}'`, ansi.gray);
-  const boxLine = (text = "") => `${color("|", ansi.gray)} ${padVisible(text, inner)} ${color("|", ansi.gray)}`;
-  const rows = matches.slice(0, maxRows).map((entry) => {
-    const command = padVisible(color(`/${entry.name}`, entry.kind === "skill" ? ansi.brightMagenta : ansi.cyan), 16);
-    const kind = entry.kind === "skill" ? color("skill", ansi.brightMagenta) : color("control", ansi.gray);
-    const scope = entry.requiresBusiness ? color("business", ansi.magenta) : color("global", ansi.gray);
-    const band = entry.priorityBand ? ` ${color(entry.priorityBand, ansi.cyan)}` : "";
+    ? dim(`return runs  tab completes  plain text chats${scrollHint}`)
+    : dim(`business skills appear after /use${scrollHint}`);
+  const borderTop = color(`.${"-".repeat(width - 2)}.`, theme.muted);
+  const borderBottom = color(`'${"-".repeat(width - 2)}'`, theme.muted);
+  const boxLine = (text = "") => `${color("|", theme.muted)} ${padVisible(text, inner)} ${color("|", theme.muted)}`;
+  const rows = matches.slice(start, end).map((entry) => {
+    const command = padVisible(color(`/${entry.name}`, entry.kind === "skill" ? theme.skill : theme.primary), 16);
+    const kind = entry.kind === "skill" ? color("skill", theme.skill) : color("control", theme.control);
+    const scope = entry.requiresBusiness ? color("business", theme.secondary) : color("global", theme.muted);
+    const band = entry.priorityBand ? ` ${color(entry.priorityBand, theme.secondary)}` : "";
     const meta = padVisible(`${kind} ${scope}${band}`, 24);
     const descriptionWidth = Math.max(10, inner - 16 - 1 - 24 - 1);
     return `${command} ${meta} ${dim(truncatePlain(entry.description, descriptionWidth))}`;
   });
-  if (matches.length > maxRows) rows.push(dim(`${matches.length - maxRows} more; keep typing to narrow`));
+  if (matches.length > maxRows) rows.push(dim(`${matches.length - end} more; arrows scroll, typing narrows`));
   if (!matches.length) {
     rows.push(`${color("no matches", ansi.yellow)} ${dim(currentBusiness ? "plain text still chats with Takyon" : "try /businesses or /use <business>")}`);
   }
@@ -540,7 +578,14 @@ function renderSlashPalette(entries: SlashCommandEntry[], line: string, currentB
   ].join("\n");
 }
 
-const defaultMascot = [
+type TakyonMascot = {
+  kind: "ansi" | "pixel";
+  lines: string[];
+};
+
+const defaultMascot: TakyonMascot = {
+  kind: "pixel",
+  lines: [
   "    ####        ",
   "  ########      ",
   " ##########     ",
@@ -549,17 +594,33 @@ const defaultMascot = [
   "  ########      ",
   "    ####        ",
   "   ##  ##       "
-];
+  ]
+};
 
-async function readTakyonMascot() {
-  const filePath = process.env.TAKYON_MASCOT_FILE?.trim() || path.join(process.cwd(), "harness", "takyon", "mascot.txt");
-  const raw = await readFile(filePath, "utf8").catch(() => null);
-  if (!raw) return defaultMascot;
-  const lines = raw.replace(/\n+$/, "").split(/\r?\n/);
-  return lines.length ? lines : defaultMascot;
+function decodeMascotAnsi(text: string) {
+  return text
+    .replace(/\\x1b/g, "\x1b")
+    .replace(/\\u001b/g, "\x1b")
+    .replace(/\\e/g, "\x1b");
 }
 
-function renderMascotLine(line: string, width = 16) {
+async function readTakyonMascot() {
+  const explicitPath = process.env.TAKYON_MASCOT_FILE?.trim();
+  const ansiPath = explicitPath || path.join(process.cwd(), "harness", "takyon", "mascot.ansi");
+  const ansiRaw = await readFile(ansiPath, "utf8").catch(() => null);
+  if (ansiRaw) {
+    const lines = decodeMascotAnsi(ansiRaw).replace(/\n+$/, "").split(/\r?\n/);
+    return lines.length ? { kind: "ansi" as const, lines } : defaultMascot;
+  }
+
+  const pixelPath = path.join(process.cwd(), "harness", "takyon", "mascot.txt");
+  const pixelRaw = await readFile(pixelPath, "utf8").catch(() => null);
+  if (!pixelRaw) return defaultMascot;
+  const lines = pixelRaw.replace(/\n+$/, "").split(/\r?\n/);
+  return lines.length ? { kind: "pixel" as const, lines } : defaultMascot;
+}
+
+function renderPixelMascotLine(line: string, width = 16) {
   const cells = line.slice(0, width).padEnd(width, " ").split("");
   return cells.map((cell) => {
     if (cell === "#" || cell === "@") return color(colorEnabled ? "██" : "##", ansi.electricBlue);
@@ -570,7 +631,13 @@ function renderMascotLine(line: string, width = 16) {
   }).join("");
 }
 
-function startupGraphic(input: { commandCount: number; uiMode: "compact" | "full"; mascot: string[] }) {
+function renderMascotLine(mascot: TakyonMascot, index: number) {
+  const line = mascot.lines[index] ?? "";
+  if (mascot.kind === "ansi") return colorEnabled ? line : stripAnsi(line);
+  return renderPixelMascotLine(line);
+}
+
+function startupGraphic(input: { commandCount: number; uiMode: "compact" | "full"; mascot: TakyonMascot }) {
   const width = Math.max(92, Math.min(shellFrameWidth(), 112));
   const wordmark = [
     " _____     _                      ",
@@ -581,20 +648,20 @@ function startupGraphic(input: { commandCount: number; uiMode: "compact" | "full
     "                |___/             "
   ];
   const logoRows = wordmark.map((line, index) => {
-    const mark = renderMascotLine(input.mascot[index] ?? "");
+    const mark = renderMascotLine(input.mascot, index);
     return framedText(`${mark}  ${color(line, ansi.electricBlue)}`, width);
   });
-  const extraMascotRows = input.mascot.slice(wordmark.length).map((mark) => {
-    return framedText(`${renderMascotLine(mark)}  ${dim(" ")}`, width);
+  const extraMascotRows = input.mascot.lines.slice(wordmark.length).map((_mark, index) => {
+    return framedText(`${renderMascotLine(input.mascot, index + wordmark.length)}  ${dim(" ")}`, width);
   });
   return [
     frameLine(width),
     ...logoRows,
     ...extraMascotRows,
     framedText("", width),
-    framedText(`${bold("local CEO harness")} ${color("ready", ansi.green)}  ${dim(process.cwd())}`, width),
-    framedText(`${color("plain text", ansi.cyan)} chats and steers    ${color("/", ansi.brightMagenta)} opens skills    ${color("tab", ansi.cyan)} completes`, width),
-    framedText(`${color(String(input.commandCount), ansi.brightMagenta)} slash commands    ${dim(`ui ${input.uiMode}`)}    ${dim("local Mac runtime")}`, width),
+    framedText(`${bold("local CEO harness")} ${color("ready", theme.success)}  ${dim(process.cwd())}`, width),
+    framedText(`${color("plain text", theme.primary)} chats and steers    ${color("/", theme.primary)} opens skills    ${color("tab", theme.primary)} completes`, width),
+    framedText(`${color(String(input.commandCount), theme.primary)} slash commands    ${dim(`ui ${input.uiMode}`)}    ${dim("local Mac runtime")}`, width),
     frameLine(width)
   ].join("\n");
 }
@@ -951,6 +1018,22 @@ type LiveSession = {
 
 let suppressLiveWritePrompt = false;
 let beforeLiveWrite: (() => void) | null = null;
+let afterLiveWritePrompt: (() => void) | null = null;
+
+class ShellOperationCancelled extends Error {
+  constructor(label: string) {
+    super(`${label} cancelled.`);
+    this.name = "ShellOperationCancelled";
+  }
+}
+
+function isAbortLike(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError"
+    || error.name === "TimeoutError"
+    || error.message.toLowerCase().includes("aborted")
+    || error.message.toLowerCase().includes("abort");
+}
 
 function jobSnapshot(job: WorkflowJobRow): LiveJobSnapshot {
   return {
@@ -985,13 +1068,16 @@ function liveWrite(rl: LiveReadline, message: string) {
   clearLine(output, 0);
   cursorTo(output, 0);
   output.write(`${text}\n`);
-  if (!suppressLiveWritePrompt) rl.prompt(true);
+  if (!suppressLiveWritePrompt) {
+    rl.prompt(true);
+    afterLiveWritePrompt?.();
+  }
 }
 
 function startSpinner(rl: LiveReadline, label: string, message: string) {
   const frames = ["-", "\\", "|", "/"];
   if (!output.isTTY) {
-    console.log(`${tag(label, ansi.brightMagenta)} ${message}`);
+    console.log(`${tag(label, theme.primary)} ${message}`);
     return { stop: () => undefined };
   }
 
@@ -999,7 +1085,7 @@ function startSpinner(rl: LiveReadline, label: string, message: string) {
   const render = () => {
     clearLine(output, 0);
     cursorTo(output, 0);
-    output.write(`${tag(label, ansi.brightMagenta)} ${color(frames[index % frames.length], ansi.cyan)} ${message}`);
+    output.write(`${tag(label, theme.primary)} ${color(frames[index % frames.length], theme.secondary)} ${message}`);
     index += 1;
   };
   render();
@@ -1043,7 +1129,7 @@ async function sessionPanel(session: LiveSession, rl: LiveReadline, uiMode: "com
     `  ${color("files", ansi.cyan)} ${workspace.files.length} ${dim("business filesystem entries")}`,
     `  ${color("runtime", ansi.brightBlue)} local Mac ${runtime.localMac.ok ? color("ok", ansi.green) : color("blocked", ansi.red)}; cron ${runtime.cron.active} active/${runtime.cron.due} due; worker queued ${runtime.worker.queued}, running ${runtime.worker.running}`,
     `  ${color("capabilities", ansi.cyan)} ${capabilities.length - blockedCapabilities.length} ok, ${blockedCapabilities.length ? color(`${blockedCapabilities.length} blocked`, ansi.yellow) : color("0 blocked", ansi.green)}`,
-    `  ${color("harness", ansi.brightMagenta)} ${commands.map((command) => `/${command.name}`).join(" ")}`,
+    `  ${color("harness", theme.primary)} ${commands.map((command) => `/${command.name}`).join(" ")}`,
     `  ${dim("controls")} /runtimes /workspace /files /read /commands /ui compact /logs on /auto off /kill business`
   ].join("\n"));
 }
@@ -1129,8 +1215,8 @@ function concisePlan(plan: AutopilotPlan) {
   const queued = plan.queued.filter((item) => item.status === "queued").length;
   const existing = plan.queued.filter((item) => item.status === "already_present").length;
   const blocked = [...plan.queued.filter((item) => item.status === "blocked"), ...plan.blocked.filter((item) => item.status === "blocked")];
-  const lines = [`${tag("ceo", ansi.brightMagenta)} ${bold(plan.business.name)}: ${plan.reasons.join(" ")}`];
-  lines.push(`${tag("ceo", ansi.brightMagenta)} wakeup ${plan.ceoWakeupJobId ? dim(shortId(plan.ceoWakeupJobId)) : color("not queued", ansi.yellow)}; ${color(`queued ${queued}`, ansi.cyan)}; ${dim(`already active ${existing}`)}; ${blocked.length ? color(`blocked ${blocked.length}`, ansi.yellow) : "blocked 0"}`);
+  const lines = [`${tag("ceo", theme.primary)} ${bold(plan.business.name)}: ${plan.reasons.join(" ")}`];
+  lines.push(`${tag("ceo", theme.primary)} wakeup ${plan.ceoWakeupJobId ? dim(shortId(plan.ceoWakeupJobId)) : color("not queued", ansi.yellow)}; ${color(`queued ${queued}`, theme.secondary)}; ${dim(`already active ${existing}`)}; ${blocked.length ? color(`blocked ${blocked.length}`, ansi.yellow) : "blocked 0"}`);
   for (const item of blocked.slice(0, 4)) {
     lines.push(`${tag("blocked", ansi.yellow)} ${item.workflow_id}: ${item.reason ?? "capability unavailable"}`);
   }
@@ -1154,6 +1240,9 @@ function usage() {
     "  ./takyon shell",
     "  plain text                            # chat/instruct the Takyon agent",
     "  /businesses",
+    "  /create <name> --pitch <pitch> [--budget-usd 100]",
+    "  /delete business <business-id-or-slug> [confirm]",
+    "  /delete businesses [confirm]",
     "  /use <business-id-or-slug>",
     "  /status",
     "  /runtimes",
@@ -1589,8 +1678,8 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
       source: "takyon_terminal"
     });
     if (json || !result.supported) return print(result, json);
-    console.log(`${tag("goal", ansi.brightMagenta)} ${bold("started")} ${goalText} for ${business.name}`);
-    console.log(`${color("Campaign:", ansi.magenta)} ${shortId(result.campaign.id)}`);
+    console.log(`${tag("goal", theme.primary)} ${bold("started")} ${goalText} for ${business.name}`);
+    console.log(`${color("Campaign:", theme.secondary)} ${shortId(result.campaign.id)}`);
     console.log(`${color("Goal tick:", ansi.cyan)} ${result.tick.status} ${dim(result.tick.jobId)}`);
     return;
   }
@@ -1926,7 +2015,8 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     listTakyonHarnessCommands()
   ]);
   const mascot = await readTakyonMascot();
-  const slashEntries = slashEntriesFromHarness(initialHarnessCommands);
+  let slashEntries = slashEntriesFromHarness(initialHarnessCommands);
+  let slashEntriesLoadedAt = Date.now();
   let currentBusiness: string | null = null;
   const rl = createLiveInterface({
     input,
@@ -1945,8 +2035,18 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
   let closing = false;
   let uiMode: "compact" | "full" = harnessSettings.ui.defaultMode;
   let lastSlashPaletteKey = "";
+  let lastSlashLine = "";
+  let slashPaletteOffset = 0;
   let slashPaletteTimer: NodeJS.Timeout | null = null;
   let slashPopupVisible = false;
+  let promptVisible = false;
+  let activeOperation: { label: string; controller: AbortController } | null = null;
+
+  const refreshSlashEntries = async (force = false) => {
+    if (!force && Date.now() - slashEntriesLoadedAt < 2_000) return;
+    slashEntries = slashEntriesFromHarness(await listTakyonHarnessCommands());
+    slashEntriesLoadedAt = Date.now();
+  };
 
   const clearSlashPopup = () => {
     if (!output.isTTY || !slashPopupVisible) return;
@@ -1957,42 +2057,106 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     slashPopupVisible = false;
   };
 
+  const clearActivePrompt = () => {
+    if (!output.isTTY || !promptVisible) return;
+    output.write("\x1b[1A");
+    cursorTo(output, 0);
+    output.write("\x1b[J");
+    promptVisible = false;
+  };
+
   const previousBeforeLiveWrite = beforeLiveWrite;
-  beforeLiveWrite = clearSlashPopup;
+  const previousAfterLiveWritePrompt = afterLiveWritePrompt;
+  beforeLiveWrite = () => {
+    clearSlashPopup();
+    clearActivePrompt();
+  };
+  afterLiveWritePrompt = () => {
+    promptVisible = true;
+  };
+
+  const runCancelable = async <T>(label: string, fn: (signal: AbortSignal) => Promise<T>) => {
+    const controller = new AbortController();
+    activeOperation = { label, controller };
+    try {
+      const result = await fn(controller.signal);
+      if (controller.signal.aborted) throw new ShellOperationCancelled(label);
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted || isAbortLike(error)) throw new ShellOperationCancelled(label);
+      throw error;
+    } finally {
+      if (activeOperation?.controller === controller) activeOperation = null;
+    }
+  };
 
   const prompt = () => {
     if (closing) return;
     clearSlashPopup();
     rl.setPrompt(inputPrompt(currentBusiness));
     rl.prompt();
+    promptVisible = true;
   };
 
-  const renderCurrentSlashPalette = () => {
+  const renderCurrentSlashPalette = async () => {
+    await refreshSlashEntries();
     const line = String((rl as LiveReadline & { line?: string }).line ?? "");
-    if (!line.startsWith("/")) {
+    if (!shouldShowSlashPalette(line)) {
       lastSlashPaletteKey = "";
+      lastSlashLine = "";
+      slashPaletteOffset = 0;
       clearSlashPopup();
       return;
     }
     if (!output.isTTY) return;
-    const key = `${currentBusiness ?? ""}:${line}`;
+    if (line !== lastSlashLine) {
+      lastSlashLine = line;
+      slashPaletteOffset = 0;
+    }
+    const maxOffset = Math.max(0, slashMatches(slashEntries, line, currentBusiness).length - slashPalettePageSize());
+    slashPaletteOffset = Math.max(0, Math.min(slashPaletteOffset, maxOffset));
+    const key = `${currentBusiness ?? ""}:${line}:${slashPaletteOffset}`;
     if (key === lastSlashPaletteKey) return;
     lastSlashPaletteKey = key;
     output.write("\x1b[s");
     output.write("\x1b[E");
     output.write("\x1b[J");
-    output.write(`${renderSlashPalette(slashEntries, line, currentBusiness)}\n`);
+    output.write(`${renderSlashPalette(slashEntries, line, currentBusiness, slashPaletteOffset)}\n`);
     output.write("\x1b[u");
     slashPopupVisible = true;
   };
 
   const scheduleSlashPalette = () => {
     if (slashPaletteTimer) clearTimeout(slashPaletteTimer);
-    slashPaletteTimer = setTimeout(renderCurrentSlashPalette, 35);
+    slashPaletteTimer = setTimeout(() => void renderCurrentSlashPalette().catch((error) => {
+      liveWrite(rl, `[slash] ${error instanceof Error ? error.message : String(error)}`);
+    }), 35);
   };
 
-  const onKeypress = (_chunk: string, key: { name?: string } = {}) => {
+  const scrollSlashPalette = (delta: number) => {
+    const line = String((rl as LiveReadline & { line?: string }).line ?? "");
+    if (!shouldShowSlashPalette(line)) return false;
+    const maxOffset = Math.max(0, slashMatches(slashEntries, line, currentBusiness).length - slashPalettePageSize());
+    const nextOffset = Math.max(0, Math.min(maxOffset, slashPaletteOffset + delta));
+    if (nextOffset === slashPaletteOffset) return true;
+    slashPaletteOffset = nextOffset;
+    lastSlashPaletteKey = "";
+    void renderCurrentSlashPalette().catch((error) => {
+      liveWrite(rl, `[slash] ${error instanceof Error ? error.message : String(error)}`);
+    });
+    return true;
+  };
+
+  const onKeypress = (_chunk: string, key: { name?: string; meta?: boolean; shift?: boolean; ctrl?: boolean } = {}) => {
     if (closing) return;
+    if (key.name === "escape" && activeOperation && !activeOperation.controller.signal.aborted) {
+      activeOperation.controller.abort();
+      liveWrite(rl, `${tag("cancel", theme.warning)} stopping ${activeOperation.label}`);
+      return;
+    }
+    const jump = key.meta || key.shift || key.ctrl ? slashPalettePageSize() : 1;
+    if ((key.name === "down" || key.name === "pagedown") && scrollSlashPalette(jump)) return;
+    if ((key.name === "up" || key.name === "pageup") && scrollSlashPalette(-jump)) return;
     if (key.name === "return" || key.name === "enter") {
       lastSlashPaletteKey = "";
       clearSlashPopup();
@@ -2046,11 +2210,12 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       const hasActiveWork = jobs.some((job) => job.status === "queued" || job.status === "running");
       if (!hasActiveWork) {
         const spinner = startSpinner(rl, "ceo", "checking idle business");
-        const plan = await runBusinessAutopilot({
+        const plan = await runCancelable("CEO idle check", (signal) => runBusinessAutopilot({
           businessId: business.id,
           profileId: profile.id,
-          instruction: "Live terminal attached. Continue autonomously from current business state."
-        }).finally(() => spinner.stop());
+          instruction: "Live terminal attached. Continue autonomously from current business state.",
+          signal
+        })).finally(() => spinner.stop());
         liveWrite(rl, concisePlan(plan));
       }
     }
@@ -2061,14 +2226,16 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       liveWrite(rl, "Select a business first with `use <business>`.");
       return;
     }
+    const session = currentSession;
     const spinner = startSpinner(rl, "ceo", "planning next move");
-    const plan = await runBusinessAutopilot({
-      businessId: currentSession.businessId,
+    const plan = await runCancelable("CEO planning", (signal) => runBusinessAutopilot({
+      businessId: session.businessId,
       profileId: profile.id,
-      instruction
-    }).finally(() => spinner.stop());
+      instruction,
+      signal
+    })).finally(() => spinner.stop());
     liveWrite(rl, concisePlan(plan));
-    startLiveWorker(currentSession, rl);
+    startLiveWorker(session, rl);
   };
 
   const rememberTurn = (turn: TakyonTerminalRecentTurn) => {
@@ -2077,16 +2244,17 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
 
   const chatWithTakyon = async (instruction: string) => {
     const spinner = startSpinner(rl, "agent", "thinking");
-    const turn = await runTakyonTerminalAgent({
+    const turn = await runCancelable("agent thinking", (signal) => runTakyonTerminalAgent({
       profileId: profile.id,
       text: instruction,
       currentBusinessSlug: currentSession?.slug ?? currentBusiness,
       recentBusinessSlug,
       recentTurns,
-      terminalHelp: usage()
-    }).finally(() => spinner.stop());
+      terminalHelp: usage(),
+      signal
+    })).finally(() => spinner.stop());
     if (turn.businessSlug) recentBusinessSlug = turn.businessSlug;
-    liveWrite(rl, `${tag("agent", ansi.brightMagenta)} ${turn.reply}`);
+    liveWrite(rl, `${tag("agent", theme.primary)} ${turn.reply}`);
     rememberTurn({ role: "operator", text: instruction });
     rememberTurn({ role: "takyon", text: turn.reply });
 
@@ -2111,12 +2279,13 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       liveWrite(rl, `${tag("business", ansi.cyan)} created ${bold(created.company.name)} ${dim(`(${created.company.slug})`)}`);
       await attachBusiness(created.company.slug, false);
       const ceoSpinner = startSpinner(rl, "ceo", "starting business loop");
-      const plan = await runBusinessAutopilot({
+      const plan = await runCancelable("CEO startup", (signal) => runBusinessAutopilot({
         businessId: created.company.id,
         profileId: profile.id,
         instruction: turn.operatorInstruction ?? `Build this business end to end. ${pitch}`,
-        campaignBudgetUsd: budgetUsd > 0 ? budgetUsd : null
-      }).finally(() => ceoSpinner.stop());
+        campaignBudgetUsd: budgetUsd > 0 ? budgetUsd : null,
+        signal
+      })).finally(() => ceoSpinner.stop());
       liveWrite(rl, concisePlan(plan));
       if (currentSession) startLiveWorker(currentSession, rl);
       return;
@@ -2139,14 +2308,16 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       return;
     }
 
+    const session = currentSession;
     const ceoSpinner = startSpinner(rl, "ceo", "planning next move");
-    const plan = await runBusinessAutopilot({
-      businessId: currentSession.businessId,
+    const plan = await runCancelable("CEO planning", (signal) => runBusinessAutopilot({
+      businessId: session.businessId,
       profileId: profile.id,
-      instruction: turn.operatorInstruction ?? instruction
-    }).finally(() => ceoSpinner.stop());
+      instruction: turn.operatorInstruction ?? instruction,
+      signal
+    })).finally(() => ceoSpinner.stop());
     liveWrite(rl, concisePlan(plan));
-    startLiveWorker(currentSession, rl);
+    startLiveWorker(session, rl);
   };
 
   const handleLine = async (rawLine: string) => {
@@ -2223,6 +2394,7 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     }
 
     if (command === "commands" || command === "skills") {
+      await refreshSlashEntries(true);
       liveWrite(rl, renderSlashPalette(slashEntries, "/", currentBusiness));
       return;
     }
@@ -2251,14 +2423,16 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
         await chatWithTakyon(instruction);
         return;
       }
+      const session = currentSession;
       const spinner = startSpinner(rl, "ceo", `running /${harnessCommand.name}`);
-      const plan = await runBusinessAutopilot({
-        businessId: currentSession.businessId,
+      const plan = await runCancelable(`/${harnessCommand.name}`, (signal) => runBusinessAutopilot({
+        businessId: session.businessId,
         profileId: profile.id,
-        instruction
-      }).finally(() => spinner.stop());
+        instruction,
+        signal
+      })).finally(() => spinner.stop());
       liveWrite(rl, concisePlan(plan));
-      startLiveWorker(currentSession, rl);
+      startLiveWorker(session, rl);
       return;
     }
 
@@ -2269,6 +2443,7 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
   rl.on("line", (line) => {
     clearSlashPopup();
     closeInputBox();
+    promptVisible = false;
     commandChain = commandChain
       .then(async () => {
         suppressLiveWritePrompt = true;
@@ -2280,7 +2455,11 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       })
       .catch((error) => {
         suppressLiveWritePrompt = true;
-        liveWrite(rl, error instanceof Error ? error.message : String(error));
+        if (error instanceof ShellOperationCancelled) {
+          liveWrite(rl, `${tag("cancel", theme.warning)} ${error.message}`);
+        } else {
+          liveWrite(rl, error instanceof Error ? error.message : String(error));
+        }
         suppressLiveWritePrompt = false;
       })
       .finally(prompt);
@@ -2289,9 +2468,11 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
   await new Promise<void>((resolve) => {
     rl.on("close", () => {
       closing = true;
+      if (activeOperation && !activeOperation.controller.signal.aborted) activeOperation.controller.abort();
       if (slashPaletteTimer) clearTimeout(slashPaletteTimer);
       clearSlashPopup();
       beforeLiveWrite = previousBeforeLiveWrite;
+      afterLiveWritePrompt = previousAfterLiveWritePrompt;
       if (input.isTTY) input.off("keypress", onKeypress);
       commandChain = commandChain.finally(async () => {
         await stopLiveSession(currentSession, rl, "session closed");

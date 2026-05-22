@@ -172,6 +172,13 @@ const goalActionCatalog: Record<string, GoalActionConfig> = {
     dependencies: ["foundation"],
     capabilityAny: ["anthropic", "openai"]
   },
+  business_product_design: {
+    workflowId: "business_product_design",
+    lane: "website",
+    priority: 89,
+    dependencies: ["foundation"],
+    capabilityAny: ["anthropic", "openai"]
+  },
   business_content_engine: {
     workflowId: "business_content_engine",
     lane: "outreach",
@@ -775,6 +782,7 @@ function desiredActions(state: FirstCustomerState, strategy: Record<string, unkn
   if (noProduct) {
     add("foundation", "goal_requires_product_foundation");
     add("business_marketing_context", "goal_requires_clear_positioning");
+    add("business_product_design", "goal_requires_web_and_app_design_brief");
     add("website_build_deploy", "goal_requires_live_offer");
     add("product_backend", "goal_requires_customer_workflow");
     add("product_ui", "goal_requires_customer_workflow");
@@ -809,6 +817,7 @@ function desiredActions(state: FirstCustomerState, strategy: Record<string, unkn
   }
 
   add("business_conversion_review", "goal_no_conversion_find_conversion_friction", true);
+  add("business_product_design", "goal_no_conversion_refresh_web_and_app_design", true);
   add("business_search_visibility", "goal_no_conversion_improve_discoverability", true);
   add("business_measurement_plan", "goal_no_conversion_measure_next_attempt", true);
   add("website_build_deploy", "goal_no_conversion_refine_offer", true);

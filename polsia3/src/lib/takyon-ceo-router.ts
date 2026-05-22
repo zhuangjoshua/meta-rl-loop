@@ -1,4 +1,5 @@
 import { executeAiProvider } from "./ai-provider";
+import { explainResponseAwareBlock, preflightResponseAwareDistribution } from "./business-conversations";
 import { listBusinessMemory } from "./business-memory";
 import { db } from "./db";
 import { upsertBusinessDocument } from "./documents";
@@ -77,6 +78,13 @@ const actionCatalog = {
     priority: 77,
     dependencies: ["foundation"]
   },
+  productDesign: {
+    workflowId: "business_product_design",
+    lane: "website",
+    title: "Create product design brief",
+    priority: 89,
+    dependencies: ["foundation"]
+  },
   contentEngine: {
     workflowId: "business_content_engine",
     lane: "outreach",
@@ -113,6 +121,8 @@ const actionCatalog = {
     dependencies: []
   }
 } satisfies Record<string, ChatAction>;
+
+const responseAwareWorkflowIds = new Set(["x_social", "outreach_copy", "meta_seedance"]);
 
 function hasAny(text: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(text));
@@ -151,6 +161,9 @@ function requestedActions(body: string) {
   }
   if (hasAny(text, [/\b(cro|conversion|signup|onboarding|paywall|funnel|landing page audit|pricing page)\b/])) {
     actions.push(actionCatalog.conversionReview);
+  }
+  if (hasAny(text, [/\b(open design|design system|design brief|ui\/ux|ux|app design|webpage design|website design|screen brief|visual qa)\b/])) {
+    actions.push(actionCatalog.productDesign);
   }
   if (hasAny(text, [/\b(content engine|content strategy|copywriting|blog|lead magnet|free tool|editorial)\b/])) {
     actions.push(actionCatalog.marketingContext, actionCatalog.contentEngine);
@@ -192,7 +205,7 @@ function compactRows(rows: unknown[]) {
 
 async function loadCeoContext(companyId: string) {
   const sql = db();
-  const [company, documents, jobs, tasks, events, social, community, leads, media, deployments, cron, memory] = await Promise.all([
+  const [company, documents, jobs, tasks, events, social, community, leads, conversations, media, deployments, cron, memory] = await Promise.all([
     sql`
       SELECT b.id, b.name, b.status, b.slug, cs.public_title, cs.public_pitch, cs.status AS site_status
       FROM businesses b
@@ -250,6 +263,14 @@ async function loadCeoContext(companyId: string) {
       LIMIT 12
     `,
     sql`
+      SELECT m.source, m.author_label, m.body, m.status, m.received_at, t.title AS thread_title, t.url AS thread_url
+      FROM business_conversation_messages m
+      JOIN business_conversation_threads t ON t.id = m.thread_id
+      WHERE m.business_id = ${companyId}
+      ORDER BY m.received_at DESC
+      LIMIT 16
+    `,
+    sql`
       SELECT provider, model, status, output_url, error, prompt, created_at
       FROM media_generation_jobs
       WHERE business_id = ${companyId}
@@ -271,7 +292,7 @@ async function loadCeoContext(companyId: string) {
     listBusinessMemory({ businessId: companyId, limit: 16 })
   ]);
 
-  return { company, documents, jobs, tasks, events, social, community, leads, media, deployments, cron, memory };
+  return { company, documents, jobs, tasks, events, social, community, leads, conversations, media, deployments, cron, memory };
 }
 
 function contextText(context: Awaited<ReturnType<typeof loadCeoContext>>) {
@@ -307,6 +328,9 @@ function contextText(context: Awaited<ReturnType<typeof loadCeoContext>>) {
     "",
     "Leads:",
     compactRows(context.leads),
+    "",
+    "Conversation responses:",
+    compactRows(context.conversations),
     "",
     "Business memory:",
     compactRows(
@@ -352,6 +376,29 @@ async function enqueueActions(input: {
       : null;
   const jobs = [];
   for (const action of input.actions) {
+    if (responseAwareWorkflowIds.has(action.workflowId)) {
+      const responseBlock = await preflightResponseAwareDistribution({
+        businessId: input.companyId,
+        profileId: input.profileId,
+        workflowId: action.workflowId
+      });
+      if (responseBlock) {
+        await explainResponseAwareBlock({
+          businessId: input.companyId,
+          profileId: input.profileId,
+          reason: responseBlock.reason
+        });
+        jobs.push({
+          title: action.title,
+          workflowId: action.workflowId,
+          lane: action.lane,
+          status: "blocked",
+          error: responseBlock.reason,
+          responseCheck: responseBlock
+        });
+        continue;
+      }
+    }
     const block = await preflightCapabilityGroups({
       workflowId: action.workflowId,
       groups: takyonCapabilityGroups(action.workflowId),

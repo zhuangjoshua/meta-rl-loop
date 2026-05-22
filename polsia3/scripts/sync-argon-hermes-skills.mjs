@@ -21,6 +21,7 @@ const descriptions = {
   "business-marketing-context": "Create a Takyon-owned marketing context from explicit business evidence.",
   "business-search-visibility": "Create an SEO/GEO visibility scorecard and backlog without publishing changes.",
   "business-conversion-review": "Review conversion friction and propose bounded experiments.",
+  "business-product-design": "Create an Open Design-inspired web/app design brief without running external design daemons.",
   "business-content-engine": "Create content pillars, page briefs, social angles, and draft copy.",
   "business-outreach-pipeline": "Create a no-sending outbound and sales pipeline plan.",
   "business-paid-media-review": "Review paid-media readiness and draft planning-only creative recommendations.",

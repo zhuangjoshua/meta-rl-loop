@@ -28,6 +28,9 @@ type PlanContext = {
 export type GeneratedAppSurfaceContext = {
   mission: string | null;
   marketResearch: string | null;
+  marketingContext: string | null;
+  designBrief: string | null;
+  conversionReview: string | null;
   plans: PlanContext[];
   routes: {
     signup: string;
@@ -109,6 +112,15 @@ function contextForPrompt(context: GeneratedAppSurfaceContext | null | undefined
     "Market research document:",
     context.marketResearch || "No non-seeded Market Research document found.",
     "",
+    "Takyon marketing context:",
+    context.marketingContext || "No Business Marketing Context document found.",
+    "",
+    "Takyon product design brief:",
+    context.designBrief || "No Business Product Design document found.",
+    "",
+    "Takyon conversion review:",
+    context.conversionReview || "No Business Conversion Review document found.",
+    "",
     "Generated-app pricing and limits from generated_app_plan_policies:",
     formatPlans(context.plans),
     "",
@@ -148,10 +160,16 @@ export async function loadGeneratedAppSurfaceContext(company: CompanyBuildInput)
   const realDocuments = documents.filter((document) => !metadataSeeded(document.metadata));
   const mission = realDocuments.find((document) => document.kind === "mission" || /^mission$/i.test(document.title));
   const marketResearch = realDocuments.find((document) => document.kind === "research_report" || /market research/i.test(document.title));
+  const marketingContext = realDocuments.find((document) => /business marketing context|product marketing context/i.test(document.title));
+  const designBrief = realDocuments.find((document) => /business product design|product design|design brief/i.test(document.title));
+  const conversionReview = realDocuments.find((document) => /business conversion review|conversion review/i.test(document.title));
 
   return {
     mission: safeExcerpt(mission?.content, 5500),
     marketResearch: safeExcerpt(marketResearch?.content, 7000),
+    marketingContext: safeExcerpt(marketingContext?.content, 5000),
+    designBrief: safeExcerpt(designBrief?.content, 6500),
+    conversionReview: safeExcerpt(conversionReview?.content, 4500),
     plans,
     routes: {
       signup: "/signup",

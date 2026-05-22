@@ -31,10 +31,14 @@ export async function runBusinessAutopilot(input: {
   instruction?: string | null;
   campaignName?: string | null;
   campaignBudgetUsd?: number | null;
+  signal?: AbortSignal;
 }) {
+  input.signal?.throwIfAborted();
   const business = await loadBusiness(input.businessId);
+  input.signal?.throwIfAborted();
   const capabilities = await listToolCapabilities({ businessId: input.businessId, profileId: input.profileId });
   let campaignId: string | null = null;
+  input.signal?.throwIfAborted();
 
   if (input.campaignName || input.campaignBudgetUsd) {
     const campaign = await upsertBusinessCampaign({
@@ -62,6 +66,7 @@ export async function runBusinessAutopilot(input: {
     profileId: input.profileId,
     reason: "autopilot_wake"
   });
+  input.signal?.throwIfAborted();
   const unavailableCapabilities = capabilities.filter((capability) => !capability.canRun);
   const runtimeCapability = capabilities.find((capability) => capability.key === "takyon_runtime");
   if (!runtimeCapability?.canRun) {
@@ -126,6 +131,7 @@ export async function runBusinessAutopilot(input: {
       rule: "CEO decides from workspace evidence; deterministic runner executes only bounded jobs with receipts."
     }
   });
+  input.signal?.throwIfAborted();
   const queued: AutopilotQueueItem[] = [{ workflow_id: "ceo_wakeup", status: "queued", jobId: ceo.id }];
 
   await upsertBusinessMemory({

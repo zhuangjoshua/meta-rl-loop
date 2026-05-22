@@ -23,6 +23,7 @@ type SdkSurfaceResult = {
   context: {
     mission: boolean;
     marketResearch: boolean;
+    designBrief: boolean;
     plans: number;
   };
 };
@@ -81,6 +82,15 @@ function formatSurfaceContext(context: GeneratedAppSurfaceContext) {
     "Market research document:",
     context.marketResearch || "No non-seeded Market Research document found.",
     "",
+    "Takyon marketing context:",
+    context.marketingContext || "No Business Marketing Context document found.",
+    "",
+    "Takyon product design brief:",
+    context.designBrief || "No Business Product Design document found. If present later, use it as the primary web/app design system and screen-brief source.",
+    "",
+    "Takyon conversion review:",
+    context.conversionReview || "No Business Conversion Review document found.",
+    "",
     "Plan policies:",
     planLines.length ? planLines.join("\n") : "No plan policy rows found.",
     "",
@@ -118,6 +128,7 @@ function surfacePrompt(input: {
     "",
     "Use OpenLovable-level polish as a taste target: cohesive visual hierarchy, crisp app-builder gloss, modern B2B SaaS density, and finished product UX.",
     "Do not use the OpenLovable app/server/API. You are editing files directly in this workspace.",
+    "If Takyon product design guidance is present in the context, treat it as the business-owned design brief. It may adapt Open Design patterns, but you must not invoke Open Design, MCP tools, daemons, exports, media pipelines, or external repo-writing agents.",
     "",
     "Edit exactly these customer-surface files:",
     ...requiredSurfaceFiles.map((file) => `- ${file}`),
@@ -329,7 +340,8 @@ export async function runClaudeSdkSurfaceBuilder(input: {
     context: {
       mission: Boolean(context.mission),
       marketResearch: Boolean(context.marketResearch),
-      plans: context.plans.length
+      plans: context.plans.length,
+      designBrief: Boolean(context.designBrief)
     }
   };
 }

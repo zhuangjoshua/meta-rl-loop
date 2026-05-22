@@ -3,7 +3,7 @@ import { TakyonBusinessWorkspace } from "@/components/takyon/TakyonBusinessWorks
 import { requireProfile } from "@/lib/auth";
 import { getCompanyForProfile } from "@/lib/companies";
 import { getTakyonDashboardModel } from "@/lib/takyon-dashboard";
-import { endTakyonCompanyFromForm, sendTakyonCeoMessageFromForm, startTakyonLeverFromForm } from "./actions";
+import { endTakyonCompanyFromForm, sendTakyonCeoMessageFromForm, startTakyonLeverFromForm, updateTakyonDistributionPolicyFromForm } from "./actions";
 import { LiveDashboardRefresher } from "./LiveDashboardRefresher";
 
 type PageProps = {
@@ -29,6 +29,7 @@ export default async function CompanyPage({ params, searchParams }: PageProps) {
         model={model}
         leverAction={startTakyonLeverFromForm.bind(null, companyId)}
         chatAction={sendTakyonCeoMessageFromForm.bind(null, companyId)}
+        settingsAction={updateTakyonDistributionPolicyFromForm.bind(null, companyId)}
         endAction={endTakyonCompanyFromForm.bind(null, companyId)}
       />
     </>

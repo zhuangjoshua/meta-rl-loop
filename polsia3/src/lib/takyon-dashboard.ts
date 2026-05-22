@@ -3,6 +3,7 @@ import { db } from "./db";
 import { listCompaniesForProfile } from "./companies";
 import { listBusinessDocuments, type BusinessDocumentRow } from "./documents";
 import { listBusinessEmails, type BusinessEmailMessage } from "./business-email";
+import { getBusinessConversationSummary, getDistributionResponseCheckPolicy } from "./business-conversations";
 import { listBusinessMemory } from "./business-memory";
 import { listCompanyEvents, type EventRow } from "./events";
 import { listInboxMessages, type BusinessInboxMessage } from "./inbox";
@@ -140,6 +141,14 @@ export type TakyonDashboardModel = {
   ads: {
     budgetLabel: string;
     campaigns: TakyonDraftItem[];
+  };
+  distributionPolicy: {
+    responseCheckEnabled: boolean;
+    activeThreads: number;
+    unresolvedMessages: number;
+    staleThreads: number;
+    lastCheckedAt: string | null;
+    latestMessageAt: string | null;
   };
   team: TakyonTeamMember[];
   chat: TakyonDraftItem[];
@@ -523,7 +532,7 @@ export async function getTakyonDashboardModel(companyId: string): Promise<Takyon
   const company = companyRows[0];
   if (!company) throw new Error("Company not found.");
 
-  const [documents, inbox, jobs, tasks, events, team, counts, paymentLinks, socialPosts, communityTargets, leads, emails, mediaJobs, buildInput, cronRows, observability, memory] =
+  const [documents, inbox, jobs, tasks, events, team, counts, paymentLinks, socialPosts, communityTargets, leads, emails, mediaJobs, buildInput, cronRows, observability, memory, responsePolicy, conversationSummary] =
     await Promise.all([
       listBusinessDocuments(companyId, 80),
       listInboxMessages(companyId, 60),
@@ -583,7 +592,9 @@ export async function getTakyonDashboardModel(companyId: string): Promise<Takyon
         LIMIT 1
       `,
       getBusinessObservabilitySummary(companyId),
-      listBusinessMemory({ businessId: companyId, limit: 20 })
+      listBusinessMemory({ businessId: companyId, limit: 20 }),
+      getDistributionResponseCheckPolicy(companyId),
+      getBusinessConversationSummary(companyId)
     ]);
 
   const countRow = counts[0] ?? { generated_users: "0", social_posts: "0", community_targets: "0", leads: "0", revenue_cents: "0" };
@@ -686,6 +697,14 @@ export async function getTakyonDashboardModel(companyId: string): Promise<Takyon
     ads: {
       budgetLabel: mediaJobs.length ? "Sora creative" : "Creative lane pending",
       campaigns: mediaJobs.map(mapMediaJob)
+    },
+    distributionPolicy: {
+      responseCheckEnabled: responsePolicy.enabled,
+      activeThreads: conversationSummary.active_threads,
+      unresolvedMessages: conversationSummary.unresolved_messages,
+      staleThreads: conversationSummary.stale_threads,
+      lastCheckedAt: conversationSummary.last_checked_at,
+      latestMessageAt: conversationSummary.latest_message_at
     },
     team: team.map((member) => ({
       id: member.profile_id,
