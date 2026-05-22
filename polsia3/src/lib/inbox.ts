@@ -34,7 +34,7 @@ export async function createInboxMessage(input: {
   const sql = db();
   const rows = await sql<BusinessInboxMessage[]>`
     INSERT INTO business_inbox_messages (business_id, author_profile_id, author_label, body, source)
-    VALUES (${input.companyId}, ${input.profileId ?? null}, ${input.authorLabel}, ${input.body}, ${input.source ?? "dashboard"})
+    VALUES (${input.companyId}, ${input.profileId ?? null}, ${input.authorLabel}, ${input.body}, ${input.source ?? "operator"})
     RETURNING id, business_id, author_profile_id, author_label, body, source, created_at
   `;
 
@@ -44,7 +44,7 @@ export async function createInboxMessage(input: {
     kind: input.forwardToCeo ? "inbox.message_forwarded_to_ceo" : "inbox.message_created",
     subjectType: "business_inbox_message",
     subjectId: rows[0].id,
-    payload: { source: input.source ?? "dashboard", forwardToCeo: Boolean(input.forwardToCeo) }
+    payload: { source: input.source ?? "operator", forwardToCeo: Boolean(input.forwardToCeo) }
   });
 
   if (input.forwardToCeo) {

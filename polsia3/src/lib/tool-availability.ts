@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadLocalSecrets } from "./secrets";
 import { readResolvedProviderSecrets } from "./provider-integrations";
+import { checkArgonRuntimeHealth } from "./vendors/argon-runtime";
 
 export type ToolCapabilityReport = {
   source: "env" | "provider_integration" | "runner" | "cli";
@@ -66,6 +67,13 @@ const envToolDefinitions: EnvToolDefinition[] = [
     category: "model",
     envNames: ["ANTHROPIC_API_KEY"],
     runnerPaths: ["src/lib/ai-provider.ts"]
+  },
+  {
+    key: "claude_agent_sdk",
+    label: "Claude Agent SDK surface builder",
+    category: "model",
+    envNames: ["ANTHROPIC_API_KEY"],
+    runnerPaths: ["src/lib/generated-apps/surface-builder.ts", "node_modules/@anthropic-ai/claude-agent-sdk"]
   },
   {
     key: "openai",
@@ -204,18 +212,31 @@ function envCapability(definition: EnvToolDefinition): ToolCapability {
   });
 }
 
-function takyonRuntimeCapability(): ToolCapability {
+async function takyonRuntimeCapability(): Promise<ToolCapability> {
   loadLocalSecrets();
-  const runnerPaths = ["src/lib/ceo.ts", "src/lib/ai-provider.ts", "src/lib/cron-jobs.ts", "scripts/local-worker.ts"];
+  const runnerPaths = [
+    "src/lib/ceo.ts",
+    "src/lib/takyon-runtime.ts",
+    "src/lib/vendors/argon-runtime.ts",
+    "src/lib/cron-jobs.ts",
+    "scripts/local-worker.ts",
+    "scripts/start-argon-hermes-runtime.sh",
+    "vendor/argon-hermes-runtime"
+  ];
   const missingRunners = runnerMissing(runnerPaths);
+  const runtimeVenvPath = "vendor/argon-hermes-runtime/.venv/bin/python";
+  const missingRuntimeVenv = !fs.existsSync(path.join(process.cwd(), runtimeVenvPath));
   const hasAnthropic = hasEnv("ANTHROPIC_API_KEY");
   const hasOpenAi = hasEnv("OPENAI_API_KEY");
   const missingModel = hasAnthropic || hasOpenAi ? [] : ["ANTHROPIC_API_KEY or OPENAI_API_KEY"];
-  const remoteUrl = process.env.ARGON_RUNTIME_URL?.trim();
+  const health = missingRunners.length || missingRuntimeVenv
+    ? { ok: false, status: "not_checked", detail: "Runtime files or venv are missing." }
+    : await checkArgonRuntimeHealth();
+  const missingRuntime = health.ok ? [] : ["hermes_runtime_gateway"];
 
   return capabilityFromReports({
     key: "takyon_runtime",
-    label: "Local Mac CEO runtime",
+    label: "Hermes CEO runtime",
     category: "core",
     reports: [
       {
@@ -237,20 +258,37 @@ function takyonRuntimeCapability(): ToolCapability {
             : "Local CEO runtime needs one model key on this Mac."
       },
       {
-        source: "env",
-        key: "takyon_runtime:remote_optional",
-        ok: true,
-        missing: [],
-        detail: remoteUrl
-          ? "Optional remote ARGON_RUNTIME_URL is configured, but it is not required."
-          : "ARGON_RUNTIME_URL is not required; cron and CEO wake can run on the local Mac."
+        source: "runner",
+        key: "takyon_runtime:venv",
+        ok: !missingRuntimeVenv,
+        missing: missingRuntimeVenv ? [`runner:${runtimeVenvPath}`] : [],
+        detail: missingRuntimeVenv
+          ? "Local Hermes runtime venv is missing."
+          : "Local Hermes runtime venv is installed."
+      },
+      {
+        source: "runner",
+        key: "takyon_runtime:gateway",
+        ok: health.ok,
+        missing: missingRuntime,
+        detail: health.ok
+          ? "Local Hermes gateway is reachable and will be used for CEO wakeups."
+          : `Local Hermes gateway is not reachable: ${health.detail}`
       }
     ],
     setup: [
       ...missingRunners.map((runnerPath) => `Install or implement the runner at ${runnerPath}.`),
-      ...(missingModel.length ? ["Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env.local with: ./takyon secret set ANTHROPIC_API_KEY --stdin"] : [])
+      ...(missingRuntimeVenv ? ["Install the local Hermes runtime with: scripts/setup-argon-hermes-runtime.sh"] : []),
+      ...(missingModel.length ? ["Set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env.local with: ./takyon secret set ANTHROPIC_API_KEY --stdin"] : []),
+      ...(missingRuntime.length && !missingRuntimeVenv ? ["Start the local Hermes gateway with: scripts/start-argon-hermes-runtime.sh"] : [])
     ],
-    setupCommand: missingModel.length ? "./takyon secret set ANTHROPIC_API_KEY --stdin" : undefined
+    setupCommand: missingModel.length
+      ? "./takyon secret set ANTHROPIC_API_KEY --stdin"
+      : missingRuntimeVenv
+        ? "scripts/setup-argon-hermes-runtime.sh"
+        : missingRuntime.length
+          ? "scripts/start-argon-hermes-runtime.sh"
+          : undefined
   });
 }
 

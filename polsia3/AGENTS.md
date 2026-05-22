@@ -38,6 +38,32 @@ For every code change:
 
 Architecture changes that exist only in code are not allowed.
 
+## Per-Business Isolation And One Source Of Truth
+
+Everything is per business unless explicitly stated otherwise.
+
+Business-scoped data, jobs, campaigns, conversations, touchpoints, monitors, budgets, memory, documents, and vendor receipts must carry and preserve the owning `business_id`. Do not blend state, conclusions, reply queues, campaign evidence, or automation decisions across businesses unless the operator explicitly asks for cross-business behavior.
+
+There must be one source of truth for each operational fact. Prefer one canonical table or ledger row with stable IDs over parallel channel-specific truth stores. Derived views, documents, memories, and prompts must point back to that canonical evidence rather than becoming competing truth.
+
+For outbound distribution and reply monitoring, the canonical chain must be:
+
+```text
+business-owned outbound receipt -> business-owned monitored touchpoint -> business-owned conversation message -> business-owned customer/campaign signal
+```
+
+Cron or worker loops may be shared infrastructure, but every claimed unit of work must remain business-scoped, bounded, idempotent, and traceable to the canonical row that caused it.
+
+`businesses.mode` is the source of truth for live/test behavior. In `test` mode, workflows may plan, build, draft, record receipts, run per-business cron/watch loops, and observe internal state exactly as live mode does, but outbound outreach/distribution adapters must not create external posts, DMs, comments, emails, ads, or spend. They must write a business-owned receipt that says the external side effect was suppressed. Missing outbound-provider keys may be bypassed only when the adapter can produce a truthful suppressed-side-effect receipt; missing model, research, build, payment, or database capabilities must be recorded as blocked capability evidence, not replaced with fake success.
+
+Operator changes to live/test mode must go through the source-of-truth business setting, including the Takyon shell `/test on|off|status` command. Do not add parallel per-channel test flags.
+
+## No Part Left Unused
+
+Business-owned artifacts must not be silently ignored. If a file, receipt, document, memory, job, conversation, campaign row, or generated artifact exists for a business, it must either be reachable from the business's canonical evidence map when relevant or be flagged as unreadable, orphaned, omitted, or blocked.
+
+The per-business workspace filesystem is a first-class business artifact. CEO/runtime context should start with a cheap top-level map and boot files, then read deeper only when relevant. If prompt budget, tool failure, path policy, or missing runtime support means the CEO cannot or will not read a relevant path, surface that limitation to the operator instead of treating the path as absent.
+
 ## Sync Folder Workflow
 
 When the user says "my prompt is in the sync folder", "I edited the sync folder", "I edited `prompt/`", or similar:
@@ -107,6 +133,14 @@ The v0 backend split is:
 
 Do not use Vercel Sandbox as the generated-app builder.
 
+## Generated-App Rails Versus Customer Surface
+
+Do not use deterministic templates as the customer-facing website or product UI.
+
+Templates may create only deterministic rails: auth, account, checkout, billing, API routes, platform client wiring, entitlements, user/session plumbing, project AI proxy plumbing, and minimal compiling placeholders when required. The public website, offer, product workflow UI, visual system, copy, and conversion surface must be produced by the existing generated-app surface builders, Claude Agent SDK paths, OpenLovable integration when explicitly configured, and Takyon skills already present in the repo.
+
+Before changing generated-app behavior, first trace why the main trunk did not route through the correct existing skill or builder. Do not make one-off local generated-app patches, duplicate builders, duplicate skills, or duplicate tool registries to compensate for a missed trunk connection. Fix the canonical route, capability gate, or source-of-truth handoff that caused the bypass.
+
 ## Anti-Sycophancy And Brittle Tooling Warnings
 
 Do not agree with the operator just because they suggested a tool, runtime, architecture, or integration.
@@ -123,7 +157,7 @@ If a simpler direct approach is enough, say so clearly and prefer it after the o
 
 ## TODO - Generated-App Economics, Auth, And API-Key Funding
 
-Deferred by operator for the current chat/dashboard/operations slice. Keep these as explicit later work, not hidden assumptions.
+Deferred by operator for the current terminal/queued-CEO operations slice. Keep these as explicit later work, not hidden assumptions.
 
 These items are not complete. Do not describe them as done until they are implemented and verified:
 
@@ -141,7 +175,7 @@ Guardrail that remains non-negotiable:
 The post-launch observation loop is intentionally stubbed in v0.
 
 Implemented now:
-- After real X publishing or completed Sora creative sync, Takyon can queue an `observe_campaign_results` workflow job so the dashboard does not look dead after launch.
+- After real X publishing or completed Sora creative sync, Takyon can queue an `observe_campaign_results` workflow job so terminal/queued CEO has a visible follow-up row after launch.
 - The queued observation job is a visible placeholder for the future CEO learning loop.
 
 Not implemented yet:
@@ -157,6 +191,8 @@ User-facing CEO/chat language must say `background runner` or `queued runner` fo
 
 ## Hermes Scope
 
-Hermes exists in v2 and may be kept where v2 used it: non-deterministic skill workflows such as CEO, research, market planning, social/content/support/outreach copy, lead finding, and activity review.
+Hermes/Takyon runtime is the canonical CEO runtime. CEO wakeups and CEO reasoning must not fall back to a plain local model call that cannot use Hermes skills, files, and runtime tools.
 
-Hermes must remain optional/scoped for v0. Deterministic side effects, generated-app builds, cron, payments, AI metering, and vendor calls stay app-owned/local-runner-owned.
+Hermes owns non-deterministic business judgment: CEO inspection, skill selection, research synthesis, market planning, social/content/support/outreach copy, lead finding, campaign review, and activity review.
+
+Deterministic side effects, generated-app builds, cron dispatch, payments, AI metering, deployment, and vendor mutations stay app-owned/local-runner-owned. Hermes may request or queue those actions, but the runner must validate capabilities, execute bounded work, and record receipts.

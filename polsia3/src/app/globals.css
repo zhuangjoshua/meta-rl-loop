@@ -101,6 +101,56 @@ select {
   background: var(--panel-2);
 }
 
+.terminal-home {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.terminal-home-panel {
+  width: min(720px, 100%);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: clamp(24px, 5vw, 44px);
+  box-shadow: var(--shadow);
+}
+
+.terminal-home-panel h1 {
+  margin: 0 0 12px;
+  font-size: clamp(36px, 7vw, 64px);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.terminal-home-panel p {
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.6;
+}
+
+.terminal-home-note {
+  color: var(--ink) !important;
+}
+
+.terminal-home-commands {
+  margin-top: 28px;
+  display: grid;
+  gap: 8px;
+}
+
+.terminal-home-commands code {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f7f5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
 .main {
   padding: 28px;
 }
@@ -1872,6 +1922,12 @@ a.takyon-preview-shell:focus-visible .takyon-site-frame {
   font-size: 13px;
 }
 
+.takyon-settings-note {
+  color: var(--takyon-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .takyon-policy-grid {
   display: grid;
   gap: 8px;
@@ -1894,6 +1950,27 @@ a.takyon-preview-shell:focus-visible .takyon-site-frame {
 
 .takyon-policy-grid strong {
   font-size: 16px;
+}
+
+.takyon-ops-control-form {
+  border-top: 1px solid var(--takyon-line);
+  padding-top: 14px;
+}
+
+.takyon-ops-control-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.takyon-ops-control-copy strong {
+  font-size: 13px;
+}
+
+.takyon-ops-control-copy p {
+  color: var(--takyon-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
 }
 
 .takyon-shutdown-form textarea {

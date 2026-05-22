@@ -36,9 +36,9 @@ export async function getCompanyBuildInput(companyId: string) {
   const sql = db();
   const rows = await sql<CompanyBuildInput[]>`
     SELECT b.id, b.name, b.slug, cs.public_pitch,
-           cs.config->>'customer' AS customer,
-           cs.config->>'pain' AS pain,
-           cs.config->>'offer' AS offer,
+           COALESCE(NULLIF(cs.config->>'customer', ''), NULLIF(cs.config#>>'{foundation,output,target_customer}', '')) AS customer,
+           COALESCE(NULLIF(cs.config->>'pain', ''), NULLIF(cs.config#>>'{foundation,output,pain}', '')) AS pain,
+           COALESCE(NULLIF(cs.config->>'offer', ''), NULLIF(cs.config#>>'{foundation,output,offer}', '')) AS offer,
            cs.config->>'template' AS template
     FROM businesses b
     LEFT JOIN company_sites cs ON cs.business_id = b.id
@@ -64,7 +64,7 @@ export async function ensureGeneratedAppFoundation(companyId: string) {
         source,
         metadata
       )
-      VALUES (${companyId}, 'free', 'free', 0, 'month', 100000, 25, 'argon_default', '{"title":"Free"}'::jsonb)
+      VALUES (${companyId}, 'free', 'free', 0, 'month', 100000, 25, 'agent_suggested', '{"title":"Free"}'::jsonb)
       ON CONFLICT (business_id, plan_key) DO NOTHING
     `;
 
@@ -80,7 +80,7 @@ export async function ensureGeneratedAppFoundation(companyId: string) {
         source,
         metadata
       )
-      VALUES (${companyId}, 'starter', 'paid', 1900, 'month', 15000000, 500, 'argon_default', '{"title":"Starter"}'::jsonb)
+      VALUES (${companyId}, 'starter', 'paid', 1900, 'month', 15000000, 500, 'agent_suggested', '{"title":"Starter"}'::jsonb)
       ON CONFLICT (business_id, plan_key) DO NOTHING
     `;
 

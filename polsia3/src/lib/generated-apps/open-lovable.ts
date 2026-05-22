@@ -47,6 +47,7 @@ export type GeneratedAppSurfaceContext = {
 export const requiredSurfaceFiles = [
   "src/product/module.ts",
   "src/app/page.tsx",
+  "src/app/account/page.tsx",
   "src/app/product/page.tsx",
   "src/app/signup/page.tsx",
   "src/app/globals.css"

@@ -128,7 +128,7 @@ async function loadBusinessState(input: { businessId: string; profileId?: string
   const sql = db();
   const [business, documents, jobs, campaigns, communityTargets, leads, conversations, posts, mediaJobs, revenue, paymentLinks, memories, workspace, capabilities] = await Promise.all([
     sql`
-      SELECT b.id, b.name, b.slug, b.status, cs.public_title, cs.public_pitch, cs.status AS site_status, cs.config AS site_config
+      SELECT b.id, b.name, b.slug, b.status, b."mode", cs.public_title, cs.public_pitch, cs.status AS site_status, cs.config AS site_config
       FROM businesses b
       LEFT JOIN company_sites cs ON cs.business_id = b.id
       WHERE b.id = ${input.businessId}
@@ -209,6 +209,8 @@ async function loadBusinessState(input: { businessId: string; profileId?: string
     businessWorkspaceContext({ businessId: input.businessId, profileId: input.profileId ?? null }),
     listToolCapabilities({ businessId: input.businessId, profileId: input.profileId ?? null })
   ]);
+  const workspaceFilePromptLimit = 160;
+  const visibleWorkspaceFiles = workspace.files.slice(0, workspaceFilePromptLimit);
 
   return {
     business,
@@ -234,10 +236,14 @@ async function loadBusinessState(input: { businessId: string; profileId?: string
     })),
     workspace: {
       root: workspace.root,
+      readStrategy: workspace.readStrategy,
       bootFiles: workspace.bootFiles,
-      files: workspace.files.slice(0, 160),
+      topLevelMap: workspace.topLevelMap,
+      files: visibleWorkspaceFiles,
+      omittedFilesFromPacket: Math.max(0, workspace.files.length - visibleWorkspaceFiles.length),
       excerpts: workspace.excerpts.map((file) => ({
         path: file.path,
+        truncated: file.truncated,
         content: file.content.slice(0, 2200)
       }))
     },

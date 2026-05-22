@@ -20,7 +20,7 @@ export function TakyonOnboarding({ actionUrl = "/new/takyon/start", initialIdea 
     <main className="takyon-root takyon-onboarding">
       <div className="takyon-aurora" />
       <header className="takyon-onboarding-header">
-        <a className="takyon-wordmark" href="/dashboard/takyon">
+        <a className="takyon-wordmark" href="/">
           <span />
           {brandName}
         </a>

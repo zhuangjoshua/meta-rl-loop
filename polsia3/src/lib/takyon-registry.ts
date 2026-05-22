@@ -43,7 +43,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     priority: 95,
     dependencies: ["foundation"],
     stages: ["product_foundation", "conversion", "recovery"],
-    capabilityAll: ["vercel"],
+    capabilityAll: ["vercel", "claude_agent_sdk"],
     repeatable: true,
     retryOnFailure: true,
     dispatchable: true,
@@ -262,6 +262,18 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     dispatchable: true,
     autoBuild: false,
     description: "Create an analytics, attribution, experiment, and Pixel/CAPI audit plan without sending events."
+  },
+  {
+    workflowId: "customer_ops_watch",
+    lane: "ceo",
+    priority: 56,
+    dependencies: [],
+    stages: ["conversion", "learning", "recovery"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    maxAttempts: 1,
+    description: "Refresh generated-app customer, entitlement, subscription, usage, and revenue state for CEO inspection."
   },
   {
     workflowId: "ceo_wakeup",

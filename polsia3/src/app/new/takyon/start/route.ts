@@ -60,5 +60,5 @@ export async function POST(request: Request) {
     brief: body
   });
 
-  return NextResponse.redirect(new URL(`/dashboard/companies/${company.id}?auto=pipeline`, request.url), 303);
+  return NextResponse.redirect(new URL(`/?business=${encodeURIComponent(company.slug)}&queued=1`, request.url), 303);
 }

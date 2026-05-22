@@ -19,7 +19,7 @@ export async function GET(request: NextRequest) {
   const state = base64Url(randomBytes(24));
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
-  const returnTo = request.nextUrl.searchParams.get("returnTo") || "/dashboard";
+  const returnTo = request.nextUrl.searchParams.get("returnTo") || "/";
   const businessId = request.nextUrl.searchParams.get("businessId")?.trim() || "";
   const scopeParam = request.nextUrl.searchParams.get("scope")?.trim() || "";
   const scopeType = scopeParam === "platform" ? "platform" : businessId ? "business" : "profile";
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   const secure = request.nextUrl.protocol === "https:";
   response.cookies.set("x_oauth_state", state, { httpOnly: true, sameSite: "lax", secure, path: "/", maxAge: 600 });
   response.cookies.set("x_oauth_verifier", verifier, { httpOnly: true, sameSite: "lax", secure, path: "/", maxAge: 600 });
-  response.cookies.set("x_oauth_return_to", returnTo.startsWith("/") ? returnTo : "/dashboard", {
+  response.cookies.set("x_oauth_return_to", returnTo.startsWith("/") ? returnTo : "/", {
     httpOnly: true,
     sameSite: "lax",
     secure,

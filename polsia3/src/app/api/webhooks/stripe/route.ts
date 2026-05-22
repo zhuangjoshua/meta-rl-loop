@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     if (event.type === "checkout.session.completed") {
       await recordStripeCheckoutSession(event.id, event.created, event.data.object);
     }
-    if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
+    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
       await updateGeneratedAppSubscriptionEntitlement(event.data.object);
     }
 

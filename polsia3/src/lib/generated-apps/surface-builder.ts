@@ -226,7 +226,7 @@ async function runSdkEdit(input: {
             cwd: input.sourceDir,
             env: {
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-              CLAUDE_AGENT_SDK_CLIENT_APP: "polsia-takyon-v3-surface-builder"
+              CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-surface-builder"
             },
             model,
             thinking: { type: "adaptive", display: "omitted" },

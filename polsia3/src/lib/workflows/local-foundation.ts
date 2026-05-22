@@ -46,14 +46,28 @@ function stripInternalPromptNoise(value: string) {
   return value
     .replace(/\bArgon(?:-style)?\b/gi, "autonomous")
     .replace(/\bH(?:ermes)\b/gi, "")
-    .replace(/\bPolsia\b/gi, "")
+    .replace(/\bPolsia\s*\d*\b/gi, "")
+    .replace(/\bpolsia\d+\b/gi, "")
+    .replace(/\bTakyon\b/gi, "")
     .replace(/\bBHPV3\b/gi, "")
     .replace(/\bRun the autonomous .*?foundation\b/gi, "")
     .replace(/\bDo not ask the founder[^.]*\./gi, "")
     .replace(/\bStart from the raw founder idea\b/gi, "")
     .replace(/\bspecialize the concept\b/gi, "")
+    .replace(/\bBuild the real foundation first\.?/gi, "")
+    .replace(/\bDo not create placeholder reports\.?/gi, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function sanitizeSkillInstructions(value: string) {
+  return value
+    .replace(/^#\s+Takyon Company Skill:/gim, "# Company Skill:")
+    .replace(/\bproduct-owned Takyon company skill\b/gi, "product-owned company skill")
+    .replace(/\bTakyon\b/g, "the platform")
+    .replace(/\bPolsia(?:-style)?\b/gi, "operator")
+    .replace(/\bArgon\b/gi, "the runtime")
+    .replace(/\bfixed workflow cockpit\b/gi, "workflow runner");
 }
 
 function meaningfulBusinessName(name: string) {
@@ -216,7 +230,7 @@ function extractJson(text: string) {
 
 function buildGenerationPrompt(input: LocalFoundationInput, research: Awaited<ReturnType<typeof collectEvidence>>) {
   return [
-    "You are running a fixed Takyon company-foundation skill locally because the external runtime is unavailable.",
+    "You are running a company-foundation workflow locally.",
     "This is real execution using Tavily evidence and an LLM, not a mock.",
     "",
     "Core requirement: specialize the operator's idea into a sharper, revenue-capable micro-SaaS wedge.",
@@ -230,7 +244,7 @@ function buildGenerationPrompt(input: LocalFoundationInput, research: Awaited<Re
     JSON.stringify({ workflow_id: input.workflowId, workflow_title: input.workflowTitle }, null, 2),
     "",
     "Fixed skill instructions:",
-    input.skillInstructions,
+    sanitizeSkillInstructions(input.skillInstructions),
     "",
     "Operator request:",
     input.operatorPrompt || "Run the workflow using the current business state.",

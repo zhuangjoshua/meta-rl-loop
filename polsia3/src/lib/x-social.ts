@@ -1,5 +1,6 @@
 import { getAppEnv } from "./env";
 import { preflightResponseAwareDistribution } from "./business-conversations";
+import { isBusinessTestMode } from "./companies";
 import { markSocialPostFailed, markSocialPostPublished, recordReadySocialPost, xPostAllowance } from "./social-posts";
 import { assertTakyonRunnable } from "./takyon-control";
 import { xCapability } from "./tool-availability";
@@ -13,24 +14,28 @@ function ensureUrl(text: string, url: string) {
 
 export async function runXSocialLane(input: { businessId: string; profileId?: string | null; campaignId?: string | null }) {
   await assertTakyonRunnable({ businessId: input.businessId, provider: "x" });
-  const capability = await xCapability({ businessId: input.businessId, profileId: input.profileId ?? null });
-  if (!capability.canRun) {
-    return {
-      status: "blocked" as const,
-      reason: capability.reason,
-      capability,
-      publishAttempted: false
-    };
-  }
+  const testMode = await isBusinessTestMode(input.businessId);
+  let allowance: Awaited<ReturnType<typeof xPostAllowance>> | null = null;
+  if (!testMode) {
+    const capability = await xCapability({ businessId: input.businessId, profileId: input.profileId ?? null });
+    if (!capability.canRun) {
+      return {
+        status: "blocked" as const,
+        reason: capability.reason,
+        capability,
+        publishAttempted: false
+      };
+    }
 
-  const allowance = await xPostAllowance(input.businessId);
-  if (!allowance.allowed) {
-    return {
-      status: "blocked" as const,
-      reason: allowance.reason,
-      allowance,
-      publishAttempted: false
-    };
+    allowance = await xPostAllowance(input.businessId);
+    if (!allowance.allowed) {
+      return {
+        status: "blocked" as const,
+        reason: allowance.reason,
+        allowance,
+        publishAttempted: false
+      };
+    }
   }
 
   const responseBlock = await preflightResponseAwareDistribution({
@@ -74,8 +79,26 @@ export async function runXSocialLane(input: { businessId: string; profileId?: st
     campaignId: input.campaignId ?? null,
     provider: "x",
     text,
-    result: { workflow: "x_social", publish_attempted: false, campaign_id: input.campaignId ?? null }
+    result: {
+      workflow: "x_social",
+      publish_attempted: false,
+      campaign_id: input.campaignId ?? null,
+      business_mode: testMode ? "test" : "live",
+      external_side_effects: testMode ? "suppressed" : "pending"
+    }
   });
+
+  if (testMode) {
+    return {
+      status: "completed" as const,
+      socialPostId: socialPost.id,
+      providerPostId: null,
+      allowance: null,
+      publishAttempted: false,
+      testMode: true,
+      reason: "Business is in test mode; X publish was suppressed and a ready social post receipt was recorded."
+    };
+  }
 
   try {
     const result = await publishXPost({ text, madeWithAi: true, businessId: input.businessId, profileId: input.profileId ?? null });

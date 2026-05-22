@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { BadRequestError, UnauthorizedError } from "@/lib/errors";
 import { jsonOk } from "@/lib/http";
 import { toJson } from "@/lib/json";
+import { ensureGeneratedAppProductRunAllowance } from "@/lib/generated-apps/customer-ops";
 import { verifyProjectAiKey } from "@/lib/generated-apps/records";
 import { observedRequest } from "@/lib/observability";
 import { completeProjectAiUsage, failProjectAiUsage, reserveProjectAiUsage } from "@/lib/project-ai";
@@ -131,6 +132,10 @@ export async function POST(request: Request) {
       return { userId };
     });
     observation.set({ appUserId: runtimeContext.userId });
+    const allowance = await ensureGeneratedAppProductRunAllowance({
+      businessId: body.companyId,
+      appUserId: runtimeContext.userId
+    });
 
     const companyRows = await sql<{ name: string; public_pitch: string | null; customer: string | null; pain: string | null; offer: string | null }[]>`
       SELECT b.name, cs.public_pitch, cs.config->>'customer' AS customer, cs.config->>'pain' AS pain, cs.config->>'offer' AS offer
@@ -147,8 +152,14 @@ export async function POST(request: Request) {
       purpose: body.purpose,
       route: body.route,
       appUserKey: runtimeContext.userId,
-      appUserTier: "free",
-      metadata: { email: body.input.email, campaign_id: body.campaignId ?? null }
+      appUserTier: allowance.tier,
+      metadata: {
+        email: body.input.email,
+        campaign_id: body.campaignId ?? null,
+        plan_key: allowance.planKey,
+        product_runs_used_this_period: allowance.used,
+        included_action_quota: allowance.includedActionQuota
+      }
     });
 
     try {

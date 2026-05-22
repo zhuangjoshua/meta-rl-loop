@@ -1,6 +1,7 @@
 import { executeAiProvider } from "./ai-provider";
 import { upsertBusinessCampaign, setBusinessCampaignStatus, type BusinessCampaignRow } from "./business-campaigns";
 import { upsertBusinessMemory } from "./business-memory";
+import { isBusinessTestMode } from "./companies";
 import { createEvent } from "./events";
 import { IntegrationCallError } from "./errors";
 import { createInboxMessage } from "./inbox";
@@ -455,7 +456,8 @@ function capabilityMap(capabilities: ToolCapability[]) {
   return new Map(capabilities.map((capability) => [capability.key, capability]));
 }
 
-function capabilityBlock(workflow: GoalActionConfig, capabilities: Map<string, ToolCapability>) {
+function capabilityBlock(workflow: GoalActionConfig, capabilities: Map<string, ToolCapability>, options: { testMode?: boolean } = {}) {
+  if (options.testMode && workflow.workflowId === "x_social") return null;
   const requiredAll = [...(workflow.capabilityAll ?? []), ...(workflow.capabilityKey ? [workflow.capabilityKey] : [])];
   const missingRequired = requiredAll.map((key) => capabilities.get(key)).filter((capability) => !capability?.canRun);
   const anyKeys = workflow.capabilityAny ?? [];
@@ -479,10 +481,11 @@ async function enqueueGoalWorkflow(input: {
   reason: string;
   strategy: Record<string, unknown>;
   repeatable?: boolean;
+  testMode?: boolean;
 }) {
   const workflow = goalActionCatalog[input.workflowId];
   if (!workflow) return null;
-  const blocked = capabilityBlock(workflow, input.capabilities);
+  const blocked = capabilityBlock(workflow, input.capabilities, { testMode: input.testMode });
   if (blocked) {
     return { workflow_id: workflow.workflowId, status: "blocked" as const, ...blocked, reason: `${input.reason}: ${blocked.reason}` };
   }
@@ -1016,6 +1019,7 @@ export async function runGetFirstCustomerGoal(input: {
   const state = await loadFirstCustomerState(input.businessId);
   const capabilities = await listToolCapabilities({ businessId: input.businessId, profileId: input.profileId ?? null });
   const caps = capabilityMap(capabilities);
+  const testMode = await isBusinessTestMode(input.businessId);
   const operatorInstruction = payloadString(input.payload, "operator_instruction");
   const strategy = await runGoalStrategy({ state, capabilities, operatorInstruction });
 
@@ -1087,7 +1091,8 @@ export async function runGetFirstCustomerGoal(input: {
       capabilities: caps,
       reason: action.reason,
       strategy: strategy.output,
-      repeatable: action.repeatable
+      repeatable: action.repeatable,
+      testMode
     });
     if (result) queued.push(result);
   }

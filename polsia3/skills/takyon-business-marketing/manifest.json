@@ -1,7 +1,7 @@
 {
   "namespace": "takyon-business-marketing",
   "owner": "takyon-core",
-  "runtime": "external-bhpv3",
+  "runtime": "local-takyon",
   "policy": {
     "side_effects": "none",
     "source": "Copied and adapted from audited marketing, sales, SEO, ads, and Open Design references into Takyon-owned bounded workflows.",

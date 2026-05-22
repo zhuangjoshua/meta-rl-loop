@@ -59,7 +59,7 @@ export async function GET(request: NextRequest) {
   const error = request.nextUrl.searchParams.get("error");
   const cookieState = request.cookies.get("x_oauth_state")?.value;
   const verifier = request.cookies.get("x_oauth_verifier")?.value;
-  const returnTo = request.cookies.get("x_oauth_return_to")?.value || "/dashboard";
+  const returnTo = request.cookies.get("x_oauth_return_to")?.value || "/";
   const scopeType = request.cookies.get("x_oauth_scope_type")?.value || "profile";
   const businessId = request.cookies.get("x_oauth_business_id")?.value || "";
   const profileId = request.cookies.get("x_oauth_profile_id")?.value || profile.id;
@@ -90,7 +90,7 @@ export async function GET(request: NextRequest) {
   });
   await getXCurrentUser(token.access_token, context);
 
-  const redirectUrl = new URL(returnTo.startsWith("/") ? returnTo : "/dashboard", request.url);
+  const redirectUrl = new URL(returnTo.startsWith("/") ? returnTo : "/", request.url);
   redirectUrl.searchParams.set("x", "connected");
   const response = NextResponse.redirect(redirectUrl);
   response.cookies.delete("x_oauth_state");

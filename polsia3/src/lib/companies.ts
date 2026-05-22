@@ -4,7 +4,8 @@ import { createEvent } from "./events";
 import type { Profile } from "./auth";
 import { getAppEnv } from "./env";
 import { syncBusinessWorkspace } from "./business-workspace";
-import { ensureBusinessCeoCronJob } from "./cron-jobs";
+import { ensureBusinessCeoCronJob, ensureBusinessConversationCronJob, ensureBusinessCustomerOpsCronJob } from "./cron-jobs";
+import { setTakyonControl } from "./takyon-control";
 
 export type CompanyRow = {
   id: string;
@@ -12,6 +13,7 @@ export type CompanyRow = {
   name: string;
   slug: string;
   status: "active" | "paused" | "archived";
+  mode: "live" | "test";
   created_at: string;
   updated_at: string;
 };
@@ -70,7 +72,7 @@ export async function createCompany(input: z.infer<typeof createCompanySchema>, 
     const companyRows = await tx<CompanyRow[]>`
       INSERT INTO businesses (owner_profile_id, name, slug, status)
       VALUES (${profile.id}, ${parsed.name}, ${slug}, 'active')
-      RETURNING id, owner_profile_id, name, slug, status, created_at, updated_at
+      RETURNING id, owner_profile_id, name, slug, status, "mode", created_at, updated_at
     `;
     const company = companyRows[0];
 
@@ -121,6 +123,12 @@ export async function createCompany(input: z.infer<typeof createCompanySchema>, 
     slug: rows[0].company.slug,
     name: rows[0].company.name
   });
+  await ensureBusinessCustomerOpsCronJob({
+    businessId: rows[0].company.id,
+    ownerProfileId: rows[0].company.owner_profile_id,
+    slug: rows[0].company.slug,
+    name: rows[0].company.name
+  });
 
   return rows[0];
 }
@@ -128,7 +136,7 @@ export async function createCompany(input: z.infer<typeof createCompanySchema>, 
 export async function listCompaniesForProfile(profileId: string, limit = 12) {
   const sql = db();
   return sql<(CompanyRow & { public_pitch: string | null; site_status: string | null })[]>`
-    SELECT b.id, b.owner_profile_id, b.name, b.slug, b.status, b.created_at, b.updated_at,
+    SELECT b.id, b.owner_profile_id, b.name, b.slug, b.status, b."mode", b.created_at, b.updated_at,
            cs.public_pitch, cs.status AS site_status
     FROM businesses b
     JOIN business_memberships bm ON bm.business_id = b.id
@@ -142,7 +150,7 @@ export async function listCompaniesForProfile(profileId: string, limit = 12) {
 export async function getCompanyForProfile(companyId: string, profileId: string) {
   const sql = db();
   const rows = await sql<(CompanyRow & { public_pitch: string | null; site_slug: string | null; site_status: string | null })[]>`
-    SELECT b.id, b.owner_profile_id, b.name, b.slug, b.status, b.created_at, b.updated_at,
+    SELECT b.id, b.owner_profile_id, b.name, b.slug, b.status, b."mode", b.created_at, b.updated_at,
            cs.public_pitch, cs.slug AS site_slug, cs.status AS site_status
     FROM businesses b
     JOIN business_memberships bm ON bm.business_id = b.id
@@ -152,6 +160,156 @@ export async function getCompanyForProfile(companyId: string, profileId: string)
     LIMIT 1
   `;
   return rows[0] ?? null;
+}
+
+export async function setCompanyOperationsPaused(input: {
+  companyId: string;
+  profileId?: string | null;
+  paused: boolean;
+  reason?: string;
+}) {
+  const sql = db();
+  const reason = input.reason?.trim() || (input.paused ? "Operator paused business operations." : "Operator resumed business operations.");
+  const nextStatus = input.paused ? "paused" : "active";
+
+  const rows = await sql<CompanyRow[]>`
+    UPDATE businesses
+    SET status = ${nextStatus},
+        updated_at = now()
+    WHERE id = ${input.companyId}
+      AND status <> 'archived'
+    RETURNING id, owner_profile_id, name, slug, status, "mode", created_at, updated_at
+  `;
+  const company = rows[0];
+  if (!company) throw new Error("Company not found or archived.");
+
+  if (input.paused) {
+    const cronRows = await sql<{ job_key: string }[]>`
+      UPDATE cron_jobs
+      SET status = 'paused',
+          locked_by = NULL,
+          locked_at = NULL,
+          metadata = metadata || ${sql.json({
+            paused_at: new Date().toISOString(),
+            paused_by_profile_id: input.profileId ?? null,
+            pause_reason: reason
+          })}::jsonb,
+          updated_at = now()
+      WHERE metadata->>'business_id' = ${input.companyId}
+      RETURNING job_key
+    `;
+
+    await setTakyonControl({
+      scopeType: "business",
+      businessId: input.companyId,
+      state: "paused",
+      reason,
+      actorProfileId: input.profileId ?? null,
+      metadata: { cron_jobs_paused: cronRows.length }
+    });
+    await createEvent({
+      businessId: input.companyId,
+      actorProfileId: input.profileId ?? null,
+      kind: "business.operations_paused",
+      subjectType: "business",
+      subjectId: input.companyId,
+      payload: { cron_jobs_paused: cronRows.length, reason }
+    });
+    return { company, cronJobsChanged: cronRows.length };
+  }
+
+  await setTakyonControl({
+    scopeType: "business",
+    businessId: input.companyId,
+    state: "active",
+    reason,
+    actorProfileId: input.profileId ?? null
+  });
+  await ensureBusinessCeoCronJob({
+    businessId: company.id,
+    ownerProfileId: company.owner_profile_id,
+    slug: company.slug,
+    name: company.name
+  });
+  await ensureBusinessConversationCronJob({
+    businessId: company.id,
+    ownerProfileId: company.owner_profile_id,
+    slug: company.slug,
+    name: company.name
+  });
+  await ensureBusinessCustomerOpsCronJob({
+    businessId: company.id,
+    ownerProfileId: company.owner_profile_id,
+    slug: company.slug,
+    name: company.name
+  });
+
+  const cronRows = await sql<{ job_key: string }[]>`
+    UPDATE cron_jobs
+    SET status = 'active',
+        locked_by = NULL,
+        locked_at = NULL,
+        metadata = metadata || ${sql.json({
+          resumed_at: new Date().toISOString(),
+          resumed_by_profile_id: input.profileId ?? null,
+          resume_reason: reason
+        })}::jsonb,
+        updated_at = now()
+    WHERE metadata->>'business_id' = ${input.companyId}
+    RETURNING job_key
+  `;
+
+  await createEvent({
+    businessId: input.companyId,
+    actorProfileId: input.profileId ?? null,
+    kind: "business.operations_resumed",
+    subjectType: "business",
+    subjectId: input.companyId,
+    payload: { cron_jobs_resumed: cronRows.length, reason }
+  });
+  return { company, cronJobsChanged: cronRows.length };
+}
+
+export async function getBusinessMode(businessId: string) {
+  const sql = db();
+  const rows = await sql<{ mode: "live" | "test" }[]>`
+    SELECT "mode"
+    FROM businesses
+    WHERE id = ${businessId}
+    LIMIT 1
+  `;
+  return rows[0]?.mode ?? "live";
+}
+
+export async function isBusinessTestMode(businessId: string) {
+  return (await getBusinessMode(businessId)) === "test";
+}
+
+export async function setCompanyMode(input: {
+  companyId: string;
+  profileId?: string | null;
+  mode: "live" | "test";
+}) {
+  const sql = db();
+  const rows = await sql<CompanyRow[]>`
+    UPDATE businesses
+    SET "mode" = ${input.mode},
+        updated_at = now()
+    WHERE id = ${input.companyId}
+      AND status <> 'archived'
+    RETURNING id, owner_profile_id, name, slug, status, "mode", created_at, updated_at
+  `;
+  const company = rows[0];
+  if (!company) throw new Error("Company not found or archived.");
+  await createEvent({
+    businessId: input.companyId,
+    actorProfileId: input.profileId ?? null,
+    kind: "business.mode_changed",
+    subjectType: "business",
+    subjectId: input.companyId,
+    payload: { mode: input.mode }
+  });
+  return company;
 }
 
 export async function getPublicSite(slug: string) {

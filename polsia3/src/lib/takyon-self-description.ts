@@ -4,7 +4,7 @@ import { takyonControlScopeTypes, takyonControlStates } from "./takyon-control";
 import { listToolCapabilities, type ToolCapability } from "./tool-availability";
 import { takyonWorkflowRegistry } from "./takyon-registry";
 import { workerDispatchableWorkflowIds } from "./workflow-jobs";
-import { businessWorkspaceContext } from "./business-workspace";
+import { businessWorkspaceContext, focusedBusinessWorkspaceExcerpts } from "./business-workspace";
 import { listTakyonHarnessCommands, readTakyonHarnessSettings } from "./takyon-harness";
 
 type SkillManifest = {
@@ -76,6 +76,7 @@ export async function buildTakyonSelfDescription(input: {
   profileId: string;
   businessId?: string | null;
   terminalHelp: string;
+  operatorText?: string | null;
 }) {
   const [capabilities, skillManifests, workspace, harnessCommands, harnessSettings] = await Promise.all([
     listToolCapabilities({ businessId: input.businessId ?? null, profileId: input.profileId }),
@@ -84,6 +85,15 @@ export async function buildTakyonSelfDescription(input: {
     listTakyonHarnessCommands(),
     readTakyonHarnessSettings()
   ]);
+  const focusedWorkspace = workspace && input.operatorText
+    ? await focusedBusinessWorkspaceExcerpts({
+        businessId: input.businessId!,
+        text: input.operatorText,
+        workspace,
+        maxFiles: 8,
+        maxBytes: 4_000
+      })
+    : null;
 
   return {
     terminal_mode: {
@@ -124,8 +134,19 @@ export async function buildTakyonSelfDescription(input: {
       ? {
           root: workspace.root,
           file_count: workspace.files.length,
+          top_level_map: workspace.topLevelMap,
           boot_files: workspace.bootFiles,
-          rule: "The CEO should inspect relevant workspace facts/receipts before deciding. Missing evidence means unknown."
+          focused_file_excerpts: focusedWorkspace
+            ? focusedWorkspace.excerpts.map((file) => ({
+                path: file.path,
+                bytes: file.bytes,
+                truncated: file.truncated,
+                error: "error" in file ? file.error : null,
+                content: file.content.slice(0, 2200)
+              }))
+            : [],
+          read_strategy: workspace.readStrategy,
+          rule: "The CEO should inspect relevant workspace facts/receipts before deciding. Missing evidence means unknown. Prompt truncation never means a workspace path is absent."
         }
       : null,
     controls: {

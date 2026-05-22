@@ -1,7 +1,7 @@
 {
   "namespace": "takyon-company-factory",
   "owner": "takyon-core",
-  "runtime": "external-bhpv3",
+  "runtime": "local-takyon",
   "skills": [
     {
       "id": "takyon-company-factory/ceo-awake",

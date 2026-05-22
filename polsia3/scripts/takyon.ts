@@ -5,13 +5,12 @@ import { stdin as input, stdout as output } from "node:process";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { readFile, rm } from "node:fs/promises";
-import { createCompany } from "../src/lib/companies";
 import { getAppEnv, getLocalAuthSeed } from "../src/lib/env";
 import { upsertProfile } from "../src/lib/auth";
-import { getCompanyForProfile, listCompaniesForProfile } from "../src/lib/companies";
+import { createCompany, getCompanyForProfile, listCompaniesForProfile, setCompanyMode, type CompanyRow } from "../src/lib/companies";
 import { runBusinessAutopilot } from "../src/lib/business-autopilot";
 import { upsertBusinessCampaign, listBusinessCampaigns, requireBusinessCampaign, setBusinessCampaignStatus } from "../src/lib/business-campaigns";
-import { ensureBudgetAccount, reserveBusinessBudget, usdToMicrousd } from "../src/lib/business-budget";
+import { ensureBudgetAccount, getBudgetAccount, microusdToUsd, reserveBusinessBudget, usdToMicrousd } from "../src/lib/business-budget";
 import { listBusinessMemory, upsertBusinessMemory } from "../src/lib/business-memory";
 import { startTakyonGoal } from "../src/lib/goals";
 import { enqueueWorkflowJob, listWorkflowJobs, type WorkflowJobRow } from "../src/lib/workflow-jobs";
@@ -66,6 +65,7 @@ const topLevelCommands = new Set([
   "pause",
   "resume",
   "kill",
+  "test",
   "auto",
   "stop",
   "logs",
@@ -220,7 +220,7 @@ function inputBarTop(currentBusiness: string | null) {
 
 function inputPrompt(currentBusiness: string | null) {
   if (!output.isTTY) return `${inputPromptLabel(currentBusiness)} > `;
-  return `${inputBarTop(currentBusiness)}\n${color("›", theme.primary)} `;
+  return `${color("›", theme.primary)} `;
 }
 
 function closeInputBox() {
@@ -239,6 +239,12 @@ function statusColor(status: string) {
 
 function paintStatus(status: string) {
   return color(status, statusColor(status));
+}
+
+function printBusinessMode(input: { business: Pick<CompanyRow, "id" | "name" | "slug">; mode: "live" | "test" }, json: boolean) {
+  if (json) return print({ business_id: input.business.id, slug: input.business.slug, mode: input.mode }, true);
+  const label = input.mode === "test" ? color("test", ansi.yellow) : color("live", ansi.green);
+  console.log(`${tag("mode", theme.primary)} ${bold(input.business.name)} ${dim(input.business.slug)} ${label}`);
 }
 
 function shortId(id: string) {
@@ -308,6 +314,58 @@ function printCampaigns(campaigns: Awaited<ReturnType<typeof listBusinessCampaig
   }
   for (const campaign of campaigns) {
     console.log(`${color(campaign.slug.padEnd(34), theme.secondary)} ${bold(campaign.name)} ${dim("(")}${paintStatus(campaign.status)}, ${campaign.kind}${dim(")")}`);
+  }
+}
+
+async function loadBudgetSummary(input: { businessId: string; campaignId?: string | null }) {
+  const sql = db();
+  const account = await getBudgetAccount({ businessId: input.businessId, campaignId: input.campaignId ?? null });
+  const ledger = await sql<Array<{
+    id: string;
+    kind: string;
+    status: string;
+    amount_microusd: string;
+    purpose: string;
+    provider: string | null;
+    created_at: string;
+  }>>`
+    SELECT id, kind, status, amount_microusd::text, purpose, provider, created_at::text
+    FROM business_budget_ledger
+    WHERE business_id = ${input.businessId}
+      AND COALESCE(campaign_id, '00000000-0000-0000-0000-000000000000'::uuid) =
+          COALESCE(${input.campaignId ?? null}::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+    ORDER BY created_at DESC
+    LIMIT 12
+  `;
+  return { account, ledger };
+}
+
+function usd(value: string | number | bigint) {
+  return `$${microusdToUsd(value).toFixed(2)}`;
+}
+
+function printBudgetSummary(input: {
+  businessName: string;
+  campaignName?: string | null;
+  summary: Awaited<ReturnType<typeof loadBudgetSummary>>;
+}, json: boolean) {
+  if (json) return print(input.summary, true);
+  const scope = input.campaignName ? `${input.businessName} / ${input.campaignName}` : input.businessName;
+  console.log(`${tag("budget", theme.primary)} ${bold(scope)}`);
+  if (!input.summary.account) {
+    console.log(`${color("No budget account set.", ansi.yellow)} ${dim("Use /budget set --usd 100")}`);
+  } else {
+    const account = input.summary.account;
+    const remaining = BigInt(account.hard_limit_microusd) - BigInt(account.committed_microusd);
+    console.log(`  ${color("cap", theme.secondary)} ${usd(account.hard_limit_microusd)}  ${color("committed", theme.secondary)} ${usd(account.committed_microusd)}  ${color("remaining", theme.secondary)} ${usd(remaining)}  ${paintStatus(account.status)}`);
+  }
+  if (!input.summary.ledger.length) {
+    console.log(`  ${dim("no ledger entries")}`);
+    return;
+  }
+  for (const item of input.summary.ledger) {
+    const purpose = item.purpose ? ` ${item.purpose}` : "";
+    console.log(`  ${paintStatus(item.status)} ${color(item.kind.padEnd(12), theme.secondary)} ${usd(item.amount_microusd).padStart(9)} ${dim(new Date(item.created_at).toLocaleString())}${purpose}`);
   }
 }
 
@@ -445,15 +503,16 @@ function printRuntimeStatus(status: TakyonRuntimeStatus, json: boolean) {
   const nodeMark = paintStatus(status.localMac.node);
   const tsxMark = paintStatus(status.localMac.tsx);
   console.log(`${tag("runtime", ansi.brightBlue)} local Mac ${localMark} ${dim(status.cwd)}`);
-  console.log(`  ${color("model", ansi.cyan)} ${paintStatus(status.localMac.modelRuntime)} ${status.localMac.provider ? dim(status.localMac.provider) : color("no provider", ansi.yellow)}`);
+  console.log(`  ${color("hermes", ansi.cyan)} ${paintStatus(status.localMac.modelRuntime)} ${status.localMac.provider ? dim(status.localMac.provider) : color("no provider", ansi.yellow)}`);
   console.log(`  ${color("node", ansi.cyan)} ${nodeMark}  ${color("tsx", ansi.cyan)} ${tsxMark}`);
   console.log(`  ${color("worker", ansi.cyan)} queued ${status.worker.queued}, running ${status.worker.running}, blocked ${status.worker.blocked}, failed ${status.worker.failed}`);
   console.log(`  ${color("cron", ansi.cyan)} ${status.cron.active} active, ${status.cron.paused} paused, ${status.cron.due} due`);
   console.log(`  ${color("harness", theme.primary)} ${status.harness.commandCount} commands at ${status.harness.root}`);
-  console.log(`  ${color("remote", ansi.gray)} ${status.remoteRuntime.enabled ? "enabled" : "off"} ${status.remoteRuntime.configured ? dim("ARGON_RUNTIME_URL configured") : dim("no URL needed")}`);
+  console.log(`  ${color("gateway", ansi.gray)} ${status.remoteRuntime.enabled ? "reachable" : "blocked"} ${status.remoteRuntime.configured ? dim("ARGON_RUNTIME_URL configured") : dim("local default")}`);
   if (status.missing.length) {
     console.log(`  ${color("missing", ansi.yellow)} ${status.missing.join(", ")}`);
-    console.log(`  ${color("setup", ansi.cyan)} ./takyon secret set ANTHROPIC_API_KEY --stdin`);
+    const runtimeVenvMissing = status.missing.includes("runner:vendor/argon-hermes-runtime/.venv/bin/python");
+    console.log(`  ${color("setup", ansi.cyan)} ${runtimeVenvMissing ? "scripts/setup-argon-hermes-runtime.sh" : status.missing.includes("hermes_runtime_gateway") ? "scripts/start-argon-hermes-runtime.sh" : "./takyon secret set ANTHROPIC_API_KEY --stdin"}`);
   }
   console.log(`  ${dim("local VPS:")} ${status.localMac.vpsCommand}`);
 }
@@ -485,11 +544,13 @@ const builtInSlashCommands: SlashCommandEntry[] = [
   { name: "campaigns", kind: "control", description: "List current business campaigns", requiresBusiness: true },
   { name: "run", kind: "control", description: "Wake/autopilot current business with instructions", requiresBusiness: true },
   { name: "wake", kind: "control", description: "Queue a CEO wake for current business", requiresBusiness: true },
+  { name: "gc", kind: "control", description: "Clean old terminal rows; dry-run unless confirm is included" },
   { name: "auto", kind: "control", description: "Start or stop background worker stream", requiresBusiness: true },
   { name: "logs", kind: "control", description: "Toggle worker internals in the shell", requiresBusiness: true },
   { name: "ui", kind: "control", description: "Switch compact/full session panel" },
   { name: "goal", kind: "control", description: "Start a business goal", requiresBusiness: true },
   { name: "budget", kind: "control", description: "Set or reserve business/campaign budget", requiresBusiness: true },
+  { name: "test", kind: "control", description: "Set current business test mode: /test on|off|status", requiresBusiness: true },
   { name: "memory", kind: "control", description: "List or record business memory", requiresBusiness: true },
   { name: "connect", kind: "control", description: "Connect provider integrations" },
   { name: "setup", kind: "control", description: "Show setup for a blocked capability" },
@@ -709,6 +770,14 @@ function spawnWorkerProcess(input: {
   });
 }
 
+function spawnHermesRuntimeProcess() {
+  return spawn("scripts/start-argon-hermes-runtime.sh", [], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: process.env
+  });
+}
+
 async function runWorkerForBusiness(input: { businessId?: string | null; once: boolean }) {
   const child = spawnWorkerProcess({ ...input, stdio: "inherit" });
   await new Promise<void>((resolve, reject) => {
@@ -759,10 +828,12 @@ async function runLocalVps(input: { once: boolean; cronIntervalMs: number; limit
 
   if (!input.json) {
     console.log(`${tag("vps", ansi.brightBlue)} local Mac VPS started`);
+    console.log(`  ${color("hermes", ansi.cyan)} local CEO runtime gateway`);
     console.log(`  ${color("cron", ansi.cyan)} every ${input.cronIntervalMs}ms`);
     console.log(`  ${color("worker", ansi.cyan)} global local-worker loop`);
     console.log(`  ${dim("Press Ctrl-C to stop.")}`);
   }
+  const hermes = spawnHermesRuntimeProcess();
   const worker = spawnWorkerProcess({ businessId: null, once: false, stdio: "inherit" });
   let closed = false;
   const runCron = () => {
@@ -781,6 +852,7 @@ async function runLocalVps(input: { once: boolean; cronIntervalMs: number; limit
       if (closed) return;
       closed = true;
       clearInterval(timer);
+      if (!hermes.killed) hermes.kill("SIGINT");
       if (!worker.killed) worker.kill("SIGINT");
     };
     const onSigint = () => stop();
@@ -798,6 +870,17 @@ async function runLocalVps(input: { once: boolean; cronIntervalMs: number; limit
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
       clearInterval(timer);
+      if (!hermes.killed) hermes.kill("SIGINT");
+      reject(error);
+    });
+    hermes.on("exit", (code, signal) => {
+      if (closed) return;
+      stop();
+      reject(new Error(`Hermes runtime exited with ${signal ?? code}.`));
+    });
+    hermes.on("error", (error) => {
+      if (closed) return;
+      stop();
       reject(error);
     });
   });
@@ -1018,7 +1101,7 @@ type LiveSession = {
 
 let suppressLiveWritePrompt = false;
 let beforeLiveWrite: (() => void) | null = null;
-let afterLiveWritePrompt: (() => void) | null = null;
+let renderLivePrompt: ((rl: LiveReadline) => void) | null = null;
 
 class ShellOperationCancelled extends Error {
   constructor(label: string) {
@@ -1069,8 +1152,8 @@ function liveWrite(rl: LiveReadline, message: string) {
   cursorTo(output, 0);
   output.write(`${text}\n`);
   if (!suppressLiveWritePrompt) {
-    rl.prompt(true);
-    afterLiveWritePrompt?.();
+    if (renderLivePrompt) renderLivePrompt(rl);
+    else rl.prompt(true);
   }
 }
 
@@ -1229,6 +1312,7 @@ function parseInput(line: string) {
   for (const match of line.matchAll(matcher)) {
     tokens.push(match[1] ?? match[2] ?? match[3]);
   }
+  if (tokens[0]) tokens[0] = tokens[0].replace(/=+$/, "");
   return tokens;
 }
 
@@ -1255,6 +1339,9 @@ function usage() {
     "  /ui compact|full",
     "  /capabilities",
     "  /campaigns",
+    "  /test on|off|status                    # suppress external outreach posts for this business",
+    "  /budget [set --usd 100 | reserve --usd 10 --purpose <text>]",
+    "  /gc [--older-than-days 30] [--max-delete 1000] [confirm]",
     "  /auto on|off                          # start/stop background worker + stream",
     "  /logs on|off                          # show/hide worker internals",
     "",
@@ -1275,6 +1362,7 @@ function usage() {
     "  ./takyon command <business-id-or-slug> <harness-command> [args...]",
     "  ./takyon jobs <business-id-or-slug> [--limit 30]",
     "  ./takyon capabilities [business-id-or-slug]",
+    "  ./takyon test <business-id-or-slug> on|off|status",
     "  ./takyon setup <capability> [business-id-or-slug]",
     "  ./takyon connect x [business-id-or-slug] [--platform|--business|--profile] [--open]",
     "  ./takyon secret set <ENV_KEY> --stdin",
@@ -1375,7 +1463,7 @@ async function printConnectX(inputArgs: string[], profile: TerminalProfile, json
   if (business) url.searchParams.set("businessId", business.id);
   if (forcePlatform) url.searchParams.set("scope", "platform");
   else if (forceProfile) url.searchParams.set("scope", "profile");
-  url.searchParams.set("returnTo", business ? `/dashboard/companies/${business.id}` : "/dashboard");
+  url.searchParams.set("returnTo", "/");
   const result = {
     provider: "x",
     scope: forceBusiness && business ? "business" : forceProfile ? "profile" : "platform",
@@ -1452,6 +1540,23 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
       listBusinessMemory({ businessId: business.id, limit: 20 })
     ]);
     return print({ business, workspace: { root: workspace.root, fileCount: workspace.files.length }, campaigns, capabilities, memory }, json);
+  }
+
+  if (command === "test") {
+    const business = await resolveBusiness(cleanArgs[1], profile.id);
+    const modeArg = (cleanArgs[2] || "status").toLowerCase();
+    if (modeArg === "status" || modeArg === "show") {
+      return printBusinessMode({ business, mode: business.mode === "test" ? "test" : "live" }, json);
+    }
+    const mode = modeArg === "on" || modeArg === "test"
+      ? "test"
+      : modeArg === "off" || modeArg === "live"
+        ? "live"
+        : null;
+    if (!mode) throw new Error("Use: ./takyon test <business-id-or-slug> on|off|status");
+    const updated = await setCompanyMode({ companyId: business.id, profileId: profile.id, mode });
+    await syncBusinessWorkspace({ businessId: business.id, profileId: profile.id, reason: "terminal_test_mode" });
+    return printBusinessMode({ business: updated, mode }, json);
   }
 
   if (command === "workspace") {
@@ -1605,6 +1710,21 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
     return print(campaign, json);
   }
 
+  if (command === "budget" && cleanArgs[1] !== "set" && cleanArgs[1] !== "reserve") {
+    const businessArg = cleanArgs[1] && !["show", "status"].includes(cleanArgs[1]) && !cleanArgs[1].startsWith("--")
+      ? cleanArgs[1]
+      : cleanArgs[2];
+    if (!businessArg) throw new Error("Use: /budget after /use <business>, or ./takyon budget <business>");
+    const business = await resolveBusiness(businessArg, profile.id);
+    const campaignArg = flag(cleanArgs, "--campaign");
+    const campaign = campaignArg ? await requireBusinessCampaign({ businessId: business.id, campaignIdOrSlug: campaignArg }) : null;
+    return printBudgetSummary({
+      businessName: business.name,
+      campaignName: campaign?.name ?? null,
+      summary: await loadBudgetSummary({ businessId: business.id, campaignId: campaign?.id ?? null })
+    }, json);
+  }
+
   if (command === "budget" && cleanArgs[1] === "set") {
     const business = await resolveBusiness(cleanArgs[2], profile.id);
     const campaignArg = flag(cleanArgs, "--campaign");
@@ -1713,7 +1833,8 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
   if (command === "gc") {
     const maybeBusiness = cleanArgs[1] && cleanArgs[1] !== "confirm" && !cleanArgs[1].startsWith("--") ? cleanArgs[1] : "";
     const business = maybeBusiness ? await resolveBusiness(maybeBusiness, profile.id) : null;
-    const olderThanDays = Math.max(1, Number(flag(cleanArgs, "--older-than-days", "30")));
+    const rawOlderThanDays = Number(flag(cleanArgs, "--older-than-days", "30"));
+    const olderThanDays = Number.isFinite(rawOlderThanDays) ? Math.max(0, rawOlderThanDays) : 30;
     const maxDelete = Math.max(1, Number(flag(cleanArgs, "--max-delete", "1000")));
     const confirm = cleanArgs.includes("confirm") || hasFlag(cleanArgs, "--confirm");
     return print(await runTakyonGc({ businessId: business?.id ?? null, olderThanDays, maxDelete, confirm }), json);
@@ -1926,7 +2047,7 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
     }
   }
 
-  throw new Error(`Unknown Takyon command.\n\n${usage()}`);
+  throw new Error(`Unknown Takyon command: ${command}. Use /commands in shell or ./takyon help.`);
 }
 
 function commandWithContext(tokens: string[], currentBusiness: string | null) {
@@ -1994,8 +2115,16 @@ function commandWithContext(tokens: string[], currentBusiness: string | null) {
   if (command === "campaign" && tokens[1] === "create" && currentBusiness && tokens[2] !== currentBusiness) {
     return ["campaign", "create", currentBusiness, ...tokens.slice(2)];
   }
+  if (command === "budget" && currentBusiness && (!tokens[1] || tokens[1] === "show" || tokens[1] === "status" || tokens[1].startsWith("--"))) {
+    return ["budget", currentBusiness, ...tokens.slice(1)];
+  }
   if (command === "budget" && ["set", "reserve"].includes(tokens[1] || "") && currentBusiness && tokens[2] !== currentBusiness) {
     return ["budget", tokens[1], currentBusiness, ...tokens.slice(2)];
+  }
+  if (command === "test") {
+    const modeArgs = new Set(["on", "off", "status", "show", "test", "live"]);
+    if (!currentBusiness && (!tokens[1] || modeArgs.has(tokens[1]))) throw new Error("Select a business first with: /use <business>");
+    if (currentBusiness && (!tokens[1] || modeArgs.has(tokens[1]))) return ["test", currentBusiness, ...tokens.slice(1)];
   }
   if (command === "memory" && ["list", "record"].includes(tokens[1] || "") && currentBusiness && tokens[2] !== currentBusiness) {
     return ["memory", tokens[1], currentBusiness, ...tokens.slice(2)];
@@ -2059,20 +2188,16 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
 
   const clearActivePrompt = () => {
     if (!output.isTTY || !promptVisible) return;
-    output.write("\x1b[1A");
     cursorTo(output, 0);
     output.write("\x1b[J");
     promptVisible = false;
   };
 
   const previousBeforeLiveWrite = beforeLiveWrite;
-  const previousAfterLiveWritePrompt = afterLiveWritePrompt;
+  const previousRenderLivePrompt = renderLivePrompt;
   beforeLiveWrite = () => {
     clearSlashPopup();
     clearActivePrompt();
-  };
-  afterLiveWritePrompt = () => {
-    promptVisible = true;
   };
 
   const runCancelable = async <T>(label: string, fn: (signal: AbortSignal) => Promise<T>) => {
@@ -2094,9 +2219,11 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     if (closing) return;
     clearSlashPopup();
     rl.setPrompt(inputPrompt(currentBusiness));
+    if (output.isTTY) output.write(`${inputBarTop(currentBusiness)}\n`);
     rl.prompt();
     promptVisible = true;
   };
+  renderLivePrompt = prompt;
 
   const renderCurrentSlashPalette = async () => {
     await refreshSlashEntries();
@@ -2472,7 +2599,7 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
       if (slashPaletteTimer) clearTimeout(slashPaletteTimer);
       clearSlashPopup();
       beforeLiveWrite = previousBeforeLiveWrite;
-      afterLiveWritePrompt = previousAfterLiveWritePrompt;
+      renderLivePrompt = previousRenderLivePrompt;
       if (input.isTTY) input.off("keypress", onKeypress);
       commandChain = commandChain.finally(async () => {
         await stopLiveSession(currentSession, rl, "session closed");

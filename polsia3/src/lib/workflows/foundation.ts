@@ -124,8 +124,7 @@ function buildOperatorPrompt(payload: unknown) {
     asString(brief.pitch) ? `Raw idea: ${asString(brief.pitch)}` : null,
     asString(brief.customer) ? `Customer: ${asString(brief.customer)}` : null,
     asString(brief.pain) ? `Pain: ${asString(brief.pain)}` : null,
-    asString(brief.offer) ? `Offer: ${asString(brief.offer)}` : null,
-    "Build the real foundation first. Do not create placeholder reports."
+    asString(brief.offer) ? `Offer: ${asString(brief.offer)}` : null
   ]);
 }
 

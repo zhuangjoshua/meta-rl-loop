@@ -182,8 +182,9 @@ function stableDoctrine() {
     "",
     "Evidence and side effects:",
     "- Treat the business workspace in LIVE SELF-DESCRIPTION and CURRENT BUSINESS CONTEXT as the agent-facing filesystem view.",
+    "- The workspace top-level map is first-class evidence. Prompt truncation never means a path is absent.",
     "- If the operator asks whether something is done, answer only from visible workspace files, receipts, jobs, and capability reports.",
-    "- If relevant evidence is not visible, say it is unknown and identify what file/receipt/check should exist.",
+    "- If relevant evidence is omitted, truncated, unreadable, or not visible, say it is unknown and identify what file/receipt/check should exist.",
     "- Never claim work, posting, deployment, spend, revenue, users, or provider mutations happened unless context says so.",
     "- If a capability is blocked, explain the exact missing keys/setup path from LIVE SELF-DESCRIPTION.",
     "- You may propose or request work, but deterministic Takyon code executes queues, budgets, provider calls, receipts, cleanup, and kill switches.",
@@ -322,7 +323,8 @@ export async function runTakyonTerminalAgent(input: {
   const selfDescription = await buildTakyonSelfDescription({
     profileId: input.profileId,
     businessId: scopedBusiness?.business.id ?? null,
-    terminalHelp: input.terminalHelp
+    terminalHelp: input.terminalHelp,
+    operatorText: input.text
   });
   input.signal?.throwIfAborted();
 

@@ -9,6 +9,7 @@ type WorkspaceBusiness = {
   name: string;
   slug: string;
   status: string;
+  mode: "live" | "test";
   public_pitch: string | null;
   public_title: string | null;
   site_status: string | null;
@@ -19,6 +20,14 @@ type WorkspaceFile = {
   path: string;
   bytes: number;
   updatedAt: string;
+};
+
+type WorkspaceTopLevelEntry = {
+  path: string;
+  files: number;
+  bytes: number;
+  updatedAt: string | null;
+  sampleFiles: string[];
 };
 
 const generatedReadonlyRoots = ["state", "jobs", "ledger", "tools", "receipts", "website"];
@@ -40,6 +49,7 @@ const ceoBootFiles = [
   "state/index.json",
   "state/inbox.jsonl",
   "state/current.md",
+  "state/customer-ops.json",
   "state/blockers.md",
   "tools/missing-keys.md"
 ];
@@ -92,6 +102,35 @@ function jsonl(rows: unknown[]) {
   return rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : "");
 }
 
+function workspaceTopLevelMap(files: WorkspaceFile[]): WorkspaceTopLevelEntry[] {
+  const buckets = new Map<string, WorkspaceTopLevelEntry>();
+  for (const file of files) {
+    const normalized = normalizeWorkspacePath(file.path);
+    const [first, ...rest] = normalized.split("/");
+    const bucketPath = rest.length ? `${first}/` : first;
+    const bucket = buckets.get(bucketPath) ?? {
+      path: bucketPath,
+      files: 0,
+      bytes: 0,
+      updatedAt: null,
+      sampleFiles: []
+    };
+    bucket.files += 1;
+    bucket.bytes += file.bytes;
+    if (!bucket.updatedAt || file.updatedAt > bucket.updatedAt) bucket.updatedAt = file.updatedAt;
+    if (bucket.sampleFiles.length < 5) bucket.sampleFiles.push(normalized);
+    buckets.set(bucketPath, bucket);
+  }
+  return [...buckets.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function workspaceReadStrategy(fileCount: number) {
+  return {
+    fileCount,
+    policy: "CEO receives the cheap top-level map and boot excerpts first. Use the files tool or /files and /read to inspect relevant deeper paths; prompt truncation never means absent."
+  };
+}
+
 function usdFromMicrousd(value: string | number | null | undefined) {
   return Number(value ?? 0) / 1_000_000;
 }
@@ -113,6 +152,7 @@ async function loadBusiness(businessId: string) {
            b.name,
            b.slug,
            b.status,
+           b."mode",
            cs.public_pitch,
            cs.public_title,
            cs.status AS site_status,
@@ -232,6 +272,47 @@ async function workspaceRows(businessId: string) {
       WHERE business_id = ${businessId}
       ORDER BY created_at DESC
       LIMIT 300
+    `,
+    sql<{ id: string; email: string; name: string | null; status: string; tier: string; metadata: unknown; created_at: string; updated_at: string }[]>`
+      SELECT id, email, name, status, tier, metadata, created_at::text, updated_at::text
+      FROM generated_app_users
+      WHERE business_id = ${businessId}
+      ORDER BY updated_at DESC
+      LIMIT 300
+    `,
+    sql<{ id: string; app_user_id: string; email: string | null; tier: string; status: string; source: string; stripe_customer_id: string | null; stripe_subscription_id: string | null; current_period_end: string | null; metadata: unknown; created_at: string; updated_at: string }[]>`
+      SELECT e.id,
+             e.app_user_id,
+             u.email,
+             e.tier,
+             e.status,
+             e.source,
+             e.stripe_customer_id,
+             e.stripe_subscription_id,
+             e.current_period_end::text,
+             e.metadata,
+             e.created_at::text,
+             e.updated_at::text
+      FROM generated_app_entitlements e
+      LEFT JOIN generated_app_users u ON u.id = e.app_user_id
+      WHERE e.business_id = ${businessId}
+      ORDER BY e.updated_at DESC
+      LIMIT 300
+    `,
+    sql<{ id: string; generated_app_user_id: string | null; email: string | null; status: string; input: unknown; output: unknown; error: string | null; created_at: string }[]>`
+      SELECT r.id,
+             r.generated_app_user_id,
+             u.email,
+             r.status,
+             r.input,
+             r.output,
+             r.error,
+             r.created_at::text
+      FROM generated_app_product_runs r
+      LEFT JOIN generated_app_users u ON u.id = r.generated_app_user_id
+      WHERE r.business_id = ${businessId}
+      ORDER BY r.created_at DESC
+      LIMIT 300
     `
   ]);
 }
@@ -245,6 +326,7 @@ function currentMarkdown(input: {
   deployments: Awaited<ReturnType<typeof workspaceRows>>[6];
   posts: Awaited<ReturnType<typeof workspaceRows>>[7];
   revenue: Awaited<ReturnType<typeof workspaceRows>>[8];
+  generatedUsers: Awaited<ReturnType<typeof workspaceRows>>[13];
 }) {
   const latestDeployment = input.deployments[0];
   const activeJobs = input.jobs.filter((job) => ["queued", "running", "blocked", "failed"].includes(job.status));
@@ -255,6 +337,7 @@ function currentMarkdown(input: {
     `Business ID: ${input.business.id}`,
     `Slug: ${input.business.slug}`,
     `Status: ${input.business.status}`,
+    `Mode: ${input.business.mode}`,
     `Site status: ${input.business.site_status ?? "unknown"}`,
     `Pitch: ${input.business.public_pitch ?? ""}`,
     "",
@@ -267,6 +350,7 @@ function currentMarkdown(input: {
     `- Completed deployments: ${input.deployments.filter((row) => row.status === "completed").length}`,
     `- Social posts tracked: ${input.posts.length}`,
     `- Revenue events tracked: ${input.revenue.length}`,
+    `- Generated-app customers tracked: ${input.generatedUsers.length}`,
     latestDeployment?.alias_url || latestDeployment?.deployment_url ? `- Latest public URL: ${latestDeployment.alias_url ?? latestDeployment.deployment_url}` : "- Latest public URL: unknown",
     "",
     "## Rule",
@@ -324,6 +408,7 @@ function ceoMapMarkdown() {
     "- `state/index.json`: generated map of authoritative paths and what each path means.",
     "- `state/inbox.jsonl`: generated evidence feed from jobs, events, receipts, capabilities, and business facts.",
     "- `state/current.md`: generated current snapshot.",
+    "- `state/customer-ops.json`: generated generated-app customer, subscription, usage, and revenue snapshot.",
     "- `state/blockers.md`: generated failures and missing capabilities.",
     "",
     "## Generated Read-Only",
@@ -385,6 +470,7 @@ function ceoBriefMarkdown(business: WorkspaceBusiness) {
     "- `state/index.json`",
     "- `state/inbox.jsonl`",
     "- `state/current.md`",
+    "- `state/customer-ops.json`",
     "- `state/blockers.md`",
     "",
     "Keep this file short and update it when the operating picture changes."
@@ -406,7 +492,8 @@ function workspaceIndex(input: {
       id: input.business.id,
       slug: input.business.slug,
       name: input.business.name,
-      status: input.business.status
+      status: input.business.status,
+      mode: input.business.mode
     },
     read_first: ceoBootFiles,
     generated_readonly_roots: generatedReadonlyRoots,
@@ -414,11 +501,11 @@ function workspaceIndex(input: {
     standing_obligations: standingObligations,
     files_by_purpose: {
       operating_brief: ["ceo/brief.md", "ceo/doctrine.md", "ceo/map.md"],
-      facts_and_evidence: ["state/current.md", "state/facts.jsonl", "state/inbox.jsonl", "state/blockers.md"],
+      facts_and_evidence: ["state/current.md", "state/customer-ops.json", "state/customers.jsonl", "state/product-runs.jsonl", "state/facts.jsonl", "state/inbox.jsonl", "state/blockers.md"],
       queue: ["jobs/queued.jsonl", "jobs/running.jsonl", "jobs/completed.jsonl", "jobs/blocked.jsonl"],
-      budget: ["ledger/budget.json", "ledger/reservations.jsonl", "ledger/receipts.jsonl"],
+      budget: ["ledger/budget.json", "ledger/reservations.jsonl", "ledger/receipts.jsonl", "ledger/subscriptions.jsonl"],
       capabilities: ["tools/availability.json", "tools/missing-keys.md"],
-      product: ["product/", "product/search-visibility.md", "product/conversion-review.md", "product/design-brief.md", "product/measurement-plan.md"],
+      product: ["product/", "product/customer-ops.md", "product/search-visibility.md", "product/conversion-review.md", "product/design-brief.md", "product/measurement-plan.md"],
       outreach: ["outreach/", "outreach/content-engine.md", "outreach/outreach-pipeline.md", "outreach/paid-media-review.md"],
       business_skills: [
         "memory/product-marketing-context.md",
@@ -456,6 +543,9 @@ function evidenceInbox(input: {
   leads: Awaited<ReturnType<typeof workspaceRows>>[10];
   mediaJobs: Awaited<ReturnType<typeof workspaceRows>>[11];
   events: Awaited<ReturnType<typeof workspaceRows>>[12];
+  generatedUsers: Awaited<ReturnType<typeof workspaceRows>>[13];
+  generatedEntitlements: Awaited<ReturnType<typeof workspaceRows>>[14];
+  productRuns: Awaited<ReturnType<typeof workspaceRows>>[15];
   capabilities: ToolCapabilityLike[];
 }) {
   const rows = [
@@ -468,6 +558,9 @@ function evidenceInbox(input: {
     ...input.communityTargets.map((row) => ({ ...row, at: row.created_at, kind: "community_target" })),
     ...input.leads.map((row) => ({ ...row, at: row.created_at, kind: "lead" })),
     ...input.mediaJobs.map((row) => ({ ...row, at: row.created_at, kind: "media_job" })),
+    ...input.generatedUsers.map((row) => ({ ...row, at: row.updated_at, kind: "generated_app_user" })),
+    ...input.generatedEntitlements.map((row) => ({ ...row, at: row.updated_at, kind: "generated_app_entitlement" })),
+    ...input.productRuns.map((row) => ({ ...row, at: row.created_at, kind: "generated_app_product_run" })),
     ...input.capabilities.filter((capability) => !capability.canRun).map((capability) => ({
       at: new Date().toISOString(),
       kind: "missing_capability",
@@ -481,6 +574,46 @@ function evidenceInbox(input: {
   return rows
     .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")))
     .slice(0, 500);
+}
+
+function customerOpsSummary(input: {
+  generatedUsers: Awaited<ReturnType<typeof workspaceRows>>[13];
+  generatedEntitlements: Awaited<ReturnType<typeof workspaceRows>>[14];
+  productRuns: Awaited<ReturnType<typeof workspaceRows>>[15];
+  revenue: Awaited<ReturnType<typeof workspaceRows>>[8];
+  syncedAt: string;
+}) {
+  const activeUsers = input.generatedUsers.filter((row) => row.status === "active").length;
+  const paidUsers = input.generatedUsers.filter((row) => row.tier === "paid" || row.tier === "owner").length;
+  const activePaidEntitlements = input.generatedEntitlements.filter((row) => row.status === "active" && (row.tier === "paid" || row.tier === "owner")).length;
+  const pastDueOrCancelled = input.generatedEntitlements.filter((row) => row.status === "past_due" || row.status === "cancelled");
+  const last30dRuns = input.productRuns.filter((row) => Date.parse(row.created_at) >= Date.now() - 30 * 24 * 60 * 60 * 1000).length;
+  const revenueCents = input.revenue.reduce((sum, row) => sum + Number(row.amount_paid_cents || 0), 0);
+  return {
+    synced_at: input.syncedAt,
+    users: {
+      total: input.generatedUsers.length,
+      active: activeUsers,
+      paid_or_owner: paidUsers
+    },
+    entitlements: {
+      total: input.generatedEntitlements.length,
+      active_paid: activePaidEntitlements,
+      attention_needed: pastDueOrCancelled.slice(0, 50)
+    },
+    product_runs: {
+      total: input.productRuns.length,
+      completed: input.productRuns.filter((row) => row.status === "completed").length,
+      blocked: input.productRuns.filter((row) => row.status !== "completed").length,
+      last_30d: last30dRuns
+    },
+    revenue: {
+      events: input.revenue.length,
+      total_cents: revenueCents,
+      total_usd: revenueCents / 100
+    },
+    rule: "Generated app customer state mirrors Postgres. Treat missing customers, subscriptions, or receipts as unknown."
+  };
 }
 
 async function ensureBaseTree(root: string, business: WorkspaceBusiness) {
@@ -541,7 +674,10 @@ export async function syncBusinessWorkspace(input: { businessId: string; profile
     communityTargets,
     leads,
     mediaJobs,
-    events
+    events,
+    generatedUsers,
+    generatedEntitlements,
+    productRuns
   ] = await workspaceRows(input.businessId);
   const capabilities = await listToolCapabilities({ businessId: input.businessId, profileId: input.profileId ?? null });
   const missingCapabilities = capabilities.filter((capability) => !capability.canRun).map((capability) => `${capability.label}: ${capability.reason}`);
@@ -556,10 +692,13 @@ export async function syncBusinessWorkspace(input: { businessId: string; profile
     sync_reason: input.reason ?? null
   }));
   await writeText(path.join(root, "state", "index.json"), json(workspaceIndex({ business, campaigns, capabilities, syncedAt, reason: input.reason ?? null })));
-  await writeText(path.join(root, "state", "current.md"), currentMarkdown({ business, campaigns, memories, jobs, budgets, deployments, posts, revenue }));
+  await writeText(path.join(root, "state", "current.md"), currentMarkdown({ business, campaigns, memories, jobs, budgets, deployments, posts, revenue, generatedUsers }));
+  await writeText(path.join(root, "state", "customer-ops.json"), json(customerOpsSummary({ generatedUsers, generatedEntitlements, productRuns, revenue, syncedAt })));
+  await writeText(path.join(root, "state", "customers.jsonl"), jsonl(generatedUsers));
+  await writeText(path.join(root, "state", "product-runs.jsonl"), jsonl(productRuns));
   await writeText(path.join(root, "state", "facts.jsonl"), jsonl([
     { kind: "business", business },
-    { kind: "counts", campaigns: campaigns.length, jobs: jobs.length, memories: memories.length, documents: documents.length, budgets: budgets.length, deployments: deployments.length, posts: posts.length, revenue_events: revenue.length, community_targets: communityTargets.length, leads: leads.length, media_jobs: mediaJobs.length },
+    { kind: "counts", campaigns: campaigns.length, jobs: jobs.length, memories: memories.length, documents: documents.length, budgets: budgets.length, deployments: deployments.length, posts: posts.length, revenue_events: revenue.length, community_targets: communityTargets.length, leads: leads.length, media_jobs: mediaJobs.length, generated_app_users: generatedUsers.length, generated_app_entitlements: generatedEntitlements.length, generated_app_product_runs: productRuns.length },
     ...campaigns.map((row) => ({ ...row, kind: "campaign", campaign_kind: row.kind })),
     ...memories.map((row) => ({ kind: "memory", ...row })),
     ...deployments.map((row) => ({ kind: "deployment", ...row })),
@@ -567,9 +706,12 @@ export async function syncBusinessWorkspace(input: { businessId: string; profile
     ...revenue.map((row) => ({ kind: "revenue_event", ...row })),
     ...communityTargets.map((row) => ({ kind: "community_target", ...row })),
     ...leads.map((row) => ({ kind: "lead", ...row })),
-    ...mediaJobs.map((row) => ({ kind: "media_job", ...row }))
+    ...mediaJobs.map((row) => ({ kind: "media_job", ...row })),
+    ...generatedUsers.map((row) => ({ kind: "generated_app_user", ...row })),
+    ...generatedEntitlements.map((row) => ({ kind: "generated_app_entitlement", ...row })),
+    ...productRuns.map((row) => ({ kind: "generated_app_product_run", ...row }))
   ]));
-  await writeText(path.join(root, "state", "inbox.jsonl"), jsonl(evidenceInbox({ jobs, ledger, deployments, posts, revenue, communityTargets, leads, mediaJobs, events, capabilities })));
+  await writeText(path.join(root, "state", "inbox.jsonl"), jsonl(evidenceInbox({ jobs, ledger, deployments, posts, revenue, communityTargets, leads, mediaJobs, events, generatedUsers, generatedEntitlements, productRuns, capabilities })));
   await writeText(path.join(root, "state", "blockers.md"), blockersMarkdown({ jobs, missingCapabilities }));
   await writeText(path.join(root, "tools", "availability.json"), json(capabilities));
   await writeText(path.join(root, "tools", "missing-keys.md"), [
@@ -594,6 +736,7 @@ export async function syncBusinessWorkspace(input: { businessId: string; profile
     hard_limit_usd: usdFromMicrousd(account.hard_limit_microusd),
     committed_usd: usdFromMicrousd(account.committed_microusd)
   }))));
+  await writeText(path.join(root, "ledger", "subscriptions.jsonl"), jsonl(generatedEntitlements.filter((row) => row.source === "stripe")));
   await writeText(path.join(root, "ledger", "reservations.jsonl"), jsonl(ledger.filter((row) => row.kind === "reservation")));
   await writeText(path.join(root, "ledger", "receipts.jsonl"), jsonl(ledger));
   await writeText(path.join(root, "website", "deployments.jsonl"), jsonl(deployments));
@@ -654,10 +797,13 @@ export async function syncBusinessWorkspace(input: { businessId: string; profile
     ]));
   }
 
+  const files = await listBusinessWorkspaceFiles({ businessId: input.businessId, rootHint: root });
   return {
     business,
     root,
-    files: await listBusinessWorkspaceFiles({ businessId: input.businessId, rootHint: root })
+    files,
+    topLevelMap: workspaceTopLevelMap(files),
+    readStrategy: workspaceReadStrategy(files.length)
   };
 }
 
@@ -669,7 +815,12 @@ export async function listBusinessWorkspaceFiles(input: { businessId: string; re
 
   async function walk(dir: string, depth: number) {
     if (depth > maxDepth) return;
-    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      throw new Error(`Cannot read business workspace directory ${path.relative(root, dir) || "."}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     for (const entry of entries) {
       const absolute = path.join(dir, entry.name);
       const relative = path.relative(root, absolute);
@@ -677,8 +828,15 @@ export async function listBusinessWorkspaceFiles(input: { businessId: string; re
         await walk(absolute, depth + 1);
         continue;
       }
-      if (!entry.isFile()) continue;
-      const stat = await fs.stat(absolute);
+      if (!entry.isFile()) {
+        throw new Error(`Unsupported business workspace entry ${relative}. Only regular files and directories are CEO-readable.`);
+      }
+      let stat;
+      try {
+        stat = await fs.stat(absolute);
+      } catch (error) {
+        throw new Error(`Cannot stat business workspace file ${relative}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       files.push({ path: relative, bytes: stat.size, updatedAt: stat.mtime.toISOString() });
     }
   }
@@ -723,9 +881,96 @@ export async function businessWorkspaceContext(input: { businessId: string; prof
   return {
     root: synced.root,
     files: synced.files,
+    topLevelMap: synced.topLevelMap,
     bootFiles: ceoBootFiles,
-    excerpts
+    excerpts,
+    readStrategy: synced.readStrategy
   };
+}
+
+function workspaceFocusPaths(input: {
+  text: string;
+  workspace: Awaited<ReturnType<typeof businessWorkspaceContext>>;
+  maxFiles: number;
+}) {
+  const text = input.text.toLowerCase();
+  const paths = input.workspace.files.map((file) => normalizeWorkspacePath(file.path));
+  const pathSet = new Set(paths);
+  const bootFiles = new Set(input.workspace.bootFiles);
+  const selected = new Set<string>();
+
+  const add = (relativePath: string) => {
+    const normalized = normalizeWorkspacePath(relativePath);
+    if (pathSet.has(normalized) && !bootFiles.has(normalized)) selected.add(normalized);
+  };
+
+  for (const pathName of paths) {
+    if (text.includes(pathName.toLowerCase())) add(pathName);
+  }
+
+  for (const match of input.text.matchAll(/(?:^|[\s`'"])([a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)+)(?=$|[\s`'",.;:!?])/g)) {
+    add(match[1]);
+  }
+
+  const addFirstFromRoot = (root: string, preferred: string[] = []) => {
+    for (const pathName of preferred) add(pathName);
+    for (const pathName of paths.filter((path) => path.startsWith(root) && !path.endsWith("/README.md"))) {
+      if (selected.size >= input.maxFiles) return;
+      add(pathName);
+    }
+  };
+
+  if (/\b(outreach|lead|prospect|sales|community|reddit|twitter|tweet|x post|campaign|post|reply|monitor)\b/i.test(input.text)) {
+    addFirstFromRoot("outreach/");
+    addFirstFromRoot("campaigns/");
+  }
+  if (/\b(product|search|seo|geo|conversion|design|measurement|website|site|auth|checkout|deploy)\b/i.test(input.text)) {
+    addFirstFromRoot("product/");
+    addFirstFromRoot("website/");
+  }
+  if (/\b(job|blocked|failed|queue|status|current|cron|capabilit|key|runtime)\b/i.test(input.text)) {
+    addFirstFromRoot("jobs/", ["jobs/blocked.jsonl", "jobs/running.jsonl", "jobs/queued.jsonl"]);
+    add("state/current.md");
+    add("state/blockers.md");
+    add("tools/missing-keys.md");
+  }
+  if (/\b(memory|positioning|pricing|strategy|lesson|learning)\b/i.test(input.text)) {
+    addFirstFromRoot("memory/");
+  }
+
+  return [...selected].slice(0, input.maxFiles);
+}
+
+export async function focusedBusinessWorkspaceExcerpts(input: {
+  businessId: string;
+  text: string;
+  workspace: Awaited<ReturnType<typeof businessWorkspaceContext>>;
+  maxFiles?: number;
+  maxBytes?: number;
+}) {
+  const paths = workspaceFocusPaths({
+    text: input.text,
+    workspace: input.workspace,
+    maxFiles: input.maxFiles ?? 8
+  });
+  const excerpts = await Promise.all(paths.map(async (relativePath) => {
+    try {
+      return await readBusinessWorkspaceFile({
+        businessId: input.businessId,
+        relativePath,
+        maxBytes: input.maxBytes ?? 4_000
+      });
+    } catch (error) {
+      return {
+        path: relativePath,
+        bytes: 0,
+        truncated: false,
+        content: "",
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }));
+  return { paths, excerpts };
 }
 
 export async function removeBusinessWorkspace(input: { slug: string }) {

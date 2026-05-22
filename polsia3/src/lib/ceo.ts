@@ -2,13 +2,10 @@ import { db } from "./db";
 import { listBusinessMemory, upsertBusinessMemory } from "./business-memory";
 import { upsertBusinessDocument } from "./documents";
 import { createEvent } from "./events";
-import { ConfigurationError } from "./errors";
 import { createInboxMessage } from "./inbox";
 import { toJson } from "./json";
 import { runTakyonRuntimeReasoning } from "./takyon-runtime";
 import { businessWorkspaceContext } from "./business-workspace";
-import { executeAiProvider } from "./ai-provider";
-import { loadLocalSecrets } from "./secrets";
 import { getTakyonWorkflowSpec, takyonCapabilityGroups, takyonWorkflowRegistry } from "./takyon-registry";
 import { preflightCapabilityGroups } from "./tool-availability";
 import { enqueueWorkflowJob } from "./workflow-jobs";
@@ -24,28 +21,6 @@ function ceoActionWorkflowSpecs() {
 function isCeoActionWorkflowId(value: string) {
   const spec = getTakyonWorkflowSpec(value);
   return Boolean(spec?.dispatchable && !CEO_ACTION_EXCLUDED_WORKFLOWS.has(value));
-}
-
-function useRemoteRuntime() {
-  return process.env.TAKYON_REMOTE_RUNTIME === "1";
-}
-
-function configuredLocalCeoProvider() {
-  loadLocalSecrets();
-  const explicit = process.env.TAKYON_CEO_PROVIDER?.trim().toLowerCase() || process.env.ARGON_CEO_PROVIDER?.trim().toLowerCase();
-  if (explicit === "anthropic" || explicit === "openai") return explicit;
-  if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
-  if (process.env.OPENAI_API_KEY?.trim()) return "openai";
-  return null;
-}
-
-function localCeoModel(provider: string) {
-  return (
-    process.env.TAKYON_CEO_MODEL?.trim() ||
-    process.env.ARGON_CEO_MODEL?.trim() ||
-    process.env.ARGON_PRODUCT_AI_MODEL?.trim() ||
-    (provider === "anthropic" ? "claude-opus-4-7" : "gpt-5.2")
-  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -293,32 +268,6 @@ async function queueCeoBusinessActions(input: { businessId: string; reportId: st
   return queued;
 }
 
-async function runLocalMacCeoReasoning(prompt: string) {
-  const provider = configuredLocalCeoProvider();
-  if (!provider) {
-    throw new ConfigurationError("Local Mac CEO runtime requires ANTHROPIC_API_KEY or OPENAI_API_KEY. Set one with: ./takyon secret set ANTHROPIC_API_KEY --stdin");
-  }
-  const model = localCeoModel(provider);
-  const response = await executeAiProvider({
-    provider,
-    model,
-    maxOutputTokens: 1800,
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You are Takyon's terminal CEO runtime running locally on this Mac.",
-          "Use only explicit business context, workspace files, database rows, receipts, and capability reports.",
-          "Do not claim external side effects unless the context explicitly says they happened.",
-          "Keep the operating report concise, evidence-grounded, and useful for the next wake."
-        ].join("\n")
-      },
-      { role: "user", content: prompt }
-    ]
-  });
-  return { output: response.text, raw: response.raw, provider: `local-mac:${provider}`, model };
-}
-
 export async function runCeoReasoning(input: { businessId: string }) {
   const sql = db();
   const [companyRows, documentRows, jobRows, conversationRows, memoryRows, workspace] = await Promise.all([
@@ -356,6 +305,9 @@ export async function runCeoReasoning(input: { businessId: string }) {
   ]);
   const company = companyRows[0];
   if (!company) throw new Error("Company not found for CEO reasoning.");
+  const workspaceFilePromptLimit = 120;
+  const visibleWorkspaceFiles = workspace.files.slice(0, workspaceFilePromptLimit);
+  const omittedWorkspaceFileCount = Math.max(0, workspace.files.length - visibleWorkspaceFiles.length);
   const prompt = [
     `Company: ${company.name}`,
     `Pitch: ${company.public_pitch ?? ""}`,
@@ -375,18 +327,28 @@ export async function runCeoReasoning(input: { businessId: string }) {
     "",
     "Business workspace:",
     `Root: ${workspace.root}`,
+    `Filesystem files discovered: ${workspace.files.length}`,
+    `Filesystem read strategy: ${workspace.readStrategy.policy}`,
+    "",
+    "Workspace top-level map:",
+    ...workspace.topLevelMap.map((entry) => `- ${entry.path}: ${entry.files} files, ${entry.bytes} bytes${entry.sampleFiles.length ? `; examples: ${entry.sampleFiles.join(", ")}` : ""}`),
+    "",
     "Boot files:",
     ...workspace.bootFiles.map((file) => `- ${file}`),
     "",
-    "Workspace files:",
-    ...workspace.files.slice(0, 120).map((file) => `- ${file.path} (${file.bytes} bytes, ${file.updatedAt})`),
+    `Workspace files shown in prompt: ${visibleWorkspaceFiles.length} of ${workspace.files.length}`,
+    ...visibleWorkspaceFiles.map((file) => `- ${file.path} (${file.bytes} bytes, ${file.updatedAt})`),
+    omittedWorkspaceFileCount > 0
+      ? `- ${omittedWorkspaceFileCount} files are not listed in this prompt. They still exist in the business workspace; use the files tool on the root above before deciding they are irrelevant.`
+      : "- No workspace files are omitted from this prompt listing.",
     "",
     "Boot file excerpts:",
-    ...workspace.excerpts.map((file) => `## ${file.path}\n${file.content.slice(0, 6000)}`),
+    ...workspace.excerpts.map((file) => `## ${file.path}${file.truncated ? " (truncated)" : ""}\n${file.content.slice(0, 6000)}`),
     "",
     "CEO evidence rule:",
     "Only make decisions from explicit workspace files, database rows, receipts, and capability reports in this prompt.",
     "If a needed fact is not visible in the workspace or rows, say it is unknown and name the file or receipt that should exist.",
+    "No part left unused: if a business workspace path appears relevant but is omitted, unreadable, or not inspected when it should be, flag that as a blocker or open question instead of ignoring it.",
     "Do not infer product completion, campaign success, revenue, auth, checkout, deployment, posting, or spend from intentions or queued work.",
     "",
     "Write a concise CEO operating report with priorities, blockers, next actions, and any business-memory updates you would make.",
@@ -407,11 +369,13 @@ export async function runCeoReasoning(input: { businessId: string }) {
     "Use {\"next_actions\":[]} when no business skill should be queued."
   ].join("\n");
 
-  const runtime = useRemoteRuntime()
-    ? await runTakyonRuntimeReasoning({ businessId: input.businessId, prompt, metadata: { workflow: "ceo", business_workspace_root: workspace.root } })
-    : await runLocalMacCeoReasoning(prompt);
-  const provider = "provider" in runtime ? runtime.provider : "remote-takyon-runtime";
-  const model = "model" in runtime ? runtime.model : "remote-takyon-runtime";
+  const runtime = await runTakyonRuntimeReasoning({
+    businessId: input.businessId,
+    prompt,
+    metadata: { workflow: "ceo", business_workspace_root: workspace.root }
+  });
+  const provider = runtime.provider;
+  const model = runtime.model;
   const text = runtime.output;
   const raw = runtime.raw;
 

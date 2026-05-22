@@ -5,6 +5,7 @@ import { getAppEnv } from "../env";
 import { NotFoundError } from "../errors";
 import { toJson } from "../json";
 import { stripeClient } from "../vendors/stripe";
+import { generatedAppSubscriptionLifecycle, syncGeneratedAppUserTierFromEntitlements } from "./customer-ops";
 
 type PaymentLinkRow = {
   id: string;
@@ -90,7 +91,7 @@ export async function ensureGeneratedAppPaymentLink(input: { slug: string; planK
     business_id: plan.business_id,
     company_site_id: plan.company_site_id,
     plan_key: plan.plan_key,
-    source: "polsia_v3_generated_app"
+    source: "takyon_generated_app"
   };
   const product = await stripe.products.create(
     {
@@ -394,19 +395,16 @@ export async function recordStripeCheckoutSession(eventId: string, eventCreated:
 
 export async function updateGeneratedAppSubscriptionEntitlement(subscription: Stripe.Subscription) {
   const sql = db();
-  const customerId = objectId(subscription.customer);
-  const rawPeriodEnd = (subscription as unknown as { current_period_end?: unknown }).current_period_end;
-  const periodEnd = typeof rawPeriodEnd === "number"
-    ? new Date(rawPeriodEnd * 1000)
-    : null;
-  const status = subscription.status === "active" || subscription.status === "trialing" ? "active" : subscription.status === "canceled" ? "cancelled" : "past_due";
-  await sql`
+  const lifecycle = generatedAppSubscriptionLifecycle(subscription);
+  const rows = await sql<{ business_id: string; app_user_id: string }[]>`
     UPDATE generated_app_entitlements
-    SET status = ${status},
-        stripe_customer_id = COALESCE(${customerId}, stripe_customer_id),
-        current_period_end = COALESCE(${periodEnd}, current_period_end),
-        metadata = metadata || ${sql.json(toJson({ stripe_subscription_status: subscription.status }))}::jsonb
+    SET status = ${lifecycle.status},
+        stripe_customer_id = COALESCE(${lifecycle.customerId}, stripe_customer_id),
+        current_period_end = COALESCE(${lifecycle.periodEnd}, current_period_end),
+        metadata = metadata || ${sql.json(toJson(lifecycle.metadata))}::jsonb
     WHERE source = 'stripe'
       AND stripe_subscription_id = ${subscription.id}
+    RETURNING business_id, app_user_id
   `;
+  await Promise.all(rows.map((row) => syncGeneratedAppUserTierFromEntitlements({ businessId: row.business_id, appUserId: row.app_user_id })));
 }

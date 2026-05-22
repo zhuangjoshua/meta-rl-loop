@@ -81,7 +81,7 @@ export async function setDistributionResponseCheckPolicy(input: {
       ${input.businessId},
       ${RESPONSE_CHECK_POLICY_KEY},
       ${input.enabled},
-      ${sql.json(toJson({ source: "takyon_dashboard", updated_by_profile_id: input.profileId ?? null }))}
+      ${sql.json(toJson({ source: "takyon_operator", updated_by_profile_id: input.profileId ?? null }))}
     )
     ON CONFLICT (business_id, policy_key)
     DO UPDATE SET

@@ -15,7 +15,7 @@ const publicPathPrefixes = [
   "/auth/"
 ];
 const generatedAppPlatformApiPrefixes = ["/api/generated-apps/", "/api/payment-links/"];
-const operatorPathPrefixes = ["/dashboard", "/api/companies", "/api/workflow", "/api/actions"];
+const operatorPathPrefixes = ["/api/companies", "/api/workflow", "/api/actions"];
 
 function isStaticAsset(pathname: string) {
   return (

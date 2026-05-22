@@ -5,6 +5,7 @@ import { isBusinessSkillWorkflowId, runBusinessSkillWorkflow } from "../src/lib/
 import { runCeoReasoning } from "../src/lib/ceo";
 import { observeCampaignAndCustomerLearning } from "../src/lib/campaign-learning";
 import { runCommunityResearch } from "../src/lib/community";
+import { isBusinessTestMode } from "../src/lib/companies";
 import { runConversationWatch } from "../src/lib/business-conversations";
 import { db } from "../src/lib/db";
 import { ConfigurationError, IntegrationCallError } from "../src/lib/errors";
@@ -12,6 +13,7 @@ import { createEvent } from "../src/lib/events";
 import { runClaudeSdkProductLane } from "../src/lib/generated-apps/agent-builder";
 import { buildGeneratedWebsite } from "../src/lib/generated-apps/builder";
 import { ensureGeneratedAppPaymentLink } from "../src/lib/generated-apps/commerce";
+import { runCustomerOpsWatch } from "../src/lib/generated-apps/customer-ops";
 import { ensureGeneratedAppFoundation } from "../src/lib/generated-apps/records";
 import { runGetFirstCustomerGoal } from "../src/lib/goals";
 import { createInboxMessage } from "../src/lib/inbox";
@@ -118,12 +120,18 @@ function isRetryableWorkerError(error: unknown) {
   return status === 408 || status === 409 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 529 || /\boverloaded\b/i.test(message);
 }
 
-function capabilityGroupsForWorkflow(workflowId: string) {
-  return takyonCapabilityGroups(workflowId);
+async function capabilityGroupsForWorkflow(input: { workflowId: string; businessId: string }) {
+  const groups = takyonCapabilityGroups(input.workflowId);
+  if (input.workflowId === "x_social" && await isBusinessTestMode(input.businessId)) {
+    return groups
+      .map((group) => group.filter((key) => key !== "x_posting"))
+      .filter((group) => group.length > 0);
+  }
+  return groups;
 }
 
 async function preflightJobCapabilities(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[number]) {
-  const groups = capabilityGroupsForWorkflow(job.workflow_id);
+  const groups = await capabilityGroupsForWorkflow({ workflowId: job.workflow_id, businessId: job.business_id });
   const block = await preflightCapabilityGroups({
     workflowId: job.workflow_id,
     groups,
@@ -161,6 +169,27 @@ async function syncTaskStatusFromWorkflowJobs(companyId: string, taskId: string)
   await updateTaskStatus({ companyId, taskId, status });
 }
 
+async function scheduleCeoReviewAfterWorkflowOutcome(row: Awaited<ReturnType<typeof completeWorkflowJobRecord>>) {
+  if (!row || row.workflow_id === "ceo_wakeup") return null;
+  if (!["completed", "blocked", "failed"].includes(row.status)) return null;
+  return enqueueWorkflowJob({
+    companyId: row.business_id,
+    profileId: row.profile_id,
+    workflowId: "ceo_wakeup",
+    lane: "ceo",
+    priority: 110,
+    maxAttempts: 1,
+    runAfter: new Date(Date.now() + 30_000),
+    payload: {
+      source: "workflow_outcome_review",
+      source_workflow_id: row.workflow_id,
+      source_job_id: row.id,
+      source_status: row.status,
+      operator_instruction: `Inspect the ${row.workflow_id} ${row.status} receipt and decide the next product, outreach, recovery, or learning move from business evidence.`
+    }
+  });
+}
+
 async function completeWorkflowJob(input: Parameters<typeof completeWorkflowJobRecord>[0]) {
   const row = await completeWorkflowJobRecord(input);
   if (row?.task_id) {
@@ -193,6 +222,9 @@ async function completeWorkflowJob(input: Parameters<typeof completeWorkflowJobR
         subjectId: row.id,
         payload: { workflow_id: row.workflow_id, status: row.status, error: message }
       }).catch(() => null);
+    });
+    await scheduleCeoReviewAfterWorkflowOutcome(row).catch((error) => {
+      workerLog(`worker: ceo review schedule failed ${row.workflow_id} ${shortId(row.id)} error=${error instanceof Error ? error.message : String(error)}`);
     });
     workerLog(
       `worker: ${row.status} ${row.workflow_id} ${shortId(row.id)}${row.error ? ` error=${row.error}` : ""}`
@@ -348,12 +380,15 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
       await finishAgentRun({ runId: run.id, status, output: result, error: status === "completed" ? null : result.reason });
       const completed = await completeWorkflowJob({ jobId: job.id, status, result, error: status === "completed" ? null : result.reason });
       if (status === "completed") {
+        const testMode = "testMode" in result && result.testMode === true;
         await enqueueCampaignObservationJob({
           companyId: job.business_id,
           profileId: job.profile_id,
           campaignId: payloadString(job.payload, "campaign_id"),
           sourceWorkflowId: job.workflow_id,
-          reason: "Observe X launch response and decide the next growth move."
+          reason: testMode
+            ? "Observe test-mode X draft receipt and record what would have been distributed."
+            : "Observe X launch response and decide the next growth move."
         });
       }
       return completed;
@@ -395,6 +430,13 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
     if (job.workflow_id === "conversation_watch") {
       const result = await runConversationWatch({ businessId: job.business_id, profileId: job.profile_id });
       await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "conversation.watch", output: result });
+      await finishAgentRun({ runId: run.id, status: "completed", output: result });
+      return completeWorkflowJob({ jobId: job.id, status: "completed", result });
+    }
+
+    if (job.workflow_id === "customer_ops_watch") {
+      const result = await runCustomerOpsWatch({ businessId: job.business_id, profileId: job.profile_id });
+      await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "customer_ops.watch", output: result });
       await finishAgentRun({ runId: run.id, status: "completed", output: result });
       return completeWorkflowJob({ jobId: job.id, status: "completed", result });
     }
@@ -462,7 +504,9 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
         routes: [
           "/api/generated-apps/[slug]/auth/request",
           "/api/generated-apps/[slug]/auth/verify",
-          "/api/generated-apps/[slug]/session"
+          "/api/generated-apps/[slug]/session",
+          "/api/generated-apps/[slug]/account",
+          "/api/generated-apps/[slug]/billing/portal"
         ]
       };
       await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "generated_app_auth.routes", output: result });

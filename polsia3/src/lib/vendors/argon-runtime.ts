@@ -28,6 +28,29 @@ function runtimeUrl(path: string) {
   return `${env.ARGON_RUNTIME_URL.replace(/\/+$/, "")}${path}`;
 }
 
+export async function checkArgonRuntimeHealth(timeoutMs = 1500) {
+  let response: Response;
+  try {
+    response = await fetch(runtimeUrl("/health"), {
+      method: "GET",
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status: "unreachable",
+      detail: error instanceof Error ? error.message : "request failed"
+    };
+  }
+
+  const body = await parseResponse(response);
+  return {
+    ok: response.ok,
+    status: String(response.status),
+    detail: typeof body === "string" ? body : JSON.stringify(body)
+  };
+}
+
 async function parseResponse(response: Response) {
   const text = await response.text();
   if (!text) return null;

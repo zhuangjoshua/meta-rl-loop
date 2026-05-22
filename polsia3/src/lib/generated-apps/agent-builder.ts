@@ -209,7 +209,7 @@ export async function runClaudeSdkProductLane(input: {
             cwd: sourceDir,
             env: {
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-              CLAUDE_AGENT_SDK_CLIENT_APP: "polsia-takyon-v3-product-builder"
+              CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-product-builder"
             },
             model: "claude-opus-4-7",
             thinking: { type: "adaptive", display: "omitted" },

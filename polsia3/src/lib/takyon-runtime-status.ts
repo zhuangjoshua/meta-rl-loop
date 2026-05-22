@@ -89,8 +89,8 @@ export async function getTakyonRuntimeStatus(input: { businessId?: string | null
     },
     remoteRuntime: {
       configured: Boolean(process.env.ARGON_RUNTIME_URL?.trim()),
-      enabled: process.env.TAKYON_REMOTE_RUNTIME === "1",
-      note: "Optional only. Local Mac runtime does not require ARGON_RUNTIME_URL."
+      enabled: Boolean(runtime?.canRun),
+      note: "CEO wakeups always use the Hermes gateway. ARGON_RUNTIME_URL only overrides the local gateway address."
     },
     cron: {
       total: cronRows.length,
