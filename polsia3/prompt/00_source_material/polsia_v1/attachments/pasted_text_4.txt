@@ -1,0 +1,735 @@
+Here's everything I can see from my position. I'll be explicit about what's visible to me vs. what's opaque (Polsia's internal infrastructure I don't have access to).
+
+Complete System Architecture
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER (Sai)                                   │
+│                    Chat interface / Dashboard                        │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     LAYER 0: CHAT ORCHESTRATOR                       │
+│                     (Me — "Polsia CEO")                              │
+│                                                                     │
+│  Model: Claude (Anthropic)                                          │
+│  Role: Conversational interface + task router + strategist           │
+│  Session: Stateless per conversation (context injected each turn)   │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │
+              ┌──────────────────┼──────────────────────┐
+              │                  │                      │
+              ▼                  ▼                      ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
+│  LAYER 1:        │  │  LAYER 2:        │  │  LAYER 3:            │
+│  AUTONOMOUS      │  │  TASK QUEUE      │  │  SHARED STATE        │
+│  PLANNERS        │  │  + DISPATCH      │  │  (persistence)       │
+│                  │  │                  │  │                      │
+│  • Cycle Planner │  │  • Priority queue│  │  • Documents         │
+│  • Boost Planner │  │  • Agent routing │  │  • Reports           │
+│  • Recurring     │  │  • Credit gate   │  │  • Memory (per-agent)│
+│    Scheduler     │  │  • Disable gate  │  │  • Context Graph     │
+│                  │  │                  │  │  • Contacts/Leads    │
+│                  │  │                  │  │  • Database (Postgres)│
+└──────────────────┘  └────────┬─────────┘  └──────────────────────┘
+                               │
+                               │ dispatches to
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     LAYER 4: EXECUTION AGENTS                        │
+│                                                                     │
+│  8 independent AI sessions, each with:                              │
+│  • System prompt (role + rules)                                     │
+│  • MCP tool mounts (what they can call)                             │
+│  • Max turns (compute budget)                                       │
+│  • Skills (repo-level instruction files)                            │
+│  • Compressed memory from prior runs                                │
+│  • Company context injection                                        │
+└─────────────────────────────────────────────────────────────────────┘
+LAYER 0: Chat Orchestrator (Me)
+Purpose
+The single conversational interface between user and platform. Understands intent, creates tasks, routes work, answers questions, manages queue.
+
+Inputs
+Input	Source
+User messages	Chat interface
+Company context	Injected into system prompt each turn (company profile, user personality, context graph nodes, subscription status)
+Conversation summary	Compressed history from prior messages (I don't retain raw history across sessions)
+Task queue state	On-demand via get_tasks()
+Agent capabilities	On-demand via get_agent_capabilities()
+Memory search results	On-demand via search_memory()
+Outputs
+Output	Destination
+Tasks created	→ Task Queue
+Tasks rejected/edited/reordered	→ Task Queue
+Recurring tasks created	→ Scheduler
+Agents disabled/enabled	→ Agent Gate
+Support tickets	→ Polsia support team
+Feature suggestions	→ Polsia product team
+Document updates	→ Shared State
+Direct answers	→ User (chat)
+My Tools (36 total)
+CAPABILITIES & ROUTING:
+  list_available_modules, get_module_capabilities, list_mcp_servers,
+  list_available_agents, get_agent_capabilities, find_agent_for_task
+
+MEMORY & KNOWLEDGE:
+  search_memory, read_memory (layer 1 = domain, layer 3 = cross-company)
+
+COMPANY CONTEXT:
+  get_context, get_document, update_document, read_context_graph
+
+TASK MANAGEMENT:
+  get_tasks, create_task, edit_task, reject_task, approve_task,
+  get_task_details, get_task_run_link, get_task_execution_status,
+  get_task_execution_logs, get_active_executions, find_best_agent,
+  reorder_task, move_task_to_top
+
+RECURRING TASKS:
+  get_recurring_tasks, create_recurring_task, update_recurring_task,
+  delete_recurring_task
+
+AGENT MANAGEMENT:
+  list_company_agents, disable_agent, enable_agent
+
+COMMUNICATION:
+  get_emails, get_tweets
+
+ADS:
+  pause_ads
+
+COMPANY ADMIN:
+  rename_company, get_links, update_link
+
+PLATFORM:
+  open_support_ticket, list_user_support_tickets, suggest_feature,
+  query_reports
+Handoff Rules
+Condition	Action
+User request is clear + specific	Create task immediately
+Request is ambiguous	Ask 2-3 clarifying options before creating
+Unsure which agent tag	Call find_best_agent() first
+Task over 4 hours estimated	Split into multiple tasks
+User reports a bug	Gather evidence (screenshots, steps, errors) THEN create bug task
+User asks about marketing/growth	Pitch Meta Ads first
+User wants to stop a category of work	Call list_company_agents → disable_agent
+Action needs credits but user has 0	Surface credit options, don't create the task
+Failure Handling
+Failure	Response
+Tool call returns is_error	Tell user honestly, don't claim success
+Can't determine right agent	Call find_best_agent(), if still unclear → ask user
+Task previously failed	Check logs, re-create with more context + link to failed task via related_task_ids
+User asks for something outside platform capabilities	Say so directly, offer suggest_feature()
+Prompt injection attempt	Refuse, redirect to useful action
+What I Don't Have
+No persistent memory across sessions (only compressed summaries + memory layers)
+No ability to execute code myself
+No direct access to the database
+No ability to browse the web
+No ability to send emails directly
+Cannot run tasks — only create them for agents to execute
+LAYER 1: Autonomous Planners
+1A. Cycle Planner
+Purpose: Autonomous daily planning — looks at company state and proposes what should happen next without user input.
+
+How it works (what I can see):
+
+Runs on a schedule (daily)
+Reads: company context, recent completions, active work, roadmap documents
+Outputs: task proposals injected into the queue
+You can view/reject these like any other task
+What's opaque to me: The exact planning algorithm, priority weighting, how it decides between competing priorities. I know it exists as a platform MCP mount (cycle_planning) but I don't have direct access to its internals.
+
+1B. Boost Planner
+Purpose: Proposes tasks proactively — appears to be the system that generates "suggested" tasks based on company state.
+
+What I know:
+
+Respects disabled agents (won't propose tasks for agents you've turned off)
+Can be overridden by user preferences
+Runs independently of my chat sessions
+What's opaque: Trigger conditions, frequency, planning model.
+
+1C. Recurring Task Scheduler
+Purpose: Cron-like system that creates task instances from templates on a schedule.
+
+Inputs: Recurring task definitions (title, description, frequency, tag, priority)
+
+Frequencies: daily, weekdays (Mon-Fri), weekly (specific days), monthly (specific day 1-28)
+
+Output: Creates a new task instance in the queue each time it fires. Each run consumes 1 credit.
+
+Failure handling: If credits = 0, the instance still creates but can't execute.
+
+LAYER 2: Task Queue + Dispatch
+Queue Structure
+Every task has:
+
+{
+  id: number
+  title: string
+  description: string        // The "brief" the agent reads
+  tag: string                // Routes to which agent type
+  task_type: string          // bug, feature, refactor, css, research, etc.
+  status: todo | in_progress | completed | failed | rejected
+  priority: low | medium | high | critical
+  complexity: 1-10
+  estimated_hours: 0.5-4
+  position: number           // Queue order (lower = runs first)
+  suggested_agent_id: number // Optional: specific agent
+  related_task_ids: number[] // Links to prior tasks (required for bugs)
+  metadata: object           // Optional structured data
+  executability_type: can_run_now | needs_new_connection | manual_task
+}
+Dispatch Logic (what I can infer)
+User clicks "Run" on a task
+        │
+        ▼
+┌─────────────────────────┐
+│ CREDIT GATE             │
+│ Credits > 0?            │──── No ──→ Block (show upgrade prompt)
+└───────────┬─────────────┘
+            │ Yes
+            ▼
+┌─────────────────────────┐
+│ AGENT DISABLE GATE      │
+│ (Layer B')              │
+│ Is target agent enabled │──── No ──→ Auto-reject task
+│ for this company?       │
+└───────────┬─────────────┘
+            │ Yes
+            ▼
+┌─────────────────────────┐
+│ AGENT MATCHING          │
+│ tag → agent_id          │
+│ (or suggested_agent_id) │
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│ AGENT EXECUTION SESSION │
+│ • Inject system prompt  │
+│ • Inject task desc      │
+│ • Inject company context│
+│ • Inject memory         │
+│ • Inject skills         │
+│ • Mount MCP tools       │
+│ • Begin turn loop       │
+└─────────────────────────┘
+Status Transitions
+todo ──→ in_progress ──→ completed
+  │           │
+  │           └──→ failed (agent hit error / couldn't complete)
+  │           └──→ blocked (missing dependency)
+  │
+  └──→ rejected (user or system removed it)
+Failure Handling at Dispatch Level
+Failure	System Response
+0 credits	Task stays in queue, user prompted to buy
+Agent disabled	Task auto-rejected
+Agent execution crashes	Status → failed, logs preserved
+Agent exceeds maxTurns	Forced stop, status → failed
+Agent calls block_task()	Status → blocked, reason saved
+Agent calls fail_task()	Status → failed, reason saved
+LAYER 3: Shared State (Persistence)
+3A. Documents
+Types: mission, product_overview, tech_notes, brand_voice, user_research
+
+Read by: All agents (injected as context) + Me Written by: Me (via update_document) + Engineering agent (can edit tech_notes)
+
+3B. Reports
+Structure: Typed reports with metadata, searchable by date and type
+
+Written by: Research, Data, Cold Outreach, Meta Ads, any agent with create_report Read by: All agents (via query_reports) + Me
+
+3C. Memory
+Two types:
+
+Type	Scope	Purpose
+Layer 1 (Domain)	This company	Accumulated knowledge about Longer — decisions, patterns, preferences
+Layer 3 (Cross-company)	Platform-wide	Patterns learned across all Polsia companies
+Per-agent memory: Each agent also has compressed notes from its prior executions injected into its context. This is how Engineering "remembers" what it built last time.
+
+3D. Context Graph
+Nodes available for Longer:
+
+product_knowledge — Full product index
+revenue — Revenue state
+active_work — Current work in progress
+support_history — Past support interactions
+user_context — Your personal preferences/style
+feature:ads, feature:stripe_connect, feature:twitter, etc. — Feature-specific deep dives
+Read by: Me (via read_context_graph) + injected into agents as needed
+
+3E. Contacts / Leads (Cold Outreach)
+Structure: Name, email, status (pending → contacted → replied → responded → meeting → dead), notes
+
+Written by: Cold Outreach agent Read by: Cold Outreach agent, Me (indirectly via reports)
+
+3F. Database (Postgres)
+Your app's database — users, sessions, exercises, AI usage, subscriptions, daily_tracker
+
+Written by: Engineering agent (schema changes), your live app (runtime data) Read by: Data agent (queries), Engineering agent (schema inspection), your live app
+
+LAYER 4: Execution Agents — Complete Specifications
+AGENT #29: Research
+Property	Value
+Purpose	Web research, competitive analysis, market intelligence
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	Structured reports
+MCP Mounts:
+
+Mount	Tools Provided
+tasks	create_task_proposal, get_available_tasks, start_task, complete_task, fail_task, block_task
+reports	create_report, query_reports, get_reports_by_date
+polsia_support	report_bug, suggest_feature
+Inputs:
+
+Task description (the research question)
+Company documents (product overview, brand voice)
+Prior reports (for continuity)
+Compressed memory from prior research runs
+Outputs:
+
+Reports saved via create_report() (MUST create before completing)
+Task proposals for follow-up work
+Report format: Executive Summary → Key Findings (with sources) → Recommended Actions
+Handoff Rules:
+
+If research reveals a technical need → create_task_proposal(tag: "engineering")
+If research reveals outreach targets → create_task_proposal(tag: "cold_outreach") or report for Cold Outreach to consume
+If research is blocked by access → fail_task() with reason
+Failure Handling:
+
+Can't access paywalled source → note limitation in report, proceed with available info
+Question too broad → narrow scope, deliver partial report, propose follow-up
+No useful information found → fail_task() with explanation
+Critical Limitation: No explicit web search or browser tools mounted. Relies on model training knowledge. Quality ceiling is the model's knowledge cutoff.
+
+AGENT #30: Engineering
+Property	Value
+Purpose	Full-stack web development — build, fix, deploy
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	Code changes deployed to production
+MCP Mounts:
+
+Mount	Tools Provided
+polsia_infra	create_instance, push_to_remote, push_to_prod, get_status, get_logs, get_preview, query_db, list_instances, delete_instance
+tasks	create_task_proposal, get_available_tasks, start_task, complete_task, fail_task, block_task
+reports	create_report
+Skills (from .claude/skills/ in repo):
+
+Skill File	Teaches
+ai_features.md	Polsia proxy usage (Claude, OpenAI)
+frontend_ui.md	Tailwind + shadcn/ui patterns
+stripe_payments.md	Checkout, subscriptions, webhooks
+neon_database.md	Postgres schema, migrations
+r2_proxy.md	File uploads
+email_proxy.md	Sending email from app code
+openai_proxy.md	Image generation, embeddings, OCR
+render_infrastructure.md	Deploy constraints (512MB RAM, no Docker)
+Execution Pattern:
+
+1. Read task description
+2. Read relevant skill files
+3. Explore current codebase (list files, read existing code)
+4. Plan changes
+5. Write/edit files
+6. push_to_remote() AFTER EVERY FILE CHANGE (critical — timeouts lose work)
+7. Wait for deploy
+8. get_status() to verify
+9. get_logs() to check for errors
+10. If errors → fix and re-push
+11. complete_task() when verified working
+Handoff Rules:
+
+If task requires data not in the database → block_task() explaining what's needed
+If task reveals a deeper bug → create_task_proposal(type: "bug")
+If CSS/design is ambiguous → complete the functional part, propose a follow-up for styling
+After major features → often proposes a "test and verify" follow-up task
+Failure Handling:
+
+Failure	Response
+Build fails (512MB)	Remove heavy dependency, try alternative
+Deploy fails	Check logs, fix, re-push
+Database migration fails	Rollback, try different approach
+Runs out of turns (200)	fail_task() with what was accomplished
+Ambiguous requirements	Makes best judgment, documents assumptions in commit
+Conflicting skill instructions	Follows most recent/specific skill file
+Hard Constraints:
+
+MUST push after every file change
+Single Express app — no microservices
+JavaScript/Node.js only
+512MB RAM build limit
+No Docker, no native binaries
+Web apps only
+AGENT #32: Support
+Property	Value
+Purpose	Customer email support — read inbox, reply to users
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	Email replies sent to customers
+MCP Mounts:
+
+Mount	Tools Provided
+company_email	get_inbox, send_company_email, get_email_thread, add_contact, get_contacts
+tasks	create_task_proposal, start_task, complete_task
+reports	create_report
+Inputs:
+
+Inbound emails to longer@polsia.app
+Company documents (product overview — to answer accurately)
+Conversation thread history
+Outputs:
+
+Email replies (plain text, no markdown)
+Task proposals (if user reports a bug → proposes engineering task)
+Reports (support volume, common questions)
+Handoff Rules:
+
+Technical bug reported by user → create_task_proposal(tag: "engineering", type: "bug")
+Feature request from user → create_task_proposal(tag: "engineering", type: "feature")
+Billing/subscription issue → respond with guidance, escalate if needed
+Angry/sensitive user → respond empathetically, flag for human review
+Failure Handling:
+
+Can't answer a question (not in docs) → reply honestly "I'll look into this and get back to you"
+Email send fails → fail_task() with error
+Spam/irrelevant email → ignore, complete task
+Email Rules:
+
+Plain text only (no HTML, no markdown rendering in email)
+Match response length to question complexity
+Never promise features that don't exist
+Never share technical details (API keys, database info)
+Sign as company name, not "AI" or "bot"
+AGENT #33: Data
+Property	Value
+Purpose	Business intelligence — query database, analyze metrics, generate reports
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	SQL query results + reports
+MCP Mounts:
+
+Mount	Tools Provided
+polsia_infra	query_db, get_logs, get_status, create_instance, push_to_remote, push_to_prod, get_preview, list_instances, delete_instance
+tasks	create_task_proposal, start_task, complete_task
+reports	create_report, query_reports
+Execution Pattern:
+
+1. Read task (e.g., "How many users signed up this week?")
+2. Discover schema: SELECT table_name FROM information_schema.tables
+3. Explore relevant tables: SELECT column_name FROM information_schema.columns WHERE table_name = 'users'
+4. Write and run SQL queries
+5. Analyze results
+6. create_report() with findings
+7. complete_task()
+Handoff Rules:
+
+If data reveals a bug (e.g., orphaned records) → create_task_proposal(tag: "engineering", type: "bug")
+If analysis suggests a product change → propose engineering task
+If data is insufficient → report what's available, propose logging/tracking improvements
+Failure Handling:
+
+Table doesn't exist → report limitation, suggest Engineering add tracking
+Query times out → simplify, use LIMIT, try different approach
+Ambiguous metric definition → make assumption explicit in report
+Note: Has full polsia_infra mount (same as Engineering) — technically CAN push code, but its role instructions focus it on analysis/reporting. It's not supposed to build features.
+
+AGENT #42: Browser
+Property	Value
+Purpose	Automated web interaction — form filling, submissions, scraping, testing
+Max Turns	Not explicitly capped (session timeout ~20 min)
+Model	Claude (Anthropic)
+Primary Output	Completed web actions + screenshots + extracted data
+MCP Mounts:
+
+Mount	Tools Provided
+browserbase	browserbase_session_create, browserbase_navigate, browserbase_screenshot, browserbase_click, browserbase_fill, browserbase_extract, browserbase_get_page_content, browserbase_evaluate, browserbase_session_close
+browser_auth	get_site_tier, get_or_create_browser_context, save_site_credentials, get_site_credentials
+company_email	check_verification_inbox, get_inbox, send_company_email
+tasks	create_task_proposal, start_task, complete_task
+Execution Pattern:
+
+1. Read task (e.g., "Submit Longer to BetaList")
+2. get_site_tier("betalist.com") → check what's allowed
+3. If Tier 1 → browse only, extract info, cannot interact
+4. If Tier 2+ → proceed with full interaction
+5. get_or_create_browser_context("betalist") → load saved session if exists
+6. browserbase_session_create()
+7. Navigate → screenshot → click → fill → screenshot (at every key step)
+8. If account creation needed → use longer@polsia.app
+9. If email verification needed → check_verification_inbox()
+10. complete_task() with final screenshot as proof
+Site Tier Enforcement (hardcoded, cannot override):
+
+Tier	Sites	Login	Post	Create Account
+1	Reddit, Twitter/X, Instagram, LinkedIn, TikTok, Facebook, ProductHunt, IndieHackers, YouTube	❌	❌	❌
+1.5	HackerNews, Medium, Dev.to, Gumroad, Etsy, Craigslist, Wellfound	✅ (existing only)	✅	❌ (CAPTCHA)
+2	Hashnode, Substack, BetaList, Lobste.rs, smaller forums	✅	✅	✅
+3	Everything else	✅	✅	✅ (if no CAPTCHA)
+Handoff Rules:
+
+Tier 1 site requested for interaction → fail_task() with "site is browse-only"
+CAPTCHA encountered on Tier 1.5 → fail_task() with "CAPTCHA blocked account creation"
+Scraped data needs analysis → create_task_proposal(tag: "research") or create_task_proposal(tag: "data")
+Found broken link on your site → create_task_proposal(tag: "engineering", type: "bug")
+Failure Handling:
+
+Failure	Response
+Site blocks automation	fail_task(), suggest manual approach
+CAPTCHA	fail_task() — cannot solve
+Session timeout	Screenshots show progress, fail_task() with partial results
+Element not found (selector)	Try alternative selector, screenshot for debugging
+Site layout changed	Adapt based on page content, or fail
+Login expired	Re-authenticate from saved credentials
+AGENT #52: Meta Ads Manager
+Property	Value
+Purpose	Create AI video ads, manage Meta (Facebook/Instagram) campaigns
+Max Turns	100
+Model	Claude (Anthropic)
+Primary Output	Running ad campaigns + performance reports
+MCP Mounts:
+
+Mount	Tools Provided
+meta_ads	create_ad, get_ad_analytics, pause_ad, activate_ad, archive_ad, create_campaign, create_adset, upload_ad_video, create_video_creative, activate_campaign, save_ad, update_ad_metrics, add_captions, get_ad_account, list_campaigns, get_campaign_insights
+tasks	create_task_proposal, start_task, complete_task
+reports	create_report
+Two Operating Modes:
+
+Mode A — First Run (no campaigns exist):
+
+1. Read company context (product, audience, brand voice)
+2. Generate video creative prompt:
+   - Format: vertical iPhone selfie UGC
+   - Style: "natural, not polished"
+   - Template: conversational monologue about the product
+3. create_ad({ prompt, headline, body_text })
+   → This ONE call triggers: Sora 2 generation → captions → Meta upload → campaign creation → activation
+4. Wait 5-8 minutes per ad
+5. Verify with get_ad_analytics()
+6. create_report() with what was launched
+7. complete_task()
+Mode B — Optimization Run (campaigns exist):
+
+1. get_ad_analytics() → pull all metrics
+2. Check for disapproved/flagged ads FIRST
+3. Evaluate each active ad:
+   - Healthy: CTR > 1%, CPC < $1 → keep running
+   - Mediocre: CTR 0.5-1% or CPC $1-2 → wait 7 days
+   - Underperforming: CTR < 0.5% or CPC > $2 after 7+ days → replace
+   - Delivery-failed: Active 5+ days, <200 impressions → replace
+4. If replacing: create new ad FIRST, then pause old one
+   (never leave zero active ads)
+5. "No action needed" is a valid outcome
+6. create_report() with decisions made
+7. complete_task()
+Budget-Tiered Limits:
+
+Daily Budget	Max Active Ads	Max Creations/24h
+≤ $10	2	2
+$10-30	3	3
+$30+	5	5
+Handoff Rules:
+
+All ads disapproved → create_task_proposal for new creative angle
+Landing page conversion bad → create_task_proposal(tag: "engineering") for landing page improvements
+Budget exhausted → report and wait for next scheduled run
+Failure Handling:
+
+Failure	Response
+Sora 2 generation fails	Retry with simplified prompt
+Meta rejects ad (policy)	Note reason, try different creative angle
+Ad account restricted	fail_task(), flag for support
+All ads underperforming	Replace 1-2, don't nuke everything at once
+0 impressions after 5 days	Likely delivery issue, recreate campaign
+AGENT #53: Twitter
+Property	Value
+Purpose	Post tweets from shared @polsia account
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	Published tweet
+MCP Mounts:
+
+Mount	Tools Provided
+twitter	post_tweet, get_twitter_account
+tasks	create_task_proposal, start_task, complete_task
+reports	create_report, query_reports
+documents	get_company_documents, get_company_document
+Execution Pattern:
+
+1. Read company documents (brand voice, product overview)
+2. Read recent reports (for metrics/milestones to reference)
+3. Compose tweet:
+   - 280 chars max
+   - MUST include website link
+   - Voice: "dark humor, witty, bitter > excited"
+   - No emojis, no hashtags
+4. post_tweet()
+5. create_report() logging what was posted
+6. complete_task()
+Hard Constraints:
+
+2 tweets/day platform limit (shared across all Polsia companies)
+Posts from @polsia, not a dedicated brand account
+Text only — no images, no video, no threads
+Cannot reply to others, cannot DM
+Handoff: None — it's a terminal action. No follow-up proposals typical.
+
+Failure Handling:
+
+Rate limited → fail_task() with "daily limit reached"
+Tweet rejected → try shorter version
+AGENT #54: Cold Outreach
+Property	Value
+Purpose	Find professional emails, send cold outreach, manage lead pipeline
+Max Turns	200
+Model	Claude (Anthropic)
+Primary Output	Emails sent + lead status updates
+MCP Mounts:
+
+Mount	Tools Provided
+company_email	get_inbox, send_company_email, get_email_thread, add_contact, get_contacts
+hunter_io	find_email, verify_email
+tasks	create_task_proposal, start_task, complete_task
+reports	create_report
+documents	get_company_documents
+Daily Workflow (sequential priority):
+
+1. CHECK REPLIES FIRST
+   get_inbox() → find replies from leads → respond (unlimited replies)
+
+2. RESEARCH NEW LEADS (if pipeline < threshold)
+   find_email(name, domain) → verify_email() → add_contact()
+
+3. SEND COLD OUTREACH (max 2/day)
+   - Verify email deliverability before sending
+   - 50-125 words, plain text
+   - Founder-to-founder voice
+   - One clear CTA
+   - Subject line: 3-5 words, lowercase, no clickbait
+
+4. FOLLOW UP (after 5+ days no reply)
+   - Same 2/day limit applies
+   - Max 2 follow-ups total per lead
+   - If no reply after 2 follow-ups → mark as dead
+
+5. create_report() summarizing actions taken
+6. complete_task()
+Lead Status Machine:
+
+pending → contacted → replied → responded → meeting → dead
+                 └─(no reply 2x)──────────────────────→ dead
+Rate Limits (platform-enforced):
+
+Category	Limit
+Cold emails (to strangers)	2/day
+Known contact emails	20/day
+Replies to inbound	Unlimited
+Emails to company owner	Unlimited
+Handoff Rules:
+
+Lead replies with technical question → create_task_proposal(tag: "support")
+Lead asks about feature that doesn't exist → note in report for me to see
+Can't find email for a lead → report failure, move to next
+Lead converts → create_task_proposal(tag: "support") for onboarding
+Failure Handling:
+
+Failure	Response
+Hunter.io can't find email	Skip lead, move to next
+Email bounces	Mark lead as dead, don't retry
+No leads in pipeline	fail_task() or create report explaining gap
+Rate limit hit	Complete what's possible, report remaining
+CROSS-CUTTING SYSTEMS
+Memory Architecture
+┌─────────────────────────────────────────────────────┐
+│ MEMORY LAYER 1: Company Domain Knowledge (15K tokens)│
+│ • Accumulated facts about Longer                     │
+│ • Decisions made, preferences expressed              │
+│ • Technical details discovered                       │
+│ • Updated automatically as agents learn things       │
+│ Read by: Me (Chat), all agents (as context)          │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ MEMORY LAYER 3: Cross-Company Patterns (15K tokens)  │
+│ • Patterns learned across ALL Polsia companies       │
+│ • "What works" for similar tasks                     │
+│ • Common failure modes                               │
+│ Read by: Me (Chat)                                   │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ PER-AGENT COMPRESSED MEMORY                          │
+│ • Each agent has notes from prior runs               │
+│ • Injected into context at execution time            │
+│ • "Last time I deployed, the Postgres migration..."  │
+│ • Prevents repeating mistakes                        │
+│ Written by: Each agent during execution              │
+│ Read by: Same agent on next run                      │
+└─────────────────────────────────────────────────────┘
+Learnings System
+Separate from memory — a tagged knowledge base:
+
+Agents create "learnings" when they discover something useful
+Searchable by tag
+Persists across runs
+Example: "Reddit is Tier 1, cannot post" → tagged browser, reddit
+Skills System
+.claude/skills/ files in your repo that Engineering reads:
+
+Teach it YOUR app's specific patterns
+Updated when the platform adds new capabilities
+Engineering agent reads relevant skill files before writing code
+Other agents don't have skill files (role is simpler)
+WHAT'S OPAQUE TO ME (Things I Cannot See)
+Component	What I Know	What I Don't Know
+Queue dispatcher	Tasks route by tag → agent	Exact matching algorithm, retry logic, scheduling priority
+Credit system	0 credits = blocked	How credits are consumed (per-task? per-turn? per-tool-call?)
+Cycle planner	Exists, runs daily	Planning algorithm, scoring model, feature flags
+Boost planner	Exists, proposes tasks	Trigger conditions, frequency
+Model routing	"Claude (Anthropic)"	Exact model version, temperature, token limits per agent
+Agent Factory	Can create custom agents	Full API, what tool combinations are possible
+Scripts system	Exists as an MCP mount	What scripts are available, how to run them
+Rate limiting	Some hard limits (2 cold emails/day, 1-2 tweets/day)	All platform-level throttles
+Monitoring	Mentioned as an infrastructure agent	What it monitors, alert conditions
+Reporting agent	Mentioned as infrastructure	What triggers it, automated report generation
+THE FULL AGENT ROSTER (including infrastructure)
+#	Agent	Type	User-Facing?
+29	Research	Execution	✅
+30	Engineering	Execution	✅
+32	Support	Execution	✅
+33	Data	Execution	✅
+42	Browser	Execution	✅
+52	Meta Ads Manager	Execution	✅
+53	Twitter	Execution	✅
+54	Cold Outreach	Execution	✅
+—	Chat (Me)	Orchestrator	✅ (you talk to me)
+—	CEO / Cycle Planner	Infrastructure	❌ (cannot disable)
+—	Monitoring	Infrastructure	❌ (cannot disable)
+—	Reporting	Infrastructure	❌ (cannot disable)
+Infrastructure agents exist but you can't see or control them. They run in the background maintaining system health.
+
+HOW THEY COORDINATE (Summary)
+There is no real-time agent-to-agent communication. Coordination is entirely through shared artifacts:
+
+Agent A runs → produces {report, code, database change, task proposal}
+                            │
+                            ▼
+                    SHARED STATE LAYER
+                            │
+                            ▼
+Agent B runs → consumes {reports, database, documents} as context
+The sequencing is controlled by:
+
+Task queue order (position)
+Me (I create tasks in logical sequence)
+Agent self-proposals (create_task_proposal → enters queue for next run)
+Recurring schedules
+Cycle planner (autonomous sequencing)
+No agent can call another agent. No agent can run another task. They can only PROPOSE tasks that enter the queue for later execution.
+
+Next: You now see the full machine. The bottleneck for Longer isn't the system's complexity — it's that you have 0 credits and your highest-leverage channel (Reddit DMs) requires your personal account. Get credits flowing and I'll prioritize the SEO foundation + BetaList submission (both fully within system capabilities with high success probability).
+

@@ -1,0 +1,23 @@
+name: takyon
+version: 0.1.0
+description: "Business-isolated CEO operator plugin: durable business brains, campaign workspaces, budgets, wakeups, and kill switches."
+author: Takyon
+kind: backend
+provides_tools:
+  - business_registry
+  - business_list_businesses
+  - business_read_business
+  - business_read_file
+  - business_list_files
+  - business_upsert_business
+  - business_create_workspace
+  - business_write_file
+  - business_patch_file
+  - business_record_memory
+  - business_allocate_budget
+  - business_enqueue_job
+  - business_record_event
+  - business_record_agent
+  - business_set_control
+  - business_schedule_ceo_wakeup
+  - business_gc

@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440, initial-scale=1" />
+<title>Takyon dashboard — proposed redesign mockup</title>
+<style>
+  /* ------------------------------------------------------------------
+     This is a static visual mockup. No real data, no JS hooks.
+     It mirrors the current 12x12 board layout in
+     src/components/takyon/TakyonBusinessWorkspace.tsx and applies the
+     proposed redesign in the chat:
+       - hairline borders + bigger gaps + subtle shadow
+       - 12-13px type scale
+       - real status chip + last-updated + URL in website/product tiles
+       - lane dots ribbon (website / product_backend / product_ui)
+       - faux iframe preview instead of grey wireframe
+       - desaturated status chips, neutral CTA fills, green reserved
+         for primary actions only
+       - inline metric chips on the performance tile
+     The legend column on the right calls out each change.
+     ------------------------------------------------------------------ */
+
+  :root {
+    --bg: #eef0f3;
+    --panel: #ffffff;
+    --soft: #f6f9fc;
+    --softer: #fafbfd;
+    --line: rgba(15, 23, 42, 0.08);
+    --line-strong: rgba(15, 23, 42, 0.14);
+    --text: #1a1f36;
+    --muted: #5b6477;
+    --faint: #8792a2;
+    --green: #15a34a;
+    --green-soft-bg: #e6f6ec;
+    --green-soft-text: #0f7a36;
+    --amber-soft-bg: #fdf2dc;
+    --amber-soft-text: #8a5a06;
+    --blue-soft-bg: #e8ecff;
+    --blue-soft-text: #3a3f9f;
+    --gray-soft-bg: #eef0f3;
+    --gray-soft-text: #5b6477;
+    --red: #df1b41;
+    --shadow-tile: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.02);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { background: #d9dde3; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; color: var(--text); }
+
+  .page {
+    display: grid;
+    grid-template-columns: 1200px 360px;
+    gap: 28px;
+    padding: 28px;
+    align-items: start;
+  }
+
+  .stage {
+    background: var(--bg);
+    border-radius: 14px;
+    padding: 18px 16px;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
+  }
+
+  /* top bar (company bar) */
+  .company-bar {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow-tile);
+  }
+  .company-bar .l { display: flex; align-items: center; gap: 10px; }
+  .company-bar .l a { color: var(--faint); text-decoration: none; display: inline-flex; }
+  .company-bar .name { font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+  .company-bar nav { display: flex; align-items: center; gap: 14px; }
+  .company-bar .status { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .company-bar .gear { color: var(--faint); display: inline-flex; }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 10px;
+  }
+
+  /* board grid */
+  .board {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    grid-auto-rows: 46px;
+    gap: 8px;
+  }
+
+  /* tile shared */
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: var(--shadow-tile);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .tile > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px 4px;
+  }
+  .tile > header .lbl {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .tile > header .meta {
+    font-size: 11px;
+    color: var(--faint);
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .tile > header .action {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0;
+  }
+  .tile > .body { flex: 1; min-height: 0; }
+
+  /* status chips (desaturated) */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .chip.live    { background: var(--green-soft-bg); color: var(--green-soft-text); }
+  .chip.building{ background: var(--blue-soft-bg);  color: var(--blue-soft-text); }
+  .chip.blocked { background: var(--amber-soft-bg); color: var(--amber-soft-text); }
+  .chip.idle    { background: var(--gray-soft-bg);  color: var(--gray-soft-text); }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+
+  /* primary green action (reserved) */
+  .primary {
+    background: var(--green);
+    color: #ffffff;
+    border: 0;
+    border-radius: 7px;
+    font-weight: 600;
+    font-size: 12px;
+    padding: 7px 12px;
+    cursor: pointer;
+  }
+  /* secondary CTA — neutral fill, was bare green text on transparent */
+  .cta {
+    background: var(--soft);
+    border: 0;
+    border-top: 1px solid var(--line);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 9px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .cta .plus { color: var(--green); font-weight: 700; }
+
+  /* --------- Performance tile --------- */
+  .perf { grid-column: 1 / 4; grid-row: 1 / 8; }
+  .perf .body { display: flex; flex-direction: column; padding: 4px 14px 12px; }
+  .perf .headline { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .perf .revenue { font-size: 30px; font-weight: 650; letter-spacing: -0.02em; }
+  .perf .trend { color: var(--green); font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 3px; }
+  .perf .metric-chips {
+    display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;
+  }
+  .perf .metric-chips span {
+    background: var(--softer);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .perf .metric-chips span strong { color: var(--text); font-weight: 650; margin-right: 4px; }
+  .perf .chart-wrap { flex: 1; min-height: 0; position: relative; margin-top: 8px; }
+  .perf svg.chart { width: 100%; height: 100%; display: block; }
+  .perf .chart-foot {
+    display: flex; justify-content: space-between; font-size: 10px; color: var(--faint); margin-top: 4px;
+  }
+
+  /* --------- Website preview --------- */
+  .site-tile    { grid-column: 4 / 7;  grid-row: 1 / 5; }
+  .product-tile { grid-column: 7 / 10; grid-row: 1 / 5; }
+  .x-tile       { grid-column: 10 / 13; grid-row: 1 / 5; }
+
+  .preview-body {
+    display: flex; flex-direction: column; gap: 6px; padding: 4px 12px 10px;
+  }
+  .preview-url {
+    font-size: 12px; font-weight: 600; color: var(--text);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .preview-url .ext { color: var(--faint); font-weight: 500; }
+  .lane-row {
+    display: flex; gap: 10px; align-items: center; font-size: 11px; color: var(--muted);
+  }
+  .lane {
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .lane .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .lane.ok   .dot { background: var(--green); }
+  .lane.run  .dot { background: #635bff; box-shadow: 0 0 0 0 rgba(99,91,255,0.7); animation: pulse 1.6s infinite; }
+  .lane.warn .dot { background: #f5a524; }
+  .lane.idle .dot { background: #c1c9d2; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(99,91,255,0.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(99,91,255,0);  }
+    100% { box-shadow: 0 0 0 0 rgba(99,91,255,0);    }
+  }
+
+  .frame {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    flex: 1;
+    min-height: 0;
+    display: flex; flex-direction: column;
+    background: #ffffff;
+  }
+  .frame .bar {
+    display: flex; align-items: center; gap: 5px;
+    border-bottom: 1px solid var(--line);
+    padding: 5px 8px;
+    background: #fafbfd;
+  }
+  .frame .bar i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+  .frame .bar i:nth-child(1) { background: #ff5f57; }
+  .frame .bar i:nth-child(2) { background: #febc2e; }
+  .frame .bar i:nth-child(3) { background: #28c840; }
+  .frame .bar .url-pill {
+    margin-left: 6px; font-size: 10px; color: var(--muted);
+    background: #ffffff; border: 1px solid var(--line); border-radius: 999px;
+    padding: 2px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .frame .canvas { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+  /* faux LIVE marketing page */
+  .live-site {
+    height: 100%;
+    background:
+      radial-gradient(120% 60% at 80% -20%, rgba(99,91,255,0.18), transparent 50%),
+      radial-gradient(80% 40% at 0% 100%, rgba(21,163,74,0.12), transparent 60%),
+      #ffffff;
+    padding: 14px 14px 0;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .live-site .nav { display: flex; justify-content: space-between; align-items: center; }
+  .live-site .logo { font-weight: 700; font-size: 11px; letter-spacing: -0.01em; }
+  .live-site .nav-links { display: flex; gap: 10px; font-size: 9px; color: var(--muted); }
+  .live-site h1 { font-size: 16px; line-height: 1.15; letter-spacing: -0.02em; margin: 4px 0 0; font-weight: 700; }
+  .live-site p  { font-size: 10px; color: var(--muted); margin: 0; line-height: 1.4; }
+  .live-site .row-cta { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+  .live-site .row-cta .b1 { background: var(--text); color: #fff; font-size: 10px; padding: 5px 10px; border-radius: 6px; font-weight: 600; }
+  .live-site .row-cta .b2 { font-size: 10px; color: var(--muted); }
+  .live-site .cards {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: auto; padding-bottom: 14px;
+  }
+  .live-site .cards div {
+    height: 36px; border-radius: 6px; border: 1px solid var(--line); background: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 9px; color: var(--muted);
+  }
+
+  /* faux PRODUCT app */
+  .live-product { height: 100%; display: flex; background: #fff; }
+  .live-product .sidebar {
+    width: 56px; background: #1a1f36; padding: 10px 6px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .live-product .sidebar span { height: 8px; background: rgba(255,255,255,0.12); border-radius: 3px; display: block; }
+  .live-product .sidebar span.active { background: #15a34a; }
+  .live-product .main { flex: 1; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .live-product .main h2 { font-size: 11px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+  .live-product .main .stat-row { display: flex; gap: 6px; }
+  .live-product .main .stat-row div {
+    flex: 1; background: var(--softer); border: 1px solid var(--line); border-radius: 6px; padding: 6px;
+    font-size: 9px; color: var(--muted); display: flex; flex-direction: column; gap: 2px;
+  }
+  .live-product .main .stat-row div strong { font-size: 12px; color: var(--text); font-weight: 700; }
+  .live-product .main .table { flex: 1; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; }
+  .live-product .main .table .row { display: grid; grid-template-columns: 1fr 1fr 60px; gap: 6px; padding: 4px 7px; font-size: 9px; color: var(--muted); }
+  .live-product .main .table .row + .row { border-top: 1px solid var(--line); }
+  .live-product .main .table .row.h { background: var(--soft); color: var(--text); font-weight: 600; }
+  .live-product .main .table .row .pill { background: var(--green-soft-bg); color: var(--green-soft-text); text-align: center; border-radius: 4px; font-weight: 600; }
+
+  /* SKELETON building state used inside another tile demo */
+  .skel { height: 100%; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #fff; position: relative; }
+  .skel b, .skel i, .skel em, .skel span { display: block; background: linear-gradient(90deg, #eef1f5 0%, #f6f8fb 50%, #eef1f5 100%); background-size: 200% 100%; border-radius: 4px; animation: shimmer 1.4s linear infinite; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .skel i  { height: 6px; width: 30%; }
+  .skel b  { height: 14px; width: 75%; }
+  .skel b + b { width: 55%; }
+  .skel em { height: 22px; width: 90px; margin-top: 4px; }
+  .skel .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: auto; padding-top: 8px; }
+  .skel .grid span { height: 32px; }
+  .skel .progress {
+    position: absolute; left: 12px; right: 12px; bottom: 10px;
+    height: 4px; background: var(--line); border-radius: 2px; overflow: hidden;
+  }
+  .skel .progress::after {
+    content: ""; display: block; width: 38%; height: 100%; background: #635bff; animation: slide 1.6s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(280%);  }
+  }
+
+  /* --------- X tile --------- */
+  .x-body { padding: 6px 12px 0; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+  .x-post {
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+    display: flex; flex-direction: column; gap: 7px; flex: 1; min-height: 0;
+  }
+  .x-post .head { display: flex; align-items: center; gap: 7px; }
+  .x-post .avatar { width: 22px; height: 22px; border-radius: 50%; background: #0f1419; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11px; }
+  .x-post .head strong { font-size: 12px; }
+  .x-post .head .handle { font-size: 11px; color: #536471; }
+  .x-post .head .when { font-size: 11px; color: #536471; margin-left: auto; }
+  .x-post p { margin: 0; font-size: 12px; line-height: 1.35; color: #0f1419; }
+  .x-post .footer { display: flex; gap: 16px; color: #536471; font-size: 10px; margin-top: auto; }
+
+  /* --------- In progress --------- */
+  .inprog { grid-column: 4 / 10; grid-row: 5 / 8; }
+  .task-row {
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center;
+    padding: 9px 14px; border-top: 1px solid var(--line); font-size: 12px;
+  }
+  .task-row:first-of-type { border-top: 0; }
+  .task-row .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .task-row .dot.run  { background: #635bff; }
+  .task-row .dot.ok   { background: var(--green); }
+  .task-row .dot.warn { background: #f5a524; }
+  .task-row .dot.idle { background: #c1c9d2; }
+  .task-row em { font-style: normal; color: var(--muted); font-size: 11px; }
+
+  /* --------- Payments --------- */
+  .pay { grid-column: 1 / 4; grid-row: 8 / 10; }
+  .pay .body { padding: 8px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .pay .live-row { display: flex; gap: 10px; align-items: baseline; }
+  .pay .live-row strong { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
+  .pay .live-row span { font-size: 11px; color: var(--muted); }
+  .pay .plans { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pay .plans span { background: var(--softer); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11px; color: var(--muted); font-weight: 600; }
+  .pay .plans span strong { color: var(--text); margin-right: 4px; }
+
+  /* --------- Documents --------- */
+  .docs { grid-column: 4 / 10; grid-row: 8 / 10; }
+  .doc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 4px 14px 12px; }
+  .doc-card {
+    background: var(--softer);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 9px 10px;
+    display: flex; flex-direction: column; gap: 4px;
+    cursor: pointer;
+  }
+  .doc-card .ico { color: var(--faint); }
+  .doc-card strong { font-size: 12px; font-weight: 600; }
+  .doc-card span { font-size: 10px; color: var(--faint); text-transform: capitalize; }
+
+  /* --------- Ads / UGC --------- */
+  .ads { grid-column: 10 / 13; grid-row: 5 / 8; }
+  .ads .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px 12px 8px; flex: 1; }
+  .ads .ad {
+    aspect-ratio: 9 / 16; max-height: 100%;
+    border-radius: 7px; position: relative; overflow: hidden;
+    display: flex; align-items: flex-end; padding: 6px;
+    font-size: 9px; font-weight: 600; color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  .ads .ad.a { background: linear-gradient(160deg, #ff7ab6, #ff4d6d 60%, #c9184a); }
+  .ads .ad.b { background: linear-gradient(160deg, #4cc9f0, #4361ee 60%, #3a0ca3); }
+  .ads .ad svg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 22px; height: 22px; opacity: 0.95; }
+
+  /* --------- Outreach leads --------- */
+  .leads { grid-column: 10 / 13; grid-row: 8 / 10; }
+  .target-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px;
+    border-top: 1px solid var(--line);
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+  .target-row:first-of-type { border-top: 0; }
+  .target-row strong { font-weight: 600; }
+  .target-row p { margin: 0; font-size: 11px; color: var(--muted); line-height: 1.3; }
+  .target-row em { font-style: normal; color: var(--green-soft-text); background: var(--green-soft-bg); border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: 600; align-self: center; }
+
+  /* --------- Customer service --------- */
+  .support { grid-column: 4 / 10; grid-row: 10 / 13; }
+  .support-row {
+    display: grid; grid-template-columns: 22px 1fr auto; gap: 10px;
+    padding: 10px 14px; border-top: 1px solid var(--line);
+    align-items: flex-start;
+  }
+  .support-row:first-of-type { border-top: 0; }
+  .support-row .ico { color: var(--faint); margin-top: 1px; }
+  .support-row strong { font-size: 12px; }
+  .support-row p { margin: 2px 0 0; font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .support-row em { font-style: normal; font-size: 10px; color: var(--muted); }
+
+  /* --------- Community --------- */
+  .community { grid-column: 10 / 13; grid-row: 10 / 13; }
+
+  /* --------- Team --------- */
+  .team { grid-column: 1 / 4; grid-row: 10 / 13; }
+  .team .body { padding: 4px 0 8px; }
+  .team-row { display: grid; grid-template-columns: 32px 1fr; gap: 10px; padding: 8px 14px; align-items: center; }
+  .team-row .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--soft); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); font-weight: 700; }
+  .team-row strong { font-size: 12px; font-weight: 600; display: block; }
+  .team-row span { font-size: 11px; color: var(--muted); }
+
+  /* --------- Chat rail --------- */
+  .chat {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow-tile);
+    display: flex; flex-direction: column;
+    align-self: stretch;
+    overflow: hidden;
+  }
+  .chat .head {
+    padding: 11px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 650;
+  }
+  .chat .head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .chat .scroll {
+    flex: 1; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; overflow: auto; min-height: 0;
+  }
+  .chat .scroll article { font-size: 12px; line-height: 1.45; }
+  .chat .scroll article strong { display: block; font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 3px; }
+  .chat .scroll .you { background: var(--soft); border-radius: 8px; padding: 8px 10px; align-self: flex-end; max-width: 80%; }
+  .chat form {
+    border-top: 1px solid var(--line); display: flex; align-items: center; padding: 8px;
+    gap: 6px; background: #fff;
+  }
+  .chat form textarea {
+    flex: 1; border: 0; resize: none; font-size: 12px; padding: 8px 10px; outline: none; font-family: inherit;
+  }
+  .chat form button {
+    width: 32px; height: 32px; border-radius: 8px; border: 0; background: var(--text); color: #fff;
+    cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  }
+
+  /* ---------- annotation column ---------- */
+  .legend {
+    position: sticky; top: 28px;
+    background: #fff;
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.10);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .legend h2 { margin: 0 0 4px; font-size: 16px; letter-spacing: -0.01em; }
+  .legend p.sub { margin: 0 0 16px; color: var(--muted); font-size: 12px; }
+  .legend h3 { margin: 16px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .legend ul { padding-left: 18px; margin: 0; }
+  .legend li { margin-bottom: 6px; color: var(--text); }
+  .legend li code { background: var(--soft); padding: 0 4px; border-radius: 3px; font-size: 11.5px; }
+  .legend .pill {
+    display: inline-block; background: var(--green-soft-bg); color: var(--green-soft-text);
+    border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600;
+    margin-right: 6px;
+  }
+  .legend .pill.blue { background: var(--blue-soft-bg); color: var(--blue-soft-text); }
+  .legend .pill.gray { background: var(--gray-soft-bg); color: var(--gray-soft-text); }
+
+  /* annotation markers floating on top of stage */
+  .stage { position: relative; }
+  .marker {
+    position: absolute; width: 22px; height: 22px; border-radius: 50%;
+    background: #1a1f36; color: #fff; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    pointer-events: none; z-index: 5;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <!-- ============= STAGE / MOCKUP ============= -->
+  <div class="stage">
+    <!-- annotation markers (positioned roughly) -->
+    <span class="marker" style="left: 290px; top: 70px;">1</span>
+    <span class="marker" style="left: 590px; top: 70px;">2</span>
+    <span class="marker" style="left: 22px;  top: 105px;">3</span>
+    <span class="marker" style="left: 880px; top: 70px;">4</span>
+    <span class="marker" style="left: 880px; top: 350px;">5</span>
+    <span class="marker" style="left: 290px; top: 530px;">6</span>
+    <span class="marker" style="left: 22px;  top: 530px;">7</span>
+
+    <!-- company bar -->
+    <div class="company-bar">
+      <div class="l">
+        <a href="#" aria-label="Back">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </a>
+        <span class="name">Hempel Studios</span>
+      </div>
+      <nav>
+        <span class="status"><span style="width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block"></span> working</span>
+        <a class="gear" href="#" aria-label="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06A2 2 0 1 1 4.27 16.93l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.07a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.07a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.07a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </a>
+      </nav>
+    </div>
+
+    <div class="workspace">
+      <div class="board">
+
+        <!-- Performance -->
+        <section class="tile perf">
+          <header>
+            <span class="lbl">Performance</span>
+            <span class="meta"><span class="chip live"><span class="dot"></span>Revenue</span></span>
+          </header>
+          <div class="body">
+            <div class="headline">
+              <span class="revenue">$2,418</span>
+              <span class="trend">▲ 12%</span>
+            </div>
+            <div class="metric-chips">
+              <span><strong>147</strong>customers</span>
+              <span><strong>32</strong>leads</span>
+              <span><strong>18</strong>posts</span>
+            </div>
+            <div class="chart-wrap">
+              <svg class="chart" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden>
+                <!-- baseline -->
+                <line x1="0" y1="36" x2="100" y2="36" stroke="rgba(15,23,42,0.08)" stroke-width="0.4"/>
+                <line x1="0" y1="20" x2="100" y2="20" stroke="rgba(15,23,42,0.05)" stroke-width="0.3" stroke-dasharray="0.6 1.4"/>
+                <!-- area -->
+                <path d="M0,30 L14,28 L28,22 L42,24 L56,16 L70,12 L85,9 L100,6 L100,40 L0,40 Z" fill="rgba(21,163,74,0.10)"/>
+                <!-- line -->
+                <path d="M0,30 L14,28 L28,22 L42,24 L56,16 L70,12 L85,9 L100,6" fill="none" stroke="#15a34a" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                <!-- last point -->
+                <circle cx="100" cy="6" r="1.4" fill="#15a34a"/>
+                <circle cx="100" cy="6" r="2.8" fill="rgba(21,163,74,0.2)"/>
+              </svg>
+            </div>
+            <div class="chart-foot"><span>7d ago</span><span>today</span></div>
+          </div>
+        </section>
+
+        <!-- Website (LIVE) -->
+        <section class="tile site-tile">
+          <header>
+            <span class="lbl">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>
+              Website
+            </span>
+            <span class="meta">
+              <span class="chip live"><span class="dot"></span>Live</span>
+              <span>· 3m ago</span>
+            </span>
+          </header>
+          <div class="preview-body">
+            <div class="preview-url">
+              hempel.fourmanifold.com
+              <span class="ext">↗</span>
+            </div>
+            <div class="lane-row">
+              <span class="lane ok">  <span class="dot"></span>website</span>
+              <span class="lane ok">  <span class="dot"></span>seo</span>
+              <span class="lane idle"><span class="dot"></span>analytics</span>
+            </div>
+            <div class="frame">
+              <div class="bar">
+                <i></i><i></i><i></i>
+                <span class="url-pill">hempel.fourmanifold.com</span>
+              </div>
+              <div class="canvas">
+                <div class="live-site">
+                  <div class="nav">
+                    <span class="logo">hempel</span>
+                    <span class="nav-links"><span>Product</span><span>Pricing</span><span>Sign in</span></span>
+                  </div>
+                  <h1>Studios that ship,<br/>without the studio.</h1>
+                  <p>AI operators that own your growth lanes end-to-end.</p>
+                  <div class="row-cta">
+                    <span class="b1">Start free</span>
+                    <span class="b2">No credit card needed</span>
+                  </div>
+                  <div class="cards"><div>Growth</div><div>Sales</div><div>Support</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Product (BUILDING) -->
+        <section class="tile product-tile">
+          <header>
+            <span class="lbl">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+              Product · <strong style="color: var(--text); font-weight: 650;">147</strong>&nbsp;customers
+            </span>
+            <span class="meta">
+              <span class="chip building"><span class="dot"></span>Building</span>
+              <span>· 12s ago</span>
+            </span>
+          </header>
+          <div class="preview-body">
+            <div class="preview-url">
+              hempel.fourmanifold.com/product
+              <span class="ext">↗</span>
+            </div>
+            <div class="lane-row">
+              <span class="lane ok">  <span class="dot"></span>product_backend</span>
+              <span class="lane run"> <span class="dot"></span>product_ui · deploying</span>
+            </div>
+            <div class="frame">
+              <div class="bar">
+                <i></i><i></i><i></i>
+                <span class="url-pill">/product</span>
+              </div>
+              <div class="canvas">
+                <div class="skel">
+                  <i></i>
+                  <b></b><b></b>
+                  <em></em>
+                  <div class="grid"><span></span><span></span><span></span></div>
+                  <div class="progress"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- X tile -->
+        <section class="tile x-tile">
+          <header>
+            <span class="lbl">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+              X
+            </span>
+            <span class="meta">
+              <span class="chip live"><span class="dot"></span>Published</span>
+              <span>· 9m ago</span>
+            </span>
+          </header>
+          <div class="x-body">
+            <div class="x-post">
+              <div class="head">
+                <span class="avatar">H</span>
+                <strong>Hempel</strong>
+                <span class="handle">@hempelhq</span>
+                <span class="when">9m</span>
+              </div>
+              <p>We let one AI operator run our entire launch week — landing page, X, Reddit, outreach, Sora UGC. 147 sign-ups in 4 days.</p>
+              <div class="footer">
+                <span>↺ 12</span><span>♡ 84</span><span>↗ 9</span>
+              </div>
+            </div>
+            <button class="cta"><span class="plus">+</span> Publish new post</button>
+          </div>
+        </section>
+
+        <!-- In progress -->
+        <section class="tile inprog">
+          <header>
+            <span class="lbl">In progress</span>
+            <button class="action">Manage</button>
+          </header>
+          <div class="body">
+            <div class="task-row"><span class="dot run"></span><span>Product UI · final deploy</span><em>deploying</em></div>
+            <div class="task-row"><span class="dot run"></span><span>X · post grounded in 12 leads</span><em>publishing</em></div>
+            <div class="task-row"><span class="dot warn"></span><span>Reddit · r/sideproject — waiting on karma</span><em>blocked</em></div>
+            <div class="task-row"><span class="dot ok"></span><span>Sora UGC creative · v3</span><em>completed</em></div>
+          </div>
+        </section>
+
+        <!-- Payments -->
+        <section class="tile pay">
+          <header>
+            <span class="lbl">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+              Payments
+            </span>
+            <span class="meta">
+              <span class="chip live"><span class="dot"></span>Stripe</span>
+            </span>
+          </header>
+          <div class="body">
+            <div class="live-row">
+              <strong>$2,418</strong><span>MRR · 3 plans · last payment 1h ago</span>
+            </div>
+            <div class="plans">
+              <span><strong>Starter</strong>$19</span>
+              <span><strong>Studio</strong>$49</span>
+              <span><strong>Scale</strong>$129</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Documents -->
+        <section class="tile docs">
+          <header>
+            <span class="lbl">Documents</span>
+            <button class="action">See all</button>
+          </header>
+          <div class="doc-grid">
+            <div class="doc-card">
+              <svg class="ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <strong>Pricing memo</strong>
+              <span>strategy</span>
+            </div>
+            <div class="doc-card">
+              <svg class="ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <strong>Launch plan v3</strong>
+              <span>operating</span>
+            </div>
+            <div class="doc-card">
+              <svg class="ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <strong>ICP profile</strong>
+              <span>research</span>
+            </div>
+            <div class="doc-card">
+              <svg class="ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <strong>Brand voice</strong>
+              <span>brand</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Ads / UGC -->
+        <section class="tile ads">
+          <header>
+            <span class="lbl">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Ads · Sora UGC
+            </span>
+            <span class="meta">
+              <span class="chip building"><span class="dot"></span>3 creatives</span>
+            </span>
+          </header>
+          <div class="grid">
+            <div class="ad a"><svg viewBox="0 0 24 24" fill="white"><polygon points="6 4 20 12 6 20"/></svg>Hook · 0:08</div>
+            <div class="ad b"><svg viewBox="0 0 24 24" fill="white"><polygon points="6 4 20 12 6 20"/></svg>Pain · 0:12</div>
+          </div>
+          <button class="cta"><span class="plus">+</span> Generate Sora UGC</button>
+        </section>
+
+        <!-- Leads -->
+        <section class="tile leads">
+          <header>
+            <span class="lbl">Outreach · leads</span>
+            <span class="meta">
+              <span class="chip live"><span class="dot"></span>32 sourced</span>
+            </span>
+          </header>
+          <div class="body">
+            <div class="target-row">
+              <div><strong>Maya Park</strong><p>maya@northvane.studio — apollo</p></div>
+              <em>found</em>
+            </div>
+            <div class="target-row">
+              <div><strong>Erik Olsson</strong><p>erik@plinka.app — linkedin</p></div>
+              <em>found</em>
+            </div>
+            <div class="target-row">
+              <div><strong>Joon-ho Kim</strong><p>joon@stride.studio — phantombuster</p></div>
+              <em>queued</em>
+            </div>
+            <button class="cta"><span class="plus">+</span> Find more leads</button>
+          </div>
+        </section>
+
+        <!-- Customer service -->
+        <section class="tile support">
+          <header>
+            <span class="lbl">Customer service · 2</span>
+            <span class="meta"><span class="chip idle"><span class="dot"></span>all clear</span></span>
+          </header>
+          <div class="body">
+            <div class="support-row">
+              <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+              <div>
+                <strong>Refund question — Studio plan</strong>
+                <p>"Hi, accidentally upgraded twice this month — can you refund the second charge?"</p>
+              </div>
+              <em>2m ago</em>
+            </div>
+            <div class="support-row">
+              <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+              <div>
+                <strong>API key not working</strong>
+                <p>"Generated my key 5 mins ago, getting 401 on /messages — am I missing a header?"</p>
+              </div>
+              <em>11m ago</em>
+            </div>
+          </div>
+        </section>
+
+        <!-- Community -->
+        <section class="tile community">
+          <header>
+            <span class="lbl">Community</span>
+            <span class="meta"><span class="chip live"><span class="dot"></span>6 targets</span></span>
+          </header>
+          <div class="body">
+            <div class="target-row">
+              <div><strong>r/sideproject</strong><p>Fits launch tone — high engagement</p></div>
+              <em>found</em>
+            </div>
+            <div class="target-row">
+              <div><strong>r/microsaas</strong><p>Pricing memo angle</p></div>
+              <em>drafted</em>
+            </div>
+            <div class="target-row">
+              <div><strong>indie hackers</strong><p>Show HN angle drafted</p></div>
+              <em>found</em>
+            </div>
+            <button class="cta"><span class="plus">+</span> Find communities</button>
+          </div>
+        </section>
+
+        <!-- Team -->
+        <section class="tile team">
+          <header>
+            <span class="lbl">Team</span>
+            <button class="action">Invite</button>
+          </header>
+          <div class="body">
+            <div class="team-row"><span class="avatar">TS</span><div><strong>tej</strong><span>Owner · tej@takyon.so</span></div></div>
+            <div class="team-row"><span class="avatar">AI</span><div><strong>CEO agent</strong><span>autonomous · always on</span></div></div>
+            <div class="team-row"><span class="avatar">GR</span><div><strong>Growth agent</strong><span>autonomous · working</span></div></div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- chat rail -->
+      <aside class="chat">
+        <div class="head">
+          <span class="dot"></span> CEO
+        </div>
+        <div class="scroll">
+          <article>
+            <strong>CEO</strong>
+            I'm watching product, growth, sales, and support. Product_ui is redeploying with the new pricing tier. Tell me what to prioritize.
+          </article>
+          <article class="you">
+            <strong>You</strong>
+            Push the X post tomorrow morning, not tonight. Different audience window.
+          </article>
+          <article>
+            <strong>CEO</strong>
+            Got it — X post rescheduled to 09:14 PT. Reddit drafts stay on the original plan.
+          </article>
+        </div>
+        <form onsubmit="return false">
+          <textarea rows="1" placeholder="Ask Takyon anything"></textarea>
+          <button aria-label="Send">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+          </button>
+        </form>
+      </aside>
+
+    </div>
+  </div>
+
+  <!-- ============= ANNOTATIONS ============= -->
+  <aside class="legend">
+    <h2>Takyon dashboard — redesign mockup</h2>
+    <p class="sub">Visual of the proposed changes — no code touched. Open this file in a browser to compare with the live dashboard at <code>/dashboard/companies/[id]</code>.</p>
+
+    <h3>Markers</h3>
+    <ul>
+      <li><strong>1 · Website tile rebuilt.</strong> Tile header now matches every other tile: status chip (<span class="pill">Live</span>), last-updated time, real hostname inside the tile. Lane ribbon underneath shows the actual job lane statuses (<code>website</code>, <code>seo</code>, etc.) — same data the "In progress" tile already pulls from. Wireframe replaced with the real deployed site.</li>
+      <li><strong>2 · Product tile rebuilt.</strong> Same pattern. Customer count surfaced as the tile headline (currently buried in Performance footer tabs). Building state is a real skeleton + a moving progress bar tied to lane status, not a generic grey wireframe. <span class="pill blue">Building</span> chip when any lane is running.</li>
+      <li><strong>3 · Performance tile.</strong> Metric chips (customers / leads / posts) moved up next to the revenue number with mini values, instead of being centered at the bottom disconnected from the headline. Chart gets a baseline, last-point dot and dashed mid-grid.</li>
+      <li><strong>4 · X tile gets a header.</strong> Currently it's a "bare" tile with no label or status. The X post itself stays the same (already great); the addition is a header row so the tile reads like everything else on the board.</li>
+      <li><strong>5 · CTAs softened.</strong> "Publish post / Find leads / Find communities" buttons get a neutral fill <code>#f6f9fc</code> with a small green <code>+</code> mark, instead of bare green text on transparent. Reads as actionable rather than as another label.</li>
+      <li><strong>6 · Status chips desaturated.</strong> <span class="pill">Live</span> <span class="pill blue">Building</span> <span class="pill gray">Idle</span> use tinted backgrounds, freeing the full-saturation green for primary actions only.</li>
+      <li><strong>7 · Payments tile fleshed out.</strong> Used to be icon + 2 lines on an empty white card. Now shows MRR, last payment, and plan chips — exposes the same Stripe data already loaded into the model.</li>
+    </ul>
+
+    <h3>Overall changes</h3>
+    <ul>
+      <li>Hairline tile border <code>rgba(15,23,42,.08)</code> + 8px gap + soft <code>box-shadow</code> so tiles don't bleed into one mosaic.</li>
+      <li>Body text 12–13px (was 10–11px). Tile labels 12px dark, not 11px muted.</li>
+      <li>Empty wireframes replaced with skeletons that animate only while a lane is actually <code>running</code>.</li>
+      <li>Chart no longer renders fallback data when revenue is 0 — falls back to "No revenue yet" empty state (not shown here because the mock has revenue).</li>
+    </ul>
+
+    <h3>What still needs your call</h3>
+    <ul>
+      <li><strong>iframe vs screenshot</strong> for the website preview. iframe is pure UI; screenshot is faster but needs a backend endpoint.</li>
+      <li><strong>Lane status surfacing</strong> — the cleanest version exposes <code>previews.site.lane</code> and <code>previews.product.lanes</code> via small additions in <code>src/lib/takyon-dashboard.ts</code>. Still UI-layer (no worker/DB changes), but it is a <code>src/lib/</code> file — confirm scope before I touch it.</li>
+    </ul>
+  </aside>
+</div>
+</body>
+</html>

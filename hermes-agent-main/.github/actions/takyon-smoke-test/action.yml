@@ -1,0 +1,47 @@
+name: Takyon smoke test
+description: >
+  Run the image's built-in entrypoint against `--help` and `dashboard --help`
+  to catch basic runtime regressions before publishing.  Requires the image
+  to already be loaded into the local Docker daemon under `image`.
+
+  Works identically on amd64 and arm64 runners.
+
+inputs:
+  image:
+    description: Fully-qualified image tag (e.g. nousresearch/takyon-agent:test)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure /tmp/takyon-test is takyon-writable
+      shell: bash
+      run: |
+        # The image runs as the takyon user (UID 10000).  GitHub Actions
+        # creates /tmp/takyon-test root-owned by default, which takyon
+        # can't write to — chown it to match the in-container UID before
+        # bind-mounting.  Real users doing `docker run -v ~/.takyon:...`
+        # with their own UID hit the same issue and have their own
+        # remediations (TAKYON_UID env var, or chown locally).
+        mkdir -p /tmp/takyon-test
+        sudo chown -R 10000:10000 /tmp/takyon-test
+
+    - name: takyon --help
+      shell: bash
+      run: |
+        docker run --rm \
+          -v /tmp/takyon-test:/opt/data \
+          --entrypoint /opt/takyon/docker/entrypoint.sh \
+          "${{ inputs.image }}" --help
+
+    - name: takyon dashboard --help
+      shell: bash
+      run: |
+        # Regression guard for #9153: dashboard was present in source but
+        # missing from the published image.  If this fails, something in
+        # the Dockerfile is excluding the dashboard subcommand from the
+        # installed package.
+        docker run --rm \
+          -v /tmp/takyon-test:/opt/data \
+          --entrypoint /opt/takyon/docker/entrypoint.sh \
+          "${{ inputs.image }}" dashboard --help

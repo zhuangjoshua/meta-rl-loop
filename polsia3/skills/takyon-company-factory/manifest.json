@@ -1,0 +1,72 @@
+{
+  "namespace": "takyon-company-factory",
+  "owner": "takyon-core",
+  "runtime": "external-bhpv3",
+  "skills": [
+    {
+      "id": "takyon-company-factory/ceo-awake",
+      "file": "ceo-awake.md",
+      "workflow_id": null
+    },
+    {
+      "id": "takyon-company-factory/business-plan",
+      "file": "business-plan.md",
+      "workflow_id": "plan_business"
+    },
+    {
+      "id": "takyon-company-factory/market-research",
+      "file": "market-research.md",
+      "workflow_id": "research_market"
+    },
+    {
+      "id": "takyon-company-factory/site-build",
+      "file": "site-build.md",
+      "workflow_id": "build_site"
+    },
+    {
+      "id": "takyon-company-factory/site-improve",
+      "file": "site-improve.md",
+      "workflow_id": "improve_site"
+    },
+    {
+      "id": "takyon-company-factory/social-posting",
+      "file": "social-posting.md",
+      "workflow_id": "generate_social_post"
+    },
+    {
+      "id": "takyon-company-factory/meta-creative",
+      "file": "meta-creative.md",
+      "workflow_id": "meta_seedance"
+    },
+    {
+      "id": "takyon-company-factory/find-leads",
+      "file": "find-leads.md",
+      "workflow_id": "find_leads"
+    },
+    {
+      "id": "takyon-company-factory/outreach-copy",
+      "file": "outreach-copy.md",
+      "workflow_id": "generate_outreach_copy"
+    },
+    {
+      "id": "takyon-company-factory/content-generation",
+      "file": "content-generation.md",
+      "workflow_id": "generate_content"
+    },
+    {
+      "id": "takyon-company-factory/support-reply",
+      "file": "support-reply.md",
+      "workflow_id": "draft_support_reply"
+    },
+    {
+      "id": "takyon-company-factory/activity-review",
+      "file": "activity-review.md",
+      "workflow_id": "review_activity"
+    },
+    {
+      "id": "takyon-company-factory/get-first-customer",
+      "file": "get-first-customer.md",
+      "workflow_id": "goal_get_first_customer"
+    }
+  ]
+}

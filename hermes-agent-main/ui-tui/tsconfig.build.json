@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@takyon/ink": ["src/types/takyon-ink.d.ts"]
+    }
+  }
+}

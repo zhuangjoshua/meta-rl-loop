@@ -1,0 +1,27 @@
+.DS_Store
+.embedded-git-backups/
+
+# Local secrets and machine-specific environment files.
+.env
+.env.*
+!.env.example
+
+# JS/Next build output and dependencies.
+node_modules/
+.next/
+dist/
+build/
+coverage/
+*.log
+*.tsbuildinfo
+
+# Python local state.
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Takyon local runtime/cache state.
+.takyon/
+.argon-hermes-home/

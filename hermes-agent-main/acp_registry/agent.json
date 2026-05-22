@@ -1,0 +1,16 @@
+{
+  "id": "takyon-agent",
+  "name": "Takyon Agent",
+  "version": "0.14.0",
+  "description": "Self-improving open-source AI agent by Nous Research with ACP editor integration, persistent memory, skills, and rich tool support.",
+  "repository": "https://github.com/NousResearch/takyon-agent",
+  "website": "https://takyon-agent.nousresearch.com/docs/user-guide/features/acp",
+  "authors": ["Nous Research"],
+  "license": "MIT",
+  "distribution": {
+    "uvx": {
+      "package": "takyon-agent[acp]==0.14.0",
+      "args": ["takyon-acp"]
+    }
+  }
+}
