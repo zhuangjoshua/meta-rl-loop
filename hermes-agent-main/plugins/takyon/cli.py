@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,8 @@ _LOCAL_COMMANDS = {
     "registry",
     "campaigns",
     "workspaces",
+    "cron",
+    "crons",
     "show",
     "wake",
     "pause",
@@ -29,22 +30,6 @@ _LOCAL_COMMANDS = {
     "gc",
 }
 
-_POLSIA_COMMANDS = {
-    "businesses",
-    "business",
-    "list",
-    "capabilities",
-    "campaigns",
-    "campaign",
-    "budget",
-    "memory",
-    "wake",
-    "enqueue",
-    "pause",
-    "resume",
-    "kill",
-}
-
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -52,7 +37,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         nargs=argparse.REMAINDER,
         help=(
             "Natural language command, or: businesses | campaigns <business> | show <business> [path] | "
-            "registry [all|tools|skills] [category] [priority] | wake <business> [schedule] | "
+            "registry [all|tools|skills] [category] [priority] | cron [list|tick] | wake <business> [schedule] | "
             "pause/resume/kill <scope> [reason] | gc [days] [confirm]"
         ),
     )
@@ -111,6 +96,7 @@ Takyon control:
   /takyon businesses
   /takyon registry [all|tools|skills] [category] [priority]
   /takyon campaigns <business>
+  /takyon cron [list|tick]
   /takyon show <business> [path]
   /takyon wake <business> [schedule]
   /takyon pause|resume|kill <scope> [reason]
@@ -129,54 +115,6 @@ def _format_slash_value(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, indent=2, ensure_ascii=False)
-
-
-def _polsia_dir() -> Path | None:
-    explicit = os.getenv("POLSIA3_DIR") or os.getenv("POLSIAV3_DIR") or os.getenv("TAKYON_POLSIA_DIR")
-    candidates = []
-    if explicit:
-        candidates.append(Path(explicit).expanduser())
-    root = Path(__file__).resolve().parents[2]
-    candidates.extend([root.parent / "polsia3", root.parent / "polsiav3", root.parent / "polsia-v3"])
-    for candidate in candidates:
-        if (candidate / "scripts" / "takyon.ts").exists() and (candidate / "package.json").exists():
-            return candidate
-    return None
-
-
-def _run_polsia_command(argv: list[str], *, raw_json: bool) -> Any | None:
-    if argv and argv[0].lower() not in _POLSIA_COMMANDS:
-        return None
-    polsia = _polsia_dir()
-    if not polsia:
-        return None
-    if not argv:
-        if os.isatty(0):
-            result = subprocess.run(["./takyon"], cwd=str(polsia), check=False)
-            if result.returncode != 0:
-                raise RuntimeError("Polsia Takyon interactive session failed.")
-            return ""
-        return None
-    args = [*argv]
-    if "--json" not in args:
-        args.append("--json")
-    result = subprocess.run(
-        ["./takyon", *args],
-        cwd=str(polsia),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "Polsia Takyon command failed.").strip())
-    output = result.stdout.strip()
-    json_start = output.find("[")
-    object_start = output.find("{")
-    starts = [index for index in [json_start, object_start] if index >= 0]
-    if starts:
-        parsed = json.loads(output[min(starts) :])
-        return parsed if raw_json else parsed
-    return output
 
 
 def _resolve_skill_reference(name: str) -> tuple[str, str] | None:
@@ -301,10 +239,6 @@ def _load_ceo_skill() -> str:
 
 
 def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = "", max_turns: int = 30) -> Any:
-    polsia_result = _run_polsia_command(argv, raw_json=raw_json)
-    if polsia_result is not None:
-        return polsia_result
-
     store = TakyonStore()
 
     if not argv:
@@ -347,6 +281,18 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
         ]
         return {"success": True, "business": slug, "campaigns": workspaces}
 
+    if command in {"cron", "crons"}:
+        action = argv[1].lower() if len(argv) >= 2 else "list"
+        if action in {"list", "jobs"}:
+            from cron.jobs import list_jobs
+
+            return {"success": True, "jobs": list_jobs(include_disabled=True)}
+        if action in {"tick", "run", "run-due"}:
+            from cron.scheduler import tick
+
+            return {"success": True, "ran": tick()}
+        raise SystemExit("usage: takyon cron [list|tick]")
+
     if command == "show":
         if len(argv) < 2:
             raise SystemExit("usage: takyon show <business> [path]")
@@ -370,10 +316,15 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
 
     if command in {"pause", "resume", "kill"}:
         if len(argv) < 2:
-            raise SystemExit(f"usage: takyon {command} <scope> [reason]")
+            raise SystemExit(f"usage: takyon {command} <scope>|business <slug> [reason]")
         state = "active" if command == "resume" else ("killed" if command == "kill" else "paused")
-        reason = " ".join(argv[2:]).strip() or f"operator {command}"
-        return _control(store, argv[1], state, reason)
+        if argv[1] == "business" and len(argv) >= 3:
+            scope = _scope_for_business(argv[2])
+            reason = " ".join(argv[3:]).strip() or f"operator {command}"
+        else:
+            scope = argv[1]
+            reason = " ".join(argv[2:]).strip() or f"operator {command}"
+        return _control(store, scope, state, reason)
 
     if command == "init":
         if len(argv) < 2:

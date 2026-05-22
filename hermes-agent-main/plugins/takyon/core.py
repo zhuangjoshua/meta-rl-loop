@@ -160,18 +160,16 @@ def _repo_root() -> Path:
 
 def _candidate_env_files() -> list[Path]:
     paths: list[Path] = []
-    for key in ("TAKYON_ENV_FILE", "POLSIAV3_ENV_FILE", "POLSIA3_ENV_FILE"):
+    for key in ("TAKYON_ENV_FILE",):
         value = os.getenv(key)
         if value:
             paths.append(Path(value).expanduser())
 
     root = _repo_root()
-    search_roots = [
-        root.parent / "polsia3",
-        root.parent / "polsiav3",
-        root.parent / "polsia-v3",
-        root.parent / "polsia",
-    ]
+    search_roots = [root.parent, root]
+    takyon_home = os.getenv("TAKYON_HOME")
+    if takyon_home:
+        search_roots.append(Path(takyon_home).expanduser())
     for base in search_roots:
         paths.extend([base / ".env.local", base / ".env", base / "secrets" / ".env"])
     return paths
@@ -181,7 +179,7 @@ _loaded_env_paths: set[Path] = set()
 
 
 def load_takyon_env() -> list[str]:
-    """Load nearby Takyon/Polsia env files without overriding Takyon env."""
+    """Load explicit Takyon env files without overriding process env."""
     loaded: list[str] = []
     for path in _candidate_env_files():
         try:
@@ -444,6 +442,24 @@ class TakyonStore:
         )
         return event_id
 
+    def _sync_business_ceo_cron_control(self, slug: str, state: str, reason: str) -> dict[str, Any]:
+        from cron.jobs import list_jobs, pause_job, resume_job
+
+        name = f"takyon-ceo:{_slugify(slug)}"
+        existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
+        if not existing:
+            return {"cron_job": None, "changed": False}
+        if state == "active":
+            updated = resume_job(existing["id"])
+        else:
+            updated = pause_job(existing["id"], reason=reason)
+        return {
+            "cron_job": existing["id"],
+            "changed": bool(updated),
+            "enabled": bool(updated.get("enabled", False)) if updated else bool(existing.get("enabled", False)),
+            "state": updated.get("state") if updated else existing.get("state"),
+        }
+
     def read(
         self,
         *,
@@ -686,15 +702,24 @@ class TakyonStore:
             if state not in _CONTROL_STATES:
                 raise TakyonError(f"control.set state must be one of {sorted(_CONTROL_STATES)}")
             control_scope = str(op.get("scope") or target_scope)
-            _scope_parts(control_scope)
+            control_parts = _scope_parts(control_scope)
             conn.execute(
                 "INSERT INTO control_states (scope, state, reason, actor, updated_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(scope) DO UPDATE SET state = excluded.state, reason = excluded.reason, actor = excluded.actor, updated_at = excluded.updated_at",
                 (control_scope, state, str(op.get("reason") or reason or ""), actor, _now()),
             )
-            business = _scope_parts(control_scope).get("business")
+            business = control_parts.get("business")
+            cron = (
+                self._sync_business_ceo_cron_control(
+                    business,
+                    state,
+                    str(op.get("reason") or reason or ""),
+                )
+                if business and control_parts.get("kind") == "business"
+                else None
+            )
             self._record_event(conn, scope=control_scope, business_slug=business, event_type="control.set", payload={"state": state, "reason": op.get("reason") or reason, "actor": actor})
-            return {"action": action, "scope": control_scope, "state": state}
+            return {"action": action, "scope": control_scope, "state": state, "cron": cron}
 
         if action == "maintenance.gc":
             return self._gc(conn, parsed_scope, op)

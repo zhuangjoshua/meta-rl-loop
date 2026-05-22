@@ -196,3 +196,5 @@ Hermes/Takyon runtime is the canonical CEO runtime. CEO wakeups and CEO reasonin
 Hermes owns non-deterministic business judgment: CEO inspection, skill selection, research synthesis, market planning, social/content/support/outreach copy, lead finding, campaign review, and activity review.
 
 Deterministic side effects, generated-app builds, cron dispatch, payments, AI metering, deployment, and vendor mutations stay app-owned/local-runner-owned. Hermes may request or queue those actions, but the runner must validate capabilities, execute bounded work, and record receipts.
+
+Business creation must not enqueue a fixed startup plan. A new business creates the canonical business row, business workspace/filesystem, per-business cron/watch rows, and one Hermes CEO wakeup with the operator brief. Hermes then reads the context and chooses the first skill or bounded runner job. Do not add a hardcoded foundation/startup lane, hidden workflow dependency, or local-model startup fallback.

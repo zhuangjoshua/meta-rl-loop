@@ -2,7 +2,6 @@ ALTER TABLE workflow_jobs DROP CONSTRAINT IF EXISTS workflow_jobs_lane_check;
 ALTER TABLE workflow_jobs
   ADD CONSTRAINT workflow_jobs_lane_check
   CHECK (lane IN (
-    'foundation',
     'website',
     'product_backend',
     'product_ui',

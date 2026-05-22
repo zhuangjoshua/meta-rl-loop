@@ -7,7 +7,7 @@ import path from "node:path";
 import { readFile, rm } from "node:fs/promises";
 import { getAppEnv, getLocalAuthSeed } from "../src/lib/env";
 import { upsertProfile } from "../src/lib/auth";
-import { createCompany, getCompanyForProfile, listCompaniesForProfile, setCompanyMode, type CompanyRow } from "../src/lib/companies";
+import { createCompany, getCompanyForProfile, listCompaniesForProfile, setCompanyMode, setCompanyOperationsPaused, type CompanyRow } from "../src/lib/companies";
 import { runBusinessAutopilot } from "../src/lib/business-autopilot";
 import { upsertBusinessCampaign, listBusinessCampaigns, requireBusinessCampaign, setBusinessCampaignStatus } from "../src/lib/business-campaigns";
 import { ensureBudgetAccount, getBudgetAccount, microusdToUsd, reserveBusinessBudget, usdToMicrousd } from "../src/lib/business-budget";
@@ -1903,6 +1903,15 @@ async function runCommand(cleanArgs: string[], profile: TerminalProfile, json: b
     }
     if (scopeKind === "business") {
       const business = await resolveBusiness(cleanArgs[2], profile.id);
+      if (state === "active" || state === "paused") {
+        const operations = await setCompanyOperationsPaused({
+          companyId: business.id,
+          profileId: profile.id,
+          paused: state === "paused",
+          reason: cleanArgs.slice(3).join(" ")
+        });
+        return print({ ...operations, controlState: state }, json);
+      }
       const control = await setTakyonControl({
         scopeType: "business",
         businessId: business.id,

@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS workflow_jobs (
   profile_id uuid REFERENCES profiles(id) ON DELETE SET NULL,
   task_id uuid REFERENCES tasks(id) ON DELETE SET NULL,
   workflow_id text NOT NULL,
-  lane text NOT NULL DEFAULT 'foundation',
+  lane text NOT NULL DEFAULT 'ceo',
   status text NOT NULL DEFAULT 'queued',
   priority integer NOT NULL DEFAULT 50,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS workflow_jobs (
 );
 
 ALTER TABLE workflow_jobs
-  ADD COLUMN IF NOT EXISTS lane text NOT NULL DEFAULT 'foundation',
+  ADD COLUMN IF NOT EXISTS lane text NOT NULL DEFAULT 'ceo',
   ADD COLUMN IF NOT EXISTS dependencies text[] NOT NULL DEFAULT ARRAY[]::text[];
 
 UPDATE workflow_jobs
@@ -194,7 +194,6 @@ ALTER TABLE workflow_jobs DROP CONSTRAINT IF EXISTS workflow_jobs_lane_check;
 ALTER TABLE workflow_jobs
   ADD CONSTRAINT workflow_jobs_lane_check
   CHECK (lane IN (
-    'foundation',
     'website',
     'product_backend',
     'product_ui',

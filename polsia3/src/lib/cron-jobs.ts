@@ -106,7 +106,8 @@ export async function ensureBusinessCeoCronJob(input: {
       }))}
     )
     ON CONFLICT (job_key) DO UPDATE
-    SET schedule_type = 'daily',
+    SET status = 'active',
+        schedule_type = 'daily',
         interval_seconds = NULL,
         daily_time_utc = EXCLUDED.daily_time_utc,
         default_limit = 1,
@@ -245,6 +246,35 @@ export async function reconcileBusinessCeoCronJobs(input: { profileId?: string |
   `;
 
   await sql`
+    UPDATE cron_jobs cj
+    SET status = 'paused',
+        locked_by = NULL,
+        locked_at = NULL,
+        updated_at = now()
+    WHERE cj.status = 'active'
+      AND (
+        cj.job_key LIKE ${`${businessCeoCronPrefix}%`}
+        OR cj.job_key LIKE ${`${businessConversationCronPrefix}%`}
+        OR cj.job_key LIKE ${`${businessCustomerOpsCronPrefix}%`}
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM businesses b
+        WHERE b.id::text = cj.metadata->>'business_id'
+          AND (
+            b.status = 'paused'
+            OR EXISTS (
+              SELECT 1
+              FROM takyon_control_states c
+              WHERE c.state IN ('paused', 'killed')
+                AND c.scope_type = 'business'
+                AND c.business_id = b.id
+            )
+          )
+      )
+  `;
+
+  await sql`
     DELETE FROM cron_jobs cj
     WHERE cj.job_key LIKE ${`${businessCeoCronPrefix}%`}
       AND NOT EXISTS (
@@ -324,12 +354,28 @@ export async function dispatchDueCronJobs(input: { dispatcherId: string; limit?:
   const claimed = await sql.begin(async (tx) => {
     return tx<CronJobRow[]>`
       WITH due AS (
-        SELECT job_key
-        FROM cron_jobs
-        WHERE status = 'active'
-          AND next_run_at <= now()
-          AND (locked_at IS NULL OR locked_at < now() - interval '10 minutes')
-        ORDER BY next_run_at ASC
+        SELECT cj.job_key
+        FROM cron_jobs cj
+        LEFT JOIN businesses b ON b.id::text = cj.metadata->>'business_id'
+        WHERE cj.status = 'active'
+          AND cj.next_run_at <= now()
+          AND (cj.locked_at IS NULL OR cj.locked_at < now() - interval '10 minutes')
+          AND (
+            cj.metadata->>'business_id' IS NULL
+            OR (
+              b.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM takyon_control_states c
+                WHERE c.state IN ('paused', 'killed')
+                  AND (
+                    c.scope_type = 'global'
+                    OR (c.scope_type = 'business' AND c.business_id = b.id)
+                  )
+              )
+            )
+          )
+        ORDER BY cj.next_run_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT ${limit}
       )

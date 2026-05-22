@@ -1,7 +1,7 @@
 import type { WorkflowLane } from "./workflow-jobs";
 
 export type TakyonStage =
-  | "product_foundation"
+  | "product_context"
   | "distribution"
   | "conversion"
   | "checkout"
@@ -26,23 +26,11 @@ export type TakyonWorkflowSpec = {
 
 export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
   {
-    workflowId: "foundation",
-    lane: "foundation",
-    priority: 100,
-    dependencies: [],
-    stages: ["product_foundation", "recovery"],
-    capabilityAll: ["tavily"],
-    capabilityAny: ["anthropic", "openai"],
-    retryOnFailure: true,
-    dispatchable: true,
-    description: "Research, positioning, mission, offer, and first product wedge."
-  },
-  {
     workflowId: "website_build_deploy",
     lane: "website",
     priority: 95,
-    dependencies: ["foundation"],
-    stages: ["product_foundation", "conversion", "recovery"],
+    dependencies: [],
+    stages: ["product_context", "conversion", "recovery"],
     capabilityAll: ["vercel", "claude_agent_sdk"],
     repeatable: true,
     retryOnFailure: true,
@@ -53,8 +41,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "product_backend",
     lane: "product_backend",
     priority: 75,
-    dependencies: ["foundation", "website_build_deploy"],
-    stages: ["product_foundation", "recovery"],
+    dependencies: ["website_build_deploy"],
+    stages: ["product_context", "recovery"],
     capabilityAll: ["anthropic"],
     retryOnFailure: true,
     dispatchable: true,
@@ -64,8 +52,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "product_ui",
     lane: "product_ui",
     priority: 74,
-    dependencies: ["foundation", "website_build_deploy", "product_backend"],
-    stages: ["product_foundation", "conversion", "recovery"],
+    dependencies: ["website_build_deploy", "product_backend"],
+    stages: ["product_context", "conversion", "recovery"],
     capabilityAll: ["anthropic"],
     repeatable: true,
     retryOnFailure: true,
@@ -76,8 +64,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "generated_app_auth",
     lane: "generated_app_auth",
     priority: 72,
-    dependencies: ["foundation"],
-    stages: ["product_foundation"],
+    dependencies: [],
+    stages: ["product_context"],
     dispatchable: true,
     description: "Ensure generated-app auth routes are available."
   },
@@ -85,8 +73,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "generated_app_users_entitlements",
     lane: "generated_app_users_entitlements",
     priority: 71,
-    dependencies: ["foundation"],
-    stages: ["product_foundation"],
+    dependencies: [],
+    stages: ["product_context"],
     dispatchable: true,
     description: "Ensure generated-app users, plans, entitlements, wallet, and project AI key."
   },
@@ -94,8 +82,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "stripe_setup",
     lane: "stripe",
     priority: 70,
-    dependencies: ["foundation"],
-    stages: ["product_foundation", "checkout", "conversion", "recovery"],
+    dependencies: [],
+    stages: ["product_context", "checkout", "conversion", "recovery"],
     capabilityAll: ["stripe"],
     retryOnFailure: true,
     dispatchable: true,
@@ -105,8 +93,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "ai_gateway_setup",
     lane: "ai_gateway",
     priority: 69,
-    dependencies: ["foundation"],
-    stages: ["product_foundation"],
+    dependencies: [],
+    stages: ["product_context"],
     dispatchable: true,
     description: "Ensure generated-app AI gateway policy and proxy-key rails."
   },
@@ -114,7 +102,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "x_social",
     lane: "x_social",
     priority: 66,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["distribution", "recovery"],
     capabilityAll: ["x_posting"],
     repeatable: true,
@@ -126,7 +114,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "meta_seedance",
     lane: "meta_seedance",
     priority: 65,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["distribution", "recovery"],
     capabilityAll: ["openai"],
     repeatable: true,
@@ -138,7 +126,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "community_research",
     lane: "community",
     priority: 64,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["distribution", "learning"],
     capabilityAll: ["tavily"],
     repeatable: true,
@@ -161,7 +149,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "outreach_copy",
     lane: "outreach",
     priority: 63,
-    dependencies: ["foundation", "community_research"],
+    dependencies: ["community_research"],
     stages: ["distribution", "conversion"],
     repeatable: true,
     dispatchable: true,
@@ -171,7 +159,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_marketing_context",
     lane: "outreach",
     priority: 68,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["distribution", "conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -183,7 +171,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_search_visibility",
     lane: "website",
     priority: 67,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["distribution", "conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -195,7 +183,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_conversion_review",
     lane: "website",
     priority: 62,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["conversion", "learning", "recovery"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -207,8 +195,8 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_product_design",
     lane: "website",
     priority: 89,
-    dependencies: ["foundation"],
-    stages: ["product_foundation", "conversion", "learning"],
+    dependencies: [],
+    stages: ["product_context", "conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
     dispatchable: true,
@@ -219,7 +207,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_content_engine",
     lane: "outreach",
     priority: 60,
-    dependencies: ["foundation", "business_marketing_context"],
+    dependencies: ["business_marketing_context"],
     stages: ["distribution", "conversion"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -231,7 +219,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_outreach_pipeline",
     lane: "outreach",
     priority: 59,
-    dependencies: ["foundation", "community_research", "business_marketing_context"],
+    dependencies: ["community_research", "business_marketing_context"],
     stages: ["distribution", "conversion"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -243,7 +231,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_paid_media_review",
     lane: "meta_seedance",
     priority: 58,
-    dependencies: ["foundation", "business_marketing_context"],
+    dependencies: ["business_marketing_context"],
     stages: ["distribution", "conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -255,7 +243,7 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     workflowId: "business_measurement_plan",
     lane: "website",
     priority: 57,
-    dependencies: ["foundation"],
+    dependencies: [],
     stages: ["conversion", "learning"],
     capabilityAny: ["anthropic", "openai"],
     repeatable: true,
@@ -320,17 +308,6 @@ export function takyonWorkflowsForStage(stage: TakyonStage) {
 
 export function takyonDispatchableWorkflowIds() {
   return takyonWorkflowRegistry.filter((workflow) => workflow.dispatchable).map((workflow) => workflow.workflowId);
-}
-
-export function takyonBuildCompanyLanes() {
-  return takyonWorkflowRegistry
-    .filter((workflow) => workflow.dispatchable && workflow.autoBuild !== false && workflow.lane !== "ceo" && workflow.lane !== "goal")
-    .map((workflow) => ({
-      workflowId: workflow.workflowId,
-      lane: workflow.lane,
-      priority: workflow.priority,
-      dependencies: workflow.dependencies
-    }));
 }
 
 export function takyonLaneByWorkflow() {

@@ -36,9 +36,9 @@ export async function getCompanyBuildInput(companyId: string) {
   const sql = db();
   const rows = await sql<CompanyBuildInput[]>`
     SELECT b.id, b.name, b.slug, cs.public_pitch,
-           COALESCE(NULLIF(cs.config->>'customer', ''), NULLIF(cs.config#>>'{foundation,output,target_customer}', '')) AS customer,
-           COALESCE(NULLIF(cs.config->>'pain', ''), NULLIF(cs.config#>>'{foundation,output,pain}', '')) AS pain,
-           COALESCE(NULLIF(cs.config->>'offer', ''), NULLIF(cs.config#>>'{foundation,output,offer}', '')) AS offer,
+           NULLIF(cs.config->>'customer', '') AS customer,
+           NULLIF(cs.config->>'pain', '') AS pain,
+           NULLIF(cs.config->>'offer', '') AS offer,
            cs.config->>'template' AS template
     FROM businesses b
     LEFT JOIN company_sites cs ON cs.business_id = b.id
@@ -48,7 +48,7 @@ export async function getCompanyBuildInput(companyId: string) {
   return rows[0] ?? null;
 }
 
-export async function ensureGeneratedAppFoundation(companyId: string) {
+export async function ensureGeneratedAppRails(companyId: string) {
   const sql = db();
   const productAi = getProductAiPolicyEnv();
   await sql.begin(async (tx) => {
@@ -113,7 +113,7 @@ export async function ensureGeneratedAppFoundation(companyId: string) {
         12000,
         2200,
         3000000,
-        '{"source":"default_v3_foundation","tier":"frontier_default"}'::jsonb
+        '{"source":"default_generated_app_rails","tier":"frontier_default"}'::jsonb
       )
       ON CONFLICT (business_id, purpose) DO UPDATE SET
         provider = EXCLUDED.provider,

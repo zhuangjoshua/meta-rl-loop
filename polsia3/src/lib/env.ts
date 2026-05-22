@@ -150,20 +150,6 @@ export function getArgonRuntimeEnv() {
   };
 }
 
-export function getLocalFoundationEnv() {
-  loadLocalSecrets();
-  return {
-    TAVILY_API_KEY: process.env.TAVILY_API_KEY?.trim() || "",
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY?.trim() || "",
-    OPENAI_API_KEY: process.env.OPENAI_API_KEY?.trim() || "",
-    ARGON_FOUNDATION_MODEL:
-      process.env.ARGON_FOUNDATION_MODEL?.trim() ||
-      process.env.ARGON_CEO_MODEL?.trim() ||
-      process.env.ARGON_PRODUCT_AI_MODEL?.trim() ||
-      "claude-opus-4-7"
-  };
-}
-
 export function getProductAiPolicyEnv() {
   loadLocalSecrets();
   const explicitProvider = process.env.ARGON_PRODUCT_AI_PROVIDER?.trim();

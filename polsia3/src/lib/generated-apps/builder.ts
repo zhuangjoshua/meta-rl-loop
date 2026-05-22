@@ -8,7 +8,7 @@ import { writeGeneratedAppTemplate } from "./template";
 import {
   createGeneratedAppDeployment,
   createGeneratedAppBuild,
-  ensureGeneratedAppFoundation,
+  ensureGeneratedAppRails,
   ensureProjectAiProxyKey,
   finishGeneratedAppBuild,
   getCompanyBuildInput,
@@ -146,7 +146,7 @@ export async function buildGeneratedWebsite(input: { companyId: string; workflow
     throw new Error("Company not found for generated app build.");
   }
 
-  await ensureGeneratedAppFoundation(input.companyId);
+  await ensureGeneratedAppRails(input.companyId);
   const projectAiKey = await ensureProjectAiProxyKey(input.companyId);
   const appEnv = getAppEnv();
   const workspaceRoot = path.join(process.cwd(), ".takyon", "generated", company.id);
@@ -301,7 +301,7 @@ export async function buildAndDeployExistingGeneratedApp(input: {
     throw new Error("Company not found for generated app build.");
   }
 
-  await ensureGeneratedAppFoundation(input.companyId);
+  await ensureGeneratedAppRails(input.companyId);
   const projectAiKey = await ensureProjectAiProxyKey(input.companyId);
   const appEnv = getAppEnv();
   const manifest = await readExistingManifest(input.sourceDir);

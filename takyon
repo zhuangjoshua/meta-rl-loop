@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+# The outer Takyon workspace owns runtime state. This keeps Hermes cron,
+# control state, and business memory in one visible place.
+export TAKYON_HOME="${TAKYON_HOME:-$ROOT/.takyon}"
+
+cd "$ROOT/hermes-agent-main"
+exec ./takyon "$@"

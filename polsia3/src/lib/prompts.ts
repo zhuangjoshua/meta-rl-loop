@@ -2,7 +2,6 @@ import { db } from "./db";
 
 export const requiredPromptSeeds = [
   ["ceo_wakeup", "CEO Wakeup"],
-  ["initial_foundation", "Initial Foundation"],
   ["business_plan", "Business Plan"],
   ["market_research", "Market Research"],
   ["workflow_skill_envelope", "Workflow Skill Envelope"],

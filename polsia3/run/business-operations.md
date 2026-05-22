@@ -115,3 +115,24 @@ Acceptance checks:
 
 Known limits:
 - The local Hermes gateway is not kept running by this Codex turn. Run `./takyon vps` for the normal local-Mac VPS loop, or `scripts/start-argon-hermes-runtime.sh` for just the Hermes gateway.
+
+## Hermes-Decided Business Startup
+
+Implemented behavior:
+- Business creation now queues one `ceo_wakeup` job only.
+- The old fixed startup plan expander is removed from creation routes; `/new/takyon/start` and `/api/companies` now call `enqueueBusinessStartup`.
+- The central workflow registry no longer contains a foundation workflow and no workflow depends on a foundation lane.
+- The local worker no longer has a local foundation/market-research branch.
+- The local foundation workflow files were deleted.
+- The CEO prompt tells Hermes to choose bounded runner work from business context, not from a fixed startup sequence.
+- Database migration `0015_remove_foundation_startup_lane.sql` cancels active legacy foundation jobs, moves legacy foundation-lane rows to `ceo`, changes the default lane to `ceo`, and removes foundation from the lane check.
+- `AGENTS.md` now states that new businesses create business context, workspace/filesystem, cron/watch rows, and a Hermes CEO wakeup only.
+
+Acceptance checks:
+- Source search under `src/` and `scripts/` finds no active `foundation` workflow id, dependency, local foundation fallback, startup expander, or foundation env/model setting.
+- Outer `./takyon --help` launches Hermes Takyon, not the removed polsia3 launcher.
+- Outer `./takyon --json cron list` succeeds and reads the outer `.takyon` state.
+
+Known limits:
+- This does not rename historical database migrations already applied in old databases; migration `0015` cleans live state forward.
+- Generated-app rails still create plan, entitlement, wallet, and proxy-key records when a build or app runtime lane needs them. That is deterministic product plumbing, not business judgment or startup sequencing.

@@ -337,6 +337,15 @@ export async function runConversationWatch(input: { businessId: string; profileI
   `;
   const summary = await getBusinessConversationSummary(input.businessId);
   const unresolved = await listUnresolvedBusinessConversationMessages(input.businessId, 8);
+  const ceoWakeupJob = policy.enabled && summary.unresolved_messages > 0
+    ? await queueResponseAwareCeoWakeup({
+        businessId: input.businessId,
+        profileId: input.profileId ?? null,
+        sourceWorkflowId: "conversation_watch",
+        reason: "unresolved_inbound_messages_detected_by_conversation_watch",
+        unresolvedMessages: summary.unresolved_messages
+      })
+    : null;
   const content = [
     "# Conversation Watch",
     "",
@@ -359,7 +368,12 @@ export async function runConversationWatch(input: { businessId: string; profileI
     "## Adapter Notes",
     "- Community/forum target URLs are tracked per business as watched threads.",
     "- This workflow normalizes known inbound rows. Platform-specific reply fetchers can add messages to the same tables.",
-    "- Missing adapter evidence means unknown, not no replies."
+    "- Missing adapter evidence means unknown, not no replies.",
+    "",
+    "## CEO Handoff",
+    ceoWakeupJob
+      ? `- Queued CEO wakeup: ${ceoWakeupJob.id}`
+      : "- No CEO wakeup queued."
   ].join("\n");
 
   const document = await upsertBusinessDocument({
@@ -378,10 +392,22 @@ export async function runConversationWatch(input: { businessId: string; profileI
     kind: "conversation_watch.completed",
     subjectType: "business_document",
     subjectId: document.id,
-    payload: { summary, community_threads: communityThreads, inbound_email_messages: inboundEmailMessages }
+    payload: {
+      summary,
+      community_threads: communityThreads,
+      inbound_email_messages: inboundEmailMessages,
+      ceo_wakeup_job_id: ceoWakeupJob?.id ?? null
+    }
   });
 
-  return { status: "completed" as const, summary, communityThreads, inboundEmailMessages, documentId: document.id };
+  return {
+    status: "completed" as const,
+    summary,
+    communityThreads,
+    inboundEmailMessages,
+    documentId: document.id,
+    ceoWakeupJobId: ceoWakeupJob?.id ?? null
+  };
 }
 
 async function queueConversationWatch(input: { businessId: string; profileId?: string | null; reason: string; sourceWorkflowId?: string | null }) {
@@ -400,6 +426,29 @@ async function queueConversationWatch(input: { businessId: string; profileId?: s
   });
 }
 
+async function queueResponseAwareCeoWakeup(input: {
+  businessId: string;
+  profileId?: string | null;
+  reason: string;
+  sourceWorkflowId?: string | null;
+  unresolvedMessages: number;
+}) {
+  return enqueueWorkflowJob({
+    companyId: input.businessId,
+    profileId: input.profileId ?? null,
+    workflowId: "ceo_wakeup",
+    lane: "ceo",
+    priority: 92,
+    maxAttempts: 1,
+    payload: {
+      source: "response_aware_distribution",
+      reason: input.reason,
+      source_workflow_id: input.sourceWorkflowId ?? null,
+      unresolved_messages: input.unresolvedMessages
+    }
+  });
+}
+
 export async function preflightResponseAwareDistribution(input: {
   businessId: string;
   profileId?: string | null;
@@ -410,18 +459,12 @@ export async function preflightResponseAwareDistribution(input: {
 
   const summary = await getBusinessConversationSummary(input.businessId);
   if (summary.unresolved_messages > 0) {
-    await enqueueWorkflowJob({
-      companyId: input.businessId,
+    await queueResponseAwareCeoWakeup({
+      businessId: input.businessId,
       profileId: input.profileId ?? null,
-      workflowId: "ceo_wakeup",
-      lane: "ceo",
-      priority: 92,
-      maxAttempts: 1,
-      payload: {
-        source: "response_aware_distribution",
-        reason: "unresolved_inbound_messages",
-        source_workflow_id: input.workflowId
-      }
+      reason: "unresolved_inbound_messages",
+      sourceWorkflowId: input.workflowId,
+      unresolvedMessages: summary.unresolved_messages
     });
     return {
       status: "blocked" as const,

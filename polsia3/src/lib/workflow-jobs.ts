@@ -1,12 +1,11 @@
 import { db } from "./db";
 import { createEvent } from "./events";
 import { toJson } from "./json";
-import { takyonBuildCompanyLanes, takyonDispatchableWorkflowIds } from "./takyon-registry";
+import { takyonDispatchableWorkflowIds } from "./takyon-registry";
 
 export type WorkflowJobStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "cancelled";
 
 export type WorkflowLane =
-  | "foundation"
   | "website"
   | "product_backend"
   | "product_ui"
@@ -48,8 +47,6 @@ export type WorkflowJobRow = {
 function postgresTextArrayLiteral(values: string[]) {
   return `{${values.map((value) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
 }
-
-export const buildCompanyLanes = takyonBuildCompanyLanes();
 
 export const workerDispatchableWorkflowIds = takyonDispatchableWorkflowIds();
 
@@ -117,7 +114,7 @@ export async function enqueueSoraSyncJob(input: {
     profileId: input.profileId ?? null,
     workflowId: "meta_seedance",
     lane: "meta_seedance",
-    dependencies: ["foundation"],
+    dependencies: [],
     priority: 55,
     maxAttempts: 1,
     runAfter: input.runAfter ?? new Date(Date.now() + 2 * 60 * 1000),
@@ -202,34 +199,28 @@ export async function enqueueWorkflowJob(input: {
   return rows[0];
 }
 
-export async function enqueueBuildCompanyPlan(input: {
+export async function enqueueBusinessStartup(input: {
   companyId: string;
   profileId: string;
   taskId?: string | null;
   brief: Record<string, unknown>;
 }) {
-  const jobs: WorkflowJobRow[] = [];
-  const template = typeof input.brief.template === "string" ? input.brief.template.trim() : "";
-  for (const lane of buildCompanyLanes) {
-    jobs.push(
-      await enqueueWorkflowJob({
-        companyId: input.companyId,
-        profileId: input.profileId,
-        taskId: input.taskId ?? null,
-        workflowId: lane.workflowId,
-        lane: lane.lane,
-        priority: lane.priority,
-        dependencies: lane.dependencies,
-        payload: {
-          brief: input.brief,
-          template,
-          independent_lane: lane.dependencies.length <= 1,
-          product_failure_must_not_block: ["website", "x_social", "meta_seedance", "community", "outreach"].includes(lane.lane)
-        }
-      })
-    );
-  }
-  return jobs;
+  const job = await enqueueWorkflowJob({
+    companyId: input.companyId,
+    profileId: input.profileId,
+    taskId: input.taskId ?? null,
+    workflowId: "ceo_wakeup",
+    lane: "ceo",
+    priority: 110,
+    maxAttempts: 1,
+    dependencies: [],
+    payload: {
+      source: "business_startup",
+      brief: input.brief,
+      operator_instruction: `A new business was created. Inspect the business filesystem, choose the right skills from context, and decide the first bounded work. Do not follow a fixed startup lane list.`
+    }
+  });
+  return [job];
 }
 
 export async function listWorkflowJobs(companyId: string, limit = 50) {

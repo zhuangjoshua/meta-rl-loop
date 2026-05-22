@@ -357,7 +357,7 @@ export async function runCeoReasoning(input: { businessId: string }) {
     "Do not claim vendor side effects unless listed as completed.",
     "",
     "Optional bounded workflow actions:",
-    "If deterministic work should run next, append one final fenced JSON block. The runner validates capabilities and queues missing workflow dependencies first.",
+    "If bounded runner work should run next, append one final fenced JSON block. The runner validates capabilities and records receipts; do not invent a fixed startup sequence.",
     "Product/value delivery and outreach/demand creation are standing obligations. Do not use planning-only reviews as substitutes for missing product, site, checkout, auth, or distribution work.",
     "Choose at most four workflow ids from the central registry below:",
     ...ceoActionWorkflowSpecs().map(
@@ -365,7 +365,7 @@ export async function runCeoReasoning(input: { businessId: string }) {
         `- ${workflow.workflowId}: ${workflow.description} (depends: ${workflow.dependencies.length ? workflow.dependencies.join(", ") : "none"})`
     ),
     "Avoid recommending a workflow if a fresh completed or active version is already visible in jobs/documents/workspace.",
-    "The JSON shape is: {\"next_actions\":[{\"workflow_id\":\"foundation\",\"reason\":\"short evidence-grounded reason\"}]}",
+    "The JSON shape is: {\"next_actions\":[{\"workflow_id\":\"website_build_deploy\",\"reason\":\"short evidence-grounded reason\"}]}",
     "Use {\"next_actions\":[]} when no business skill should be queued."
   ].join("\n");
 

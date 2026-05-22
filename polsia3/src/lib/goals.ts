@@ -85,134 +85,126 @@ type GoalStrategy = {
 };
 
 const goalActionCatalog: Record<string, GoalActionConfig> = {
-  foundation: {
-    workflowId: "foundation",
-    lane: "foundation",
-    priority: 100,
-    dependencies: [],
-    capabilityAll: ["tavily"],
-    capabilityAny: ["anthropic", "openai"]
-  },
   website_build_deploy: {
     workflowId: "website_build_deploy",
     lane: "website",
     priority: 94,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityKey: "vercel"
   },
   product_backend: {
     workflowId: "product_backend",
     lane: "product_backend",
     priority: 76,
-    dependencies: ["foundation", "website_build_deploy"],
+    dependencies: ["website_build_deploy"],
     capabilityKey: "anthropic"
   },
   product_ui: {
     workflowId: "product_ui",
     lane: "product_ui",
     priority: 75,
-    dependencies: ["foundation", "website_build_deploy", "product_backend"],
+    dependencies: ["website_build_deploy", "product_backend"],
     capabilityKey: "anthropic"
   },
   generated_app_auth: {
     workflowId: "generated_app_auth",
     lane: "generated_app_auth",
     priority: 73,
-    dependencies: ["foundation"]
+    dependencies: []
   },
   generated_app_users_entitlements: {
     workflowId: "generated_app_users_entitlements",
     lane: "generated_app_users_entitlements",
     priority: 72,
-    dependencies: ["foundation"]
+    dependencies: []
   },
   stripe_setup: {
     workflowId: "stripe_setup",
     lane: "stripe",
     priority: 90,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityKey: "stripe"
   },
   ai_gateway_setup: {
     workflowId: "ai_gateway_setup",
     lane: "ai_gateway",
     priority: 70,
-    dependencies: ["foundation"]
+    dependencies: []
   },
   community_research: {
     workflowId: "community_research",
     lane: "community",
     priority: 85,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityKey: "tavily"
   },
   outreach_copy: {
     workflowId: "outreach_copy",
     lane: "outreach",
     priority: 84,
-    dependencies: ["foundation", "community_research"]
+    dependencies: ["community_research"]
   },
   business_marketing_context: {
     workflowId: "business_marketing_context",
     lane: "outreach",
     priority: 88,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityAny: ["anthropic", "openai"]
   },
   business_search_visibility: {
     workflowId: "business_search_visibility",
     lane: "website",
     priority: 77,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityAny: ["anthropic", "openai"]
   },
   business_conversion_review: {
     workflowId: "business_conversion_review",
     lane: "website",
     priority: 76,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityAny: ["anthropic", "openai"]
   },
   business_product_design: {
     workflowId: "business_product_design",
     lane: "website",
     priority: 89,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityAny: ["anthropic", "openai"]
   },
   business_content_engine: {
     workflowId: "business_content_engine",
     lane: "outreach",
     priority: 75,
-    dependencies: ["foundation", "business_marketing_context"],
+    dependencies: ["business_marketing_context"],
     capabilityAny: ["anthropic", "openai"]
   },
   business_outreach_pipeline: {
     workflowId: "business_outreach_pipeline",
     lane: "outreach",
     priority: 83,
-    dependencies: ["foundation", "community_research", "business_marketing_context"],
+    dependencies: ["community_research", "business_marketing_context"],
     capabilityAny: ["anthropic", "openai"]
   },
   business_paid_media_review: {
     workflowId: "business_paid_media_review",
     lane: "meta_seedance",
     priority: 70,
-    dependencies: ["foundation", "business_marketing_context"],
+    dependencies: ["business_marketing_context"],
     capabilityAny: ["anthropic", "openai"]
   },
   business_measurement_plan: {
     workflowId: "business_measurement_plan",
     lane: "website",
     priority: 74,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityAny: ["anthropic", "openai"]
   },
   x_social: {
     workflowId: "x_social",
     lane: "x_social",
     priority: 78,
-    dependencies: ["foundation"],
+    dependencies: [],
     capabilityKey: "x_posting"
   },
   ceo_wakeup: {
@@ -783,7 +775,6 @@ function desiredActions(state: FirstCustomerState, strategy: Record<string, unkn
   const noDistribution = state.counts.social_post_count === 0 && state.counts.outreach_event_count === 0;
 
   if (noProduct) {
-    add("foundation", "goal_requires_product_foundation");
     add("business_marketing_context", "goal_requires_clear_positioning");
     add("business_product_design", "goal_requires_web_and_app_design_brief");
     add("website_build_deploy", "goal_requires_live_offer");
@@ -850,7 +841,7 @@ function hardBlockers(state: FirstCustomerState, capabilities: Map<string, ToolC
   const noTargets = state.counts.lead_count < 10 && state.counts.community_target_count < 10;
 
   if (noProduct) {
-    if (needsProductBuild && !tavily?.canRun) blockers.push(tavily?.reason || "Tavily research is unavailable for the foundation lane.");
+    if (needsProductBuild && !tavily?.canRun) blockers.push(tavily?.reason || "Tavily research is unavailable for market/customer research.");
     if (needsDeployment && !vercel?.canRun) blockers.push(vercel?.reason || "Vercel deployment is unavailable.");
     if (needsProductBuild && !anthropic?.canRun) blockers.push(anthropic?.reason || "Anthropic model calls are unavailable for the product/surface builder.");
     return blockers;

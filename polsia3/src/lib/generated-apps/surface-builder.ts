@@ -191,7 +191,7 @@ function surfacePrompt(input: {
         ].join("\n")
       : "",
     "",
-    "Foundation/research/pricing/auth context:",
+    "Business/research/pricing/auth context:",
     formatSurfaceContext(input.context),
     ...repair,
     "",

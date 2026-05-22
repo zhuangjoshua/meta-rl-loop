@@ -14,7 +14,7 @@ import { runClaudeSdkProductLane } from "../src/lib/generated-apps/agent-builder
 import { buildGeneratedWebsite } from "../src/lib/generated-apps/builder";
 import { ensureGeneratedAppPaymentLink } from "../src/lib/generated-apps/commerce";
 import { runCustomerOpsWatch } from "../src/lib/generated-apps/customer-ops";
-import { ensureGeneratedAppFoundation } from "../src/lib/generated-apps/records";
+import { ensureGeneratedAppRails } from "../src/lib/generated-apps/records";
 import { runGetFirstCustomerGoal } from "../src/lib/goals";
 import { createInboxMessage } from "../src/lib/inbox";
 import { createSoraCreative, syncSoraCreative } from "../src/lib/media-generation";
@@ -24,7 +24,6 @@ import { preflightCapabilityGroups } from "../src/lib/tool-availability";
 import { recordWorkflowOutcomeMemory } from "../src/lib/business-learning";
 import { syncBusinessWorkspace } from "../src/lib/business-workspace";
 import { takyonCapabilityGroups } from "../src/lib/takyon-registry";
-import { runInitialFoundation } from "../src/lib/workflows/foundation";
 import {
   claimWorkflowJobs,
   completeWorkflowJob as completeWorkflowJobRecord,
@@ -263,31 +262,6 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
   });
 
   try {
-    if (job.workflow_id === "foundation") {
-      const foundation = await runInitialFoundation({
-        companyId: job.business_id,
-        profileId: job.profile_id,
-        payload: job.payload
-      });
-      await createAgentRunStep({
-        runId: run.id,
-        stepIndex: 1,
-        toolName: "foundation.plan_and_research",
-        output: foundation
-      });
-      await ensureGeneratedAppFoundation(job.business_id);
-      const generatedAppFoundation = { status: "completed", plan_policies: "ensured", ai_wallet: "ensured" };
-      await createAgentRunStep({
-        runId: run.id,
-        stepIndex: 2,
-        toolName: "generated_app.economics_foundation",
-        output: generatedAppFoundation
-      });
-      const output = { ...foundation, generated_app_foundation: true };
-      await finishAgentRun({ runId: run.id, status: "completed", output });
-      return completeWorkflowJob({ jobId: job.id, status: "completed", result: output });
-    }
-
     if (job.workflow_id === "website_build_deploy") {
       const result = await buildGeneratedWebsite({
         companyId: job.business_id,
@@ -366,7 +340,7 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
     }
 
     if (job.workflow_id === "ai_gateway_setup") {
-      await ensureGeneratedAppFoundation(job.business_id);
+      await ensureGeneratedAppRails(job.business_id);
       const output = { projectAiPolicy: "ready", gateway: "/api/ai-gateway/messages" };
       await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "ai_gateway.ready", output });
       await finishAgentRun({ runId: run.id, status: "completed", output });
@@ -515,7 +489,7 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
     }
 
     if (job.workflow_id === "generated_app_users_entitlements") {
-      await ensureGeneratedAppFoundation(job.business_id);
+      await ensureGeneratedAppRails(job.business_id);
       const sql = db();
       const rows = await sql<{ plan_count: number; wallet_count: number; proxy_key_count: number }[]>`
         SELECT
@@ -530,13 +504,13 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
         runId: run.id,
         status: ready ? "completed" : "blocked",
         output: result,
-        error: ready ? null : "Generated app user/entitlement foundation is incomplete."
+        error: ready ? null : "Generated app user/entitlement rails are incomplete."
       });
       return completeWorkflowJob({
         jobId: job.id,
         status: ready ? "completed" : "blocked",
         result,
-        error: ready ? null : "Generated app user/entitlement foundation is incomplete."
+        error: ready ? null : "Generated app user/entitlement rails are incomplete."
       });
     }
 

@@ -105,9 +105,9 @@ function formatPlans(plans: PlanContext[]) {
 }
 
 function contextForPrompt(context: GeneratedAppSurfaceContext | null | undefined) {
-  if (!context) return "No foundation context was loaded.";
+  if (!context) return "No business context was loaded.";
   return [
-    "Foundation mission document:",
+    "Mission document:",
     context.mission || "No non-seeded Mission document found.",
     "",
     "Market research document:",
@@ -588,7 +588,7 @@ function buildPrompt(input: {
     "",
     `Workflow: ${workflowLabel}`,
     "",
-    "Foundation, research, pricing, auth, and economics context:",
+    "Business, research, pricing, auth, and economics context:",
     contextForPrompt(input.context),
     "",
     "Company:",
@@ -665,7 +665,7 @@ function buildSingleFilePrompt(input: {
       "Use CSS classes only; no inline style objects.",
       "No in-page hash links.",
       "It must include clear links to /signup and /product.",
-      "It must use the foundation Mission and Market Research context, including pricing and product positioning.",
+      "It must use the Mission and Market Research context, including pricing and product positioning.",
       "Use specific customer-facing copy from the company pitch, with a compact hero, proof/market pain, pricing, product workflow, and CTA sections."
     ].join("\n"),
     "src/app/product/page.tsx": [
@@ -705,12 +705,12 @@ function buildSingleFilePrompt(input: {
     "Existing deterministic rails own auth/session, entitlements, AI gateway execution, usage limits, persistence, receipts, and deployment.",
     "The product page must POST to /api/product/run; that route already exists and must not be regenerated.",
     "The product module must export productModule with productName, category, actionLabel, inputLabel, inputPlaceholder, resultLabel, systemPrompt, and outputInstructions.",
-    "Use the foundation context below; do not ignore pricing, mission, market research, auth, or checkout routes.",
+    "Use the business context below; do not ignore pricing, mission, market research, auth, or checkout routes.",
     "",
     targetGuide[input.targetFile],
     input.previousIssue ? `Previous rejection for this file: ${input.previousIssue}` : "",
     "",
-    "Foundation, research, pricing, auth, and economics context:",
+    "Business, research, pricing, auth, and economics context:",
     contextForPrompt(input.context),
     "",
     "Company:",

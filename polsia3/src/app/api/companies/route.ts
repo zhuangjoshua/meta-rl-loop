@@ -4,7 +4,7 @@ import { createCompany, createCompanySchema, listCompaniesForProfile } from "@/l
 import { jsonOk } from "@/lib/http";
 import { observedRequest } from "@/lib/observability";
 import { createTask } from "@/lib/tasks";
-import { enqueueBuildCompanyPlan } from "@/lib/workflow-jobs";
+import { enqueueBusinessStartup } from "@/lib/workflow-jobs";
 
 export async function GET(request: Request) {
   return observedRequest({ request, route: "/api/companies", action: "companies.list" }, async (observation) => {
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       category: "build_company",
       priority: 100
     });
-    const jobs = await enqueueBuildCompanyPlan({
+    const jobs = await enqueueBusinessStartup({
       companyId: company.id,
       profileId: profile.id,
       taskId: task.id,

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireProfile } from "@/lib/auth";
 import { createCompany } from "@/lib/companies";
 import { createTask } from "@/lib/tasks";
-import { enqueueBuildCompanyPlan } from "@/lib/workflow-jobs";
+import { enqueueBusinessStartup } from "@/lib/workflow-jobs";
 
 const startTakyonCompanySchema = z.object({
   businessName: z.preprocess((value) => (value === null || value === "" ? undefined : value), z.string().trim().max(120).optional()),
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
     category: "build_company",
     priority: 100
   });
-  await enqueueBuildCompanyPlan({
+  await enqueueBusinessStartup({
     companyId: company.id,
     profileId: profile.id,
     taskId: task.id,

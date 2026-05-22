@@ -87,7 +87,7 @@ const envToolDefinitions: EnvToolDefinition[] = [
     label: "Tavily web research",
     category: "research",
     envNames: ["TAVILY_API_KEY"],
-    runnerPaths: ["src/lib/workflows/foundation.ts", "src/lib/community.ts"]
+    runnerPaths: ["src/lib/community.ts"]
   },
   {
     key: "stripe",
