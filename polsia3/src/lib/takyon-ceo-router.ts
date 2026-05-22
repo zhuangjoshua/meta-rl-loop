@@ -56,6 +56,55 @@ const actionCatalog = {
     priority: 81,
     dependencies: ["foundation"]
   },
+  marketingContext: {
+    workflowId: "business_marketing_context",
+    lane: "outreach",
+    title: "Refresh business marketing context",
+    priority: 79,
+    dependencies: ["foundation"]
+  },
+  searchVisibility: {
+    workflowId: "business_search_visibility",
+    lane: "website",
+    title: "Review search visibility",
+    priority: 78,
+    dependencies: ["foundation"]
+  },
+  conversionReview: {
+    workflowId: "business_conversion_review",
+    lane: "website",
+    title: "Review conversion",
+    priority: 77,
+    dependencies: ["foundation"]
+  },
+  contentEngine: {
+    workflowId: "business_content_engine",
+    lane: "outreach",
+    title: "Build content engine",
+    priority: 76,
+    dependencies: ["foundation", "business_marketing_context"]
+  },
+  outreachPipeline: {
+    workflowId: "business_outreach_pipeline",
+    lane: "outreach",
+    title: "Build outreach pipeline",
+    priority: 75,
+    dependencies: ["foundation", "community_research", "business_marketing_context"]
+  },
+  paidMediaReview: {
+    workflowId: "business_paid_media_review",
+    lane: "meta_seedance",
+    title: "Review paid media",
+    priority: 74,
+    dependencies: ["foundation", "business_marketing_context"]
+  },
+  measurementPlan: {
+    workflowId: "business_measurement_plan",
+    lane: "website",
+    title: "Create measurement plan",
+    priority: 73,
+    dependencies: ["foundation"]
+  },
   ceo: {
     workflowId: "ceo_wakeup",
     lane: "ceo",
@@ -93,6 +142,27 @@ function requestedActions(body: string) {
   if (hasAny(text, [/\b(x|twitter|tweet|post)\b/, /\bpublish\b.*\bpost\b/])) actions.push(actionCatalog.x);
   if (hasAny(text, [/\b(sora|ugc|ad creative|video|creative)\b/, /\bads?\b.*\b(generate|make|create|call|run)\b/])) {
     actions.push(actionCatalog.sora);
+  }
+  if (hasAny(text, [/\b(marketing context|positioning|icp|messaging|business skills?)\b/])) {
+    actions.push(actionCatalog.marketingContext);
+  }
+  if (hasAny(text, [/\b(seo|geo|search visibility|llms\.?txt|schema|citability|crawler|rankings?)\b/])) {
+    actions.push(actionCatalog.searchVisibility);
+  }
+  if (hasAny(text, [/\b(cro|conversion|signup|onboarding|paywall|funnel|landing page audit|pricing page)\b/])) {
+    actions.push(actionCatalog.conversionReview);
+  }
+  if (hasAny(text, [/\b(content engine|content strategy|copywriting|blog|lead magnet|free tool|editorial)\b/])) {
+    actions.push(actionCatalog.marketingContext, actionCatalog.contentEngine);
+  }
+  if (hasAny(text, [/\b(outreach pipeline|sales enablement|revops|cold email sequence|sequence draft)\b/])) {
+    actions.push(actionCatalog.marketingContext, actionCatalog.community, actionCatalog.outreachPipeline);
+  }
+  if (hasAny(text, [/\b(paid media|meta ads report|ads? review|ad fatigue|budget recommendation|roas|cpa|ctr)\b/])) {
+    actions.push(actionCatalog.marketingContext, actionCatalog.paidMediaReview);
+  }
+  if (hasAny(text, [/\b(analytics|measurement|utm|event taxonomy|pixel|capi|a\/b test|ab test|experiment metrics)\b/])) {
+    actions.push(actionCatalog.measurementPlan);
   }
   if (!describesOutreachCampaign && hasAny(text, [/\b(community|reddit|indie hackers|forums?|targets?)\b/])) actions.push(actionCatalog.community);
   if (!describesOutreachCampaign && hasAny(text, [/\b(leads?|outreach|prospects?|email copy|sales)\b/])) {
@@ -422,7 +492,7 @@ export async function handleTakyonCeoChat(input: {
           "Do not mention the local Mac worker or local machine details in normal operator chat. Say background runner or queued runner instead, unless the operator explicitly asks about runtime architecture.",
           "If the operator asks for an action, explain the bounded job that was queued and what will execute it.",
           "For website edits, say the background runner will run the generated-app surface builder; do not imply the chat directly edited files.",
-          "For Meta/ads, say Sora creative display only; no Meta launch/spend in v0.",
+          "For Meta/ads, say paid-media review and Sora creative are planning/display only; no Meta launch/spend/upload/pause/budget mutation in v0.",
           "If a requested capability is not implemented, state it plainly."
         ].join("\n")
       },

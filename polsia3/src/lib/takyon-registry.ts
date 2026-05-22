@@ -19,6 +19,7 @@ export type TakyonWorkflowSpec = {
   repeatable?: boolean;
   retryOnFailure?: boolean;
   dispatchable?: boolean;
+  autoBuild?: boolean;
   maxAttempts?: number;
   description: string;
 };
@@ -155,6 +156,90 @@ export const takyonWorkflowRegistry: TakyonWorkflowSpec[] = [
     description: "Write outbound/community copy grounded in current research."
   },
   {
+    workflowId: "business_marketing_context",
+    lane: "outreach",
+    priority: 68,
+    dependencies: ["foundation"],
+    stages: ["distribution", "conversion", "learning"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create a Takyon-owned shared marketing context from explicit business evidence."
+  },
+  {
+    workflowId: "business_search_visibility",
+    lane: "website",
+    priority: 67,
+    dependencies: ["foundation"],
+    stages: ["distribution", "conversion", "learning"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create an inspectable SEO/GEO visibility scorecard and backlog without publishing changes."
+  },
+  {
+    workflowId: "business_conversion_review",
+    lane: "website",
+    priority: 62,
+    dependencies: ["foundation"],
+    stages: ["conversion", "learning", "recovery"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Review the visible funnel and write a CRO experiment backlog."
+  },
+  {
+    workflowId: "business_content_engine",
+    lane: "outreach",
+    priority: 61,
+    dependencies: ["foundation", "business_marketing_context"],
+    stages: ["distribution", "conversion"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create content pillars, page briefs, social angles, and draft copy from business context."
+  },
+  {
+    workflowId: "business_outreach_pipeline",
+    lane: "outreach",
+    priority: 60,
+    dependencies: ["foundation", "community_research", "business_marketing_context"],
+    stages: ["distribution", "conversion"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create a no-sending outbound and sales pipeline plan from visible leads and targets."
+  },
+  {
+    workflowId: "business_paid_media_review",
+    lane: "meta_seedance",
+    priority: 59,
+    dependencies: ["foundation", "business_marketing_context"],
+    stages: ["distribution", "conversion", "learning"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Review paid-media readiness and draft planning-only creative/ad recommendations without Meta mutation."
+  },
+  {
+    workflowId: "business_measurement_plan",
+    lane: "website",
+    priority: 58,
+    dependencies: ["foundation"],
+    stages: ["conversion", "learning"],
+    capabilityAny: ["anthropic", "openai"],
+    repeatable: true,
+    dispatchable: true,
+    autoBuild: false,
+    description: "Create an analytics, attribution, experiment, and Pixel/CAPI audit plan without sending events."
+  },
+  {
     workflowId: "ceo_wakeup",
     lane: "ceo",
     priority: 110,
@@ -203,7 +288,7 @@ export function takyonDispatchableWorkflowIds() {
 
 export function takyonBuildCompanyLanes() {
   return takyonWorkflowRegistry
-    .filter((workflow) => workflow.dispatchable && workflow.lane !== "ceo" && workflow.lane !== "goal")
+    .filter((workflow) => workflow.dispatchable && workflow.autoBuild !== false && workflow.lane !== "ceo" && workflow.lane !== "goal")
     .map((workflow) => ({
       workflowId: workflow.workflowId,
       lane: workflow.lane,

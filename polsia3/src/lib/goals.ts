@@ -151,6 +151,55 @@ const goalActionCatalog: Record<string, GoalActionConfig> = {
     priority: 84,
     dependencies: ["foundation", "community_research"]
   },
+  business_marketing_context: {
+    workflowId: "business_marketing_context",
+    lane: "outreach",
+    priority: 88,
+    dependencies: ["foundation"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_search_visibility: {
+    workflowId: "business_search_visibility",
+    lane: "website",
+    priority: 77,
+    dependencies: ["foundation"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_conversion_review: {
+    workflowId: "business_conversion_review",
+    lane: "website",
+    priority: 76,
+    dependencies: ["foundation"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_content_engine: {
+    workflowId: "business_content_engine",
+    lane: "outreach",
+    priority: 75,
+    dependencies: ["foundation", "business_marketing_context"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_outreach_pipeline: {
+    workflowId: "business_outreach_pipeline",
+    lane: "outreach",
+    priority: 83,
+    dependencies: ["foundation", "community_research", "business_marketing_context"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_paid_media_review: {
+    workflowId: "business_paid_media_review",
+    lane: "meta_seedance",
+    priority: 70,
+    dependencies: ["foundation", "business_marketing_context"],
+    capabilityAny: ["anthropic", "openai"]
+  },
+  business_measurement_plan: {
+    workflowId: "business_measurement_plan",
+    lane: "website",
+    priority: 74,
+    dependencies: ["foundation"],
+    capabilityAny: ["anthropic", "openai"]
+  },
   x_social: {
     workflowId: "x_social",
     lane: "x_social",
@@ -725,6 +774,7 @@ function desiredActions(state: FirstCustomerState, strategy: Record<string, unkn
 
   if (noProduct) {
     add("foundation", "goal_requires_product_foundation");
+    add("business_marketing_context", "goal_requires_clear_positioning");
     add("website_build_deploy", "goal_requires_live_offer");
     add("product_backend", "goal_requires_customer_workflow");
     add("product_ui", "goal_requires_customer_workflow");
@@ -737,23 +787,34 @@ function desiredActions(state: FirstCustomerState, strategy: Record<string, unkn
 
   if (noCheckout) {
     add("stripe_setup", "goal_requires_paid_checkout");
+    add("business_conversion_review", "goal_requires_checkout_conversion_review", true);
+    add("business_measurement_plan", "goal_requires_checkout_measurement_plan", true);
     return desired;
   }
 
   if (noTargets) {
+    add("business_marketing_context", "goal_needs_icp_and_offer_context", true);
     add("community_research", "goal_needs_specific_targets", true);
+    add("business_outreach_pipeline", "goal_needs_no_sending_outreach_plan", true);
     add("outreach_copy", "goal_needs_targeted_outreach", true);
     return desired;
   }
 
   if (noDistribution) {
+    add("business_content_engine", "goal_needs_content_angles", true);
+    add("business_outreach_pipeline", "goal_needs_first_outreach_plan", true);
     add("outreach_copy", "goal_needs_first_distribution", true);
     add("x_social", "goal_needs_public_launch_signal");
     return desired;
   }
 
+  add("business_conversion_review", "goal_no_conversion_find_conversion_friction", true);
+  add("business_search_visibility", "goal_no_conversion_improve_discoverability", true);
+  add("business_measurement_plan", "goal_no_conversion_measure_next_attempt", true);
   add("website_build_deploy", "goal_no_conversion_refine_offer", true);
   add("community_research", "goal_no_conversion_find_sharper_targets", true);
+  add("business_content_engine", "goal_no_conversion_refresh_content_angles", true);
+  add("business_outreach_pipeline", "goal_no_conversion_refresh_outreach_pipeline", true);
   add("outreach_copy", "goal_no_conversion_rewrite_outreach", true);
   add("x_social", "goal_no_conversion_refresh_launch_post", true);
 

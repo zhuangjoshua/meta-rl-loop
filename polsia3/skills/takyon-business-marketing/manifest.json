@@ -1,0 +1,53 @@
+{
+  "namespace": "takyon-business-marketing",
+  "owner": "takyon-core",
+  "runtime": "external-bhpv3",
+  "policy": {
+    "side_effects": "none",
+    "source": "Copied and adapted from audited marketing, sales, SEO, and ads skill references into Takyon-owned bounded workflows.",
+    "excluded": [
+      "upstream installers and update scripts",
+      "Meta campaign upload, launch, pause, budget, and spend mutation",
+      "cold email sending",
+      "private contact scraping",
+      "global home-directory writes"
+    ]
+  },
+  "skills": [
+    {
+      "id": "takyon-business-marketing/business-marketing-context",
+      "file": "business-marketing-context.md",
+      "workflow_id": "business_marketing_context"
+    },
+    {
+      "id": "takyon-business-marketing/business-search-visibility",
+      "file": "business-search-visibility.md",
+      "workflow_id": "business_search_visibility"
+    },
+    {
+      "id": "takyon-business-marketing/business-conversion-review",
+      "file": "business-conversion-review.md",
+      "workflow_id": "business_conversion_review"
+    },
+    {
+      "id": "takyon-business-marketing/business-content-engine",
+      "file": "business-content-engine.md",
+      "workflow_id": "business_content_engine"
+    },
+    {
+      "id": "takyon-business-marketing/business-outreach-pipeline",
+      "file": "business-outreach-pipeline.md",
+      "workflow_id": "business_outreach_pipeline"
+    },
+    {
+      "id": "takyon-business-marketing/business-paid-media-review",
+      "file": "business-paid-media-review.md",
+      "workflow_id": "business_paid_media_review"
+    },
+    {
+      "id": "takyon-business-marketing/business-measurement-plan",
+      "file": "business-measurement-plan.md",
+      "workflow_id": "business_measurement_plan"
+    }
+  ]
+}

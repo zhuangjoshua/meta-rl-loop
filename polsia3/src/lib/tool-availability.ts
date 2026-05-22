@@ -107,11 +107,10 @@ const envToolDefinitions: EnvToolDefinition[] = [
     docsUrl: "https://postmarkapp.com/developer/user-guide/send-email-with-api"
   },
   {
-    key: "meta_ads",
-    label: "Meta campaign launch/spend",
+    key: "meta_ads_read",
+    label: "Meta Ads read-only credentials",
     category: "distribution",
     envNames: ["META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"],
-    runnerPaths: ["src/lib/meta-ads.ts"],
     docsUrl: "https://developers.facebook.com/docs/marketing-api"
   }
 ];

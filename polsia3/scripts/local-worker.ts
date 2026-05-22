@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeDbConnections } from "../src/lib/db";
 import { createAgentRun, createAgentRunStep, finishAgentRun } from "../src/lib/agent-runs";
+import { isBusinessSkillWorkflowId, runBusinessSkillWorkflow } from "../src/lib/business-skills";
 import { runCeoReasoning } from "../src/lib/ceo";
 import { observeCampaignAndCustomerLearning } from "../src/lib/campaign-learning";
 import { runCommunityResearch } from "../src/lib/community";
@@ -393,6 +394,19 @@ async function handleJob(job: Awaited<ReturnType<typeof claimWorkflowJobs>>[numb
     if (job.workflow_id === "outreach_copy") {
       const result = await runOutreachCopy({ businessId: job.business_id, campaignId: payloadString(job.payload, "campaign_id") });
       await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: "outreach.copy", output: result });
+      await finishAgentRun({ runId: run.id, status: "completed", output: result });
+      return completeWorkflowJob({ jobId: job.id, status: "completed", result });
+    }
+
+    if (isBusinessSkillWorkflowId(job.workflow_id)) {
+      const result = await runBusinessSkillWorkflow({
+        businessId: job.business_id,
+        profileId: job.profile_id,
+        workflowId: job.workflow_id,
+        payload: job.payload,
+        workflowJobId: job.id
+      });
+      await createAgentRunStep({ runId: run.id, stepIndex: 1, toolName: `business_skill.${job.workflow_id}`, output: result });
       await finishAgentRun({ runId: run.id, status: "completed", output: result });
       return completeWorkflowJob({ jobId: job.id, status: "completed", result });
     }

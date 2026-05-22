@@ -45,7 +45,7 @@ Wanted next cron behavior:
 - CEO enqueues those lanes, records a digest/report, then sleeps until the next wake.
 
 Still pending:
-- CEO wakeup does not yet autonomously choose and enqueue improvement/growth lanes on its scheduled run.
+- CEO wakeup can now autonomously choose at most two no-side-effect business-skill workflows, but it still does not autonomously launch product edits, publishing, paid media mutation, outreach sending, or spend.
 - Engagement learning is not implemented; X/media receipts exist, but no recurring metrics fetch/learning loop exists.
 
 ## Verified Dashboard Schedule Visibility - 2026-05-20
@@ -59,3 +59,23 @@ Acceptance checks:
 - `npm run typecheck` passed.
 - Direct dashboard model check for local company `19687d0b-e1d4-4e78-a45c-2d11aa2a2161` returned `cron:ceo_wakeup` with scheduled time `2026-05-21T09:00:00.000Z`.
 - In-app browser verification on `http://localhost:3000/dashboard/companies/19687d0b-e1d4-4e78-a45c-2d11aa2a2161` showed `Next CEO Wakeup next in 19h` in the `In progress` panel with no console errors.
+
+## Verified CEO Business-Skill Selection - 2026-05-22
+
+Implemented:
+- `ceo_wakeup` reports may append a strict JSON `next_actions` block.
+- The app parses only this bounded no-side-effect allowlist:
+  - `business_marketing_context`
+  - `business_search_visibility`
+  - `business_conversion_review`
+  - `business_content_engine`
+  - `business_outreach_pipeline`
+  - `business_paid_media_review`
+  - `business_measurement_plan`
+- The parser ignores unknown workflow ids and limits each wakeup to two queued business-skill jobs.
+- The queue path preflights required model capability and skips workflows with queued/running/completed jobs updated in the last 24 hours.
+- Selection is recorded as `ceo.business_actions_selected`.
+
+Acceptance checks:
+- `npm run typecheck` passed.
+- `npm run build` passed with the existing Turbopack NFT warning.

@@ -4,7 +4,7 @@ import { clearLine, createInterface as createLiveInterface, cursorTo, emitKeypre
 import { stdin as input, stdout as output } from "node:process";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createCompany } from "../src/lib/companies";
 import { getAppEnv, getLocalAuthSeed } from "../src/lib/env";
 import { upsertProfile } from "../src/lib/auth";
@@ -119,7 +119,9 @@ function print(value: unknown, json: boolean) {
   else console.log(JSON.stringify(value, null, 2));
 }
 
-const colorEnabled = output.isTTY && process.env.NO_COLOR !== "1" && process.env.TAKYON_COLOR !== "0";
+const colorEnabled = output.isTTY
+  && process.env.TAKYON_COLOR !== "0"
+  && (process.env.TAKYON_COLOR === "1" || process.env.NO_COLOR !== "1");
 const ansi = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -132,11 +134,31 @@ const ansi = {
   cyan: "\x1b[36m",
   gray: "\x1b[90m",
   brightBlue: "\x1b[94m",
-  brightMagenta: "\x1b[95m"
+  brightMagenta: "\x1b[95m",
+  electricBlue: "\x1b[38;2;0;176;255m"
 };
 
 function color(text: string, code: string) {
   return colorEnabled ? `${code}${text}${ansi.reset}` : text;
+}
+
+function stripAnsi(text: string) {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(text: string) {
+  return stripAnsi(text).length;
+}
+
+function padVisible(text: string, width: number) {
+  return `${text}${" ".repeat(Math.max(0, width - visibleLength(text)))}`;
+}
+
+function truncatePlain(text: string, width: number) {
+  if (width <= 1) return "";
+  if (text.length <= width) return text;
+  if (width <= 3) return text.slice(0, width);
+  return `${text.slice(0, Math.max(1, width - 3))}...`;
 }
 
 function bold(text: string) {
@@ -156,9 +178,32 @@ function frameLine(width = 66) {
 }
 
 function framedText(text: string, width = 66) {
-  const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
+  const plain = stripAnsi(text);
   const padding = Math.max(0, width - plain.length - 4);
   return `${color("|", ansi.gray)} ${text}${" ".repeat(padding)} ${color("|", ansi.gray)}`;
+}
+
+function shellFrameWidth() {
+  const columns = output.columns || 92;
+  return Math.max(64, Math.min(columns - 2, 112));
+}
+
+function inputRule() {
+  return color("-".repeat(shellFrameWidth()), ansi.gray);
+}
+
+function inputPromptLabel(currentBusiness: string | null) {
+  const scope = currentBusiness ? color(currentBusiness, ansi.cyan) : dim("terminal");
+  return `${color("takyon", ansi.brightMagenta)}${dim("/")}${scope}`;
+}
+
+function inputPrompt(currentBusiness: string | null) {
+  void currentBusiness;
+  return `${inputRule()}\n${color(">", ansi.cyan)} `;
+}
+
+function closeInputBox() {
+  if (output.isTTY) console.log(inputRule());
 }
 
 function statusColor(status: string) {
@@ -435,10 +480,7 @@ function slashEntriesFromHarness(commands: TakyonHarnessCommand[]) {
     priorityBand: command.priorityBand,
     requiresBusiness: command.requiresBusiness
   }));
-  return [...builtInSlashCommands, ...skillEntries].sort((left, right) => {
-    if (left.kind !== right.kind) return left.kind === "skill" ? -1 : 1;
-    return left.name.localeCompare(right.name);
-  });
+  return [...builtInSlashCommands, ...skillEntries].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function slashPrefix(line: string) {
@@ -446,40 +488,113 @@ function slashPrefix(line: string) {
   return line.slice(1).trimStart().split(/\s+/)[0]?.toLowerCase() ?? "";
 }
 
-function slashMatches(entries: SlashCommandEntry[], line: string) {
+function visibleSlashEntries(entries: SlashCommandEntry[], currentBusiness: string | null) {
+  return entries.filter((entry) => !entry.requiresBusiness || Boolean(currentBusiness));
+}
+
+function slashMatches(entries: SlashCommandEntry[], line: string, currentBusiness: string | null) {
   const prefix = slashPrefix(line);
-  if (!prefix) return entries;
-  return entries.filter((entry) => entry.name.toLowerCase().startsWith(prefix));
+  const visible = visibleSlashEntries(entries, currentBusiness);
+  if (!prefix) return visible;
+  return visible.filter((entry) => entry.name.toLowerCase().startsWith(prefix));
 }
 
 function renderSlashPalette(entries: SlashCommandEntry[], line: string, currentBusiness: string | null) {
   const prefix = slashPrefix(line);
-  const matches = slashMatches(entries, line);
-  const maxRows = 18;
-  const header = prefix
-    ? `${matches.length} match${matches.length === 1 ? "" : "es"} for /${prefix}`
-    : "slash commands and skills";
-  const context = currentBusiness ? dim(`attached: ${currentBusiness}`) : dim("no business attached");
+  const matches = slashMatches(entries, line, currentBusiness);
+  const visibleCount = visibleSlashEntries(entries, currentBusiness).length;
+  const width = Math.max(58, Math.min((output.columns || 96) - 6, 96));
+  const inner = width - 4;
+  const maxRows = Math.max(5, Math.min(10, (output.rows || 24) - 8));
+  const title = prefix ? `/${prefix}` : "/";
+  const header = `${bold("Takyon")} ${dim("slash")} ${color(title, ansi.cyan)} ${dim(`${matches.length}/${visibleCount}`)}`;
+  const context = currentBusiness
+    ? `${dim("business")} ${color(currentBusiness, ansi.cyan)}`
+    : `${dim("attach")} ${color("/use <business>", ansi.cyan)}`;
+  const hint = currentBusiness
+    ? dim("return runs  tab completes  plain text chats")
+    : dim("business skills appear after /use");
+  const borderTop = color(`.${"-".repeat(width - 2)}.`, ansi.gray);
+  const borderBottom = color(`'${"-".repeat(width - 2)}'`, ansi.gray);
+  const boxLine = (text = "") => `${color("|", ansi.gray)} ${padVisible(text, inner)} ${color("|", ansi.gray)}`;
   const rows = matches.slice(0, maxRows).map((entry) => {
-    const command = color(`/${entry.name}`.padEnd(16), entry.kind === "skill" ? ansi.brightMagenta : ansi.cyan);
+    const command = padVisible(color(`/${entry.name}`, entry.kind === "skill" ? ansi.brightMagenta : ansi.cyan), 16);
     const kind = entry.kind === "skill" ? color("skill", ansi.brightMagenta) : color("control", ansi.gray);
     const scope = entry.requiresBusiness ? color("business", ansi.magenta) : color("global", ansi.gray);
-    const band = entry.priorityBand ? `${color(entry.priorityBand, ansi.cyan)} ` : "";
-    return `  ${command} ${kind} ${scope} ${band}${dim(entry.description)}`;
+    const band = entry.priorityBand ? ` ${color(entry.priorityBand, ansi.cyan)}` : "";
+    const meta = padVisible(`${kind} ${scope}${band}`, 24);
+    const descriptionWidth = Math.max(10, inner - 16 - 1 - 24 - 1);
+    return `${command} ${meta} ${dim(truncatePlain(entry.description, descriptionWidth))}`;
   });
-  if (matches.length > maxRows) rows.push(`  ${dim(`...${matches.length - maxRows} more; keep typing to narrow`)}`);
-  if (!matches.length) rows.push(`  ${color("no matches", ansi.yellow)} ${dim("plain text still chats with Takyon")}`);
-  return [`${tag("slash", ansi.brightMagenta)} ${header} ${context}`, ...rows].join("\n");
+  if (matches.length > maxRows) rows.push(dim(`${matches.length - maxRows} more; keep typing to narrow`));
+  if (!matches.length) {
+    rows.push(`${color("no matches", ansi.yellow)} ${dim(currentBusiness ? "plain text still chats with Takyon" : "try /businesses or /use <business>")}`);
+  }
+  return [
+    borderTop,
+    boxLine(`${header}  ${context}`),
+    boxLine(hint),
+    boxLine(),
+    ...rows.map((row) => boxLine(row)),
+    borderBottom
+  ].join("\n");
 }
 
-function startupGraphic(input: { commandCount: number; uiMode: "compact" | "full" }) {
-  const width = 72;
-  const logo = `${color("TAKYON", ansi.brightMagenta)} ${dim("local CEO harness")}`;
+const defaultMascot = [
+  "    ####        ",
+  "  ########      ",
+  " ##########     ",
+  "###..##..###==> ",
+  " ############   ",
+  "  ########      ",
+  "    ####        ",
+  "   ##  ##       "
+];
+
+async function readTakyonMascot() {
+  const filePath = process.env.TAKYON_MASCOT_FILE?.trim() || path.join(process.cwd(), "harness", "takyon", "mascot.txt");
+  const raw = await readFile(filePath, "utf8").catch(() => null);
+  if (!raw) return defaultMascot;
+  const lines = raw.replace(/\n+$/, "").split(/\r?\n/);
+  return lines.length ? lines : defaultMascot;
+}
+
+function renderMascotLine(line: string, width = 16) {
+  const cells = line.slice(0, width).padEnd(width, " ").split("");
+  return cells.map((cell) => {
+    if (cell === "#" || cell === "@") return color(colorEnabled ? "██" : "##", ansi.electricBlue);
+    if (cell === ".") return color(colorEnabled ? "██" : "##", ansi.cyan);
+    if (cell === "=") return color("==", ansi.cyan);
+    if (cell === ">") return color("=>", ansi.cyan);
+    return "  ";
+  }).join("");
+}
+
+function startupGraphic(input: { commandCount: number; uiMode: "compact" | "full"; mascot: string[] }) {
+  const width = Math.max(92, Math.min(shellFrameWidth(), 112));
+  const wordmark = [
+    " _____     _                      ",
+    "|_   _|_ _| | ___   _  ___  _ __  ",
+    "  | |/ _` | |/ / | | |/ _ \\| '_ \\ ",
+    "  | | (_| |   <| |_| | (_) | | | |",
+    "  |_|\\__,_|_|\\_\\\\__, |\\___/|_| |_|",
+    "                |___/             "
+  ];
+  const logoRows = wordmark.map((line, index) => {
+    const mark = renderMascotLine(input.mascot[index] ?? "");
+    return framedText(`${mark}  ${color(line, ansi.electricBlue)}`, width);
+  });
+  const extraMascotRows = input.mascot.slice(wordmark.length).map((mark) => {
+    return framedText(`${renderMascotLine(mark)}  ${dim(" ")}`, width);
+  });
   return [
     frameLine(width),
-    framedText(`${logo} ${color("ready", ansi.green)}`, width),
-    framedText(`${color("plain text", ansi.cyan)} chats and steers; ${color("/", ansi.brightMagenta)} opens skills`, width),
-    framedText(`${color(String(input.commandCount), ansi.brightMagenta)} slash commands  ${dim(`ui ${input.uiMode}`)}  ${dim("local Mac runtime")}`, width),
+    ...logoRows,
+    ...extraMascotRows,
+    framedText("", width),
+    framedText(`${bold("local CEO harness")} ${color("ready", ansi.green)}  ${dim(process.cwd())}`, width),
+    framedText(`${color("plain text", ansi.cyan)} chats and steers    ${color("/", ansi.brightMagenta)} opens skills    ${color("tab", ansi.cyan)} completes`, width),
+    framedText(`${color(String(input.commandCount), ansi.brightMagenta)} slash commands    ${dim(`ui ${input.uiMode}`)}    ${dim("local Mac runtime")}`, width),
     frameLine(width)
   ].join("\n");
 }
@@ -835,6 +950,7 @@ type LiveSession = {
 };
 
 let suppressLiveWritePrompt = false;
+let beforeLiveWrite: (() => void) | null = null;
 
 function jobSnapshot(job: WorkflowJobRow): LiveJobSnapshot {
   return {
@@ -865,6 +981,7 @@ function liveWrite(rl: LiveReadline, message: string) {
     return;
   }
 
+  beforeLiveWrite?.();
   clearLine(output, 0);
   cursorTo(output, 0);
   output.write(`${text}\n`);
@@ -1808,17 +1925,19 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     readTakyonHarnessSettings(),
     listTakyonHarnessCommands()
   ]);
+  const mascot = await readTakyonMascot();
   const slashEntries = slashEntriesFromHarness(initialHarnessCommands);
+  let currentBusiness: string | null = null;
   const rl = createLiveInterface({
     input,
     output,
     completer: (line: string) => {
       if (!line.startsWith("/")) return [[], line];
-      const completions = slashMatches(slashEntries, line).map((entry) => `/${entry.name}`);
-      return [completions.length ? completions : slashEntries.map((entry) => `/${entry.name}`), line];
+      const visible = visibleSlashEntries(slashEntries, currentBusiness).map((entry) => `/${entry.name}`);
+      const completions = slashMatches(slashEntries, line, currentBusiness).map((entry) => `/${entry.name}`);
+      return [completions.length ? completions : visible, line];
     }
   });
-  let currentBusiness: string | null = null;
   let currentSession: LiveSession | null = null;
   let recentBusinessSlug: string | null = null;
   let recentTurns: TakyonTerminalRecentTurn[] = [];
@@ -1827,12 +1946,24 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
   let uiMode: "compact" | "full" = harnessSettings.ui.defaultMode;
   let lastSlashPaletteKey = "";
   let slashPaletteTimer: NodeJS.Timeout | null = null;
+  let slashPopupVisible = false;
+
+  const clearSlashPopup = () => {
+    if (!output.isTTY || !slashPopupVisible) return;
+    output.write("\x1b[s");
+    output.write("\x1b[E");
+    output.write("\x1b[J");
+    output.write("\x1b[u");
+    slashPopupVisible = false;
+  };
+
+  const previousBeforeLiveWrite = beforeLiveWrite;
+  beforeLiveWrite = clearSlashPopup;
 
   const prompt = () => {
     if (closing) return;
-    const name = color("takyon", ansi.brightMagenta);
-    const scope = currentBusiness ? `${dim("/")}${color(currentBusiness, ansi.cyan)}` : dim("/terminal");
-    rl.setPrompt(`${name}${scope} ${color("|", ansi.gray)} ${color(">", ansi.cyan)} `);
+    clearSlashPopup();
+    rl.setPrompt(inputPrompt(currentBusiness));
     rl.prompt();
   };
 
@@ -1840,13 +1971,19 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     const line = String((rl as LiveReadline & { line?: string }).line ?? "");
     if (!line.startsWith("/")) {
       lastSlashPaletteKey = "";
+      clearSlashPopup();
       return;
     }
-    const prefix = slashPrefix(line);
-    const key = `${currentBusiness ?? ""}:${prefix}`;
+    if (!output.isTTY) return;
+    const key = `${currentBusiness ?? ""}:${line}`;
     if (key === lastSlashPaletteKey) return;
     lastSlashPaletteKey = key;
-    liveWrite(rl, renderSlashPalette(slashEntries, line, currentBusiness));
+    output.write("\x1b[s");
+    output.write("\x1b[E");
+    output.write("\x1b[J");
+    output.write(`${renderSlashPalette(slashEntries, line, currentBusiness)}\n`);
+    output.write("\x1b[u");
+    slashPopupVisible = true;
   };
 
   const scheduleSlashPalette = () => {
@@ -1858,6 +1995,12 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     if (closing) return;
     if (key.name === "return" || key.name === "enter") {
       lastSlashPaletteKey = "";
+      clearSlashPopup();
+      return;
+    }
+    if (key.name === "escape") {
+      lastSlashPaletteKey = "";
+      clearSlashPopup();
       return;
     }
     scheduleSlashPalette();
@@ -2021,7 +2164,6 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
 
     const slashLine = line.slice(1).trim();
     if (!slashLine) {
-      liveWrite(rl, renderSlashPalette(slashEntries, "/", currentBusiness));
       return;
     }
     const tokens = parseInput(slashLine);
@@ -2123,8 +2265,10 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     await runCommand(commandWithContext(tokens, currentBusiness), profile, false);
   };
 
-  console.log(startupGraphic({ commandCount: slashEntries.length, uiMode }));
+  console.log(startupGraphic({ commandCount: slashEntries.length, uiMode, mascot }));
   rl.on("line", (line) => {
+    clearSlashPopup();
+    closeInputBox();
     commandChain = commandChain
       .then(async () => {
         suppressLiveWritePrompt = true;
@@ -2146,6 +2290,8 @@ async function interactive(profile: TerminalProfile, initialBusiness?: string | 
     rl.on("close", () => {
       closing = true;
       if (slashPaletteTimer) clearTimeout(slashPaletteTimer);
+      clearSlashPopup();
+      beforeLiveWrite = previousBeforeLiveWrite;
       if (input.isTTY) input.off("keypress", onKeypress);
       commandChain = commandChain.finally(async () => {
         await stopLiveSession(currentSession, rl, "session closed");

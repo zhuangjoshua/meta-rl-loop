@@ -137,3 +137,35 @@ Latest platform deploy verification - 2026-05-20:
 - Sora media rows for the two latest Latexflow companies were synced after the initial submitted state; both now show `status = completed` with provider job ids and proxied output URLs.
 - Corrected cached Latexflow Sora behavior was deployed in production deploy `argon-site-2n19zqjh5-tejdivs-projects.vercel.app` and aliased to `https://app.fourmanifold.com`.
 - Fresh Latexflow runs `latexflow-5` and `latexflow-6` were blocked by Anthropic `529 overloaded` in the `foundation` lane. Those foundation jobs were reset to `queued` with their original error preserved and `attempts = 1 / max_attempts = 2`; the worker must be restarted after this code patch so future retryable overloads use the new requeue path.
+
+## Verified Business Marketing Workflows - 2026-05-22
+
+Implemented:
+- Added opt-in, dispatchable no-side-effect business workflows:
+  - `business_marketing_context`
+  - `business_search_visibility`
+  - `business_conversion_review`
+  - `business_content_engine`
+  - `business_outreach_pipeline`
+  - `business_paid_media_review`
+  - `business_measurement_plan`
+- These workflows reuse existing lanes (`website`, `outreach`, and `meta_seedance`) instead of adding new lane/check constraints.
+- `takyonBuildCompanyLanes()` now respects `autoBuild: false`, so these new business-skill workflows are claimable by the worker but are not automatically added to every new-company build plan.
+- The local worker dispatches all seven through the generic `runBusinessSkillWorkflow` runner.
+- CEO chat can queue them from operator requests.
+- Daily `ceo_wakeup` can select at most two recent-missing business skill workflows, with capability preflight and 24-hour recent-job dedupe.
+- The `goal_get_first_customer` loop can include them in bounded next actions.
+
+Visible outputs:
+- `business_documents.kind = task_report`
+- `business_memory_records.namespace = business_skills`
+- Agent-authored workspace files under `memory/`, `product/`, and `outreach/`
+
+Safety:
+- These workflows do not publish, send, scrape private contacts, mutate Meta, send CAPI events, deploy code, or spend money.
+- `business_paid_media_review` is planning/read-only. Meta v0 remains display creative/reporting only.
+
+Acceptance checks:
+- `npm run typecheck` passed.
+- `npm run build` passed with the pre-existing Turbopack NFT warning.
+- `node scripts/sync-argon-hermes-skills.mjs` synced all seven business-marketing skills.

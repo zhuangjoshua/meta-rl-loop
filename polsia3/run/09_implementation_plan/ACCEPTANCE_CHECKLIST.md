@@ -27,6 +27,7 @@ Legend:
 - `partial`: Generated app auth/payments/AI limits work. Platform magic-link/session routes, free user entitlement, and product-run persistence exist; generated template auth UI, paid entitlements, Stripe webhooks, and provider metering are pending.
 - `partial`: Generated app product backend gates pass or are explicitly blocked. Browser E2E product backend completed and `/product` returned `200`; product UI failed at Claude Agent SDK maximum turns and is not complete.
 - `verified`: Website readiness and product readiness are tracked separately in workflow lanes/status.
+- `verified`: Business marketing skills are wired as Takyon-owned no-side-effect workflows. They write inspectable business documents, business memory, and workspace files; CEO chat, daily CEO wakeup, goal ticks, worker dispatch, and optional Hermes/Argon skill sync can see them. `npm run typecheck`, `npm run build`, and skill sync passed on 2026-05-22.
 - `partial`: X can publish automatically only when configured/rate-limited and a real X receipt is returned. Targeted verification now creates a real visible `ready` post row before publish gating; publish remained blocked by daily platform limit.
 - `verified`: Meta v0 only generates/displays Sora creative. Targeted verification completed a real Sora job and saved a proxied output URL; no Meta posting/spend occurs.
 - `partial`: Community UI shows real targets/copy and does not post. Records are separated from leads/outreach/X, but task volume/polish still needs another pass.

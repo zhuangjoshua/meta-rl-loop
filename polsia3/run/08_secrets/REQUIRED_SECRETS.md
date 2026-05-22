@@ -37,6 +37,13 @@
 - HUNTER_API_KEY
 - RESEND_API_KEY
 - OUTBOUND_EMAIL_PROVIDER and vendor-specific keys
+- META_PAGE_ID
+- META_BUSINESS_ID
+- META_APP_ID
+- META_APP_SECRET
+- META_SYSTEM_USER_ACCESS_TOKEN
+- META_ACCESS_TOKEN
+- META_AD_ACCOUNT_ID
 - Hermes runtime env vars
 
 ## Deprecated / Do Not Copy As Truth
@@ -58,3 +65,24 @@ The optional X client credentials are present locally. Runtime X tokens are not 
 `OPENAI_API_KEY` is present locally and was used to submit a real Sora `sora-2` video job.
 
 `ATLAS_API_KEY` is not present locally and is not required for the current v0 media lane.
+
+## Verified Local Meta Secret Update - 2026-05-22 PT
+
+The operator provided Meta Page, Business, App, System User token, access token, and Ad Account values. They were stored in local `.env.local` through `./takyon secret set` without printing secret values.
+
+Present locally:
+- `META_PAGE_ID`
+- `META_BUSINESS_ID`
+- `META_APP_ID`
+- `META_APP_SECRET`
+- `META_SYSTEM_USER_ACCESS_TOKEN`
+- `META_ACCESS_TOKEN`
+- `META_AD_ACCOUNT_ID`
+
+Current policy:
+- These secrets do not enable v0 Meta launch/spend/upload/pause/budget mutation.
+- The capability surface is `meta_ads_read` for read-only credential visibility.
+- Paid media business skills remain planning/read-only unless a future audited Meta read runner is implemented.
+
+Acceptance check:
+- `./takyon setup meta_ads_read --json` returned `canRun: true` without printing secret values.
