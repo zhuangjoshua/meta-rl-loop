@@ -1,27 +1,79 @@
+# Environment files are intentionally trackable in this private repository.
+!.env
+!.env.*
+!.envrc
+!**/.env
+!**/.env.*
+!**/.envrc
+
+# OS/editor noise.
 .DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dependencies and virtual environments.
+**/node_modules/
+**/.venv/
+**/venv/
+
+# JavaScript/Next/Docusaurus build output.
+**/.next/
+**/out/
+**/dist/
+**/build/
+**/coverage/
+**/.docusaurus/
+**/.cache-loader/
+**/*.tsbuildinfo
+
+# Logs.
+**/*.log
+**/logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python generated files.
+**/__pycache__/
+**/_pycache/
+**/*.py[cod]
+**/*.pyc*
+**/*.egg-info/
+**/.pytest_cache/
+
+# Local runtime state, caches, and machine-specific folders.
+**/.takyon/
+**/.argon-hermes-home/
+**/.vercel/
+**/.direnv/
+**/.nix-stamps/
+**/.worktrees/
+**/ignored/
+**/wandb/
+**/testlogs/
+**/tmp/
+**/.cache/
+**/temp_vision_images/
 .embedded-git-backups/
 
-# Local secrets and machine-specific environment files.
-.env
-.env.*
-!.env.example
+# Generated or synced assets.
+**/takyon_cli/web_dist/
+**/takyon_cli/tui_dist/
+**/hermes_cli/web_dist/
+**/web/public/fonts/
+**/web/public/ds-assets/
+**/website/static/api/skills-index.json
+**/website/static/llms.txt
+**/website/static/llms-full.txt
+**/website/src/data/skills.json
 
-# JS/Next build output and dependencies.
-node_modules/
-.next/
-dist/
-build/
-coverage/
-*.log
-*.tsbuildinfo
-
-# Python local state.
-__pycache__/
-*.pyc
-.venv/
-venv/
-.pytest_cache/
-
-# Takyon local runtime/cache state.
-.takyon/
-.argon-hermes-home/
+# Local/private machine files that are not needed to build.
+**/cli-config.yaml
+*.ppk
+*.pem
+privvy*
+result
