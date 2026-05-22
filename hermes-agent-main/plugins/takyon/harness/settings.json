@@ -1,0 +1,102 @@
+{
+  "ui": {
+    "defaultMode": "full",
+    "livePollMs": 2500,
+    "thinking": {
+      "enabled": true,
+      "label": "thinking",
+      "intervalMs": 140,
+      "frames": ["*", "**", "***", " **", "  *", " **"]
+    },
+    "shellHistory": {
+      "enabled": true,
+      "maxTurns": 8,
+      "maxCharsPerMessage": 4000
+    },
+    "progress": {
+      "enabled": true,
+      "showBusinessRoot": true,
+      "showDurableWrites": true,
+      "maxLinesPerTool": 6
+    }
+  },
+  "selfHelp": [
+    {"whenAll": ["create", "business"], "command": "create"},
+    {"whenAll": ["test", "mode"], "command": "test"}
+  ],
+  "controlCommands": [
+    {"name": "ceo", "description": "Focus the scoped CEO conversation", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "businesses", "description": "List businesses", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "use", "description": "Attach shell to one business", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {
+      "name": "create",
+      "description": "Create a business",
+      "requiresBusiness": false,
+      "priorityBand": "p1_ceo",
+      "usage": "/create [--test|--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
+      "summary": "Use one shell command: `/create`. By default it creates the business, schedules the CEO, and starts one bootstrap turn.",
+      "examples": [
+        {
+          "label": "Basic",
+          "command": "/create latexflow \"Build a SaaS that helps researchers turn LaTeX notes into polished PDF handouts and study packs.\""
+        },
+        {
+          "label": "Test mode with wakeups",
+          "command": "/create --test --schedule \"every 6h\" latexflow \"Build this business end to end in test mode.\""
+        },
+        {
+          "label": "Record only",
+          "command": "/create --no-auto latexflow \"Overleaf competitor for LaTeX power users\""
+        }
+      ],
+      "flags": [
+        {"name": "--test", "description": "isolate external side effects; publish local test outreach only"},
+        {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
+        {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
+        {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
+      ]
+    },
+    {"name": "status", "description": "Show current business state", "requiresBusiness": true, "priorityBand": "p1_ceo"},
+    {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning"},
+    {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning"},
+    {"name": "budget", "description": "Show or set business budget cap", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {
+      "name": "test",
+      "description": "Set current business test mode",
+      "requiresBusiness": true,
+      "priorityBand": "p0_control",
+      "usage": "/test on|off|status",
+      "summary": "Test mode is per business.",
+      "examples": [
+        {"label": "Create directly in test mode", "command": "/create --test <name> \"<goal>\""},
+        {"label": "Create, start the CEO, and schedule wakeups in test mode", "command": "/create --test --schedule \"every 6h\" <name> \"<goal>\""},
+        {"label": "Switch the current business later", "command": "/test on"},
+        {"label": "Return the current business to live mode", "command": "/test off"},
+        {"label": "Check mode", "command": "/test status"}
+      ]
+    },
+    {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning"},
+    {"name": "wake", "description": "Wake Hermes CEO for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo"},
+    {"name": "run", "description": "Run a CEO instruction for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo"},
+    {"name": "pause", "description": "Pause the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {"name": "resume", "description": "Resume the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {"name": "kill", "description": "Kill a scope", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {"name": "commands", "description": "Show slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "skills", "description": "Alias for slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "model", "description": "Show or set model provider", "requiresBusiness": false, "priorityBand": "p0_control"},
+    {"name": "setup", "description": "Run Takyon provider setup", "requiresBusiness": false, "priorityBand": "p0_control"},
+    {"name": "secret", "description": "List redacted secret keys or set one", "requiresBusiness": false, "priorityBand": "p0_control"},
+    {"name": "cron", "description": "List or tick cron jobs", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "registry", "description": "Inspect Takyon tools and skills", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo"},
+    {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth"},
+    {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning"},
+    {"name": "app-server", "description": "Run the local product app API server", "requiresBusiness": false, "priorityBand": "p2_growth"},
+    {"name": "gc", "description": "Garbage collect stale ephemeral Takyon state", "requiresBusiness": false, "priorityBand": "p4_maintenance"},
+    {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo"}
+  ],
+  "workspace": {
+    "generatedReadonlyRoots": ["state", "jobs", "ledger", "tools", "receipts", "website"],
+    "agentAuthoredRoots": ["brain", "goals", "product", "outreach", "campaigns", "memory", "agents", "conversations"]
+  }
+}

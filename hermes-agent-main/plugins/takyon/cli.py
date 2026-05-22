@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import io
 import json
 import os
+import select
+import shlex
+import shutil
+import sys
+import termios
+import threading
+import tty
 from pathlib import Path
 from typing import Any
 
@@ -12,23 +22,192 @@ from .core import TakyonStore, _slugify, load_takyon_env
 from .registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_SKILL_REGISTRY, business_registry_snapshot
 
 
-_LOCAL_COMMANDS = {
-    "businesses",
+_CLI_ONLY_COMMANDS = {
+    "shell",
+    "interactive",
     "business",
     "list",
-    "registry",
-    "campaigns",
-    "workspaces",
-    "cron",
+    "campaign",
+    "workspace",
+    "jobs",
+    "harness",
+    "command",
     "crons",
+    "runtime",
+    "runtimes",
+    "capabilities",
+    "caps",
+    "connect",
+    "api",
     "show",
-    "wake",
-    "pause",
-    "resume",
-    "kill",
+    "test",
+    "/goal",
     "init",
-    "gc",
+    "build",
 }
+
+_COLOR_ENABLED = (
+    sys.stdout.isatty()
+    and os.getenv("TAKYON_COLOR") != "0"
+    and (os.getenv("TAKYON_COLOR") == "1" or os.getenv("NO_COLOR") != "1")
+)
+_ANSI = {
+    "reset": "\x1b[0m",
+    "bold": "\x1b[1m",
+    "dim": "\x1b[2m",
+    "red": "\x1b[31m",
+    "green": "\x1b[32m",
+    "yellow": "\x1b[33m",
+    "cyan": "\x1b[36m",
+    "gray": "\x1b[90m",
+    "blue": "\x1b[94m",
+    "magenta": "\x1b[95m",
+    "electric": "\x1b[38;2;0;176;255m",
+}
+_THEME = {
+    "brand": _ANSI["electric"],
+    "primary": _ANSI["electric"],
+    "secondary": _ANSI["cyan"],
+    "skill": _ANSI["cyan"],
+    "control": _ANSI["gray"],
+    "muted": _ANSI["gray"],
+    "success": _ANSI["green"],
+    "warning": _ANSI["yellow"],
+    "danger": _ANSI["red"],
+}
+
+def _color(text: str, code: str) -> str:
+    return f"{code}{text}{_ANSI['reset']}" if _COLOR_ENABLED else text
+
+
+def _bold(text: str) -> str:
+    return _color(text, _ANSI["bold"])
+
+
+def _dim(text: str) -> str:
+    return _color(text, _ANSI["dim"])
+
+
+def _strip_ansi(text: str) -> str:
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def _visible_len(text: str) -> int:
+    return len(_strip_ansi(text))
+
+
+def _pad_visible(text: str, width: int) -> str:
+    return text + (" " * max(0, width - _visible_len(text)))
+
+
+def _truncate_plain(text: str, width: int) -> str:
+    if width <= 1:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: max(1, width - 3)] + "..."
+
+
+def _shell_width() -> int:
+    columns = shutil.get_terminal_size((96, 24)).columns
+    return max(64, min(columns - 2, 112))
+
+
+def _frame_line(width: int) -> str:
+    return _color("+" + ("-" * max(10, width - 2)) + "+", _THEME["muted"])
+
+
+def _framed_text(text: str, width: int) -> str:
+    padding = max(0, width - _visible_len(text) - 4)
+    return f"{_color('|', _THEME['muted'])} {text}{' ' * padding} {_color('|', _THEME['muted'])}"
+
+
+def _scope_label(current_business: str | None) -> str:
+    return f"business:{current_business}" if current_business else "global"
+
+
+def _input_prompt_label(current_business: str | None) -> str:
+    scope = _color(_scope_label(current_business), _THEME["secondary"]) if current_business else _dim("global")
+    return f"{_color('takyon', _THEME['brand'])}{_dim('/')}{scope}"
+
+
+def _input_bar_top(current_business: str | None) -> str:
+    width = _shell_width()
+    label = f" {_input_prompt_label(current_business)} "
+    fill = max(0, width - _visible_len(label))
+    left = fill // 2
+    right = fill - left
+    return _color("─" * left, _THEME["muted"]) + label + _color("─" * right, _THEME["muted"])
+
+
+def _input_prompt(current_business: str | None) -> str:
+    if not sys.stdout.isatty():
+        return f"takyon/{_scope_label(current_business)} > "
+    return _color("› ", _THEME["primary"])
+
+
+def _render_pixel_mascot_line(line: str, width: int = 16) -> str:
+    out: list[str] = []
+    for cell in line[:width].ljust(width):
+        if cell in {"#", "@"}:
+            out.append(_color("██" if _COLOR_ENABLED else "##", _THEME["primary"]))
+        elif cell == ".":
+            out.append(_color("██" if _COLOR_ENABLED else "##", _THEME["secondary"]))
+        elif cell == "=":
+            out.append(_color("==", _THEME["secondary"]))
+        elif cell == ">":
+            out.append(_color("=>", _THEME["secondary"]))
+        else:
+            out.append("  ")
+    return "".join(out)
+
+
+def _read_mascot_lines() -> list[str]:
+    path = _harness_root() / "mascot.txt"
+    if path.exists():
+        lines = path.read_text(encoding="utf-8", errors="replace").rstrip("\n").splitlines()
+        if lines:
+            return lines
+    return [
+        "    ####        ",
+        "  ########      ",
+        " ##########     ",
+        "###..##..###==> ",
+        " ############   ",
+        "  ########      ",
+        "    ####        ",
+        "   ##  ##       ",
+    ]
+
+
+def _startup_graphic(current_business: str | None) -> str:
+    width = max(92, min(_shell_width(), 112))
+    wordmark = [
+        " _____     _                      ",
+        "|_   _|_ _| | ___   _  ___  _ __  ",
+        "  | |/ _` | |/ / | | |/ _ \\| '_ \\ ",
+        "  | | (_| |   <| |_| | (_) | | | |",
+        "  |_|\\__,_|_|\\_\\\\__, |\\___/|_| |_|",
+        "                |___/             ",
+    ]
+    mascot = _read_mascot_lines()
+    rows = [_frame_line(width)]
+    for index, line in enumerate(wordmark):
+        rows.append(_framed_text(f"{_render_pixel_mascot_line(mascot[index] if index < len(mascot) else '')}  {_color(line, _THEME['brand'])}", width))
+    for line in mascot[len(wordmark) :]:
+        rows.append(_framed_text(f"{_render_pixel_mascot_line(line)}", width))
+    rows.extend([
+        _framed_text("", width),
+        _framed_text(f"{_bold('Takyon shell')} {_color('ready', _THEME['success'])}  {_dim(str(Path.cwd()))}", width),
+        _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['primary'])} goes to the scoped CEO", width),
+        _framed_text(f"{_color('/', _THEME['primary'])} shows controls and skills    {_color('/use', _THEME['primary'])} switches business scope    {_color('/commands', _THEME['primary'])} lists capabilities", width),
+    ])
+    rows.append(_frame_line(width))
+    return "\n".join(rows)
 
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
@@ -36,9 +215,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         "args",
         nargs=argparse.REMAINDER,
         help=(
-            "Natural language command, or: businesses | campaigns <business> | show <business> [path] | "
-            "registry [all|tools|skills] [category] [priority] | cron [list|tick] | wake <business> [schedule] | "
-            "pause/resume/kill <scope> [reason] | gc [days] [confirm]"
+            "Natural language command, a registry-driven Takyon command, or a Takyon skill invocation."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print raw JSON")
@@ -51,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="takyon",
         description="Takyon terminal CEO operator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_takyon_help().replace("/takyon", "takyon"),
+        epilog=_takyon_help("takyon"),
     )
     register_cli(parser)
     parser.set_defaults(func=takyon_command)
@@ -65,17 +242,317 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _print(value: Any, *, raw_json: bool = False) -> None:
+    if value is None:
+        return
     if raw_json:
         print(json.dumps(value, indent=2, ensure_ascii=False))
         return
     if isinstance(value, str):
         print(value)
         return
-    print(json.dumps(value, indent=2, ensure_ascii=False))
+    print(_format_cli_value(value))
+
+
+def _format_cli_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return json.dumps(value, indent=2, ensure_ascii=False)
+
+    if "content" in value and "path" in value:
+        return str(value.get("content") or "")
+
+    if "files" in value:
+        files = value.get("files") or []
+        scope = str(value.get("scope") or "")
+        business = scope.split("business:", 1)[1].split("/", 1)[0] if "business:" in scope else ""
+        root = _business_root(business) if business else None
+        if not files:
+            where = f" under {root / str(value.get('path') or '.').lstrip('/')}" if root else f" under {value.get('path') or '.'}"
+            return f"No files{where}."
+        lines = [f"Filesystem: {root}"] if root else []
+        lines.extend(
+            f"{'/' if item.get('type') == 'dir' else ' '} {item.get('path')}"
+            for item in files
+        )
+        return "\n".join(lines)
+
+    if "business" in value and "ledger" in value and "workspaces" not in value:
+        business = value.get("business") or {}
+        budget = business.get("budget") or {}
+        budget_text = "not set"
+        if isinstance(budget, dict) and budget:
+            amount = budget.get("amount") or budget.get("cap") or budget.get("limit") or budget.get("monthly_cap")
+            currency = budget.get("currency") or "USD"
+            budget_text = f"{amount} {currency}" if amount is not None else json.dumps(budget, ensure_ascii=False)
+        ledger = value.get("ledger") or []
+        lines = [
+            f"Budget for business:{business.get('slug') or '<unknown>'}: {budget_text}",
+            f"Ledger entries: {len(ledger)}",
+        ]
+        for item in ledger[:12]:
+            lines.append(f"  {item.get('amount')} {item.get('currency')} {item.get('kind')} {item.get('status')} {item.get('id')}")
+        return "\n".join(lines)
+
+    if "agent_response" in value:
+        lines = [
+            f"business:{value.get('business')} mode={value.get('mode') or 'live'}",
+        ]
+        if value.get("schedule"):
+            lines.append(f"CEO wakeup: {value.get('schedule')}")
+        lines.extend(["", str(value.get("agent_response") or "").strip()])
+        return "\n".join(line for line in lines if line is not None).rstrip()
+
+    if "business" in value and "mode" in value:
+        business = value.get("business") or {}
+        if isinstance(business, dict):
+            slug = business.get("slug") or business.get("business") or "<unknown>"
+            mode = value.get("mode") or business.get("mode") or "live"
+        else:
+            slug = str(business or "<unknown>")
+            mode = value.get("mode") or "live"
+        return f"business:{slug} mode -> {mode}"
+
+    if "businesses" in value and value.get("scope") == "global":
+        businesses = value.get("businesses") or []
+        lines = ["Businesses:"]
+        if not businesses:
+            lines.append("  none yet")
+        for item in businesses:
+            slug = item.get("slug") or item.get("business") or "<unknown>"
+            name = item.get("name") or slug
+            goal = item.get("goal") or ""
+            status = item.get("status") or "active"
+            mode = item.get("mode") or "live"
+            lines.append(f"  {slug} [{status}/{mode}] {name}{f' - {goal}' if goal else ''}")
+        controls = value.get("controls") or []
+        if controls:
+            lines.append("Controls:")
+            for item in controls[:12]:
+                lines.append(f"  {item.get('scope')} -> {item.get('state')} {item.get('reason') or ''}".rstrip())
+        return "\n".join(lines)
+
+    if "business" in value and "workspaces" in value:
+        business = value.get("business") or {}
+        slug = business.get("slug") or value.get("scope") or "<business>"
+        lines = [f"{slug}: {business.get('name') or slug}"]
+        if slug and slug != "<business>":
+            lines.append(f"Filesystem: {_business_root(str(slug))}")
+        if business.get("mode"):
+            lines.append(f"Mode: {business.get('mode')}")
+        if business.get("goal"):
+            lines.append(f"Goal: {business.get('goal')}")
+        if business.get("budget"):
+            lines.append(f"Budget: {business.get('budget')}")
+        conversations = value.get("conversations") or {}
+        if conversations:
+            lines.append(
+                "Conversations: "
+                f"{conversations.get('active_threads', 0)} active, "
+                f"{conversations.get('unresolved_messages', 0)} unresolved"
+            )
+            if conversations.get("filesystem_index"):
+                lines.append(f"  {conversations.get('filesystem_index')}")
+        controls = value.get("controls") or []
+        if controls:
+            lines.append("Controls:")
+            for item in controls[:8]:
+                lines.append(f"  {item.get('scope')} -> {item.get('state')} {item.get('reason') or ''}".rstrip())
+        workspaces = value.get("workspaces") or []
+        if workspaces:
+            lines.append("Workspaces:")
+            for item in workspaces[:12]:
+                lines.append(f"  {item.get('path')} [{item.get('status') or 'active'}]")
+        brain = value.get("brain_index") or []
+        if brain:
+            lines.append("Brain:")
+            for item in brain[:12]:
+                lines.append(f"  {item.get('path')}")
+        jobs = value.get("jobs") or []
+        if jobs:
+            lines.append("Recent guarded requests:")
+            for item in jobs[:8]:
+                lines.append(f"  {item.get('kind')} {item.get('status')} {item.get('id')}")
+        return "\n".join(lines)
+
+    if "jobs" in value and value.get("success"):
+        jobs = value.get("jobs") or []
+        if not jobs:
+            return "No cron jobs found."
+        return "\n".join(
+            f"{item.get('id')} {item.get('name') or ''} {item.get('state') or item.get('enabled') or ''} {item.get('schedule_display') or item.get('schedule') or ''}".strip()
+            for item in jobs
+        )
+
+    if {"tools", "skills"}.intersection(value):
+        lines: list[str] = []
+        for kind in ("tools", "skills"):
+            items = value.get(kind) or []
+            if not items:
+                continue
+            lines.append(f"{kind.title()}:")
+            for item in items:
+                lines.append(f"  {item.get('name') or item.get('skill')} [{item.get('category')}] {item.get('purpose') or item.get('description') or ''}".rstrip())
+        return "\n".join(lines) if lines else json.dumps(value, indent=2, ensure_ascii=False)
+
+    if "results" in value:
+        return "\n".join(_format_operation_result(item) for item in value.get("results") or [])
+
+    if "action" in value:
+        return _format_operation_result(value)
+
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _format_operation_result(item: Any) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    action = item.get("action")
+    business = str(item.get("business") or "").strip()
+    if action == "business.upsert":
+        root = _business_root(business) if business else item.get("path")
+        return f"business:{business or item.get('business')} filesystem -> {root}"
+    if action == "business.mode.set":
+        return f"business:{business or item.get('business')} mode -> {item.get('mode')}"
+    if action == "control.set":
+        cron = item.get("cron")
+        cron_text = f"; cron {cron}" if cron else ""
+        return f"{item.get('scope')} -> {item.get('state')}{cron_text}"
+    if action == "ledger.allocate":
+        return f"allocated {item.get('amount')} for business:{business or item.get('business')} ledger:{item.get('ledger_entry')}"
+    if action == "workspace.upsert":
+        workspace = str(item.get("workspace") or "")
+        where = f" -> {_business_artifact_path(business, workspace)}" if business and workspace else ""
+        return f"workspace {workspace} for business:{business or item.get('business')}{where}"
+    if action in {"artifact.write", "memory.write", "artifact.patch"}:
+        path = str(item.get("path") or "")
+        where = f" -> {_business_artifact_path(business, path)}" if business and path else ""
+        return f"{action} {path} for business:{business or item.get('business')}{where}"
+    if action == "outreach.local_publish":
+        artifact = str(item.get("artifact") or "")
+        receipt = str(item.get("receipt") or "")
+        bits = [f"test outreach locally published for business:{business or item.get('business')}"]
+        if business and artifact:
+            bits.append(f"artifact -> {_business_artifact_path(business, artifact)}")
+        if business and receipt:
+            bits.append(f"receipt -> {_business_artifact_path(business, receipt)}")
+        bits.append("external side effects suppressed")
+        return "; ".join(bits)
+    if action == "app.surface.upsert" and business:
+        return f"app surface -> {_business_artifact_path(business, 'app/surface.md')}"
+    if action == "app.plan.upsert" and business:
+        plan = str(item.get("plan_key") or "")
+        suffix = f" ({plan})" if plan else ""
+        return f"app plans{suffix} -> {_business_artifact_path(business, 'app/plans.md')}"
+    if action == "app.budget.set" and business:
+        return f"app usage budget -> {_business_artifact_path(business, 'app/usage.md')}"
+    if action in {"app.customer.upsert", "app.entitlement.upsert"} and business:
+        return f"app customers/entitlements -> {_business_artifact_path(business, 'app/customers.md')}"
+    if action == "app.usage.record" and business:
+        return f"app usage -> {_business_artifact_path(business, 'app/usage.md')}"
+    if action in {"conversation.thread.upsert", "conversation.message.record"} and business:
+        path = str(item.get("file") or "")
+        where = f" -> {_business_artifact_path(business, path)}" if path else ""
+        return f"conversation state for business:{business}{where}"
+    if action == "cron.ensure_ceo_wakeup":
+        return f"CEO wakeup for business:{business or item.get('business')} scheduled: {item.get('schedule') or item.get('cron_job')}"
+    if action == "agent.record":
+        return f"agent record for business:{business or item.get('business')}: {item.get('agent_run') or item.get('id')}"
+    if action == "maintenance.gc":
+        return f"GC {'dry run' if item.get('dry_run') else 'completed'} candidates={item.get('candidates')} deleted={item.get('deleted')}"
+    return json.dumps(item, indent=2, ensure_ascii=False)
+
+
+def _business_root(slug: str) -> Path:
+    return (TakyonStore().root / "businesses" / _slugify(slug)).resolve()
+
+
+def _business_artifact_path(slug: str, path: str) -> Path:
+    return (_business_root(slug) / str(path or "").lstrip("/")).resolve()
 
 
 def _scope_for_business(slug: str) -> str:
     return f"business:{_slugify(slug)}"
+
+
+def _parse_business_start_args(
+    argv: list[str],
+    *,
+    usage: str,
+    auto_default: bool = False,
+) -> tuple[str, str, str, str | None, str | None, bool, bool]:
+    tokens = list(argv[1:])
+    mode: str | None = None
+    schedule: str | None = None
+    auto_start = auto_default
+    no_auto = False
+    clean: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--test":
+            mode = "test"
+        elif token == "--live":
+            mode = "live"
+        elif token == "--auto":
+            auto_start = True
+            no_auto = False
+        elif token in {"--no-auto", "--manual"}:
+            auto_start = False
+            no_auto = True
+        elif token == "--schedule":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            schedule = tokens[index]
+        else:
+            clean.append(token)
+        index += 1
+    if not clean:
+        raise SystemExit(usage)
+    raw_name = clean[0]
+    slug = _slugify(raw_name)
+    goal = " ".join(clean[1:]).strip()
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto
+
+
+def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> str:
+    goal_text = goal or "Use current business state and evidence to define the business goal."
+    lines = [
+        f"Bootstrap business:{slug} now.",
+        "",
+        "This is an operational create/build request, not a request for instructions. Do not respond with a command recipe,",
+        "a checklist for the operator, or 'want me to start?'. Use Takyon skills and concrete business_* tools now.",
+        "",
+        f"Business goal: {goal_text}",
+        f"Mode: {active_mode or 'live'}",
+        "",
+        "First read current business state and registry metadata. If relevant assets already exist, advance the missing",
+        "highest-impact pieces instead of recreating them.",
+        "",
+        "Use sibling Takyon skills as operating methods when they fit:",
+        "- takyon:market-research before or alongside market/pricing claims when web/search evidence is available.",
+        "- takyon:pricing-strategy for tiers, limits, and checkout assumptions.",
+        "- takyon:build-product for offer, MVP scope, product surface, and app/code work.",
+        "- takyon:app-runtime for app plans, app surface contract, checkout, entitlements, and usage budgets.",
+        "- takyon:outreach or takyon:distribution-campaign for demand creation and follow-up tracking.",
+        "- takyon:claude-agent-sdk / business_claude_agent_task for bounded product source edits under the business filesystem.",
+        "",
+        "In this bootstrap turn, make durable progress where safe: brain/strategy, product offer/spec/design/pricing,",
+        "app plans/surface/budget, local test outreach and suppressed receipts in test mode, guarded jobs for external",
+        "side effects, and the next CEO wake. If something is blocked, record the blocker and continue with local/test",
+        "artifacts that do not require that provider.",
+        "",
+        "Final response: concise status only. Include business filesystem root, files changed, receipts/jobs/wakeups,",
+        "what is still missing, and whether pricing/research is evidence-backed or a recorded hypothesis.",
+    ]
+    if active_mode == "test":
+        lines.extend([
+            "",
+            "Test mode rules: do not send, post, buy ads, deploy, charge, or call live providers. Build local artifacts,",
+            "publish local test outreach with suppressed receipts, and queue guarded external work with credential gates.",
+        ])
+    return "\n".join(lines)
 
 
 def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[str, Any]:
@@ -88,33 +565,1199 @@ def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[st
     )
 
 
-def _takyon_help() -> str:
-    return """\
-/takyon - Takyon CEO and skill namespace
+def _takyon_help(prefix: str = "/takyon") -> str:
+    try:
+        controls = _control_slash_commands()
+    except SystemExit:
+        controls = []
+    control_lines = "\n".join(
+        f"  {prefix} {item['name']:<12} {item.get('description') or ''}".rstrip()
+        for item in controls
+        if item["name"] not in {"exit", "use"}
+    )
+    if not control_lines:
+        control_lines = f"  {prefix} commands"
+    return f"""\
+{prefix} - Takyon scoped operator and skill namespace
 
-Takyon control:
-  /takyon businesses
-  /takyon registry [all|tools|skills] [category] [priority]
-  /takyon campaigns <business>
-  /takyon cron [list|tick]
-  /takyon show <business> [path]
-  /takyon wake <business> [schedule]
-  /takyon pause|resume|kill <scope> [reason]
-  /takyon gc [days] [confirm]
+Takyon control commands come from plugins/takyon/harness/settings.json:
+{control_lines}
 
-Takyon CEO:
-  /takyon <natural language operator command>
+Scoped CEO:
+  {prefix} <natural language operator command>
+  {prefix} ceo
 
 Takyon skills through Takyon:
-  /takyon <skill-name> <instruction>
-  /takyon skill <skill-name> <instruction>
+  {prefix} <skill-name> <instruction>
+  {prefix} skill <skill-name> <instruction>
 """
+
+
+def _harness_root() -> Path:
+    return Path(os.getenv("TAKYON_HARNESS_ROOT") or Path(__file__).parent / "harness").resolve()
+
+
+def _load_harness_settings() -> dict[str, Any]:
+    path = _harness_root() / "settings.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid Takyon harness settings {path}: {exc}") from exc
+
+
+def _control_slash_commands() -> list[dict[str, Any]]:
+    settings = _load_harness_settings()
+    configured = settings.get("controlCommands") or []
+    if not isinstance(configured, list):
+        raise SystemExit("Takyon harness settings controlCommands must be a list")
+    commands: list[dict[str, Any]] = []
+    for item in configured:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip().lstrip("/")
+        if not name:
+            continue
+        commands.append({
+            "name": name,
+            "kind": "control",
+            "description": str(item.get("description") or ""),
+            "requires_business": bool(item.get("requiresBusiness") or item.get("requires_business")),
+            "priority_band": str(item.get("priorityBand") or item.get("priority_band") or "p1_ceo"),
+            "usage": str(item.get("usage") or ""),
+            "summary": str(item.get("summary") or ""),
+            "examples": item.get("examples") if isinstance(item.get("examples"), list) else [],
+            "flags": item.get("flags") if isinstance(item.get("flags"), list) else [],
+        })
+    return commands
+
+
+def _control_command(name: str) -> dict[str, Any] | None:
+    target = str(name or "").strip().lower().lstrip("/")
+    for command in _control_slash_commands():
+        if str(command.get("name") or "").lower() == target:
+            return command
+    return None
+
+
+def _local_command_names() -> set[str]:
+    return _CLI_ONLY_COMMANDS | {str(item["name"]) for item in _control_slash_commands()}
+
+
+def _parse_scalar(value: str) -> Any:
+    text = value.strip()
+    if text.lower() == "true":
+        return True
+    if text.lower() == "false":
+        return False
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return []
+        return [part.strip().strip("\"'") for part in inner.split(",") if part.strip()]
+    return text.strip("\"'")
+
+
+def _parse_harness_markdown(path: Path) -> dict[str, Any]:
+    raw = path.read_text(encoding="utf-8")
+    meta: dict[str, Any] = {}
+    body = raw
+    if raw.startswith("---\n"):
+        end = raw.find("\n---", 4)
+        if end != -1:
+            for line in raw[4:end].strip().splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                meta[key.strip()] = _parse_scalar(value)
+            body = raw[end + 4 :].lstrip()
+    return {
+        "name": str(meta.get("name") or path.stem).strip().lstrip("/"),
+        "description": str(meta.get("description") or "").strip(),
+        "requires_business": bool(meta.get("requires-business", True)),
+        "priority_band": str(meta.get("priority-band") or "").strip(),
+        "allowed_tools": [str(item) for item in meta.get("allowed-tools", [])],
+        "path": str(path),
+        "body": body,
+    }
+
+
+def _list_harness_commands() -> list[dict[str, Any]]:
+    command_root = _harness_root() / "commands"
+    if not command_root.exists():
+        return []
+    commands = [
+        _parse_harness_markdown(path)
+        for path in sorted(command_root.glob("*.md"))
+        if path.is_file()
+    ]
+    return sorted(commands, key=lambda item: str(item["name"]))
+
+
+def _get_harness_command(name: str) -> dict[str, Any] | None:
+    target = str(name or "").strip().lower().lstrip("/")
+    for command in _list_harness_commands():
+        if str(command["name"]).lower() == target:
+            return command
+    return None
+
+
+def _render_harness_command(command: dict[str, Any], *, business: str | None, args: list[str], store: TakyonStore) -> str:
+    argument_text = " ".join(args).strip()
+    workspace_root = ""
+    if business:
+        workspace_root = str((store.root / "businesses" / business).resolve())
+    body = str(command["body"])
+    body = body.replace("$ARGUMENTS", argument_text)
+    body = body.replace("$BUSINESS", business or "")
+    body = body.replace("$WORKSPACE_ROOT", workspace_root)
+    header = [
+        f"Hermes Takyon harness command: /{command['name']}{f' {argument_text}' if argument_text else ''}",
+        f"Business: {business}" if business else "",
+        f"Workspace: {workspace_root}" if workspace_root else "",
+        f"Description: {command['description']}" if command.get("description") else "",
+        "",
+    ]
+    return "\n".join([line for line in header if line] + [body])
+
+
+def _format_harness_commands() -> str:
+    controls = _control_slash_commands()
+    commands = _list_harness_commands()
+    registry_skills = sorted(
+        (item for item in TAKYON_SKILL_REGISTRY if item.get("name") != "ceo"),
+        key=lambda item: item["name"],
+    )
+    lines = [
+        "Takyon shell:",
+        "  Plain text always goes to the CEO for the current scope.",
+        "  Global is an account/root scope, not the CEO.",
+        "",
+        "Takyon controls:",
+    ]
+    if not controls:
+        lines.append("  none")
+    for command in controls:
+        scope = "business" if command.get("requires_business") else "global"
+        band = command.get("priority_band") or "unbanded"
+        lines.append(f"  /{command['name']:<12} {scope:<8} {band:<12} {command.get('description') or ''}".rstrip())
+    lines.append("")
+    lines.append("File-backed skill commands:")
+    if not commands:
+        lines.append("  none")
+    for command in commands:
+        scope = "business" if command.get("requires_business") else "global"
+        band = command.get("priority_band") or "unbanded"
+        lines.append(f"  /{command['name']:<12} {scope:<8} {band:<12} {command.get('description') or ''}".rstrip())
+    lines.append("")
+    lines.append("Registry skills:")
+    for item in registry_skills:
+        lines.append(f"  /{item['name']:<22} {item.get('category')} {item.get('purpose') or ''}".rstrip())
+    return "\n".join(lines)
+
+
+def _slash_entries() -> list[dict[str, Any]]:
+    controls = _control_slash_commands()
+    harness = [
+        {
+            "name": command["name"],
+            "kind": "skill",
+            "description": command.get("description") or "Harness skill",
+            "requires_business": bool(command.get("requires_business", True)),
+            "priority_band": command.get("priority_band") or "",
+        }
+        for command in _list_harness_commands()
+    ]
+    skills = [
+        {
+            "name": item["name"],
+            "kind": "skill",
+            "description": item.get("purpose") or "",
+            "requires_business": item["name"] != "ceo",
+            "priority_band": (item.get("priority_bands") or [""])[0],
+        }
+        for item in TAKYON_SKILL_REGISTRY
+        if item.get("name") != "ceo"
+    ]
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for item in [*controls, *harness, *skills]:
+        name = str(item["name"]).strip().lstrip("/")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        entries.append({**item, "name": name})
+    return sorted(entries, key=lambda item: str(item["name"]))
+
+
+def _slash_prefix(line: str) -> str:
+    if not line.startswith("/"):
+        return ""
+    return line[1:].lstrip().split()[0].lower() if line[1:].strip() else ""
+
+
+def _should_show_slash_palette(line: str) -> bool:
+    return line.startswith("/") and not any(char.isspace() for char in line[1:])
+
+
+def _visible_slash_entries(entries: list[dict[str, Any]], current_business: str | None) -> list[dict[str, Any]]:
+    return [
+        item for item in entries
+        if not bool(item.get("requires_business")) or bool(current_business)
+    ]
+
+
+def _slash_matches(entries: list[dict[str, Any]], line: str, current_business: str | None) -> list[dict[str, Any]]:
+    prefix = _slash_prefix(line)
+    visible = _visible_slash_entries(entries, current_business)
+    if not prefix:
+        return visible
+    return [item for item in visible if str(item["name"]).lower().startswith(prefix)]
+
+
+def _slash_page_size() -> int:
+    rows = shutil.get_terminal_size((96, 24)).lines
+    return max(6, min(18, rows - 8))
+
+
+def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_business: str | None, offset: int = 0) -> str:
+    prefix = _slash_prefix(line)
+    matches = _slash_matches(entries, line, current_business)
+    visible_count = len(_visible_slash_entries(entries, current_business))
+    width = max(58, min(shutil.get_terminal_size((96, 24)).columns - 6, 96))
+    inner = width - 4
+    max_rows = _slash_page_size()
+    start = max(0, min(offset, max(0, len(matches) - max_rows)))
+    end = min(len(matches), start + max_rows)
+    title = f"/{prefix}" if prefix else "/"
+    header = f"{_color('Takyon', _THEME['brand'])} {_dim('slash')} {_color(title, _THEME['primary'])} {_dim(f'{len(matches)}/{visible_count}')}"
+    context = (
+        f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}"
+        if current_business
+        else f"{_dim('scope')} {_color('global', _THEME['muted'])}  {_dim('attach')} {_color('/use <business>', _THEME['primary'])}"
+    )
+    overflow_hint = f"  {start + 1}-{end}; type to narrow" if len(matches) > max_rows else ""
+    hint = (
+        _dim(f"return runs  tab completes  plain text chats{overflow_hint}")
+        if current_business
+        else _dim(f"business skills appear after /use{overflow_hint}")
+    )
+    border_top = _color("." + ("-" * (width - 2)) + ".", _THEME["muted"])
+    border_bottom = _color("'" + ("-" * (width - 2)) + "'", _THEME["muted"])
+
+    def box(text: str = "") -> str:
+        return f"{_color('|', _THEME['muted'])} {_pad_visible(text, inner)} {_color('|', _THEME['muted'])}"
+
+    rows = []
+    for entry in matches[start:end]:
+        command = _pad_visible(_color(f"/{entry['name']}", _THEME["skill"] if entry.get("kind") == "skill" else _THEME["primary"]), 20)
+        kind = _color("skill", _THEME["skill"]) if entry.get("kind") == "skill" else _color("control", _THEME["control"])
+        scope = _color("business", _THEME["secondary"]) if entry.get("requires_business") else _color("global", _THEME["muted"])
+        band = f" {_color(str(entry.get('priority_band')), _THEME['secondary'])}" if entry.get("priority_band") else ""
+        meta = _pad_visible(_truncate_plain(_strip_ansi(f"{kind} {scope}{band}"), 28), 28)
+        desc_width = max(10, inner - 20 - 1 - 28 - 1)
+        rows.append(f"{command} {meta} {_dim(_truncate_plain(str(entry.get('description') or ''), desc_width))}")
+    if len(matches) > max_rows:
+        rows.append(_dim(f"{len(matches) - end} more; type to narrow"))
+    if not matches:
+        rows.append(f"{_color('no matches', _THEME['warning'])} {_dim('try /businesses or /use <business>')}")
+    return "\n".join([
+        border_top,
+        box(f"{header}  {context}"),
+        box(hint),
+        box(),
+        *(box(row) for row in rows),
+        border_bottom,
+    ])
+
+
+def _longest_common_prefix(values: list[str]) -> str:
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        while not value.startswith(prefix) and prefix:
+            prefix = prefix[:-1]
+    return prefix
+
+
+def _complete_slash_line(line: str, entries: list[dict[str, Any]], current_business: str | None) -> str:
+    if not _should_show_slash_palette(line):
+        return line
+    matches = [str(item["name"]) for item in _slash_matches(entries, line, current_business)]
+    if not matches:
+        return line
+    prefix = _slash_prefix(line)
+    if len(matches) == 1:
+        return f"/{matches[0]} "
+    common = _longest_common_prefix(matches)
+    if common and common != prefix:
+        return f"/{common}"
+    return line
+
+
+def _redraw_shell_line(line: str, current_business: str | None, entries: list[dict[str, Any]], palette_offset: int) -> None:
+    prompt = _input_prompt(current_business)
+    sys.stdout.write("\r\x1b[K")
+    sys.stdout.write(prompt + line)
+    sys.stdout.write("\x1b[s\x1b[E\x1b[J")
+    if _should_show_slash_palette(line):
+        sys.stdout.write(_render_slash_palette(entries, line, current_business, palette_offset) + "\n")
+    sys.stdout.write("\x1b[u")
+    sys.stdout.flush()
+
+
+def _clear_shell_popup() -> None:
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write("\x1b[s\x1b[E\x1b[J\x1b[u")
+    sys.stdout.flush()
+
+
+def _thinking_ui_config() -> dict[str, Any]:
+    settings = _load_harness_settings()
+    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    thinking = ui.get("thinking") if isinstance(ui.get("thinking"), dict) else {}
+    frames = [str(item) for item in thinking.get("frames", []) if str(item)]
+    if not frames:
+        frames = ["*", "**", "***", " **", "  *", " **"]
+    interval_ms = thinking.get("intervalMs", 140)
+    try:
+        interval = max(0.05, min(float(interval_ms) / 1000.0, 1.0))
+    except (TypeError, ValueError):
+        interval = 0.14
+    return {
+        "enabled": _config_bool(thinking.get("enabled"), default=True),
+        "label": str(thinking.get("label") or "thinking"),
+        "frames": frames,
+        "interval": interval,
+    }
+
+
+def _shell_history_config() -> dict[str, Any]:
+    settings = _load_harness_settings()
+    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    history = ui.get("shellHistory") if isinstance(ui.get("shellHistory"), dict) else {}
+    try:
+        max_turns = int(history.get("maxTurns", 8))
+    except (TypeError, ValueError):
+        max_turns = 8
+    try:
+        max_chars = int(history.get("maxCharsPerMessage", 4000))
+    except (TypeError, ValueError):
+        max_chars = 4000
+    return {
+        "enabled": _config_bool(history.get("enabled"), default=True),
+        "max_turns": max(1, min(max_turns, 20)),
+        "max_chars": max(500, min(max_chars, 12000)),
+    }
+
+
+def _shell_progress_config() -> dict[str, Any]:
+    settings = _load_harness_settings()
+    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    progress = ui.get("progress") if isinstance(ui.get("progress"), dict) else {}
+    try:
+        max_lines = int(progress.get("maxLinesPerTool", 6))
+    except (TypeError, ValueError):
+        max_lines = 6
+    return {
+        "enabled": _config_bool(progress.get("enabled"), default=True),
+        "show_business_root": _config_bool(progress.get("showBusinessRoot"), default=True),
+        "show_durable_writes": _config_bool(progress.get("showDurableWrites"), default=True),
+        "max_lines": max(1, min(max_lines, 8)),
+    }
+
+
+def _trim_shell_history_text(text: str, max_chars: int) -> str:
+    clean = str(text or "").strip()
+    if len(clean) <= max_chars:
+        return clean
+    return clean[: max(0, max_chars - 20)].rstrip() + "\n[truncated]"
+
+
+def _record_shell_turn(history: list[dict[str, str]], user_text: str, assistant_text: str) -> None:
+    config = _shell_history_config()
+    if not config["enabled"]:
+        return
+    history.append({
+        "user": _trim_shell_history_text(user_text, config["max_chars"]),
+        "assistant": _trim_shell_history_text(assistant_text, config["max_chars"]),
+    })
+    del history[: max(0, len(history) - int(config["max_turns"]))]
+
+
+def _format_shell_history(history: list[dict[str, str]] | None) -> str:
+    config = _shell_history_config()
+    if not config["enabled"] or not history:
+        return ""
+    lines = ["Recent Takyon shell transcript, newest last:"]
+    for index, turn in enumerate(history[-int(config["max_turns"]):], start=1):
+        user_text = _trim_shell_history_text(str(turn.get("user") or ""), int(config["max_chars"]))
+        assistant_text = _trim_shell_history_text(str(turn.get("assistant") or ""), int(config["max_chars"]))
+        if user_text:
+            lines.append(f"User {index}: {user_text}")
+        if assistant_text:
+            lines.append(f"Assistant {index}: {assistant_text}")
+    return "\n\n".join(lines).strip()
+
+
+def _parse_tool_json_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return {}
+    try:
+        loaded = json.loads(result)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[str]:
+    if not str(name or "").startswith("business_"):
+        return []
+    config = _shell_progress_config()
+    data = _parse_tool_json_result(result)
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    if not results and data.get("action"):
+        results = [data]
+    if not results and data.get("success") and str(name or "") == "business_create_app_checkout":
+        business = str(data.get("business") or args.get("business") or "").strip()
+        lines = []
+        if business:
+            lines.append(f"checkout intent -> {_business_artifact_path(business, 'app/billing.md')}")
+            if str(data.get("external_side_effects") or "") == "suppressed":
+                checkout_id = str(data.get("checkout_intent_id") or "")
+                if checkout_id:
+                    lines.append(f"checkout receipt -> {_business_artifact_path(business, f'receipts/app-checkout/{checkout_id}.json')}")
+        return lines
+    if not results and str(name or "") == "business_claude_agent_task":
+        business = str(data.get("business") or args.get("business") or "").strip()
+        workspace = str(data.get("workspace") or args.get("workspace") or ".").strip() or "."
+        lines = []
+        if business:
+            lines.append(f"agent workspace -> {_business_artifact_path(business, workspace)}")
+            agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
+            for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
+                lines.append(line)
+        return lines
+    lines: list[str] = []
+    seen_root: set[str] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "")
+        business = str(item.get("business") or item.get("business_slug") or args.get("business") or "").strip()
+        if config["show_business_root"] and business and business not in seen_root and action == "business.upsert":
+            seen_root.add(business)
+            lines.append(f"business:{business} filesystem -> {_business_root(business)}")
+        if not config["show_durable_writes"]:
+            continue
+        if action in {"artifact.write", "artifact.patch", "memory.write"}:
+            path = str(item.get("path") or "")
+            if business and path:
+                lines.append(f"file -> {_business_artifact_path(business, path)}")
+        elif action == "workspace.upsert":
+            workspace = str(item.get("workspace") or "")
+            if business and workspace:
+                lines.append(f"workspace -> {_business_artifact_path(business, workspace)}")
+        elif action == "outreach.local_publish":
+            artifact = str(item.get("artifact") or "")
+            if business and artifact:
+                lines.append(f"local outreach -> {_business_artifact_path(business, artifact)}")
+            receipt = str(item.get("receipt") or "")
+            if business and receipt:
+                lines.append(f"receipt -> {_business_artifact_path(business, receipt)}")
+        elif action == "app.surface.upsert":
+            if business:
+                lines.append(f"app surface -> {_business_artifact_path(business, 'app/surface.md')}")
+        elif action == "app.plan.upsert":
+            if business:
+                plan = str(item.get("plan_key") or "")
+                suffix = f" ({plan})" if plan else ""
+                lines.append(f"app plans{suffix} -> {_business_artifact_path(business, 'app/plans.md')}")
+        elif action == "app.budget.set":
+            if business:
+                lines.append(f"app usage budget -> {_business_artifact_path(business, 'app/usage.md')}")
+        elif action in {"app.customer.upsert", "app.entitlement.upsert"}:
+            if business:
+                lines.append(f"app customers/entitlements -> {_business_artifact_path(business, 'app/customers.md')}")
+        elif action == "app.usage.record":
+            if business:
+                lines.append(f"app usage -> {_business_artifact_path(business, 'app/usage.md')}")
+        elif action in {"conversation.thread.upsert", "conversation.message.record"}:
+            path = str(item.get("file") or "")
+            if business and path:
+                lines.append(f"conversation -> {_business_artifact_path(business, path)}")
+        elif action == "business.mode.set":
+            if business:
+                lines.append(f"business:{business} mode -> {item.get('mode')}")
+        elif action == "cron.ensure_ceo_wakeup":
+            if business:
+                lines.append(f"CEO wake -> business:{business} {item.get('schedule') or item.get('cron_job')}")
+        elif action == "ledger.allocate":
+            if business:
+                lines.append(f"budget ledger -> business:{business} {item.get('ledger_entry') or ''}".rstrip())
+        elif action == "job.enqueue":
+            if business:
+                lines.append(f"job queued -> business:{business} {item.get('job') or item.get('id') or ''}".rstrip())
+        elif action == "agent.record":
+            if business:
+                lines.append(f"agent record -> business:{business} {item.get('agent_run') or item.get('id') or ''}".rstrip())
+    return lines
+
+
+class _ShellProgress:
+    def __init__(self, enabled: bool):
+        config = _shell_progress_config()
+        self.enabled = bool(enabled and config["enabled"] and sys.stdout.isatty())
+        self.max_lines = int(config["max_lines"])
+        self.fd: int | None = os.dup(1) if self.enabled else None
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def emit(self, line: str) -> None:
+        if self.fd is None:
+            return
+        text = f"\r\x1b[K{_color('->', _THEME['secondary'])} {line}\n"
+        try:
+            os.write(self.fd, text.encode("utf-8", errors="replace"))
+        except OSError:
+            self.close()
+
+    def tool_completed(self, _tool_id: str, name: str, args: dict[str, Any], result: Any) -> None:
+        if self.fd is None:
+            return
+        for line in _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)[: self.max_lines]:
+            self.emit(line)
+
+
+@contextlib.contextmanager
+def _thinking_indicator(enabled: bool):
+    if not enabled or not sys.stdout.isatty():
+        yield
+        return
+    config = _thinking_ui_config()
+    if not config["enabled"]:
+        yield
+        return
+    writer_fd = os.dup(1)
+    stop = threading.Event()
+    label = str(config["label"])
+    frames = list(config["frames"])
+    interval = float(config["interval"])
+
+    def animate() -> None:
+        index = 0
+        while not stop.is_set():
+            frame = frames[index % len(frames)]
+            line = f"\r\x1b[K{_color(frame, _THEME['primary'])} {_dim(label)}"
+            try:
+                os.write(writer_fd, line.encode("utf-8", errors="replace"))
+            except OSError:
+                return
+            index += 1
+            stop.wait(interval)
+
+    thread = threading.Thread(target=animate, name="takyon-thinking-indicator", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=interval + 0.2)
+        try:
+            os.write(writer_fd, b"\r\x1b[K")
+        except OSError:
+            pass
+        os.close(writer_fd)
+
+
+def _read_shell_line(current_business: str | None, entries: list[dict[str, Any]]) -> str:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return input(f"takyon/{current_business or 'global'} > ")
+    config = _read_model_config(TakyonStore())
+    if not _config_bool(config.get("shell_enhanced_input"), default=True):
+        sys.stdout.write(_input_bar_top(current_business) + "\n")
+        sys.stdout.flush()
+        return input(_input_prompt(current_business))
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    line = ""
+    palette_offset = 0
+    sys.stdout.write(_input_bar_top(current_business) + "\n")
+    sys.stdout.write(_input_prompt(current_business))
+    sys.stdout.flush()
+    try:
+        tty.setcbreak(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in {"\r", "\n"}:
+                submitted = line
+                _clear_shell_popup()
+                if submitted.strip():
+                    sys.stdout.write("\r\x1b[K" + _input_prompt(current_business) + submitted)
+                    sys.stdout.write("\n" + _color("─" * _shell_width(), _THEME["muted"]) + "\n")
+                else:
+                    sys.stdout.write("\r\x1b[K")
+                sys.stdout.flush()
+                return submitted
+            if ch == "\x03":
+                _clear_shell_popup()
+                raise KeyboardInterrupt
+            if ch == "\x04":
+                if not line:
+                    _clear_shell_popup()
+                    raise EOFError
+                continue
+            if ch in {"\x7f", "\b"}:
+                line = line[:-1]
+                palette_offset = 0
+                _redraw_shell_line(line, current_business, entries, palette_offset)
+                continue
+            if ch == "\t":
+                line = _complete_slash_line(line, entries, current_business)
+                palette_offset = 0
+                _redraw_shell_line(line, current_business, entries, palette_offset)
+                continue
+            if ch == "\x1b":
+                seq = ""
+                while select.select([sys.stdin], [], [], 0.01)[0]:
+                    seq += sys.stdin.read(1)
+                    if len(seq) >= 2:
+                        break
+                if seq == "[A":
+                    palette_offset = max(0, palette_offset - 1)
+                elif seq == "[B":
+                    palette_offset += 1
+                _redraw_shell_line(line, current_business, entries, palette_offset)
+                continue
+            if ch >= " ":
+                line += ch
+                palette_offset = 0
+                _redraw_shell_line(line, current_business, entries, palette_offset)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _business_exists(store: TakyonStore, slug: str) -> bool:
+    data = store.read(scope="global", query="list_businesses", limit=200)
+    return any(item.get("slug") == slug for item in data.get("businesses", []))
+
+
+def _require_current_business(current_business: str | None) -> str:
+    if not current_business:
+        raise SystemExit("Select a business first with /use <business> or create one with /create <business> <goal>.")
+    return current_business
+
+
+def _command_with_current_business(tokens: list[str], current_business: str | None) -> list[str]:
+    if not tokens:
+        return tokens
+    command = tokens[0].lower().lstrip("/")
+    if command in {"status", "show"} and len(tokens) == 1 and current_business:
+        return ["show", current_business]
+    if command in {"files", "workspace"} and current_business:
+        return ["files", current_business, *tokens[1:]]
+    if command == "read" and current_business:
+        return ["read", current_business, *tokens[1:]]
+    if command in {"jobs", "campaigns", "capabilities", "caps"} and len(tokens) == 1 and current_business:
+        return [command, current_business]
+    if command == "test" and current_business:
+        mode_args = {"on", "off", "status", "show", "test", "live"}
+        if len(tokens) == 1 or tokens[1] in mode_args:
+            return ["test", current_business, *tokens[1:]]
+    if command in {"wake", "run", "goal", "/goal"} and current_business:
+        return [command, current_business, *tokens[1:]]
+    if command in {"budget"} and current_business and (len(tokens) == 1 or tokens[1] in {"show", "status", "set"}):
+        return [command, *tokens[1:2], current_business, *tokens[2:]] if len(tokens) > 1 else [command, current_business]
+    if command in {"memory"} and current_business and (len(tokens) == 1 or tokens[1] in {"list", "record"}):
+        return [command, *tokens[1:2], current_business, *tokens[2:]] if len(tokens) > 1 else [command, "list", current_business]
+    if command in {"pause", "resume", "kill"} and len(tokens) == 1 and current_business:
+        return [command, "business", current_business]
+    return tokens
+
+
+def _looks_like_slug(value: str) -> bool:
+    try:
+        _slugify(value)
+        return True
+    except Exception:
+        return False
+
+
+def _operator_context_message(message: str, current_business: str | None) -> str:
+    if current_business:
+        return (
+            f"Scope: business:{current_business}\n"
+            "CEO role: scoped business operator.\n\n"
+            f"Operator request:\n{message}\n\n"
+            "First read this business state with Takyon business tools. Keep all durable writes business-scoped."
+        )
+    return (
+        "Scope: global\n"
+        "CEO role: account/root-scope operator. Global is not the CEO; it is the top-level Takyon scope.\n\n"
+        f"Operator request:\n{message}\n\n"
+        "Use global reads for businesses, credentials, policy, skills, and budgets. "
+        "For any business/product/customer state change, create or select the business and use concrete business_* tools."
+    )
+
+
+def _format_ceo_focus(current_business: str | None, store: TakyonStore, model: str = "") -> str:
+    config = _read_model_config(store)
+    resolved_model = model or os.getenv("TAKYON_MODEL", "") or config.get("model") or "(not set)"
+    provider = config.get("provider") or "(not set)"
+    lines = [
+        f"Scope: {_scope_label(current_business)}",
+        "Scoped CEO: already active for plain text.",
+    ]
+    if current_business:
+        lines.append("Plain text will operate inside this business and keep durable writes business-scoped.")
+    else:
+        lines.append("Plain text will operate at the global Takyon account scope; use /use <business> to enter a business.")
+    lines.extend([
+        f"Model: {resolved_model}",
+        f"Provider: {provider}",
+    ])
+    return "\n".join(lines)
+
+
+def _config_path(store: TakyonStore) -> Path:
+    return store.root / "config.yaml"
+
+
+def _secrets_path(store: TakyonStore) -> Path:
+    return store.root.parent / "secrets" / ".env"
+
+
+def _read_model_config(store: TakyonStore) -> dict[str, str]:
+    path = _config_path(store)
+    provider = ""
+    model = ""
+    claude_agent_model = ""
+    response_style = ""
+    show_agent_activity = ""
+    shell_enhanced_input = ""
+    auto_schedule_ceo_on_create = ""
+    default_ceo_schedule = ""
+    if path.exists():
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            model_data = data.get("model") or {}
+            provider = str(model_data.get("provider") or "")
+            model = str(model_data.get("default") or model_data.get("model") or "")
+            claude_agent_model = str(
+                model_data.get("claude_agent_default")
+                or model_data.get("deep_work_default")
+                or ""
+            )
+            conversation_data = data.get("conversation") or {}
+            if isinstance(conversation_data, dict):
+                response_style = str(conversation_data.get("response_style") or "")
+                show_agent_activity = str(conversation_data.get("show_agent_activity") or "")
+            shell_data = data.get("shell") or {}
+            if isinstance(shell_data, dict):
+                shell_enhanced_input = str(shell_data.get("enhanced_input") or "")
+            business_data = data.get("business") or {}
+            if isinstance(business_data, dict):
+                auto_schedule_ceo_on_create = str(business_data.get("auto_schedule_ceo_on_create") or "")
+                default_ceo_schedule = str(business_data.get("default_ceo_schedule") or "")
+        except Exception:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("provider:"):
+                    provider = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("default:"):
+                    model = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("claude_agent_default:"):
+                    claude_agent_model = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("response_style:"):
+                    response_style = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("show_agent_activity:"):
+                    show_agent_activity = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("enhanced_input:"):
+                    shell_enhanced_input = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("auto_schedule_ceo_on_create:"):
+                    auto_schedule_ceo_on_create = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("default_ceo_schedule:"):
+                    default_ceo_schedule = stripped.split(":", 1)[1].strip()
+    return {
+        "provider": provider,
+        "model": model,
+        "claude_agent_model": claude_agent_model,
+        "response_style": response_style,
+        "show_agent_activity": show_agent_activity,
+        "shell_enhanced_input": shell_enhanced_input,
+        "auto_schedule_ceo_on_create": auto_schedule_ceo_on_create,
+        "default_ceo_schedule": default_ceo_schedule,
+        "path": str(path),
+    }
+
+
+def _config_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
+def _write_model_config(store: TakyonStore, provider: str, model: str) -> dict[str, str]:
+    path = _config_path(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            model_data = data.get("model") if isinstance(data.get("model"), dict) else {}
+            model_data = dict(model_data)
+            model_data["provider"] = provider
+            model_data["default"] = model
+            data["model"] = model_data
+            data.setdefault("security", {"redact_secrets": True})
+            path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            path.chmod(0o600)
+            return {"provider": provider, "model": model, "path": str(path)}
+        except Exception:
+            pass
+    path.write_text(
+        "model:\n"
+        f"  provider: {provider}\n"
+        f"  default: {model}\n\n"
+        "security:\n"
+        "  redact_secrets: true\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return {"provider": provider, "model": model, "path": str(path)}
+
+
+def _format_model_config(store: TakyonStore) -> str:
+    data = _read_model_config(store)
+    model = data.get("model") or "(not set)"
+    claude_agent_model = data.get("claude_agent_model") or "(inherits default)"
+    response_style = data.get("response_style") or "(not set)"
+    show_agent_activity = data.get("show_agent_activity") or "(not set)"
+    provider = data.get("provider") or "(not set)"
+    return (
+        f"Model provider: {provider}\n"
+        f"Conversational model: {model}\n"
+        f"Claude Agent SDK model: {claude_agent_model}\n"
+        f"Response style: {response_style}\n"
+        f"Agent activity: {show_agent_activity}\n"
+        f"Config: {data.get('path')}"
+    )
+
+
+def _setup_paths(store: TakyonStore) -> str:
+    store.root.mkdir(parents=True, exist_ok=True)
+    secrets = _secrets_path(store)
+    secrets.parent.mkdir(parents=True, exist_ok=True)
+    if not secrets.exists():
+        secrets.write_text("", encoding="utf-8")
+        secrets.chmod(0o600)
+    link = store.root / ".env"
+    if not link.exists():
+        try:
+            link.symlink_to(Path("..") / "secrets" / ".env")
+        except OSError:
+            pass
+    return "\n".join([
+        f"Takyon home: {store.root}",
+        f"Config: {_config_path(store)}",
+        f"Secrets: {secrets}",
+        "Secrets are never printed by this command.",
+    ])
+
+
+def _secret_command(store: TakyonStore, argv: list[str]) -> str:
+    path = _secrets_path(store)
+    if len(argv) < 2 or argv[1] in {"list", "ls"}:
+        load_takyon_env()
+        names: list[str] = []
+        for candidate in [path, store.root / ".env"]:
+            if not candidate.exists():
+                continue
+            for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                names.append(stripped.split("=", 1)[0].removeprefix("export ").strip())
+        names = sorted(set(name for name in names if name))
+        return "Secret keys:\n" + ("\n".join(f"  {name}=<redacted>" for name in names) if names else "  none found")
+    if argv[1] != "set" or len(argv) < 4:
+        raise SystemExit("usage: takyon secret list | takyon secret set KEY VALUE")
+    key = argv[2].strip()
+    if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
+        raise SystemExit("secret key must be an env-style name")
+    value = " ".join(argv[3:])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []
+    prefix = f"{key}="
+    updated = False
+    next_lines = []
+    for line in lines:
+        if line.strip().startswith(prefix) or line.strip().startswith(f"export {prefix}"):
+            next_lines.append(f"{key}={value}")
+            updated = True
+        else:
+            next_lines.append(line)
+    if not updated:
+        next_lines.append(f"{key}={value}")
+    path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return f"Stored {key}=<redacted> in {path}"
+
+
+def _interactive_shell(*, initial_business: str | None, model: str, max_turns: int) -> None:
+    store = TakyonStore()
+    current_business = _slugify(initial_business) if initial_business else None
+    if current_business and not _business_exists(store, current_business):
+        print(f"[takyon] business:{current_business} is not initialized yet. /create {current_business} <goal> will create it.")
+
+    entries = _slash_entries()
+    print(_startup_graphic(current_business))
+    shell_history: list[dict[str, str]] = []
+
+    while True:
+        try:
+            line = _read_shell_line(current_business, entries)
+        except EOFError:
+            print()
+            return
+        except KeyboardInterrupt:
+            print()
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
+            return
+        try:
+            output, current_business = _handle_shell_line(
+                line,
+                current_business=current_business,
+                store=store,
+                model=model,
+                max_turns=max_turns,
+                shell_history=shell_history,
+            )
+            if output:
+                print(output)
+            _record_shell_turn(shell_history, line, output)
+            entries = _slash_entries()
+        except SystemExit as exc:
+            if str(exc):
+                output = f"Takyon: {exc}"
+                print(output)
+                _record_shell_turn(shell_history, line, output)
+        except KeyboardInterrupt:
+            print("Takyon: interrupted")
+        except Exception as exc:
+            output = f"Takyon error: {exc}"
+            print(output)
+            _record_shell_turn(shell_history, line, output)
+
+
+def _handle_shell_line(
+    line: str,
+    *,
+    current_business: str | None,
+    store: TakyonStore,
+    model: str,
+    max_turns: int,
+    shell_history: list[dict[str, str]] | None = None,
+) -> tuple[str, str | None]:
+    is_slash = line.startswith("/")
+    raw = line.lstrip("/") if is_slash else line
+    tokens = shlex.split(raw)
+    if not tokens:
+        return "", current_business
+    command = tokens[0].lower()
+    local_answer = _local_shell_help_answer(raw, current_business=current_business)
+    if local_answer:
+        return local_answer, current_business
+
+    if is_slash and command == "ceo":
+        return _format_ceo_focus(current_business, store, model), current_business
+
+    if command == "use":
+        if len(tokens) < 2:
+            raise SystemExit("usage: /use <business>")
+        slug = _slugify(tokens[1])
+        if not _business_exists(store, slug):
+            raise SystemExit(f"business:{slug} does not exist yet. Use /create {slug} <goal>.")
+        return f"Using business:{slug}", slug
+
+    if command in {"help", "commands", "skills", "harness"}:
+        return _format_harness_commands(), current_business
+
+    if command in {"create", "build", "init"}:
+        if len(tokens) < 2:
+            raise SystemExit('usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
+        command_argv = ["create", *tokens[1:]]
+        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto = _parse_business_start_args(
+            command_argv,
+            usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+            auto_default=True,
+        )
+        result = run_takyon_command(
+            command_argv,
+            model=model,
+            max_turns=max_turns,
+            show_activity=False,
+            show_indicator=True,
+            shell_history=shell_history,
+        )
+        return _format_cli_value(result), slug
+
+    harness_command = _get_harness_command(command)
+    if harness_command:
+        business = current_business
+        if harness_command.get("requires_business"):
+            business = _require_current_business(current_business)
+        message = _render_harness_command(harness_command, business=business, args=tokens[1:], store=store)
+        return _run_agent(
+            message,
+            model=model or os.getenv("TAKYON_MODEL", ""),
+            max_turns=max_turns,
+            show_activity=False,
+            show_indicator=True,
+            shell_history=shell_history,
+        ), current_business
+
+    if command in _local_command_names() and command != "ceo":
+        normalized = _command_with_current_business(tokens, current_business)
+        result = run_takyon_command(
+            normalized,
+            model=model,
+            max_turns=max_turns,
+            show_activity=False,
+            show_indicator=True,
+            shell_history=shell_history,
+        )
+        return _format_cli_value(result), current_business
+
+    if is_slash:
+        skill_ref = _resolve_skill_reference(command)
+        if skill_ref:
+            if command != "ceo":
+                _require_current_business(current_business)
+            instruction = " ".join(tokens[1:]).strip() or f"Use the {command} skill for the current scope."
+            if skill_ref[0] == "slash":
+                from agent.skill_commands import build_skill_invocation_message
+
+                message = build_skill_invocation_message(
+                    skill_ref[1],
+                    instruction,
+                    runtime_note="Invoked through the Takyon scoped shell.",
+                )
+            else:
+                message = _plugin_skill_invocation_message(skill_ref[1], instruction) or instruction
+            return _run_agent(
+                _operator_context_message(message, current_business),
+                model=model or os.getenv("TAKYON_MODEL", ""),
+                max_turns=max_turns,
+                show_activity=False,
+                show_indicator=True,
+                shell_history=shell_history,
+            ), current_business
+        return f"Unknown slash command: /{command}. Use /commands.", current_business
+
+    message = _operator_context_message(line, current_business)
+    return _run_agent(
+        message,
+        model=model or os.getenv("TAKYON_MODEL", ""),
+        max_turns=max_turns,
+        show_activity=False,
+        show_indicator=True,
+        shell_history=shell_history,
+    ), current_business
+
+
+def _local_shell_help_answer(raw: str, *, current_business: str | None) -> str:
+    text = " ".join(str(raw or "").strip().lower().replace("?", " ").split())
+    if not text:
+        return ""
+    help_tokens = {"how", "what", "help", "usage", "show", "tell", "explain"}
+    wants_help = bool(help_tokens & set(text.split()[:4]))
+    if wants_help:
+        matched = _match_self_help_command(text)
+        if matched:
+            return _format_control_command_help(matched)
+    return ""
+
+
+def _match_self_help_command(text: str) -> str:
+    settings = _load_harness_settings()
+    configured = settings.get("selfHelp") or []
+    if not isinstance(configured, list):
+        return ""
+    words = set(text.split())
+    for item in configured:
+        if not isinstance(item, dict):
+            continue
+        required = [str(token).strip().lower() for token in item.get("whenAll") or [] if str(token).strip()]
+        command = str(item.get("command") or "").strip().lstrip("/")
+        if command and required and all(token in words for token in required):
+            return command
+    return ""
+
+
+def _format_control_command_help(name: str) -> str:
+    command = _control_command(name)
+    if not command:
+        return ""
+    lines: list[str] = []
+    summary = str(command.get("summary") or "").strip()
+    description = str(command.get("description") or "").strip()
+    usage = str(command.get("usage") or "").strip()
+    if summary:
+        lines.append(summary)
+    elif description:
+        lines.append(description)
+    if usage:
+        lines.extend(["", "Usage:", f"  {usage}"])
+    examples = command.get("examples") or []
+    for example in examples:
+        if not isinstance(example, dict):
+            continue
+        label = str(example.get("label") or "Example").strip()
+        value = str(example.get("command") or "").strip()
+        if value:
+            lines.extend(["", f"{label}:", f"  {value}"])
+    flags = command.get("flags") or []
+    if flags:
+        width = max(len(str(flag.get("name") or "")) for flag in flags if isinstance(flag, dict)) if any(isinstance(flag, dict) for flag in flags) else 0
+        lines.extend(["", "Flags:"])
+        for flag in flags:
+            if not isinstance(flag, dict):
+                continue
+            flag_name = str(flag.get("name") or "").strip()
+            flag_description = str(flag.get("description") or "").strip()
+            if flag_name:
+                lines.append(f"  {flag_name:<{width}}  {flag_description}".rstrip())
+    return "\n".join(lines).strip()
 
 
 def _format_slash_value(value: Any) -> str:
     if isinstance(value, str):
         return value
-    return json.dumps(value, indent=2, ensure_ascii=False)
+    return _format_cli_value(value)
 
 
 def _resolve_skill_reference(name: str) -> tuple[str, str] | None:
@@ -185,7 +1828,7 @@ def _queue_skill_invocation(ctx: Any, skill_kind: str, skill_ref: str, instructi
 def _queue_ceo_invocation(ctx: Any, message: str) -> str:
     prompt = (
         "Takyon operator command:\n\n"
-        f"{message}\n\n"
+        f"{_operator_context_message(message, None)}\n\n"
         "Use the Takyon CEO skill, business registry, and concrete business_* tools. Keep business state isolated."
     )
     if ctx is not None and hasattr(ctx, "inject_message") and ctx.inject_message(prompt):
@@ -197,32 +1840,103 @@ def _queue_ceo_invocation(ctx: Any, message: str) -> str:
     )
 
 
-def _run_agent(message: str, *, model: str, max_turns: int) -> str:
+@contextlib.contextmanager
+def _silence_process_stdio():
+    stdout_fd = stderr_fd = devnull_fd = None
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        stdout_fd = os.dup(1)
+        stderr_fd = os.dup(2)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            yield
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        if stdout_fd is not None:
+            os.dup2(stdout_fd, 1)
+            os.close(stdout_fd)
+        if stderr_fd is not None:
+            os.dup2(stderr_fd, 2)
+            os.close(stderr_fd)
+        if devnull_fd is not None:
+            os.close(devnull_fd)
+
+
+def _run_agent(
+    message: str,
+    *,
+    model: str,
+    max_turns: int,
+    show_activity: bool | None = None,
+    show_indicator: bool = False,
+    shell_history: list[dict[str, str]] | None = None,
+) -> str:
     load_takyon_env()
     from run_agent import AIAgent
 
     skill = _load_ceo_skill()
-    agent = AIAgent(
-        model=model,
-        max_iterations=max_turns,
-        enabled_toolsets=["takyon", "web", "skills", "todo", "delegation"],
-        disabled_toolsets=["cronjob", "messaging", "memory", "session_search", "terminal", "file", "browser", "code_execution"],
-        ephemeral_system_prompt=skill,
-        load_soul_identity=True,
-        skip_memory=True,
-        skip_context_files=True,
-        platform="takyon",
-        quiet_mode=False,
-    )
-    result = agent.run_conversation(
+    model_config = _read_model_config(TakyonStore())
+    resolved_model = model or os.getenv("TAKYON_MODEL", "") or model_config.get("model", "")
+    provider = model_config.get("provider", "")
+    response_style = model_config.get("response_style", "").strip().lower()
+    configured_activity = _config_bool(model_config.get("show_agent_activity"), default=False)
+    show_agent_activity = configured_activity if show_activity is None else bool(show_activity)
+    history_text = _format_shell_history(shell_history)
+    history_block = f"{history_text}\n\nCurrent turn:\n" if history_text else ""
+    prompt = (
         "Takyon operator command:\n\n"
-        f"{message}\n\n"
+        f"{history_block}{message}\n\n"
+        f"Configured response style: {response_style or 'default'}.\n"
+        "Use source-of-truth state, command behavior, registry metadata, and loaded skills before assumptions. "
+        "Resolve short follow-ups like 'make #1' against the recent shell transcript when it is provided. "
+        "If you do not know a fact from available context or tools, say so briefly. "
+        "Default to action for operational business requests. If the operator gives a business slug, goal, or clear choice "
+        "and asks to create, make, set up, build, start, run, continue, or operate it, use the business tools now. "
+        "Do not answer with a command recipe, implementation checklist, or 'say X and I will' handoff unless the operator "
+        "explicitly asks for explanation only or says not to implement. "
         "Use concrete business_* tools for all durable business state changes. "
         "Read business state before broad changes. Keep every write business-scoped. "
         "Do not claim a file write, budget allocation, job enqueue, agent record, or wakeup schedule succeeded "
         "unless the specific business tool returned success."
     )
-    return str(result.get("final_response") or "")
+
+    progress = _ShellProgress(show_indicator and not show_agent_activity)
+
+    def invoke() -> dict[str, Any]:
+        agent = AIAgent(
+            provider=provider or None,
+            model=resolved_model,
+            max_iterations=max_turns,
+            enabled_toolsets=["takyon", "web", "skills", "todo", "delegation"],
+            disabled_toolsets=["cronjob", "messaging", "memory", "session_search", "terminal", "file", "browser", "code_execution"],
+            ephemeral_system_prompt=skill,
+            load_soul_identity=True,
+            skip_memory=True,
+            skip_context_files=True,
+            platform="takyon",
+            quiet_mode=not show_agent_activity,
+            tool_complete_callback=progress.tool_completed if progress.enabled else None,
+        )
+        agent.suppress_status_output = not show_agent_activity
+        return agent.run_conversation(prompt, stream_callback=None if show_agent_activity else (lambda _delta: None))
+
+    try:
+        if show_agent_activity:
+            result = invoke()
+        else:
+            with _thinking_indicator(show_indicator):
+                with _silence_process_stdio():
+                    result = invoke()
+        return str(result.get("final_response") or "")
+    finally:
+        progress.close()
 
 
 def _load_ceo_skill() -> str:
@@ -238,7 +1952,16 @@ def _load_ceo_skill() -> str:
     return skill_path.read_text(encoding="utf-8")
 
 
-def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = "", max_turns: int = 30) -> Any:
+def run_takyon_command(
+    argv: list[str],
+    *,
+    raw_json: bool = False,
+    model: str = "",
+    max_turns: int = 30,
+    show_activity: bool | None = None,
+    show_indicator: bool = False,
+    shell_history: list[dict[str, str]] | None = None,
+) -> Any:
     store = TakyonStore()
 
     if not argv:
@@ -248,6 +1971,48 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
 
     if command in {"help", "-h", "--help"}:
         return _takyon_help()
+
+    if command == "ceo":
+        return _format_ceo_focus(None, store, model)
+
+    if command in {"shell", "interactive"}:
+        if raw_json or not sys.stdin.isatty():
+            return _takyon_help().replace("/takyon", "takyon")
+        _interactive_shell(
+            initial_business=argv[1] if len(argv) >= 2 else None,
+            model=model or os.getenv("TAKYON_MODEL", ""),
+            max_turns=int(max_turns or 30),
+        )
+        return None
+
+    if command in {"commands", "skills", "harness"}:
+        return _format_harness_commands()
+
+    if command == "setup":
+        return _setup_paths(store)
+
+    if command == "model":
+        if len(argv) >= 3 and argv[1] in {"set", "use"}:
+            if len(argv) < 4:
+                raise SystemExit("usage: takyon model set <provider> <model>")
+            return _write_model_config(store, argv[2], argv[3])
+        if len(argv) >= 3:
+            return _write_model_config(store, argv[1], argv[2])
+        return _format_model_config(store)
+
+    if command == "secret":
+        return _secret_command(store, argv)
+
+    if command == "connect":
+        return "Connector setup is handled by provider-specific skills/tools. Use `takyon secret set KEY VALUE` for credentials and keep business state in Hermes Takyon."
+
+    if command in {"app-server", "api"}:
+        from .app_api import run_app_api_server
+
+        host = argv[1] if len(argv) >= 2 else "127.0.0.1"
+        port = int(argv[2]) if len(argv) >= 3 else 8787
+        run_app_api_server(host=host, port=port)
+        return None
 
     if command in {"businesses", "business", "list"}:
         return store.read(scope="global", query="list_businesses")
@@ -269,6 +2034,58 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
                     f"unknown registry filter {value!r}; use all|tools|skills, a category, or a priority band"
                 )
         return business_registry_snapshot(kind=kind, category=category, priority_band=priority_band)
+
+    if command in {"status"}:
+        if len(argv) < 2:
+            raise SystemExit("usage: takyon status <business>")
+        slug = _slugify(argv[1])
+        return store.read(scope=_scope_for_business(slug), query="summary")
+
+    if command == "test":
+        if len(argv) < 2:
+            raise SystemExit("usage: takyon test <business> on|off|status")
+        slug = _slugify(argv[1])
+        mode_arg = (argv[2] if len(argv) >= 3 else "status").strip().lower()
+        if mode_arg in {"status", "show"}:
+            data = store.read(scope=_scope_for_business(slug), query="summary")
+            business = data.get("business") or {}
+            return {"success": True, "business": business, "mode": business.get("mode") or "live"}
+        mode = "test" if mode_arg in {"on", "test"} else "live" if mode_arg in {"off", "live"} else ""
+        if not mode:
+            raise SystemExit("usage: takyon test <business> on|off|status")
+        return store.commit(
+            scope=_scope_for_business(slug),
+            operations=[{"action": "business.mode.set", "business": slug, "mode": mode}],
+            idempotency_key=f"operator-test-mode:{slug}:{mode}",
+            reason="operator set business test mode",
+            actor="operator",
+        )
+
+    if command == "auto":
+        raise SystemExit('takyon auto was folded into creation. Use: takyon create [--test] [--schedule "every 6h"] <business> <goal>')
+
+    if command in {"files", "workspace"}:
+        if len(argv) < 2:
+            raise SystemExit(f"usage: takyon {command} <business> [path]")
+        slug = _slugify(argv[1])
+        return store.read(scope=_scope_for_business(slug), query="list_files", path=argv[2] if len(argv) >= 3 else ".")
+
+    if command == "read":
+        if len(argv) < 3:
+            raise SystemExit("usage: takyon read <business> <path>")
+        slug = _slugify(argv[1])
+        return store.read(scope=_scope_for_business(slug), query="read_file", path=argv[2])
+
+    if command in {"jobs", "capabilities", "caps"}:
+        if len(argv) < 2:
+            raise SystemExit(f"usage: takyon {command} <business>")
+        slug = _slugify(argv[1])
+        if command == "jobs":
+            return store.read(scope=_scope_for_business(slug), query="jobs")
+        return (
+            f"Capabilities for business:{slug} are Hermes tools plus credential/budget/control gates.\n"
+            + _format_cli_value(business_registry_snapshot(kind="tools"))
+        )
 
     if command in {"campaigns", "workspaces"}:
         if len(argv) < 2:
@@ -326,17 +2143,140 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
             reason = " ".join(argv[2:]).strip() or f"operator {command}"
         return _control(store, scope, state, reason)
 
-    if command == "init":
-        if len(argv) < 2:
-            raise SystemExit("usage: takyon init <business> [goal text]")
-        slug = _slugify(argv[1])
-        goal = " ".join(argv[2:]).strip()
-        return store.commit(
+    if command in {"init", "create", "build"}:
+        auto_default = command in {"create", "build"}
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto = _parse_business_start_args(
+            argv,
+            usage=f'usage: takyon {command} [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
+            auto_default=auto_default,
+        )
+        config = _read_model_config(store)
+        auto_wake = _config_bool(config.get("auto_schedule_ceo_on_create"), default=False)
+        schedule = schedule_arg or (config.get("default_ceo_schedule") or "every 6h").strip()
+        should_schedule = bool(schedule_arg) or (not no_auto and (auto_start or auto_wake))
+        business_result = store.commit(
             scope=_scope_for_business(slug),
-            operations=[{"action": "business.upsert", "business": slug, "name": argv[1], "goal": goal}],
-            idempotency_key=f"operator-init:{slug}:{goal}",
+            operations=[{"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}],
+            idempotency_key=f"operator-init-v3:{slug}:{mode or 'keep'}:{goal}",
             reason="operator initialized business",
             actor="operator",
+        )
+        if not should_schedule:
+            return business_result
+        cron_result = store.commit(
+            scope=_scope_for_business(slug),
+            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+            idempotency_key=f"operator-init-v2-wake:{slug}:{schedule}",
+            reason="operator initialized business CEO wake loop",
+            actor="operator",
+        )
+        if auto_start:
+            active = store.read(scope=_scope_for_business(slug), query="summary")
+            active_mode = str((active.get("business") or {}).get("mode") or mode or "live")
+            instruction = _business_bootstrap_instruction(slug, goal, active_mode)
+            agent_response = _run_agent(
+                _operator_context_message(instruction, slug),
+                model=model or os.getenv("TAKYON_MODEL", ""),
+                max_turns=int(max_turns or 30),
+                show_activity=show_activity,
+                show_indicator=show_indicator,
+                shell_history=shell_history,
+            )
+            return {
+                "success": True,
+                "business": slug,
+                "mode": active_mode,
+                "schedule": schedule,
+                "init": business_result,
+                "wake": cron_result,
+                "agent_response": agent_response,
+            }
+        return {
+            "success": True,
+            "results": [
+                *(business_result.get("results") or []),
+                *(cron_result.get("results") or []),
+            ],
+        }
+
+    if command == "budget":
+        if len(argv) < 2:
+            raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount>")
+        if argv[1] == "set":
+            if len(argv) < 4:
+                raise SystemExit("usage: takyon budget set <business> <amount>")
+            slug = _slugify(argv[2])
+            amount = float(argv[3])
+            return store.commit(
+                scope=_scope_for_business(slug),
+                operations=[{"action": "business.upsert", "business": slug, "budget": {"amount": amount, "currency": "USD"}}],
+                idempotency_key=f"operator-budget-set:{slug}:{amount}",
+                reason="operator set business budget cap",
+                actor="operator",
+            )
+        if argv[1] in {"show", "status"}:
+            if len(argv) < 3:
+                raise SystemExit("usage: takyon budget show <business>")
+            slug = _slugify(argv[2])
+        else:
+            slug = _slugify(argv[1])
+        data = store.read(scope=_scope_for_business(slug), query="summary")
+        return {
+            "success": True,
+            "business": data.get("business"),
+            "ledger": data.get("ledger", []),
+        }
+
+    if command == "memory":
+        subcommand = argv[1] if len(argv) >= 2 else "list"
+        if subcommand == "list":
+            if len(argv) < 3:
+                raise SystemExit("usage: takyon memory list <business>")
+            slug = _slugify(argv[2])
+            return store.read(scope=_scope_for_business(slug), query="list_files", path="brain")
+        if subcommand == "record":
+            if len(argv) < 4:
+                raise SystemExit("usage: takyon memory record <business> <text>")
+            slug = _slugify(argv[2])
+            content = "\n\n" + " ".join(argv[3:]).strip()
+            return store.commit(
+                scope=_scope_for_business(slug),
+                operations=[{"action": "memory.write", "path": "operator-notes.md", "content": content, "mode": "append"}],
+                idempotency_key=f"operator-memory:{slug}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}",
+                reason="operator recorded memory",
+                actor="operator",
+            )
+        raise SystemExit("usage: takyon memory list|record ...")
+
+    if command == "command":
+        if len(argv) < 3:
+            raise SystemExit("usage: takyon command <business> <harness-command> [args...]")
+        slug = _slugify(argv[1])
+        harness_command = _get_harness_command(argv[2])
+        if not harness_command:
+            raise SystemExit(f"unknown harness command: {argv[2]}")
+        message = _render_harness_command(harness_command, business=slug, args=argv[3:], store=store)
+        return _run_agent(
+            message,
+            model=model or os.getenv("TAKYON_MODEL", ""),
+            max_turns=int(max_turns or 30),
+            show_activity=show_activity,
+            show_indicator=show_indicator,
+            shell_history=shell_history,
+        )
+
+    if command in {"run", "goal", "/goal"}:
+        if len(argv) < 2:
+            raise SystemExit(f"usage: takyon {command} <business> [instruction]")
+        slug = _slugify(argv[1])
+        instruction = " ".join(argv[2:]).strip() or "Continue from current business evidence."
+        return _run_agent(
+            _operator_context_message(instruction, slug),
+            model=model or os.getenv("TAKYON_MODEL", ""),
+            max_turns=int(max_turns or 30),
+            show_activity=show_activity,
+            show_indicator=show_indicator,
+            shell_history=shell_history,
         )
 
     if command == "gc":
@@ -354,9 +2294,12 @@ def run_takyon_command(argv: list[str], *, raw_json: bool = False, model: str = 
     if not message:
         raise SystemExit("empty Takyon command")
     return _run_agent(
-        message,
+        _operator_context_message(message, None),
         model=model or os.getenv("TAKYON_MODEL", ""),
         max_turns=int(max_turns or 30),
+        show_activity=show_activity,
+        show_indicator=show_indicator,
+        shell_history=shell_history,
     )
 
 
@@ -389,6 +2332,9 @@ def takyon_slash_command(raw_args: str, ctx: Any = None) -> str:
     if command in {"help", "-h", "--help"}:
         return _takyon_help()
 
+    if command == "ceo":
+        return _format_ceo_focus(None, TakyonStore(), os.getenv("TAKYON_MODEL", ""))
+
     if command == "skill":
         if len(argv) < 2:
             return "Usage: /takyon skill <skill-name> <instruction>"
@@ -397,7 +2343,7 @@ def takyon_slash_command(raw_args: str, ctx: Any = None) -> str:
             return f"Unknown Takyon skill for /takyon: {argv[1]}"
         return _queue_skill_invocation(ctx, skill_ref[0], skill_ref[1], " ".join(argv[2:]).strip())
 
-    if command in _LOCAL_COMMANDS:
+    if command in _local_command_names():
         try:
             return _format_slash_value(run_takyon_command(argv))
         except SystemExit as exc:

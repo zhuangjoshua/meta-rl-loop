@@ -31,8 +31,9 @@ This is a useful default, not a schema.
 - Keep campaigns isolated by business and workspace.
 - Create only the files that help the actual campaign.
 - Use `business_allocate_budget` before spend, under the business cap.
-- Use `business_enqueue_job` for posting, ad launches, vendor calls, build/deploy work, or any deterministic side effect.
+- Use `business_enqueue_job` for guarded requests around posting, ad launches, vendor calls, build/deploy work, or other external side effects.
 - Include `requires_api` or `requires_env` for external posting or paid actions.
+- If the business is in test mode, still build the campaign asset and publish outreach locally with `business_publish_test_outreach`; missing outbound-provider keys should produce suppressed local receipts, not skipped work.
 - Record results and promote reusable lessons to the business brain.
 
 Do not default to the cheapest move. Choose the highest expected-impact move under budget, evidence, risk, and current business strategy.

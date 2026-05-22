@@ -2,6 +2,44 @@
 
 Instructions for AI coding assistants and developers working on the takyon-agent codebase.
 
+## Parent Workspace Takyon Role
+
+When this repo is opened from `/Users/Zygote/Downloads/takyon`, this directory is the active Hermes/Takyon runtime, CEO, skill, cron, and plugin trunk. The parent workspace entrypoint is `/Users/Zygote/Downloads/takyon/takyon`, which launches this runtime with parent-owned `TAKYON_HOME`.
+
+Do not infer that `/Users/Zygote/Downloads/takyon/polsia3` is a second active trunk. That old app tree was removed from the parent workspace. Archived source material salvaged from it lives under `plugins/takyon/references/polsia3-skills/`; merge ideas from there into active Hermes Takyon code or skills instead of recreating `polsia3`.
+
+## Takyon Users vs Product Subusers
+
+Keep these two identity layers separate:
+
+- A Takyon user is the top-level operator/account that owns a Takyon agent and one or more businesses.
+- A product subuser/app customer is an end user of a business/product that Takyon creates.
+- Top-level user-scoped APIs, credentials, budgets, and identity must not be mixed with business/product customer auth, entitlements, billing, usage, or scoped API keys.
+
+## Takyon Product App Surfaces
+
+Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `app/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
+
+## Hermes-Style Takyon Work
+
+Implement Takyon behavior the Hermes way: the CEO reasons through skills, skills describe operating modes, tools provide guarded state changes/side effects, and the business filesystem records durable context. Do not add local deterministic business flows, one-off worker stages, hardcoded startup sequences, or UI-only command lists when a skill, registry entry, harness command file, or business-scoped tool can express the behavior.
+
+When Takyon creates or updates business artifacts, the operator should be able to see where they landed. Surface the business filesystem root and paths for outreach, website/app, product, campaign, receipt, conversation, job, and wakeup deliverables through tool results, shell progress, or concise CEO reports.
+
+Default rule: everything business-facing should be a Takyon skill or a business-scoped tool visible in `business_registry`. The clear exceptions are shared safety/control rails: path containment, idempotency, credential checks, budget gates, pause/kill controls, cron wake scheduling, auth/session/payment/webhook protocol, and UI rendering mechanics. Even those exceptions should publish their user-facing command metadata through a single source of truth rather than separate UI hardcoding.
+
+Slash-command UI must be registry-driven. Shell palettes/help should derive from `plugins/takyon/harness/settings.json` for controls, `plugins/takyon/harness/commands/*.md` for harness skill commands, and `plugins/takyon/registry.py` for Takyon skills/tools. If a future command or skill is added, updating that canonical source must be enough for shell discovery; do not duplicate slash command names/descriptions in the UI.
+
+## Takyon Shell Model
+
+The Takyon shell is always in a scope. `global` is the top-level account/root scope; it is not the CEO. A business scope is `business:<slug>`.
+
+The CEO is the scoped operator agent role. Plain text in the shell should route to the CEO for the current scope, except obvious shell self-help questions such as "how do I create a business", which should answer locally and tersely. The shell must preserve recent in-session turns so follow-ups like "make #1" can resolve against what the CEO just said; tune that through `harness/settings.json`, not hardcoded prompts. `/ceo` is only a focus/status affordance because the CEO is already the default interface.
+
+For actionable business requests, the shell/CEO posture is autonomous execution. Do not respond with "say X and I'll do it", a tool-call recipe, or a staged checklist when the operator has already named a business, supplied a goal, or chosen an idea. Use business tools and skills to make durable progress, then report what changed and where it landed.
+
+Slash commands are narrow shell controls only: scope navigation, local status/inspection, setup/config, debug/doctor, server start/stop, and exit. Product-building behavior belongs in skills, tools, registry metadata, and per-business state.
+
 ## Development Environment
 
 ```bash
@@ -152,6 +190,8 @@ Reasoning content is stored in `assistant_msg["reasoning"]`.
 ### Slash Command Registry (`takyon_cli/commands.py`)
 
 All slash commands are defined in a central `COMMAND_REGISTRY` list of `CommandDef` objects. Every downstream consumer derives from this registry automatically:
+
+**PARSIMONY / no slop:** prefer one canonical operator command with explicit flags over overlapping commands, aliases, or shortcuts. If a creation-time choice belongs to creating a business, keep it on `/create` as a flag such as `--test`, `--schedule`, or `--no-auto`; do not add a separate slash command for the same path.
 
 - **CLI** — `process_command()` resolves aliases via `resolve_command()`, dispatches on canonical name
 - **Gateway** — `GATEWAY_KNOWN_COMMANDS` frozenset for hook emission, `resolve_command()` for dispatch

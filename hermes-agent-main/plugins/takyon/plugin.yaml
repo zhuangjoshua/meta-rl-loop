@@ -10,12 +10,28 @@ provides_tools:
   - business_read_file
   - business_list_files
   - business_upsert_business
+  - business_set_mode
   - business_create_workspace
   - business_write_file
   - business_patch_file
   - business_record_memory
   - business_allocate_budget
+  - business_configure_app_budget
+  - business_upsert_app_surface_contract
+  - business_upsert_app_plan
+  - business_upsert_app_customer
+  - business_grant_app_entitlement
+  - business_request_app_magic_link
+  - business_verify_app_magic_link
+  - business_read_app_account
+  - business_create_app_checkout
+  - business_record_stripe_webhook
+  - business_record_app_usage
   - business_enqueue_job
+  - business_publish_test_outreach
+  - business_claude_agent_task
+  - business_upsert_conversation_thread
+  - business_record_conversation_message
   - business_record_event
   - business_record_agent
   - business_set_control
