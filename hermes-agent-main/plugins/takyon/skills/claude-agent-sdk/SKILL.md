@@ -16,6 +16,7 @@ This is not a website lane and not a deterministic runner. It is a scoped Claude
 - Keep the task inside one business workspace. The SDK worker is path-contained and cannot use Bash.
 - The chosen workspace is the worker's current directory. Tell the worker to write paths relative to that workspace, not to prefix the workspace path again.
 - Use a small budget reservation. The business must have a numeric budget cap before the tool can spend.
+- If the worker or its helper appears blocked by local runtimes or package managers, check `business_check_runtime_capabilities` before reporting the blocker. Repair or provision through the guarded capability path when available; otherwise record the exact missing capability. Do not hardcode one executable as the business-level problem.
 - Do not use this skill for vendor side effects, posting, payment changes, deploys, or credential work.
 - Do not let the worker fake business reality in product source. Auth, sessions, users, entitlements, billing, checkout, provider calls, metrics, outreach, and deploys must be wired to canonical Hermes/Takyon rails or shown as visible `DEBUG`/blocked states. Browser localStorage is acceptable for local product data such as draft notes or device-local logs, but not for auth/session/account/subscription state.
 - Worker contract: you are not allowed to invent backend behavior. For auth, billing, entitlements, usage, or outreach, use the existing Hermes runtime API contract. If no browser endpoint exists, build the screen as unavailable/blocking, not fake.

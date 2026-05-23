@@ -94,6 +94,8 @@ Business product apps have canonical Hermes rails. For customer signup, magic-li
 
 When a product or website source path is declared, verify it with `business_verify_product_surface` after source generation or major product edits. A surface is not built, publishable, or active unless there is a passing product-surface verification receipt; failed verification is evidence for repair or a blocker, not a reason to pretend.
 
+When a worker or product build appears blocked by missing local packages, runtimes, or package managers, use `business_check_runtime_capabilities` or the verification receipt before deciding. Missing capabilities are exact repair/provision/blocker evidence, not strategy and not a reason to make fake product state. Do not turn one machine's missing executable into a permanent business lesson.
+
 When a chosen move matches a sibling skill, inspect and use that skill as the method instead of improvising a generic answer. In particular, do not invent confident pricing without either using current market evidence or recording the pricing as a hypothesis in the business brain. If web/search is available, use market research before or alongside pricing and positioning choices; if it is unavailable, write the uncertainty down and schedule/queue the research.
 
 ## Priority Bands
@@ -129,6 +131,7 @@ Use read tools before broad changes unless the operator gave a narrow direct com
 - `business_registry`
 - `business_list_businesses`
 - `business_read_business`
+- `business_check_runtime_capabilities`
 - `business_list_files`
 - `business_read_file`
 

@@ -7,9 +7,11 @@ import hmac
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -278,6 +280,150 @@ def load_takyon_env() -> list[str]:
     return loaded
 
 
+def _runtime_path_prefixes() -> list[Path]:
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    return [
+        takyon_home / "node" / "bin",
+        _repo_root() / "node_modules" / ".bin",
+        Path(sys.executable).resolve().parent,
+    ]
+
+
+def _runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    prefixes = [str(path) for path in _runtime_path_prefixes() if path.exists()]
+    path = os.pathsep.join([*prefixes, os.getenv("PATH", "")])
+    return {**os.environ, **(extra or {}), "PATH": path}
+
+
+def _resolve_runtime_executable(name: str) -> str | None:
+    if name == "python":
+        return sys.executable
+    prefixes = [str(path) for path in _runtime_path_prefixes() if path.exists()]
+    search_path = os.pathsep.join([*prefixes, os.getenv("PATH", "")])
+    return shutil.which(name, path=search_path)
+
+
+def _command_version(command: list[str], *, timeout_seconds: int = 10) -> str | None:
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=_runtime_env(),
+        )
+    except Exception:
+        return None
+    output = (proc.stdout or proc.stderr or "").strip().splitlines()
+    return output[0] if output else None
+
+
+def _runtime_capabilities(names: Iterable[str] | None = None) -> dict[str, Any]:
+    requested = list(names or ("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg"))
+    capabilities: dict[str, Any] = {}
+    for name in requested:
+        clean = str(name).strip()
+        if not clean:
+            continue
+        path = _resolve_runtime_executable(clean)
+        version: str | None = None
+        if clean == "pip":
+            pip_path = path
+            version = _command_version([sys.executable, "-m", "pip", "--version"])
+            path = pip_path or (f"{sys.executable} -m pip" if version else None)
+        elif clean == "python":
+            version = _command_version([sys.executable, "--version"])
+        elif path:
+            version = _command_version([path, "--version"])
+        capabilities[clean] = {
+            "available": bool(path),
+            "path": path,
+            "version": version,
+        }
+    return capabilities
+
+
+def _allow_runtime_installs() -> bool:
+    path = get_takyon_home() / "config.yaml"
+    if not path.exists():
+        return True
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        security = data.get("security") if isinstance(data.get("security"), dict) else {}
+        if "allow_runtime_installs" in security:
+            return _boolish(security.get("allow_runtime_installs"), default=True)
+        if "allow_lazy_installs" in security:
+            return _boolish(security.get("allow_lazy_installs"), default=True)
+    except Exception:
+        return True
+    return True
+
+
+def _ensure_javascript_runtime(*, package_manager: bool = False) -> dict[str, Any]:
+    names = ("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun")
+    before = _runtime_capabilities(names)
+    has_node = bool(before.get("node", {}).get("available"))
+    has_package_manager = any(bool(before.get(name, {}).get("available")) for name in ("npm", "pnpm", "yarn", "bun"))
+    if has_node and (has_package_manager or not package_manager):
+        return {"success": True, "installed": False, "capabilities": before}
+    if not _allow_runtime_installs():
+        return {
+            "success": False,
+            "installed": False,
+            "capabilities": before,
+            "error": "runtime installs are disabled by config",
+        }
+    helper = _repo_root() / "scripts" / "lib" / "node-bootstrap.sh"
+    if not helper.exists():
+        return {
+            "success": False,
+            "installed": False,
+            "capabilities": before,
+            "error": f"runtime installer missing: {helper}",
+        }
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    need_package_manager = "1" if package_manager else "0"
+    command = (
+        f"source {shlex.quote(str(helper))}; "
+        f"if [ {need_package_manager} = 1 ] && ! command -v npm >/dev/null 2>&1 "
+        f"&& [ ! -x {shlex.quote(str(takyon_home / 'node' / 'bin' / 'npm'))} ]; "
+        "then _nb_install_bundled_node; else ensure_node; fi"
+    )
+    started = _now()
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", command],
+            text=True,
+            capture_output=True,
+            timeout=240,
+            env=_runtime_env({"TAKYON_HOME": str(takyon_home)}),
+        )
+        after = _runtime_capabilities(names)
+        return {
+            "success": proc.returncode == 0,
+            "installed": proc.returncode == 0 and before != after,
+            "started_at": started,
+            "completed_at": _now(),
+            "returncode": proc.returncode,
+            "stdout": _truncate_text(proc.stdout or "", 4000),
+            "stderr": _truncate_text(proc.stderr or "", 4000),
+            "capabilities": after,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "success": False,
+            "installed": False,
+            "started_at": started,
+            "completed_at": _now(),
+            "stdout": _truncate_text(exc.stdout or "", 4000),
+            "stderr": _truncate_text(exc.stderr or "", 4000),
+            "error": "runtime install timed out",
+            "capabilities": _runtime_capabilities(names),
+        }
+
+
 def _model_from_config(*keys: str) -> str:
     """Read a model setting from config.yaml, the shared model source of truth."""
     path = get_takyon_home() / "config.yaml"
@@ -401,7 +547,8 @@ _PRETEND_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "demo login or demo session",
         re.compile(
-            r"(?:[?&]demo=|(?:params|searchParams)\.(?:get|has|set)\(\s*['\"]demo['\"]|demo@)",
+            r"(?:[?&]demo=|(?:params|searchParams)\.(?:get|has|set)\(\s*['\"]demo['\"]|"
+            r"URLSearchParams\([^)]*\)\.(?:get|has|set)\(\s*['\"]demo['\"]|demo@)",
             re.IGNORECASE,
         ),
     ),
@@ -518,6 +665,7 @@ def _run_verification_command(
     *,
     cwd: Path,
     timeout_seconds: int,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     started = _now()
     try:
@@ -527,6 +675,7 @@ def _run_verification_command(
             text=True,
             capture_output=True,
             timeout=timeout_seconds,
+            env=env or _runtime_env(),
         )
         status = "passed" if proc.returncode == 0 else "failed"
         return {
@@ -551,6 +700,62 @@ def _run_verification_command(
         }
 
 
+def _node_modules_present(root: Path) -> bool:
+    return (root / "node_modules").exists() and any((root / "node_modules").iterdir())
+
+
+def _javascript_package_manager_name(root: Path, package_data: dict[str, Any]) -> str:
+    package_manager = str(package_data.get("packageManager") or "").strip().lower()
+    if package_manager:
+        return package_manager.split("@", 1)[0]
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (root / "yarn.lock").exists():
+        return "yarn"
+    if (root / "bun.lockb").exists() or (root / "bun.lock").exists():
+        return "bun"
+    return "npm"
+
+
+def _javascript_package_manager_command(name: str) -> dict[str, Any]:
+    manager = str(name or "npm").strip().lower()
+    path = _resolve_runtime_executable(manager)
+    if path:
+        return {"available": True, "name": manager, "command": [path], "source": "path"}
+    if manager in {"pnpm", "yarn"}:
+        corepack = _resolve_runtime_executable("corepack")
+        if corepack:
+            return {"available": True, "name": manager, "command": [corepack, manager], "source": "corepack"}
+    return {"available": False, "name": manager, "command": [], "source": "missing"}
+
+
+def _javascript_install_command(manager: dict[str, Any]) -> list[str]:
+    base = list(manager.get("command") or [])
+    name = str(manager.get("name") or "npm")
+    if name == "npm":
+        return [*base, "install", "--ignore-scripts"]
+    if name == "pnpm":
+        return [*base, "install", "--ignore-scripts"]
+    if name == "yarn":
+        return [*base, "install", "--ignore-scripts"]
+    if name == "bun":
+        return [*base, "install", "--ignore-scripts"]
+    return [*base, "install"]
+
+
+def _javascript_run_script_command(manager: dict[str, Any], script: str, *, root: Path) -> list[str] | None:
+    base = list(manager.get("command") or [])
+    name = str(manager.get("name") or "npm")
+    if base:
+        if name == "yarn":
+            return [*base, script]
+        return [*base, "run", script]
+    node = _resolve_runtime_executable("node")
+    if node and _node_modules_present(root):
+        return [node, "--run", script]
+    return None
+
+
 def _verify_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -567,6 +772,7 @@ def _verify_product_surface_path(
         "status": "unverified",
         "checks": [],
         "warnings": [],
+        "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv")),
     }
     if business_root.resolve() not in (root, *root.parents):
         result.update({"status": "failed", "error": "source path escaped business root"})
@@ -608,26 +814,62 @@ def _verify_product_surface_path(
         next_value = str(deps.get("next") or "")
         if re.search(r"\b14\.2\.5\b", next_value):
             result["warnings"].append("next@14.2.5 is known deprecated/vulnerable; update before publication")
-    npm = shutil.which("npm")
-    if not npm:
-        result.update({"status": "blocked", "error": "npm is not available for product verification"})
+    package_manager_name = _javascript_package_manager_name(root, package_data)
+    package_manager = _javascript_package_manager_command(package_manager_name)
+    result["package_manager"] = {key: package_manager.get(key) for key in ("name", "available", "source")}
+    if install and not package_manager.get("available"):
+        ensure = _ensure_javascript_runtime(package_manager=True)
+        result["checks"].append({
+            "command": ["takyon", "ensure-runtime", "javascript-package-manager"],
+            "status": "passed" if ensure.get("success") else "blocked",
+            "result": ensure,
+        })
+        package_manager = _javascript_package_manager_command(package_manager_name)
+        result["package_manager"] = {key: package_manager.get(key) for key in ("name", "available", "source")}
+        result["capabilities"] = _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv"))
+    if not package_manager.get("available") and not _node_modules_present(root):
+        result.update({
+            "status": "blocked",
+            "error": "javascript package manager is unavailable for dependency installation",
+            "missing_capabilities": [package_manager_name],
+            "remediation": "Install or enable the declared package manager, or allow Takyon runtime installs so it can provision a local JavaScript runtime/package manager.",
+        })
         return result
     if install:
-        install_check = _run_verification_command([npm, "install", "--ignore-scripts"], cwd=root, timeout_seconds=timeout_seconds)
-        result["checks"].append(install_check)
-        if install_check["status"] != "passed":
-            result.update({"status": "failed", "error": "npm install failed"})
-            return result
+        if package_manager.get("available"):
+            install_check = _run_verification_command(_javascript_install_command(package_manager), cwd=root, timeout_seconds=timeout_seconds)
+            result["checks"].append(install_check)
+            if install_check["status"] != "passed":
+                result.update({"status": "failed", "error": "dependency install failed"})
+                return result
+        else:
+            result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
     if "build" not in scripts:
         result.update({"status": "unverified", "error": "package.json has no build script"})
         return result
-    build_check = _run_verification_command([npm, "run", "build"], cwd=root, timeout_seconds=timeout_seconds)
+    build_command = _javascript_run_script_command(package_manager, "build", root=root)
+    if not build_command:
+        result.update({
+            "status": "blocked",
+            "error": "no available runtime command for package build script",
+            "missing_capabilities": [package_manager_name, "node"],
+        })
+        return result
+    build_check = _run_verification_command(build_command, cwd=root, timeout_seconds=timeout_seconds)
     result["checks"].append(build_check)
     if build_check["status"] != "passed":
         result.update({"status": "failed", "error": "product build failed"})
         return result
     if "typecheck" in scripts:
-        typecheck = _run_verification_command([npm, "run", "typecheck"], cwd=root, timeout_seconds=timeout_seconds)
+        typecheck_command = _javascript_run_script_command(package_manager, "typecheck", root=root)
+        if not typecheck_command:
+            result.update({
+                "status": "blocked",
+                "error": "no available runtime command for package typecheck script",
+                "missing_capabilities": [package_manager_name, "node"],
+            })
+            return result
+        typecheck = _run_verification_command(typecheck_command, cwd=root, timeout_seconds=timeout_seconds)
         result["checks"].append(typecheck)
         if typecheck["status"] != "passed":
             result.update({"status": "failed", "error": "product typecheck failed"})
@@ -3168,6 +3410,7 @@ class TakyonStore:
                 "conversation_file": mirror,
                 "conversation_corpus": corpus or "conversations/corpus/messages.jsonl",
                 "external_side_effects": "suppressed",
+                "sent": False,
             }
 
         if action == "conversation.thread.upsert":
@@ -3611,6 +3854,60 @@ def handle_business_read_file(args: dict, **_: Any) -> str:
 def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
     try:
         return tool_result(_store().calculate_pulse(str(args.get("business") or ""), limit=args.get("limit") or 10))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
+    try:
+        requested = [
+            str(item).strip()
+            for item in _as_list(args.get("capabilities") or args.get("commands"))
+            if str(item).strip()
+        ]
+        ecosystems = [
+            str(item).strip().lower()
+            for item in _as_list(args.get("ecosystems") or args.get("ecosystem") or args.get("ensure"))
+            if str(item).strip()
+        ]
+        if not requested:
+            requested = ["node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg"]
+
+        ensure_results: list[dict[str, Any]] = []
+        for ecosystem in ecosystems:
+            if ecosystem in {"javascript", "js", "node"}:
+                ensure_results.append({"ecosystem": ecosystem, **_ensure_javascript_runtime(package_manager=False)})
+            elif ecosystem in {"javascript-package-manager", "package-manager", "package_manager", "node-package-manager"}:
+                ensure_results.append({"ecosystem": ecosystem, **_ensure_javascript_runtime(package_manager=True)})
+            elif ecosystem in {"python", "py"}:
+                ensure_results.append({
+                    "ecosystem": ecosystem,
+                    "success": bool(_resolve_runtime_executable("python")),
+                    "installed": False,
+                    "capabilities": _runtime_capabilities(("python", "pip", "uv")),
+                    "error": None if _resolve_runtime_executable("python") else "python runtime is unavailable",
+                })
+            else:
+                ensure_results.append({
+                    "ecosystem": ecosystem,
+                    "success": False,
+                    "installed": False,
+                    "error": "unknown ecosystem; inspect explicit capabilities instead",
+                })
+
+        capabilities = _runtime_capabilities(requested)
+        missing = [name for name, info in capabilities.items() if not info.get("available")]
+        return tool_result({
+            "success": True,
+            "capabilities": capabilities,
+            "missing_capabilities": missing,
+            "ensure": ensure_results,
+            "runtime_installs_allowed": _allow_runtime_installs(),
+            "note": (
+                "Capability results are evidence for the CEO. Missing runtimes or package managers "
+                "should be repaired, provisioned, or recorded as exact blockers; they are not product strategy."
+            ),
+        })
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -4442,9 +4739,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
 
-        node = shutil.which("node")
+        node = _resolve_runtime_executable("node")
         if not node:
-            raise TakyonError("node is required for Claude Agent SDK tasks")
+            ensure_runtime = _ensure_javascript_runtime(package_manager=False)
+            node = _resolve_runtime_executable("node")
+        else:
+            ensure_runtime = {"success": True, "installed": False, "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun"))}
+        if not node:
+            raise TakyonError(
+                "javascript runtime unavailable for Claude Agent SDK tasks: "
+                f"{ensure_runtime.get('error') or 'node is missing'}"
+            )
         script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
         if not script.exists():
             raise TakyonError(f"Claude Agent SDK helper missing: {script}")
@@ -4477,7 +4782,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             capture_output=True,
             cwd=str(_repo_root()),
             timeout=(timeout_ms / 1000.0) + 15,
-            env={**os.environ, "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+            env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
         )
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
@@ -4913,6 +5218,21 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read-only deterministic pulse calculation from canonical business state, app metrics, conversations, jobs, ledger, and events.",
         "handler": handle_business_calculate_pulse,
         "schema": _schema("business_calculate_pulse", "Calculate a business pulse without mutating state.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
+    },
+    {
+        "name": "business_check_runtime_capabilities",
+        "description": "Inspect local runtimes, package managers, and command capabilities; optionally run guarded local provisioning for supported ecosystems.",
+        "handler": handle_business_check_runtime_capabilities,
+        "schema": _schema(
+            "business_check_runtime_capabilities",
+            "Check runtimes and package-manager capabilities for product builds, app verification, and scoped workers.",
+            {
+                "capabilities": {"type": "array", "items": {"type": "string"}, "description": "Executable or capability names to inspect, such as node, npm, python, uv, git, or rg."},
+                "ecosystems": {"type": "array", "items": {"type": "string"}, "description": "Optional ecosystems to ensure when supported, such as javascript, javascript-package-manager, or python."},
+                "ensure": {"type": "string", "description": "Single ecosystem alias to ensure; use ecosystems for more than one."},
+            },
+            [],
+        ),
     },
     {
         "name": "business_list_files",

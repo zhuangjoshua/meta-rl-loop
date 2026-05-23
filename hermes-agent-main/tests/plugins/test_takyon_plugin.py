@@ -15,6 +15,7 @@ from plugins.takyon.core import (
     TakyonStore,
     _API_ENV_ALIASES,
     _scan_for_pretend_product_state,
+    handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
     handle_business_registry,
@@ -105,6 +106,19 @@ def test_registry_tool_filters_by_category_and_priority():
     assert result["success"] is True
     assert [tool["name"] for tool in result["tools"]] == ["business_enqueue_job"]
     assert "skills" not in result
+
+
+def test_runtime_capability_check_reports_requested_commands():
+    result = json.loads(
+        handle_business_check_runtime_capabilities(
+            {"capabilities": ["python", "definitely_missing_takyon_test_binary"]}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["capabilities"]["python"]["available"] is True
+    assert result["capabilities"]["definitely_missing_takyon_test_binary"]["available"] is False
+    assert "definitely_missing_takyon_test_binary" in result["missing_capabilities"]
 
 
 def test_takyon_slash_runs_local_registry_command():

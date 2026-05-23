@@ -95,6 +95,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Calculate bounded deterministic business metrics and deltas from canonical state without mutating anything.",
     },
     {
+        "name": "business_check_runtime_capabilities",
+        "category": "control",
+        "priority_bands": ["p0_control", "p1_ceo", "p2_growth", "p4_maintenance"],
+        "effect": "guarded_local_effect",
+        "purpose": "Inspect local runtimes, package managers, and command capabilities; optionally provision supported local runtimes through guarded setup before product or worker tasks.",
+    },
+    {
         "name": "business_list_files",
         "category": "read",
         "priority_bands": ["p1_ceo", "p3_learning", "p4_maintenance"],
