@@ -26,6 +26,35 @@ function pathValues(input) {
     .filter((value) => typeof value === "string" && value.length > 0);
 }
 
+function normalizeRelative(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+function rewriteWorkspacePrefixedPaths(input, workspace) {
+  if (!input || typeof input !== "object") return input;
+  const workspacePrefix = normalizeRelative(workspace);
+  if (!workspacePrefix || workspacePrefix === ".") return input;
+  let changed = false;
+  const updated = { ...input };
+  for (const key of ["file_path", "path", "notebook_path"]) {
+    const value = updated[key];
+    if (typeof value !== "string" || path.isAbsolute(value)) continue;
+    const clean = normalizeRelative(value);
+    if (clean === workspacePrefix) {
+      updated[key] = ".";
+      changed = true;
+    } else if (clean.startsWith(`${workspacePrefix}/`)) {
+      updated[key] = clean.slice(workspacePrefix.length + 1) || ".";
+      changed = true;
+    }
+  }
+  return changed ? updated : input;
+}
+
 function textFromSdkMessage(message) {
   const record = message && typeof message === "object" ? message : null;
   if (!record) return "";
@@ -53,6 +82,7 @@ function buildPrompt(input) {
     "You are a Claude Agent SDK worker called by Takyon for one bounded business-scoped task.",
     "",
     "You may inspect and edit files only inside the provided current workspace. Do not attempt shell commands, network calls, vendor side effects, credential reads, deployment, posting, payment changes, or filesystem access outside this workspace.",
+    "The provided current workspace is already your working directory. Write paths relative to it; do not prefix paths with the workspace name again.",
     "",
     "Make the smallest useful changes that satisfy the task. Preserve existing business files unless the instruction asks to update them. If durable business truth changes, write a concise note into an appropriate file in this workspace or a child path.",
     "",
@@ -119,7 +149,8 @@ async function main() {
                   toolUseID: options.toolUseID
                 };
               }
-              const outside = pathValues(toolInput).find((value) => !isSubpath(root, path.resolve(cwd, value)));
+              const updatedInput = rewriteWorkspacePrefixedPaths(toolInput, input.workspace || ".");
+              const outside = pathValues(updatedInput).find((value) => !isSubpath(root, path.resolve(cwd, value)));
               if (outside) {
                 return {
                   behavior: "deny",
@@ -127,7 +158,7 @@ async function main() {
                   toolUseID: options.toolUseID
                 };
               }
-              return { behavior: "allow", updatedInput: toolInput, toolUseID: options.toolUseID };
+              return { behavior: "allow", updatedInput, toolUseID: options.toolUseID };
             }
           }
         })) {

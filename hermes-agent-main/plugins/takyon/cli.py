@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .core import TakyonStore, _slugify, load_takyon_env
+from .core import TakyonError, TakyonStore, _slugify, load_takyon_env
 from .registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_SKILL_REGISTRY, business_registry_snapshot
 
 
@@ -547,10 +547,11 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool, float | None]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
+    budget: float | None = None
     auto_start = auto_default
     no_auto = False
     clean: list[str] = []
@@ -572,6 +573,20 @@ def _parse_business_start_args(
             if index >= len(tokens):
                 raise SystemExit(usage)
             schedule = tokens[index]
+        elif token == "--budget":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            try:
+                budget = float(tokens[index])
+            except ValueError as exc:
+                raise SystemExit(f"--budget must be a number\n{usage}") from exc
+            if budget < 0:
+                raise SystemExit(f"--budget must be non-negative\n{usage}")
+        elif token in {"-h", "--help", "help"}:
+            raise SystemExit(usage)
+        elif token.startswith("--"):
+            raise SystemExit(f"unknown create flag {token!r}\n{usage}")
         else:
             clean.append(token)
         index += 1
@@ -580,7 +595,7 @@ def _parse_business_start_args(
     raw_name = clean[0]
     slug = _slugify(raw_name)
     goal = " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, budget
 
 
 def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
@@ -785,6 +800,7 @@ def _control_slash_commands() -> list[dict[str, Any]]:
             "summary": str(item.get("summary") or ""),
             "examples": item.get("examples") if isinstance(item.get("examples"), list) else [],
             "flags": item.get("flags") if isinstance(item.get("flags"), list) else [],
+            "palette": str(item.get("palette") or item.get("slashPalette") or "").strip().lower(),
         })
     return commands
 
@@ -947,6 +963,32 @@ def _slash_entries() -> list[dict[str, Any]]:
     return sorted(entries, key=lambda item: str(item["name"]))
 
 
+def _slash_palette_config() -> dict[str, Any]:
+    settings = _load_harness_settings()
+    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    palette = ui.get("slashPalette") if isinstance(ui.get("slashPalette"), dict) else {}
+    default_visible = palette.get("defaultVisible") if isinstance(palette.get("defaultVisible"), list) else []
+    context_visible = palette.get("contextVisible") if isinstance(palette.get("contextVisible"), dict) else {}
+    return {
+        "default_visible": [str(item).strip().lstrip("/") for item in default_visible if str(item).strip()],
+        "context_visible": context_visible,
+    }
+
+
+def _business_has_product_surface(current_business: str | None) -> bool:
+    if not current_business:
+        return False
+    try:
+        root = _business_root(current_business)
+        surface = root / "app" / "surface.md"
+        if not surface.exists():
+            return False
+        text = surface.read_text(encoding="utf-8", errors="replace")
+        return "Source path: not set" not in text and "Status: missing" not in text
+    except Exception:
+        return False
+
+
 def _slash_prefix(line: str) -> str:
     if not line.startswith("/"):
         return ""
@@ -964,9 +1006,31 @@ def _visible_slash_entries(entries: list[dict[str, Any]], current_business: str 
     ]
 
 
+def _default_slash_entries(entries: list[dict[str, Any]], current_business: str | None) -> list[dict[str, Any]]:
+    visible = _visible_slash_entries(entries, current_business)
+    config = _slash_palette_config()
+    names = set(config["default_visible"])
+    context = config["context_visible"]
+    contextual = context.get("businessWithProductSurface") if isinstance(context.get("businessWithProductSurface"), list) else []
+    if _business_has_product_surface(current_business):
+        names.update(str(item).strip().lstrip("/") for item in contextual if str(item).strip())
+    if names:
+        filtered = [item for item in visible if str(item["name"]) in names or str(item.get("palette") or "") == "default"]
+    else:
+        filtered = [item for item in visible if str(item.get("palette") or "") == "default"]
+    order = {name: index for index, name in enumerate(config["default_visible"])}
+    return sorted(
+        filtered,
+        key=lambda item: (
+            order.get(str(item["name"]), 10_000),
+            str(item["name"]),
+        ),
+    )
+
+
 def _slash_matches(entries: list[dict[str, Any]], line: str, current_business: str | None) -> list[dict[str, Any]]:
     prefix = _slash_prefix(line)
-    visible = _visible_slash_entries(entries, current_business)
+    visible = _visible_slash_entries(entries, current_business) if prefix else _default_slash_entries(entries, current_business)
     if not prefix:
         return visible
     return [item for item in visible if str(item["name"]).lower().startswith(prefix)]
@@ -974,7 +1038,7 @@ def _slash_matches(entries: list[dict[str, Any]], line: str, current_business: s
 
 def _slash_page_size() -> int:
     rows = shutil.get_terminal_size((96, 24)).lines
-    return max(6, min(18, rows - 8))
+    return max(6, min(10, rows - 8))
 
 
 def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_business: str | None, offset: int = 0) -> str:
@@ -987,18 +1051,16 @@ def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_busi
     start = max(0, min(offset, max(0, len(matches) - max_rows)))
     end = min(len(matches), start + max_rows)
     title = f"/{prefix}" if prefix else "/"
-    header = f"{_color('Takyon', _THEME['brand'])} {_dim('slash')} {_color(title, _THEME['primary'])} {_dim(f'{len(matches)}/{visible_count}')}"
+    default_count = len(_default_slash_entries(entries, current_business))
+    count_label = f"{len(matches)}/{visible_count}" if prefix else f"{default_count} shown"
+    header = f"{_color('Takyon', _THEME['brand'])} {_dim('slash')} {_color(title, _THEME['primary'])} {_dim(count_label)}"
     context = (
         f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}"
         if current_business
         else f"{_dim('scope')} {_color('global', _THEME['muted'])}  {_dim('attach')} {_color('/use <business>', _THEME['primary'])}"
     )
     overflow_hint = f"  {start + 1}-{end}; type to narrow" if len(matches) > max_rows else ""
-    hint = (
-        _dim(f"return runs  tab completes  plain text chats{overflow_hint}")
-        if current_business
-        else _dim(f"business skills appear after /use{overflow_hint}")
-    )
+    hint = _dim(f"type to search all commands  /commands for full list{overflow_hint}")
     border_top = _color("." + ("-" * (width - 2)) + ".", _THEME["muted"])
     border_bottom = _color("'" + ("-" * (width - 2)) + "'", _THEME["muted"])
 
@@ -1007,13 +1069,9 @@ def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_busi
 
     rows = []
     for entry in matches[start:end]:
-        command = _pad_visible(_color(f"/{entry['name']}", _THEME["skill"] if entry.get("kind") == "skill" else _THEME["primary"]), 20)
-        kind = _color("skill", _THEME["skill"]) if entry.get("kind") == "skill" else _color("control", _THEME["control"])
-        scope = _color("business", _THEME["secondary"]) if entry.get("requires_business") else _color("global", _THEME["muted"])
-        band = f" {_color(str(entry.get('priority_band')), _THEME['secondary'])}" if entry.get("priority_band") else ""
-        meta = _pad_visible(_truncate_plain(_strip_ansi(f"{kind} {scope}{band}"), 28), 28)
-        desc_width = max(10, inner - 20 - 1 - 28 - 1)
-        rows.append(f"{command} {meta} {_dim(_truncate_plain(str(entry.get('description') or ''), desc_width))}")
+        command = _pad_visible(_color(f"/{entry['name']}", _THEME["primary"]), 16)
+        desc_width = max(10, inner - 16 - 1)
+        rows.append(f"{command} {_dim(_truncate_plain(str(entry.get('description') or ''), desc_width))}")
     if len(matches) > max_rows:
         rows.append(_dim(f"{len(matches) - end} more; type to narrow"))
     if not matches:
@@ -1056,19 +1114,7 @@ def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[
                 )
 
     def slash_toolbar() -> str:
-        try:
-            text = get_app().current_buffer.document.text_before_cursor
-        except Exception:
-            return ""
-        if not _should_show_slash_palette(text):
-            return ""
-        matches = _slash_matches(entries, text, current_business)
-        if not matches:
-            return "no slash matches"
-        visible = "  ".join(f"/{item['name']}" for item in matches[:8])
-        if len(matches) > 8:
-            visible += f"  +{len(matches) - 8} more"
-        return visible
+        return ""
 
     session = PromptSession(
         completer=SlashCompleter(),
@@ -1205,10 +1251,24 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         lines = []
         if business:
             lines.append(f"agent workspace -> {_business_artifact_path(business, workspace)}")
+            verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
+            if verification:
+                status = verification.get("status") or "unverified"
+                receipt = verification.get("receipt_path") or ""
+                suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
+                lines.append(f"product verification {status}{suffix}")
             agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
             for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
                 lines.append(line)
         return lines
+    if not results and str(name or "") == "business_verify_product_surface":
+        business = str(data.get("business") or args.get("business") or "").strip()
+        verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
+        if business and verification:
+            status = verification.get("status") or "unverified"
+            receipt = verification.get("receipt_path") or ""
+            suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
+            return [f"product verification {status}{suffix}"]
     lines: list[str] = []
     seen_root: set[str] = set()
     for item in results:
@@ -1278,7 +1338,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
 class _ShellProgress:
     def __init__(self, enabled: bool):
         config = _shell_progress_config()
-        self.enabled = bool(enabled and config["enabled"] and sys.stdout.isatty())
+        self.enabled = bool(enabled and config["enabled"])
         self.max_lines = int(config["max_lines"])
         self.fd: int | None = os.dup(1) if self.enabled else None
 
@@ -1448,6 +1508,8 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
     shell_enhanced_input = ""
     auto_schedule_ceo_on_create = ""
     default_ceo_schedule = ""
+    default_bootstrap_budget_usd = ""
+    test_bootstrap_budget_usd = ""
     if path.exists():
         try:
             import yaml  # type: ignore
@@ -1472,6 +1534,8 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
             if isinstance(business_data, dict):
                 auto_schedule_ceo_on_create = str(business_data.get("auto_schedule_ceo_on_create") or "")
                 default_ceo_schedule = str(business_data.get("default_ceo_schedule") or "")
+                default_bootstrap_budget_usd = str(business_data.get("default_bootstrap_budget_usd") or "")
+                test_bootstrap_budget_usd = str(business_data.get("test_bootstrap_budget_usd") or "")
         except Exception:
             for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 stripped = line.strip()
@@ -1491,6 +1555,10 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
                     auto_schedule_ceo_on_create = stripped.split(":", 1)[1].strip()
                 if stripped.startswith("default_ceo_schedule:"):
                     default_ceo_schedule = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("default_bootstrap_budget_usd:"):
+                    default_bootstrap_budget_usd = stripped.split(":", 1)[1].strip()
+                if stripped.startswith("test_bootstrap_budget_usd:"):
+                    test_bootstrap_budget_usd = stripped.split(":", 1)[1].strip()
     return {
         "provider": provider,
         "model": model,
@@ -1500,6 +1568,8 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
         "shell_enhanced_input": shell_enhanced_input,
         "auto_schedule_ceo_on_create": auto_schedule_ceo_on_create,
         "default_ceo_schedule": default_ceo_schedule,
+        "default_bootstrap_budget_usd": default_bootstrap_budget_usd,
+        "test_bootstrap_budget_usd": test_bootstrap_budget_usd,
         "path": str(path),
     }
 
@@ -1515,6 +1585,38 @@ def _config_bool(value: Any, *, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
+
+
+def _config_float(value: Any, *, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bootstrap_budget_cap(config: dict[str, str], mode: str | None) -> float:
+    if str(mode or "").strip().lower() == "test":
+        return max(0.0, _config_float(config.get("test_bootstrap_budget_usd"), default=25.0))
+    return max(0.0, _config_float(config.get("default_bootstrap_budget_usd"), default=25.0))
+
+
+def _require_agent_model_config(config: dict[str, str], *, model_override: str | None = None) -> str:
+    provider = config.get("provider", "")
+    resolved_model = model_override or os.getenv("TAKYON_MODEL", "") or config.get("model", "")
+    if provider and resolved_model:
+        return resolved_model
+    missing = []
+    if not provider:
+        missing.append("model.provider")
+    if not resolved_model:
+        missing.append("model.default")
+    path = config.get("path") or str(_config_path(TakyonStore()))
+    raise TakyonError(
+        f"Takyon model config missing {', '.join(missing)} in {path}. "
+        "Run `takyon model set <provider> <model>` or copy the workspace config into this TAKYON_HOME."
+    )
 
 
 def _write_model_config(store: TakyonStore, provider: str, model: str) -> dict[str, str]:
@@ -1713,11 +1815,11 @@ def _handle_shell_line(
 
     if command in {"create", "build", "init"}:
         if len(tokens) < 2:
-            raise SystemExit('usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
+            raise SystemExit('usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]')
         command_argv = ["create", *tokens[1:]]
-        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto = _parse_business_start_args(
+        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _budget = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+            usage='usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -1999,7 +2101,7 @@ def _run_agent(
 
     skill = _load_ceo_skill()
     model_config = _read_model_config(TakyonStore())
-    resolved_model = model or os.getenv("TAKYON_MODEL", "") or model_config.get("model", "")
+    resolved_model = _require_agent_model_config(model_config, model_override=model)
     provider = model_config.get("provider", "")
     response_style = model_config.get("response_style", "").strip().lower()
     configured_activity = _config_bool(model_config.get("show_agent_activity"), default=False)
@@ -2087,7 +2189,17 @@ def run_takyon_command(
     command = argv[0].lower()
 
     if command in {"help", "-h", "--help"}:
+        if len(argv) >= 2:
+            command_help = _format_control_command_help(argv[1])
+            if command_help:
+                return command_help
         return _takyon_help()
+
+    if len(argv) >= 2 and argv[1].lower() in {"help", "-h", "--help"}:
+        command_help = _format_control_command_help(command)
+        if command_help:
+            return command_help
+        raise SystemExit(_takyon_help().replace("/takyon", "takyon"))
 
     if command == "ceo":
         return _format_ceo_focus(None, store, model)
@@ -2287,19 +2399,33 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, explicit_budget = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         config = _read_model_config(store)
+        if auto_start and not no_auto:
+            _require_agent_model_config(config, model_override=model)
         auto_wake = _config_bool(config.get("auto_schedule_ceo_on_create"), default=False)
         schedule = schedule_arg or (config.get("default_ceo_schedule") or "every 6h").strip()
         should_schedule = bool(schedule_arg) or (not no_auto and (auto_start or auto_wake))
+        existing_budget = None
+        try:
+            existing = store.read(scope=_scope_for_business(slug), query="summary")
+            existing_budget = (existing.get("business") or {}).get("budget")
+        except Exception:
+            existing_budget = None
+        budget_cap = explicit_budget
+        if budget_cap is None and auto_start and not no_auto and not existing_budget:
+            budget_cap = _bootstrap_budget_cap(config, mode)
+        upsert_op: dict[str, Any] = {"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}
+        if budget_cap is not None:
+            upsert_op["budget"] = {"amount": budget_cap, "currency": "USD"}
         business_result = store.commit(
             scope=_scope_for_business(slug),
-            operations=[{"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}],
-            idempotency_key=_idempotency_key("operator-init-v4", slug, mode or "keep", goal),
+            operations=[upsert_op],
+            idempotency_key=_idempotency_key("operator-init-v5", slug, mode or "keep", goal, budget_cap if budget_cap is not None else "keep-budget"),
             reason="operator initialized business",
             actor="operator",
         )
@@ -2343,12 +2469,17 @@ def run_takyon_command(
 
     if command == "budget":
         if len(argv) < 2:
-            raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount>")
-        if argv[1] == "set":
-            if len(argv) < 4:
-                raise SystemExit("usage: takyon budget set <business> <amount>")
-            slug = _slugify(argv[2])
-            amount = float(argv[3])
+            raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount> | takyon budget <business> <amount>")
+        if argv[1] == "set" or (len(argv) >= 3 and argv[1] not in {"show", "status"}):
+            if argv[1] == "set":
+                if len(argv) < 4:
+                    raise SystemExit("usage: takyon budget set <business> <amount>")
+                slug = _slugify(argv[2])
+                raw_amount = argv[3]
+            else:
+                slug = _slugify(argv[1])
+                raw_amount = argv[2]
+            amount = float(raw_amount)
             return store.commit(
                 scope=_scope_for_business(slug),
                 operations=[{"action": "business.upsert", "business": slug, "budget": {"amount": amount, "currency": "USD"}}],
@@ -2454,6 +2585,7 @@ def takyon_command(args) -> None:
             raw_json=raw_json,
             model=getattr(args, "model", "") or os.getenv("TAKYON_MODEL", ""),
             max_turns=int(getattr(args, "max_turns", 30) or 30),
+            show_indicator=not raw_json,
         )
         _print(result, raw_json=raw_json)
     except SystemExit:

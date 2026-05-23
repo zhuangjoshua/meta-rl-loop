@@ -19,6 +19,7 @@ from plugins.takyon.core import (
     handle_business_list_businesses,
     handle_business_registry,
     handle_business_upsert_business,
+    handle_business_verify_product_surface,
 )
 from plugins.takyon.registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_REGISTRY
 
@@ -204,6 +205,131 @@ def test_business_pulse_is_read_only_baseline(tmp_path):
             "SELECT COUNT(*) AS count FROM events WHERE business_slug = 'latexflow' AND event_type = 'business.pulse.snapshot'"
         ).fetchone()
     assert recorded["count"] == 0
+
+
+def test_pulse_file_write_records_snapshot_event(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Build PDFs"}],
+        "init-latexflow",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "business": "latexflow", "path": "brain/pulse.md", "content": "# Pulse\n\nBaseline.\n"}],
+        "write-pulse",
+    )
+
+    with store._connect() as conn:
+        recorded = conn.execute(
+            "SELECT COUNT(*) AS count FROM events WHERE business_slug = 'latexflow' AND event_type = 'business.pulse.snapshot'"
+        ).fetchone()
+    assert recorded["count"] == 1
+
+
+def test_app_plan_normalizes_interval_and_records_validation_warnings(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "latexflow",
+                "plan_key": "studio",
+                "tier": "pro",
+                "price_cents": 1200,
+                "billing_interval": "monthly",
+                "included_action_quota": 10,
+                "metadata": {"core_actions_per_month": "unlimited"},
+            }
+        ],
+        "plan",
+    )
+
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    plan = app["plans"][0]
+    assert plan["billing_interval"] == "month"
+    assert plan["metadata"]["takyon_plan_validation"]["status"] == "warning"
+
+
+def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-before-source",
+    )
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "unverified"
+
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-static-site",
+            }
+        )
+    )
+
+    assert verification["success"] is True
+    assert verification["verification"]["status"] == "passed"
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+
+
+def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    nested = tmp_path / "businesses" / "latexflow" / "product" / "site" / "product" / "site"
+    nested.mkdir(parents=True)
+    (nested / "index.html").write_text("<h1>Nested</h1>\n", encoding="utf-8")
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-nested-site",
+            }
+        )
+    )
+
+    assert verification["success"] is True
+    assert verification["verification"]["status"] == "failed"
+    assert "duplicate workspace prefix" in verification["verification"]["error"]
 
 
 def test_path_escape_is_rejected(tmp_path):

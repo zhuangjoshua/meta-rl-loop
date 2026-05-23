@@ -368,6 +368,15 @@ def _require_api_access(op: dict[str, Any], *, business_mode: str = "live") -> d
 
 
 _PRODUCT_SOURCE_EXTENSIONS = {".html", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
+_PRODUCT_PROJECT_FILENAMES = {
+    "package.json",
+    "next.config.js",
+    "next.config.mjs",
+    "next.config.ts",
+    "vite.config.js",
+    "vite.config.ts",
+    "tsconfig.json",
+}
 _PRODUCT_SOURCE_SKIP_DIRS = {
     ".git",
     ".next",
@@ -478,6 +487,192 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
             if len(findings) >= limit:
                 break
     return findings
+
+
+def _product_source_files(root: Path, *, limit: int = 200) -> list[str]:
+    files: list[str] = []
+    if not root.exists() or not root.is_dir():
+        return files
+    for path in sorted(root.rglob("*")):
+        if len(files) >= limit:
+            break
+        if not path.is_file() or _product_source_is_skipped(path):
+            continue
+        if path.suffix.lower() in _PRODUCT_SOURCE_EXTENSIONS or path.name in _PRODUCT_PROJECT_FILENAMES:
+            files.append(path.relative_to(root).as_posix())
+    return files
+
+
+def _detect_nested_workspace_prefix(root: Path, source_path: str) -> str | None:
+    rel = _safe_relpath(source_path or ".", field="source_path")
+    if rel.as_posix() in {".", ""}:
+        return None
+    nested = root / rel
+    if nested.exists() and _product_source_files(nested, limit=1):
+        return rel.as_posix()
+    return None
+
+
+def _run_verification_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    started = _now()
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+        status = "passed" if proc.returncode == 0 else "failed"
+        return {
+            "command": command,
+            "status": status,
+            "returncode": proc.returncode,
+            "started_at": started,
+            "completed_at": _now(),
+            "stdout": _truncate_text(proc.stdout or "", 12_000),
+            "stderr": _truncate_text(proc.stderr or "", 12_000),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "command": command,
+            "status": "blocked",
+            "returncode": None,
+            "started_at": started,
+            "completed_at": _now(),
+            "stdout": _truncate_text(exc.stdout or "", 12_000),
+            "stderr": _truncate_text(exc.stderr or "", 12_000),
+            "error": f"timed out after {timeout_seconds}s",
+        }
+
+
+def _verify_product_surface_path(
+    business_root: Path,
+    source_path: str,
+    *,
+    install: bool = True,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    source_rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    root = (business_root / source_rel).resolve()
+    result: dict[str, Any] = {
+        "source_path": source_rel,
+        "absolute_path": str(root),
+        "generated_at": _now(),
+        "status": "unverified",
+        "checks": [],
+        "warnings": [],
+    }
+    if business_root.resolve() not in (root, *root.parents):
+        result.update({"status": "failed", "error": "source path escaped business root"})
+        return result
+    if not root.exists() or not root.is_dir():
+        result.update({"status": "missing", "error": "source path does not exist"})
+        return result
+
+    files = _product_source_files(root)
+    result["source_file_count"] = len(files)
+    result["sample_files"] = files[:25]
+    nested = _detect_nested_workspace_prefix(root, source_rel)
+    if nested:
+        result.update({
+            "status": "failed",
+            "error": f"source appears nested under duplicate workspace prefix: {nested}",
+            "nested_source_path": f"{source_rel}/{nested}",
+        })
+        return result
+    if not files:
+        result.update({"status": "missing", "error": "source path contains no recognized product source files"})
+        return result
+
+    package_json = root / "package.json"
+    if not package_json.exists():
+        result.update({"status": "passed", "kind": "static_source_present"})
+        return result
+
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result.update({"status": "failed", "error": f"package.json is not valid JSON: {exc}"})
+        return result
+    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+    dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}
+    dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}
+    deps = {**dependencies, **dev_dependencies}
+    if "next" in deps:
+        next_value = str(deps.get("next") or "")
+        if re.search(r"\b14\.2\.5\b", next_value):
+            result["warnings"].append("next@14.2.5 is known deprecated/vulnerable; update before publication")
+    npm = shutil.which("npm")
+    if not npm:
+        result.update({"status": "blocked", "error": "npm is not available for product verification"})
+        return result
+    if install:
+        install_check = _run_verification_command([npm, "install", "--ignore-scripts"], cwd=root, timeout_seconds=timeout_seconds)
+        result["checks"].append(install_check)
+        if install_check["status"] != "passed":
+            result.update({"status": "failed", "error": "npm install failed"})
+            return result
+    if "build" not in scripts:
+        result.update({"status": "unverified", "error": "package.json has no build script"})
+        return result
+    build_check = _run_verification_command([npm, "run", "build"], cwd=root, timeout_seconds=timeout_seconds)
+    result["checks"].append(build_check)
+    if build_check["status"] != "passed":
+        result.update({"status": "failed", "error": "product build failed"})
+        return result
+    if "typecheck" in scripts:
+        typecheck = _run_verification_command([npm, "run", "typecheck"], cwd=root, timeout_seconds=timeout_seconds)
+        result["checks"].append(typecheck)
+        if typecheck["status"] != "passed":
+            result.update({"status": "failed", "error": "product typecheck failed"})
+            return result
+    result.update({"status": "passed", "kind": "node_build"})
+    return result
+
+
+def _normalize_billing_interval(value: Any) -> str:
+    raw = str(value or "month").strip().lower().replace("-", "_")
+    aliases = {
+        "monthly": "month",
+        "mo": "month",
+        "per_month": "month",
+        "annual": "year",
+        "annually": "year",
+        "yearly": "year",
+        "yr": "year",
+        "per_year": "year",
+        "once": "one_time",
+        "one-time": "one_time",
+        "single": "one_time",
+    }
+    return aliases.get(raw, raw)
+
+
+def _plan_validation_warnings(plan_key: str, tier: str, quota: int, allow_overage: bool, metadata: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    normalized_key = _file_slug(plan_key, plan_key)
+    normalized_tier = _file_slug(tier, tier)
+    if normalized_tier and normalized_key and normalized_tier not in normalized_key and normalized_key not in {"free"}:
+        warnings.append("plan_key and entitlement tier differ; this can be valid for billing variants but should be intentional")
+    def contains_unlimited(value: Any) -> bool:
+        if isinstance(value, str):
+            return "unlimited" in value.lower()
+        if isinstance(value, (int, float)):
+            return value < 0
+        if isinstance(value, dict):
+            return any(contains_unlimited(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_unlimited(item) for item in value)
+        return False
+    if contains_unlimited(metadata) and quota > 0 and not allow_overage:
+        warnings.append("metadata suggests an unlimited entitlement but included_action_quota is finite and overage is disabled")
+    return warnings
 
 
 _BRAIN_COMPLETION_MARKERS = (
@@ -1264,6 +1459,51 @@ class TakyonStore:
             "updated_at": None,
         }
 
+    def _latest_surface_verification(self, conn: sqlite3.Connection, slug: str, source_path: str | None) -> dict[str, Any] | None:
+        if not source_path:
+            return None
+        rows = conn.execute(
+            "SELECT * FROM events WHERE business_slug = ? AND event_type = 'product.surface.verify' ORDER BY created_at DESC LIMIT 25",
+            (slug,),
+        ).fetchall()
+        for row in rows:
+            event = self._row_to_dict(row) or {}
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("source_path") == source_path:
+                return {**payload, "event_created_at": event.get("created_at")}
+        return None
+
+    def _surface_status_for_upsert(
+        self,
+        conn: sqlite3.Connection,
+        slug: str,
+        requested_status: str,
+        source_path: str | None,
+        metadata: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        status = str(requested_status or "draft").strip().lower()
+        if status != "active":
+            return status, metadata
+        validation: dict[str, Any] = {"requested_status": "active"}
+        if not source_path:
+            validation.update({"status": "unverified", "reason": "missing source_path"})
+            return "unverified", {**metadata, "takyon_surface_validation": validation}
+        root = self._business_root(slug) / source_path
+        source_files = _product_source_files(root, limit=2)
+        if not root.exists() or not root.is_dir() or not source_files:
+            validation.update({"status": "unverified", "reason": "source path is missing or empty", "source_path": source_path})
+            return "unverified", {**metadata, "takyon_surface_validation": validation}
+        latest = self._latest_surface_verification(conn, slug, source_path)
+        if not latest or latest.get("status") != "passed":
+            validation.update({
+                "status": "unverified",
+                "reason": "no passing product.surface.verify receipt for source_path",
+                "source_path": source_path,
+                "latest_verification": latest,
+            })
+            return "unverified", {**metadata, "takyon_surface_validation": validation}
+        return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
+
     def _rewrite_app_files(self, conn: sqlite3.Connection, slug: str) -> None:
         root = self._business_root(slug) / "app"
         budget = self._ensure_app_budget(conn, slug)
@@ -1340,6 +1580,11 @@ class TakyonStore:
         surface_lines.extend(_markdown_kv_lines(surface.get("theme"), empty="business design brief"))
         surface_lines.extend(["", "## Constraints", ""])
         surface_lines.extend(_markdown_kv_lines(surface.get("constraints"), empty="no hardcoded product UI"))
+        metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+        validation = metadata.get("takyon_surface_validation") if isinstance(metadata.get("takyon_surface_validation"), dict) else {}
+        if validation:
+            surface_lines.extend(["", "## Verification", ""])
+            surface_lines.extend(_markdown_kv_lines(validation, empty="unverified"))
         _atomic_write_text(root / "surface.md", "\n".join(surface_lines).rstrip() + "\n")
 
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
@@ -2422,6 +2667,10 @@ class TakyonStore:
                 "no_hardcoded_product_ui": True,
                 "backend_runtime_only": True,
             }
+            metadata = op.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {"value": metadata}
+            status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, metadata)
             now = _now()
             conn.execute(
                 """
@@ -2452,13 +2701,13 @@ class TakyonStore:
                     _json_dumps(theme),
                     _json_dumps(constraints),
                     str(op.get("notes") or ""),
-                    _json_dumps(op.get("metadata") or {}),
+                    _json_dumps(metadata),
                     now,
                     now,
                 ),
             )
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path})
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "app/surface.md"}
 
         if action == "app.plan.upsert":
@@ -2467,9 +2716,25 @@ class TakyonStore:
             price_cents = int(float(op.get("price_cents") or op.get("price_usd_cents") or 0))
             if price_cents < 0:
                 raise TakyonError("plan price must be non-negative")
-            interval = str(op.get("billing_interval") or "month")
+            interval = _normalize_billing_interval(op.get("billing_interval") or "month")
             if interval not in {"month", "year", "one_time"}:
-                raise TakyonError("billing_interval must be month, year, or one_time")
+                raise TakyonError("billing_interval must be one of: month, year, one_time")
+            included_action_quota = int(op.get("included_action_quota") or 25)
+            allow_overage = bool(op.get("allow_overage"))
+            metadata = op.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {"value": metadata}
+            warnings = _plan_validation_warnings(plan_key, tier, included_action_quota, allow_overage, metadata)
+            if warnings:
+                validation = metadata.get("takyon_plan_validation") if isinstance(metadata.get("takyon_plan_validation"), dict) else {}
+                metadata = {
+                    **metadata,
+                    "takyon_plan_validation": {
+                        **validation,
+                        "status": "warning",
+                        "warnings": [*validation.get("warnings", []), *warnings] if isinstance(validation.get("warnings"), list) else warnings,
+                    },
+                }
             now = _now()
             plan_id = op.get("id") or uuid.uuid4().hex
             conn.execute(
@@ -2507,15 +2772,15 @@ class TakyonStore:
                     str(op.get("currency") or "usd").lower(),
                     interval,
                     int(float(op.get("included_ai_budget_microusd") or 0)),
-                    int(op.get("included_action_quota") or 25),
-                    1 if bool(op.get("allow_overage")) else 0,
+                    included_action_quota,
+                    1 if allow_overage else 0,
                     op.get("stripe_product_id"),
                     op.get("stripe_price_id"),
                     op.get("stripe_payment_link_id"),
                     op.get("stripe_payment_link_url"),
                     str(op.get("source") or "takyon"),
                     str(op.get("notes") or ""),
-                    _json_dumps(op.get("metadata") or {}),
+                    _json_dumps(metadata),
                     now,
                     now,
                 ),
@@ -2709,6 +2974,19 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, content)
             _atomic_write_text(file_path, content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
+            if rel == "brain/pulse.md":
+                self._record_event(
+                    conn,
+                    scope=f"business:{slug}",
+                    business_slug=slug,
+                    event_type="business.pulse.snapshot",
+                    payload={
+                        "generated_at": _now(),
+                        "pulse_path": rel,
+                        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                        "source": "brain/pulse.md write",
+                    },
+                )
             return {"action": action, "business": slug, "path": rel}
 
         if action == "artifact.patch":
@@ -2727,6 +3005,19 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, updated_content)
             _atomic_write_text(file_path, updated_content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
+            if rel == "brain/pulse.md":
+                self._record_event(
+                    conn,
+                    scope=f"business:{slug}",
+                    business_slug=slug,
+                    event_type="business.pulse.snapshot",
+                    payload={
+                        "generated_at": _now(),
+                        "pulse_path": rel,
+                        "content_sha256": hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
+                        "source": "brain/pulse.md patch",
+                    },
+                )
             return {"action": action, "business": slug, "path": rel}
 
         if action == "ledger.allocate":
@@ -3457,6 +3748,84 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or ""))
+        if not business:
+            raise TakyonError("business is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        source_path = str(args.get("source_path") or "").strip()
+        surface: dict[str, Any] = {}
+        if not source_path:
+            summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
+            surface = ((summary.get("app") or {}).get("surface") or {}) if isinstance(summary.get("app"), dict) else {}
+            source_path = str(surface.get("source_path") or "product/site")
+        install = bool(args.get("install", True))
+        timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=180, minimum=15, maximum=900)
+        verification = _verify_product_surface_path(
+            store._business_root(business),
+            source_path,
+            install=install,
+            timeout_seconds=timeout_seconds,
+        )
+        receipt_id = uuid.uuid4().hex
+        receipt_path = f"receipts/product-surface/{receipt_id}.json"
+        verification = {**verification, "business": business, "receipt_path": receipt_path}
+        operations: list[dict[str, Any]] = [
+            {
+                "action": "artifact.write",
+                "business": business,
+                "path": receipt_path,
+                "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
+            },
+            {
+                "action": "event.record",
+                "business": business,
+                "event_type": "product.surface.verify",
+                "payload": {
+                    "source_path": verification.get("source_path"),
+                    "status": verification.get("status"),
+                    "kind": verification.get("kind"),
+                    "error": verification.get("error"),
+                    "warnings": verification.get("warnings") or [],
+                    "receipt_path": receipt_path,
+                },
+            },
+        ]
+        if bool(args.get("activate_on_success", True)) and verification.get("status") == "passed":
+            if not surface:
+                summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
+                surface = ((summary.get("app") or {}).get("surface") or {}) if isinstance(summary.get("app"), dict) else {}
+            operations.append(
+                {
+                    "action": "app.surface.upsert",
+                    "business": business,
+                    "status": "active",
+                    "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
+                    "source_path": verification.get("source_path"),
+                    "runtime_api_base": surface.get("runtime_api_base"),
+                    "routes": surface.get("routes") or [],
+                    "theme": surface.get("theme") or {"source": "business design brief"},
+                    "constraints": surface.get("constraints") or {},
+                    "notes": surface.get("notes") or "",
+                    "metadata": {**(surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}), "verification_receipt": receipt_path},
+                }
+            )
+        result = store.commit(
+            scope=f"business:{business}",
+            operations=operations,
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "product surface verification",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({"success": True, "business": business, "verification": verification, "result": result})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
     operation = {
         "action": "app.plan.upsert",
@@ -4128,27 +4497,75 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "product source contains fake/demo auth, account, checkout, or integration state. "
                 "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
             )
+        verification: dict[str, Any] | None = None
+        verify_surface = bool(args.get("verify_surface"))
+        if not args.get("verify_surface") and workspace_raw not in {".", ""}:
+            normalized_workspace = workspace_raw.strip("/").lower()
+            verify_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
+        if sdk_result.get("success") and verify_surface:
+            verification = _verify_product_surface_path(
+                business_root,
+                workspace_raw,
+                install=bool(args.get("install", True)),
+                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=180, minimum=15, maximum=900),
+            )
+            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_raw}".encode("utf-8")).hexdigest()[:32]
+            verification = {
+                **verification,
+                "business": business,
+                "receipt_path": f"receipts/product-surface/{receipt_id}.json",
+                "source": "business_claude_agent_task",
+            }
         status = "completed" if sdk_result.get("success") else "failed"
+        if verification and verification.get("status") != "passed":
+            status = "blocked"
 
+        record_operations: list[dict[str, Any]] = []
+        if verification:
+            record_operations.extend(
+                [
+                    {
+                        "action": "artifact.write",
+                        "business": business,
+                        "path": verification["receipt_path"],
+                        "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
+                    },
+                    {
+                        "action": "event.record",
+                        "business": business,
+                        "event_type": "product.surface.verify",
+                        "payload": {
+                            "source_path": verification.get("source_path"),
+                            "status": verification.get("status"),
+                            "kind": verification.get("kind"),
+                            "error": verification.get("error"),
+                            "warnings": verification.get("warnings") or [],
+                            "receipt_path": verification.get("receipt_path"),
+                        },
+                    },
+                ]
+            )
+        record_operations.append(
+            {
+                "action": "agent.record",
+                "business": business,
+                "scope": f"business:{business}/workspace:{workspace_raw}",
+                "status": status,
+                "prompt": worker_instruction,
+                "result": {
+                    "source": "claude-agent-sdk",
+                    "workspace": workspace_raw,
+                    "model": model,
+                    "summary": sdk_result.get("summary") or "",
+                    "error": sdk_result.get("error") or None,
+                    "pretend_product_findings": pretend_findings,
+                    "verification": verification,
+                },
+            }
+        )
         agent_record = store.commit(
             scope=f"business:{business}",
-            operations=[
-                {
-                    "action": "agent.record",
-                    "business": business,
-                    "scope": f"business:{business}/workspace:{workspace_raw}",
-                    "status": status,
-                    "prompt": worker_instruction,
-                    "result": {
-                        "source": "claude-agent-sdk",
-                        "workspace": workspace_raw,
-                        "model": model,
-                        "summary": sdk_result.get("summary") or "",
-                        "error": sdk_result.get("error") or None,
-                        "pretend_product_findings": pretend_findings,
-                    },
-                }
-            ],
+            operations=record_operations,
             idempotency_key=f"{idempotency_key}:claude-sdk-agent-record",
             reason=args.get("reason") or "Claude Agent SDK task record",
             actor=args.get("actor") or "agent",
@@ -4163,6 +4580,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "model": model,
                 "budget": budget,
                 "agent_record": agent_record,
+                "verification": verification,
                 "summary": sdk_result.get("summary") or "",
                 "error": sdk_result.get("error"),
                 "pretend_product_findings": pretend_findings,
@@ -4618,10 +5036,30 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
+        "name": "business_verify_product_surface",
+        "description": "Verify that a business product/website source path exists and builds or record a concrete blocker receipt.",
+        "handler": handle_business_verify_product_surface,
+        "schema": _schema(
+            "business_verify_product_surface",
+            "Verify product surface source/build and write a receipt.",
+            {
+                "business": _BUSINESS_PROP,
+                "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
+                "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
+                "timeout_seconds": {"type": "integer", "description": "Per command timeout; default 180"},
+                "activate_on_success": {"type": "boolean", "description": "Mark the app surface active when verification passes; default true"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string"}, "included_ai_budget_microusd": {"type": "integer"}, "included_action_quota": {"type": "integer"}, "allow_overage": {"type": "boolean"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer"}, "included_action_quota": {"type": "integer"}, "allow_overage": {"type": "boolean"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",
@@ -4703,6 +5141,9 @@ TAKYON_TOOL_DEFINITIONS = [
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
+                "verify_surface": {"type": "boolean", "description": "Verify product/website source after edits and write a receipt; product/* workspaces default to verification"},
+                "install": {"type": "boolean", "description": "Run package install before build during verification; default true"},
+                "verification_timeout_seconds": {"type": "integer", "description": "Per verification command timeout; default 180"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

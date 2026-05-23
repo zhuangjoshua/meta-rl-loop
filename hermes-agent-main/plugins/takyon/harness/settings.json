@@ -2,6 +2,12 @@
   "ui": {
     "defaultMode": "full",
     "livePollMs": 2500,
+    "slashPalette": {
+      "defaultVisible": ["create", "use", "status", "files", "read", "pulse", "wake", "commands", "exit"],
+      "contextVisible": {
+        "businessWithProductSurface": ["app-server"]
+      }
+    },
     "thinking": {
       "enabled": true,
       "label": "thinking",
@@ -26,15 +32,16 @@
     {"whenAll": ["test", "mode"], "command": "test"}
   ],
   "controlCommands": [
-    {"name": "ceo", "description": "Focus the scoped CEO conversation", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "businesses", "description": "List businesses", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "use", "description": "Attach shell to one business", "requiresBusiness": false, "priorityBand": "p1_ceo"},
+    {"name": "ceo", "description": "Focus the scoped CEO conversation", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "businesses", "description": "List businesses", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "use", "description": "Attach shell to one business", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"},
     {
       "name": "create",
       "description": "Create a business",
       "requiresBusiness": false,
       "priorityBand": "p1_ceo",
-      "usage": "/create [--test|--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
+      "palette": "default",
+      "usage": "/create [--test|--live] [--budget <usd>] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
       "summary": "Use one shell command: `/create`. By default it creates the business, schedules the CEO, and starts one bootstrap turn.",
       "examples": [
         {
@@ -52,21 +59,23 @@
       ],
       "flags": [
         {"name": "--test", "description": "allow product/website publish; suppress outreach, spend, and money movement"},
+        {"name": "--budget", "description": "set the business bootstrap budget cap in USD"},
         {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
         {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
         {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
       ]
     },
-    {"name": "status", "description": "Show current business state", "requiresBusiness": true, "priorityBand": "p1_ceo"},
-    {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo"},
-    {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning"},
-    {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning"},
-    {"name": "budget", "description": "Show or set business budget cap", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {"name": "status", "description": "Show current business state", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
+    {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
+    {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
+    {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
+    {"name": "budget", "description": "Show or set business budget cap", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
     {
       "name": "test",
       "description": "Set current business test mode",
       "requiresBusiness": true,
       "priorityBand": "p0_control",
+      "palette": "advanced",
       "usage": "/test on|off|status",
       "summary": "Test mode is per business: product/website work can publish, outreach and spend stay suppressed.",
       "examples": [
@@ -77,17 +86,18 @@
         {"label": "Check mode", "command": "/test status"}
       ]
     },
-    {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning"},
-    {"name": "wake", "description": "Wake Hermes CEO for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo"},
-    {"name": "run", "description": "Run a CEO instruction for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo"},
-    {"name": "pause", "description": "Pause the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
-    {"name": "resume", "description": "Resume the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
-    {"name": "kill", "description": "Kill a scope", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
+    {"name": "wake", "description": "Wake Hermes CEO for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
+    {"name": "run", "description": "Run a CEO instruction for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "pause", "description": "Pause the current business", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
+    {"name": "resume", "description": "Resume the current business", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
+    {"name": "kill", "description": "Kill a scope", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
     {
       "name": "delete",
       "description": "Delete the current business after preview",
       "requiresBusiness": true,
       "priorityBand": "p0_control",
+      "palette": "advanced",
       "usage": "/delete [--confirm] [--no-files] [--no-cron] [--no-domains] [--domain <subdomain>]",
       "summary": "Dry-run by default; with `--confirm` deletes the business database rows, `.takyon/businesses/<business>`, Takyon CEO cron jobs, and the business subdomain on fourmanifold.com via Vercel.",
       "flags": [
@@ -98,19 +108,19 @@
         {"name": "--domain", "description": "also remove an explicit business-owned subdomain under the base domain"}
       ]
     },
-    {"name": "commands", "description": "Show slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "skills", "description": "Alias for slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "model", "description": "Show or set model provider", "requiresBusiness": false, "priorityBand": "p0_control"},
-    {"name": "setup", "description": "Run Takyon provider setup", "requiresBusiness": false, "priorityBand": "p0_control"},
-    {"name": "secret", "description": "List redacted secret keys or set one", "requiresBusiness": false, "priorityBand": "p0_control"},
-    {"name": "cron", "description": "List or tick cron jobs", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "registry", "description": "Inspect Takyon tools and skills", "requiresBusiness": false, "priorityBand": "p1_ceo"},
-    {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo"},
-    {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth"},
-    {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning"},
-    {"name": "app-server", "description": "Run the local product app API server", "requiresBusiness": false, "priorityBand": "p2_growth"},
-    {"name": "gc", "description": "Garbage collect stale ephemeral Takyon state", "requiresBusiness": false, "priorityBand": "p4_maintenance"},
-    {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo"}
+    {"name": "commands", "description": "Show slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"},
+    {"name": "skills", "description": "Alias for slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "model", "description": "Show or set model provider", "requiresBusiness": false, "priorityBand": "p0_control", "palette": "advanced"},
+    {"name": "setup", "description": "Run Takyon provider setup", "requiresBusiness": false, "priorityBand": "p0_control", "palette": "advanced"},
+    {"name": "secret", "description": "List redacted secret keys or set one", "requiresBusiness": false, "priorityBand": "p0_control", "palette": "advanced"},
+    {"name": "cron", "description": "List or tick cron jobs", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "registry", "description": "Inspect Takyon tools and skills", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth", "palette": "advanced"},
+    {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
+    {"name": "app-server", "description": "Run the local product app API server", "requiresBusiness": false, "priorityBand": "p2_growth", "palette": "contextual"},
+    {"name": "gc", "description": "Garbage collect stale ephemeral Takyon state", "requiresBusiness": false, "priorityBand": "p4_maintenance", "palette": "advanced"},
+    {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"}
   ],
   "workspace": {
     "generatedReadonlyRoots": ["state", "jobs", "ledger", "tools", "receipts", "website"],

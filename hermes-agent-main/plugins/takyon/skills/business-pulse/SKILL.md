@@ -27,6 +27,7 @@ Raw metrics remain in canonical SQLite/app/conversation/job/ledger/event stores.
 - Never delete old metric data, pulse events, wake journals, app records, conversation records, ledger entries, jobs, or raw events during a wake cycle.
 - If a metric stops mattering, mark it inactive, missing, or not applicable in the current pulse instead of deleting history.
 - The snapshot stores evidence and deltas, not a verdict.
+- Missing or unavailable metrics are evidence gaps, not fatal errors. Preserve the gap in the pulse and let the CEO decide whether to instrument, ignore, or change strategy.
 - Think semantically against the business model only when evidence moved or important evidence is missing.
 - Update `brain/business-model.md` only when the pulse or customer evidence materially changes the model.
 - Write `brain/pulse.md` compactly enough that the CEO can read it on every wake.

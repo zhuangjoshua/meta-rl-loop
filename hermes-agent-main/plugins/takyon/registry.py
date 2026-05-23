@@ -172,6 +172,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Record the business-owned app surface contract so UI look, routes, and source path come from per-business context.",
     },
     {
+        "name": "business_verify_product_surface",
+        "category": "product",
+        "priority_bands": ["p1_ceo", "p2_growth", "p4_maintenance"],
+        "effect": "durable_write",
+        "purpose": "Verify a product/website source path and record a receipt or blocker without deciding strategy.",
+    },
+    {
         "name": "business_upsert_app_plan",
         "category": "app",
         "priority_bands": ["p2_growth"],

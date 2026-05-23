@@ -84,6 +84,16 @@ Business creation belongs to one shell command: `/create`. Creation-time choices
 
 When the CEO is working, the shell must leave a visible operator lane. Do not use spinners, carriage-return redraws, explanatory status text, or progress output that occupies or clears the input row. The active-run indicator should be minimal and visual: use a blinking `*` only when it can be cleared on completion, and let streaming tool progress stand alone when progress lines are visible. If true mid-turn injection is not available, document that in help/status surfaces rather than cluttering the active input area.
 
+## E2E Testing
+
+For operator experience, test through the real shell path. Direct commands such as `./takyon create ...` are useful unit/smoke checks, but they do not exercise the interactive shell parser, slash command handling, scoped CEO routing, shell history, visible progress, input-lane behavior, or operator follow-up flow.
+
+For isolated E2E tests, use a temporary workspace-local `TAKYON_HOME`, copy only the config needed to run the model, and launch `./takyon shell`. Run `/create` and follow-up inspection commands from inside the shell. Do not test by writing directly into `.takyon/state.sqlite3` or by bypassing the shell when the bug is about shell UX, progress, slash commands, scope, or operator conversation.
+
+Use `/status`, `/pulse`, `/files`, `/read`, `/cron list`, and `/cron tick` inside the shell to verify state, receipts, product surface, pulse, filesystem visibility, and scheduled wake behavior. Keep test businesses in test mode unless the operator explicitly wants live side effects.
+
+When the operator wants live monitoring, run the shell in a terminal visible to Codex or ask them to paste output. Codex can inspect the shared terminal output, but cannot see an unrelated external Terminal window unless its output is provided.
+
 ## Agent Behavior
 
 Do not stop at analysis because the workspace is dirty. There may be existing user or previous-agent edits. Read the relevant files, preserve unrelated changes, and make the requested change in the canonical location.

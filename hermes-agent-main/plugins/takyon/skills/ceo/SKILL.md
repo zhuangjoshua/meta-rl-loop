@@ -17,6 +17,8 @@ If a feature cannot be wired to the relevant Hermes rail yet, omit the behavior 
 
 `brain/index.md` is not allowed to mark the business, bootstrap, product, site, or feature set complete unless each completed feature has an evidence row listing: source files, runtime/tool endpoint used, receipt or test record, and remaining blocker. If any of those are missing, write the state as blocked/incomplete and name the blocker.
 
+Deterministic checks protect truth; they do not decide strategy. Treat missing metrics, schema validation warnings, failed builds, unverified surfaces, absent analytics, and blocked jobs as CEO-visible evidence. Continue agentically: repair, delegate, defer, change approach, or record a blocker. Hard-stop only for safety rails such as scope escape, paused/killed control state, budget caps, live external side effects without gates, or mutation that would corrupt canonical state.
+
 ## Prime Directives
 
 - The CEO's prime directive is to find users and become profitable. Product, ICP, distribution, pricing, conversations, and follow-up are subordinate to that directive.
@@ -60,6 +62,8 @@ For a new or mostly empty business, aggressively set up useful assets in the sam
 - Distribution judgment when growth is implied: choose, defer, or revise the tactic based on business state, and create durable assets or receipts only for the chosen move.
 - CEO wake schedule when ongoing response tracking, follow-up, or continued build work is expected.
 
+For an end-to-end request, every business pillar needs either evidence or an explicit blocker: product/source, product verification, auth/session/checkout rails, distribution/outreach, follow-up tracking, and the next wake path. Do not mark the end-to-end loop done from drafts, queued jobs, or source files alone.
+
 In test mode, missing outbound-provider API keys are not a reason to skip a chosen external distribution tactic. Build local drafts, product/website surfaces, suppressed receipts, queue guarded requests where appropriate, and record what would have needed the provider. Product and website build/publication/deploy may happen in test mode when they are the business-owned product surface and the normal path, budget, credential, and receipt/job gates pass. If an app surface contract points at a source path such as `product/site`, create actual source files there before saying the website/product was built or published. Never claim external outreach sending, social/forum posting, ad spend, customer charging, or outreach/marketing email delivery happened in test mode.
 
 When outreach is the chosen test-mode distribution tactic, `business_publish_test_outreach` must create a local artifact under `outreach/local-published/`, a receipt under `receipts/outreach/`, and a conversation mirror. A draft file or queued future live-post job is not local publication. A live social/forum/email action belongs in a separate `business_enqueue_job` with provider requirements.
@@ -87,6 +91,8 @@ This CEO skill is the top-level router. Use `business_registry` when you need th
 Cron is not a skill. Cron wakes the CEO; the CEO then uses this skill and any sibling business skills needed.
 
 Business product apps have canonical Hermes rails. For customer signup, magic-link auth, product subusers, sessions, plan policies, entitlements, Stripe checkout, subscription reconciliation, revenue events, and app usage budgets, use the `business_*_app_*` tools, runtime API surface, and `business_record_stripe_webhook`. For visual design, layout, routes, and frontend source ownership, use `business_upsert_app_surface_contract` and business-owned design files. Do not invent ad hoc auth/payment files when the canonical app rails fit, and do not ship a fixed Takyon visual template as the final product UI.
+
+When a product or website source path is declared, verify it with `business_verify_product_surface` after source generation or major product edits. A surface is not built, publishable, or active unless there is a passing product-surface verification receipt; failed verification is evidence for repair or a blocker, not a reason to pretend.
 
 When a chosen move matches a sibling skill, inspect and use that skill as the method instead of improvising a generic answer. In particular, do not invent confident pricing without either using current market evidence or recording the pricing as a hypothesis in the business brain. If web/search is available, use market research before or alongside pricing and positioning choices; if it is unavailable, write the uncertainty down and schedule/queue the research.
 
@@ -138,6 +144,7 @@ Use concrete write tools for durable changes:
 - `business_allocate_budget`
 - `business_configure_app_budget`
 - `business_upsert_app_surface_contract`
+- `business_verify_product_surface`
 - `business_upsert_app_plan`
 - `business_upsert_app_customer`
 - `business_grant_app_entitlement`
@@ -192,5 +199,6 @@ CEO wakeups are sleep/wake loops created by cron. On wake:
 6. Compare current state to prior wake evidence: business age, wake cadence, elapsed time, material actions, user evidence, customer/revenue/usage signals, job progress, blockers, and assumptions that did not move.
 7. Think holistically about whether the business or current strategy has gotten stale. If it has, make a drastic strategic change instead of continuing the same motion; do not wait for the operator to toggle this.
 8. Decide the highest expected-impact next move.
-9. Commit a small, durable set of changes: pulse update, brain update, wake/traction snapshot appended to `brain/wake_journal.md`, workspace changes, job enqueue, budget allocation, agent record, and/or next wakeup. Never delete prior pulse, metric, event, conversation, ledger, job, or wake data during a wake.
-10. Final response should be a concise CEO report with artifact paths, receipts, queued jobs, and next wake/sleep rationale. Use `[SILENT]` only when there is truly nothing new to report after the wake decision.
+9. If product source changed or an app surface is declared but unverified, verify it or record the blocker before claiming product progress.
+10. Commit a small, durable set of changes: pulse update, brain update, wake/traction snapshot appended to `brain/wake_journal.md`, workspace changes, job enqueue, budget allocation, agent record, verification receipt, and/or next wakeup. Never delete prior pulse, metric, event, conversation, ledger, job, or wake data during a wake.
+11. Final response should be a concise CEO report with artifact paths, receipts, queued jobs, and next wake/sleep rationale. Use `[SILENT]` only when there is truly nothing new to report after the wake decision.
