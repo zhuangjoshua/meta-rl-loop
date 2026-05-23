@@ -62,6 +62,7 @@ def test_plugin_registers_skill_pack():
         "ad-creative",
         "build-product",
         "business-learning",
+        "business-pulse",
         "ceo",
         "app-runtime",
         "claude-agent-sdk",
@@ -181,6 +182,28 @@ def test_business_memory_is_business_scoped(tmp_path):
 
     with pytest.raises(TakyonError):
         store.read(scope="business:other", query="read_file", path="brain/pricing.md")
+
+
+def test_business_pulse_is_read_only_baseline(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Build PDFs"}],
+        "init-latexflow",
+    )
+
+    pulse = store.calculate_pulse("latexflow")
+
+    assert pulse["success"] is True
+    assert pulse["is_first_pulse"] is True
+    assert pulse["summary"]["users"] == 0
+    assert pulse["deltas_from_previous_pulse"]["status"] == "baseline"
+    with store._connect() as conn:
+        recorded = conn.execute(
+            "SELECT COUNT(*) AS count FROM events WHERE business_slug = 'latexflow' AND event_type = 'business.pulse.snapshot'"
+        ).fetchone()
+    assert recorded["count"] == 0
 
 
 def test_path_escape_is_rejected(tmp_path):

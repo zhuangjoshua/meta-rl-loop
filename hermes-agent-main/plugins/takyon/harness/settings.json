@@ -58,6 +58,7 @@
       ]
     },
     {"name": "status", "description": "Show current business state", "requiresBusiness": true, "priorityBand": "p1_ceo"},
+    {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo"},
     {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning"},
     {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning"},
     {"name": "budget", "description": "Show or set business budget cap", "requiresBusiness": true, "priorityBand": "p0_control"},

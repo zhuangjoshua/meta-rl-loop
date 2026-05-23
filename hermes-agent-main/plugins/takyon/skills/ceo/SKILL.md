@@ -71,6 +71,7 @@ Only go idle after the useful durable work for the current instruction is done, 
 This CEO skill is the top-level router. Use `business_registry` when you need the current category or priority-band map. Load sibling skills when the work calls for them:
 
 - `takyon:business-learning` for improving per-business memory and strategy.
+- `takyon:business-pulse` for interpreting deterministic pulse metrics against the current business model.
 - `takyon:build-product` when the business has no product or the product needs major shape.
 - `takyon:market-research` when current market/customer/channel evidence is weak.
 - `takyon:pricing-strategy` when packaging, offer, checkout, or margin is the bottleneck.
@@ -183,10 +184,13 @@ Paused or killed scopes block ordinary writes. Only explicit operator control sh
 
 CEO wakeups are sleep/wake loops created by cron. On wake:
 
-1. Read the business summary, brain index, workspaces, jobs, ledger, events, and controls.
-2. Inspect the most relevant brain or workspace files.
-3. Use the existing conversation-response agent when conversation/user evidence needs compression before it can inform strategy.
-4. Re-evaluate ICP, where users concentrate, paid promise/product, reachable distribution, changed evidence, product/ICP/pricing/distribution implications, and the highest expected-profit move.
-5. Decide the highest expected-impact next move.
-6. Commit a small, durable set of changes: brain update, workspace changes, job enqueue, budget allocation, agent record, and/or next wakeup.
-7. Final response should be a concise CEO report with artifact paths, receipts, queued jobs, and next wake/sleep rationale. Use `[SILENT]` only when there is truly nothing new to report.
+1. Call `business_calculate_pulse` first.
+2. Use `takyon:business-pulse` to compare the deterministic pulse with `brain/business-model.md` and previous `brain/pulse.md`; write the current `brain/pulse.md` and record a `business.pulse.snapshot` event.
+3. Read the business summary, controls, prior wake notes from `brain/wake_journal.md`, and any focused files the pulse says matter.
+4. Use the existing conversation-response agent when conversation/user evidence needs compression before it can inform strategy.
+5. Re-evaluate ICP, where users concentrate, paid promise/product, reachable distribution, changed evidence, product/ICP/pricing/distribution implications, and the highest expected-profit move.
+6. Compare current state to prior wake evidence: business age, wake cadence, elapsed time, material actions, user evidence, customer/revenue/usage signals, job progress, blockers, and assumptions that did not move.
+7. Think holistically about whether the business or current strategy has gotten stale. If it has, make a drastic strategic change instead of continuing the same motion; do not wait for the operator to toggle this.
+8. Decide the highest expected-impact next move.
+9. Commit a small, durable set of changes: pulse update, brain update, wake/traction snapshot appended to `brain/wake_journal.md`, workspace changes, job enqueue, budget allocation, agent record, and/or next wakeup. Never delete prior pulse, metric, event, conversation, ledger, job, or wake data during a wake.
+10. Final response should be a concise CEO report with artifact paths, receipts, queued jobs, and next wake/sleep rationale. Use `[SILENT]` only when there is truly nothing new to report after the wake decision.

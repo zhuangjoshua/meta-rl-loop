@@ -10,6 +10,7 @@ Use this skill when jobs fail, campaigns go stale, agents drift, APIs are missin
 ## Practice
 
 - Read recent events, jobs, controls, relevant workspace files, and brain failure notes.
+- Read wake or traction snapshots when work appears stale; they are evidence for judgment, not a mechanical rule.
 - Determine whether to retry, simplify, pause, kill, archive, or change strategy.
 - Use `business_set_control` for pause/resume/kill at global, business, workspace, job, or agent scope.
 - Use `business_gc` only for conservative row cleanup. It must not delete files, ledgers, controls, budgets, businesses, workspaces, or idempotency records.

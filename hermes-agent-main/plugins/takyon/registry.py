@@ -37,6 +37,7 @@ TAKYON_CATEGORIES: dict[str, dict[str, str]] = {
     "workspace": {"label": "Workspace", "description": "Create isolated business, campaign, product, sales, or research workspaces."},
     "files": {"label": "Files", "description": "Write or patch business-scoped files."},
     "memory": {"label": "Memory", "description": "Improve durable per-business strategy and learning."},
+    "pulse": {"label": "Pulse", "description": "Calculate compact business metrics, deltas, and current strategic pulse."},
     "budget": {"label": "Budget", "description": "Allocate or reserve money under business caps."},
     "app": {"label": "App runtime", "description": "Product customer auth, sessions, entitlements, checkout, subscriptions, revenue, usage budgets, and surface contracts."},
     "queue": {"label": "Queue", "description": "Record guarded requests for external side effects."},
@@ -85,6 +86,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning", "p4_maintenance"],
         "effect": "read_only",
         "purpose": "Read a business-scoped file.",
+    },
+    {
+        "name": "business_calculate_pulse",
+        "category": "pulse",
+        "priority_bands": ["p1_ceo", "p2_growth", "p3_learning", "p4_maintenance"],
+        "effect": "read_only",
+        "purpose": "Calculate bounded deterministic business metrics and deltas from canonical state without mutating anything.",
     },
     {
         "name": "business_list_files",
@@ -327,6 +335,13 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "category": "memory",
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
         "purpose": "Improve flexible per-business strategy, pricing, product, distribution, and learning memory.",
+    },
+    {
+        "name": "business-pulse",
+        "skill": "takyon:business-pulse",
+        "category": "pulse",
+        "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
+        "purpose": "Interpret deterministic pulse metrics against the business model, update pulse memory, and surface changed signals.",
     },
     {
         "name": "build-product",

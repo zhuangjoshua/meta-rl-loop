@@ -114,6 +114,23 @@ def _future(minutes: int = 0, days: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes, days=days)).isoformat()
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _microusd_to_cents(value: int | float | None) -> int:
+    return int(round(float(value or 0) / 10_000))
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -1413,6 +1430,366 @@ class TakyonStore:
             "filesystem_index": "app/index.md",
         }
 
+    def calculate_pulse(self, slug: str, *, limit: int = 10) -> dict[str, Any]:
+        slug = _slugify(slug)
+        limit = max(1, min(int(limit or 10), 50))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+
+        with self._connect() as conn:
+            business = self._ensure_business(conn, slug)
+            created_at = str(business.get("created_at") or now)
+            created_dt = _parse_iso_datetime(created_at) or now_dt
+            previous_row = self._row_to_dict(conn.execute(
+                "SELECT * FROM events WHERE business_slug = ? AND event_type = 'business.pulse.snapshot' ORDER BY created_at DESC LIMIT 1",
+                (slug,),
+            ).fetchone())
+            previous_payload = (previous_row or {}).get("payload") or {}
+            previous_payload_dict = previous_payload if isinstance(previous_payload, dict) else {}
+            previous_pulse = previous_payload_dict.get("pulse") if isinstance(previous_payload_dict.get("pulse"), dict) else previous_payload_dict
+            previous_generated_at = (previous_pulse or {}).get("generated_at") or previous_payload_dict.get("generated_at") or (previous_row or {}).get("created_at")
+            previous_dt = _parse_iso_datetime(previous_generated_at) or created_dt
+            if previous_dt > now_dt:
+                previous_dt = created_dt
+
+            windows = {
+                "current_wake_interval": {"start": previous_dt.isoformat(), "end": now},
+                "since_business_created": {"start": created_dt.isoformat(), "end": now},
+                "lifetime": {"start": created_dt.isoformat(), "end": now},
+            }
+
+            def one(sql: str, params: tuple[Any, ...]) -> sqlite3.Row:
+                return conn.execute(sql, params).fetchone()
+
+            def rows(sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+                return [self._row_to_dict(row) for row in conn.execute(sql, params).fetchall()]
+
+            def window_metrics(start: str, end: str) -> dict[str, Any]:
+                usage = one(
+                    """
+                    SELECT COUNT(*) AS events,
+                           COUNT(DISTINCT app_user_id) AS active_users,
+                           COALESCE(SUM(estimated_cost_microusd), 0) AS estimated_cost_microusd,
+                           COALESCE(SUM(actual_cost_microusd), 0) AS actual_cost_microusd
+                    FROM app_usage_events
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                activation = one(
+                    """
+                    SELECT COUNT(*) AS events,
+                           COUNT(DISTINCT app_user_id) AS users
+                    FROM app_usage_events
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                      AND lower(COALESCE(purpose, '')) = 'activation'
+                    """,
+                    (slug, start, end),
+                )
+                meaningful = one(
+                    """
+                    SELECT COUNT(DISTINCT app_user_id) AS users
+                    FROM app_usage_events
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                      AND lower(COALESCE(purpose, '')) NOT IN ('', 'page_view', 'view', 'visit', 'heartbeat')
+                    """,
+                    (slug, start, end),
+                )
+                customers = one(
+                    "SELECT COUNT(*) AS users FROM app_users WHERE business_slug = ? AND created_at >= ? AND created_at <= ?",
+                    (slug, start, end),
+                )
+                checkouts = one(
+                    """
+                    SELECT COUNT(*) AS intents,
+                           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                           SUM(CASE WHEN status = 'test_local' THEN 1 ELSE 0 END) AS test_local
+                    FROM app_checkout_intents
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                revenue = one(
+                    """
+                    SELECT COUNT(*) AS events,
+                           COALESCE(SUM(amount_paid_cents), 0) AS amount_paid_cents,
+                           COUNT(DISTINCT customer_email) AS paying_emails
+                    FROM app_revenue_events
+                    WHERE business_slug = ? AND occurred_at >= ? AND occurred_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                conversations = one(
+                    """
+                    SELECT COUNT(*) AS messages,
+                           SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) AS inbound_messages,
+                           SUM(CASE WHEN direction = 'outbound' THEN 1 ELSE 0 END) AS outbound_messages,
+                           SUM(CASE WHEN direction = 'inbound' AND status = 'needs_response' THEN 1 ELSE 0 END) AS unresolved_inbound
+                    FROM conversation_messages
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                threads = one(
+                    "SELECT COUNT(*) AS threads FROM conversation_threads WHERE business_slug = ? AND created_at >= ? AND created_at <= ?",
+                    (slug, start, end),
+                )
+                jobs = one(
+                    """
+                    SELECT COUNT(*) AS jobs,
+                           SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                           SUM(CASE WHEN status IN ('failed', 'error', 'blocked') THEN 1 ELSE 0 END) AS blocked_or_failed,
+                           SUM(CASE WHEN status IN ('done', 'completed', 'succeeded') THEN 1 ELSE 0 END) AS completed
+                    FROM jobs
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                ledger = one(
+                    """
+                    SELECT COUNT(*) AS entries,
+                           COALESCE(SUM(amount), 0) AS amount_total,
+                           COALESCE(SUM(CASE WHEN lower(status) IN ('spent', 'paid', 'used', 'completed') THEN amount ELSE 0 END), 0) AS amount_spent,
+                           COALESCE(SUM(CASE WHEN lower(status) NOT IN ('spent', 'paid', 'used', 'completed') THEN amount ELSE 0 END), 0) AS amount_reserved
+                    FROM ledger_entries
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    """,
+                    (slug, start, end),
+                )
+                route_costs = rows(
+                    """
+                    SELECT route, purpose, COUNT(*) AS events,
+                           COUNT(DISTINCT app_user_id) AS users,
+                           COALESCE(SUM(estimated_cost_microusd), 0) AS estimated_cost_microusd,
+                           COALESCE(SUM(actual_cost_microusd), 0) AS actual_cost_microusd
+                    FROM app_usage_events
+                    WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
+                    GROUP BY route, purpose
+                    ORDER BY events DESC
+                    LIMIT ?
+                    """,
+                    (slug, start, end, limit),
+                )
+                actual_cost = int(usage["actual_cost_microusd"] or 0)
+                estimated_cost = int(usage["estimated_cost_microusd"] or 0)
+                cost_cents = _microusd_to_cents(actual_cost or estimated_cost)
+                revenue_cents = int(revenue["amount_paid_cents"] or 0)
+                paying_emails = int(revenue["paying_emails"] or 0)
+                active_users = int(usage["active_users"] or 0)
+                usage_events = int(usage["events"] or 0)
+                return {
+                    "activation": {
+                        "activation_events": int(activation["events"] or 0),
+                        "activated_users": int(activation["users"] or 0),
+                        "meaningful_usage_users": int(meaningful["users"] or 0),
+                    },
+                    "conversion": {
+                        "visitors": {"status": "missing"},
+                        "new_users": int(customers["users"] or 0),
+                        "checkout_intents": int(checkouts["intents"] or 0),
+                        "completed_checkouts": int(checkouts["completed"] or 0),
+                        "test_local_checkouts": int(checkouts["test_local"] or 0),
+                    },
+                    "revenue": {
+                        "events": int(revenue["events"] or 0),
+                        "amount_paid_cents": revenue_cents,
+                        "paying_emails": paying_emails,
+                        "arpu_cents": int(round(revenue_cents / paying_emails)) if paying_emails else None,
+                    },
+                    "margin": {
+                        "revenue_cents": revenue_cents,
+                        "usage_cost_cents": cost_cents,
+                        "gross_after_usage_cost_cents": revenue_cents - cost_cents,
+                        "payment_fee_estimate": {"status": "missing"},
+                    },
+                    "usage_cost": {
+                        "events": usage_events,
+                        "active_users": active_users,
+                        "estimated_cost_microusd": estimated_cost,
+                        "actual_cost_microusd": actual_cost,
+                        "cost_per_active_user_microusd": int(round((actual_cost or estimated_cost) / active_users)) if active_users else None,
+                        "by_route": route_costs,
+                    },
+                    "budget_burn": {
+                        "ledger_entries": int(ledger["entries"] or 0),
+                        "ledger_amount_total": float(ledger["amount_total"] or 0),
+                        "ledger_amount_reserved": float(ledger["amount_reserved"] or 0),
+                        "ledger_amount_spent": float(ledger["amount_spent"] or 0),
+                    },
+                    "cac": {
+                        "status": "missing",
+                        "reason": "campaign spend and paid-customer attribution are not yet linked in canonical metadata",
+                    },
+                    "payback": {
+                        "status": "missing",
+                        "reason": "CAC or gross profit per customer per month is unavailable",
+                    },
+                    "sales_signal": {
+                        "threads": int(threads["threads"] or 0),
+                        "messages": int(conversations["messages"] or 0),
+                        "inbound_messages": int(conversations["inbound_messages"] or 0),
+                        "outbound_messages": int(conversations["outbound_messages"] or 0),
+                        "unresolved_inbound": int(conversations["unresolved_inbound"] or 0),
+                        "booked_call_rate": {"status": "missing"},
+                        "close_rate": {"status": "missing"},
+                    },
+                    "retention": {
+                        "active_users": active_users,
+                        "repeat_usage_users": int(one(
+                            """
+                            SELECT COUNT(*) AS users FROM (
+                              SELECT app_user_id
+                              FROM app_usage_events
+                              WHERE business_slug = ? AND created_at >= ? AND created_at <= ? AND app_user_id IS NOT NULL
+                              GROUP BY app_user_id
+                              HAVING COUNT(*) >= 2
+                            )
+                            """,
+                            (slug, start, end),
+                        )["users"] or 0),
+                    },
+                    "engagement": {
+                        "core_actions_per_active_user": round(usage_events / active_users, 2) if active_users else None,
+                        "usage_events": usage_events,
+                    },
+                    "pricing_pressure": {
+                        "upgrade_downgrade_churn": {"status": "missing"},
+                        "support_burden_by_tier": {"status": "missing"},
+                    },
+                }
+
+            active_entitlements = one(
+                """
+                SELECT COUNT(DISTINCT app_user_id) AS paid_customers
+                FROM app_entitlements
+                WHERE business_slug = ? AND status IN ('active', 'trialing') AND tier IN ('paid', 'pro', 'team', 'owner')
+                """,
+                (slug,),
+            )
+            mrr = one(
+                """
+                SELECT COALESCE(SUM(
+                    CASE
+                      WHEN p.billing_interval = 'year' THEN p.price_cents / 12.0
+                      WHEN p.billing_interval = 'month' THEN p.price_cents
+                      ELSE 0
+                    END
+                ), 0) AS mrr_cents
+                FROM app_entitlements e
+                JOIN app_plan_policies p
+                  ON p.business_slug = e.business_slug AND p.plan_key = e.plan_key
+                WHERE e.business_slug = ? AND e.status IN ('active', 'trialing')
+                """,
+                (slug,),
+            )
+            app_budget = self._ensure_app_budget(conn, slug)
+            app_usage_total = one(
+                "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS actual, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+                (slug, app_budget["current_period_start"]),
+            )
+            current_jobs = one(
+                "SELECT SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued FROM jobs WHERE business_slug = ?",
+                (slug,),
+            )
+            business_budget_amount = _budget_amount(business.get("budget"))
+            computed_windows = {name: {**bounds, "metrics": window_metrics(bounds["start"], bounds["end"])} for name, bounds in windows.items()}
+            lifetime = computed_windows["lifetime"]["metrics"]
+            summary = {
+                "users": int(one("SELECT COUNT(*) AS count FROM app_users WHERE business_slug = ?", (slug,))["count"] or 0),
+                "paid_customers": int(active_entitlements["paid_customers"] or 0),
+                "mrr_cents": int(round(float(mrr["mrr_cents"] or 0))),
+                "arr_cents": int(round(float(mrr["mrr_cents"] or 0) * 12)),
+                "revenue_cents": int(lifetime["revenue"]["amount_paid_cents"]),
+                "checkout_intents": int(lifetime["conversion"]["checkout_intents"]),
+                "usage_events": int(lifetime["usage_cost"]["events"]),
+                "actual_cost_microusd": int(lifetime["usage_cost"]["actual_cost_microusd"]),
+                "inbound_messages": int(lifetime["sales_signal"]["inbound_messages"]),
+                "unresolved_inbound": int(lifetime["sales_signal"]["unresolved_inbound"]),
+                "queued_jobs": int(current_jobs["queued"] or 0),
+            }
+            previous_summary = (previous_pulse or {}).get("summary") if isinstance(previous_pulse, dict) else {}
+            comparable_keys = ("users", "paid_customers", "mrr_cents", "arr_cents", "revenue_cents", "checkout_intents", "usage_events", "actual_cost_microusd", "inbound_messages", "unresolved_inbound")
+            if previous_row is None:
+                deltas = {"status": "baseline"}
+            else:
+                deltas = {
+                    "status": "computed",
+                    **{
+                        key: summary.get(key, 0) - int((previous_summary or {}).get(key) or 0)
+                        for key in comparable_keys
+                        if isinstance(summary.get(key), int)
+                    },
+                }
+            evidence_score = 0
+            if business.get("goal"):
+                evidence_score = max(evidence_score, 1)
+            if int(lifetime["sales_signal"]["inbound_messages"] or 0):
+                evidence_score = max(evidence_score, 3)
+            if int(lifetime["usage_cost"]["events"] or 0):
+                evidence_score = max(evidence_score, 4)
+            if int(lifetime["revenue"]["amount_paid_cents"] or 0):
+                evidence_score = max(evidence_score, 5)
+            recent_event_types = rows(
+                """
+                SELECT event_type, COUNT(*) AS count
+                FROM events
+                WHERE business_slug = ? AND created_at >= ?
+                GROUP BY event_type
+                ORDER BY count DESC, event_type ASC
+                LIMIT ?
+                """,
+                (slug, windows["current_wake_interval"]["start"], limit),
+            )
+            return {
+                "success": True,
+                "business": slug,
+                "generated_at": now,
+                "is_first_pulse": previous_row is None,
+                "previous_pulse": {
+                    "event_id": (previous_row or {}).get("id"),
+                    "generated_at": previous_generated_at,
+                    "created_at": (previous_row or {}).get("created_at"),
+                    "status": "missing" if previous_row is None else "present",
+                },
+                "windows": computed_windows,
+                "summary": summary,
+                "deltas_from_previous_pulse": deltas,
+                "current_state": {
+                    "business_age_hours": round((now_dt - created_dt).total_seconds() / 3600, 2),
+                    "wake_interval_hours": round((now_dt - previous_dt).total_seconds() / 3600, 2),
+                    "app_budget": {
+                        "status": app_budget["status"],
+                        "hard_limit_microusd": int(app_budget["hard_limit_microusd"] or 0),
+                        "spent_microusd": int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
+                        "remaining_microusd": int(app_budget["hard_limit_microusd"] or 0) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
+                    },
+                    "business_budget": {"amount": business_budget_amount, "status": "missing" if business_budget_amount is None else "present"},
+                    "active_paid_customers": int(active_entitlements["paid_customers"] or 0),
+                    "mrr_cents": summary["mrr_cents"],
+                    "arr_cents": summary["arr_cents"],
+                },
+                "missing_metrics": [
+                    "visitors",
+                    "campaign-attributed-cac",
+                    "payment-fee-estimate",
+                    "booked-call-rate",
+                    "close-rate",
+                    "upgrade-downgrade-churn-history",
+                    "support-burden-by-tier",
+                ],
+                "recent_event_types": recent_event_types,
+                "evidence_strength": {
+                    "score": evidence_score,
+                    "scale": "0 none, 1 operator hypothesis, 2 market evidence, 3 user reply, 4 usage, 5 paid revenue",
+                },
+                "storage": {
+                    "raw_sources": ["state.sqlite3", "events", "app_* tables", "conversation_* tables", "ledger_entries", "jobs"],
+                    "snapshot_event_type": "business.pulse.snapshot",
+                    "human_summary_path": "brain/pulse.md",
+                    "business_model_path": "brain/business-model.md",
+                },
+            }
+
     def _sync_business_ceo_cron_control(self, slug: str, state: str, reason: str) -> dict[str, Any]:
         from cron.jobs import list_jobs, pause_job, resume_job
 
@@ -2703,10 +3080,19 @@ class TakyonStore:
         name = f"takyon-ceo:{slug}"
         prompt = (
             f"CEO wakeup for business:{slug}.\n"
-            "Use the concrete business_* tools to read state, update business memory, create workspaces, enqueue jobs, "
-            "allocate budget, and adjust the next wakeup if useful. Decide the highest expected-impact move under "
-            "the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
-            "memory inside this business scope. Honor business mode: in test mode, keep product/website build and "
+            "Start with business_calculate_pulse, then use takyon:business-pulse to write brain/pulse.md and record "
+            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update business memory, "
+            "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
+            "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
+            "memory inside this business scope. Read prior wake/traction notes from brain/wake_journal.md and compare "
+            "this state to those notes, including business "
+            "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
+            "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
+            "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
+            "the same motion. "
+            "Append a compact wake snapshot to brain/wake_journal.md for future comparison. Never delete prior pulse, "
+            "metric, event, conversation, ledger, job, or wake data during a wake. "
+            "Honor business mode: in test mode, keep product/website build and "
             "publication, app rails, receipts, conversations, and follow-up review active. Suppress external outreach, "
             "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
         )
@@ -2927,6 +3313,13 @@ def handle_business_read_business(args: dict, **_: Any) -> str:
 def handle_business_read_file(args: dict, **_: Any) -> str:
     try:
         return tool_result(_store().read(scope=_business_scope(args), query="read_file", path=args.get("path"), limit=args.get("limit") or 50))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
+    try:
+        return tool_result(_store().calculate_pulse(str(args.get("business") or ""), limit=args.get("limit") or 10))
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -4096,6 +4489,12 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read a file inside a business scope.",
         "handler": handle_business_read_file,
         "schema": _schema("business_read_file", "Read a business-scoped file.", {"business": _BUSINESS_PROP, "path": {"type": "string"}}, ["business", "path"]),
+    },
+    {
+        "name": "business_calculate_pulse",
+        "description": "Read-only deterministic pulse calculation from canonical business state, app metrics, conversations, jobs, ledger, and events.",
+        "handler": handle_business_calculate_pulse,
+        "schema": _schema("business_calculate_pulse", "Calculate a business pulse without mutating state.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
     },
     {
         "name": "business_list_files",

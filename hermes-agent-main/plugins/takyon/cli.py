@@ -305,6 +305,51 @@ def _format_cli_value(value: Any) -> str:
         lines.extend(["", str(value.get("agent_response") or "").strip()])
         return "\n".join(line for line in lines if line is not None).rstrip()
 
+    if "summary" in value and "deltas_from_previous_pulse" in value and "windows" in value:
+        business = value.get("business") or "<unknown>"
+        summary = value.get("summary") or {}
+        deltas = value.get("deltas_from_previous_pulse") or {}
+        current = ((value.get("windows") or {}).get("current_wake_interval") or {}).get("metrics") or {}
+        conversion = current.get("conversion") or {}
+        revenue = current.get("revenue") or {}
+        usage = current.get("usage_cost") or {}
+        sales = current.get("sales_signal") or {}
+        state = value.get("current_state") or {}
+        storage = value.get("storage") or {}
+        lines = [
+            f"business:{business} pulse",
+            f"Generated: {value.get('generated_at')}",
+            f"Baseline: {'yes' if value.get('is_first_pulse') else 'no'}",
+            f"Business age hours: {state.get('business_age_hours')}",
+            f"Wake interval hours: {state.get('wake_interval_hours')}",
+            "",
+            "Summary:",
+        ]
+        for key in ("users", "paid_customers", "mrr_cents", "arr_cents", "revenue_cents", "checkout_intents", "usage_events", "actual_cost_microusd", "inbound_messages", "unresolved_inbound"):
+            lines.append(f"  {key}: {summary.get(key, 0)}")
+        lines.append("")
+        lines.append(f"Delta status: {deltas.get('status')}")
+        for key, delta in deltas.items():
+            if key != "status":
+                lines.append(f"  {key}: {delta:+}" if isinstance(delta, int) else f"  {key}: {delta}")
+        lines.extend([
+            "",
+            "Current wake interval:",
+            f"  new users: {conversion.get('new_users', 0)}",
+            f"  checkouts: {conversion.get('checkout_intents', 0)} ({conversion.get('completed_checkouts', 0)} completed, {conversion.get('test_local_checkouts', 0)} local test)",
+            f"  revenue cents: {revenue.get('amount_paid_cents', 0)}",
+            f"  usage events: {usage.get('events', 0)}; actual microusd: {usage.get('actual_cost_microusd', 0)}",
+            f"  inbound messages: {sales.get('inbound_messages', 0)}; unresolved: {sales.get('unresolved_inbound', 0)}",
+            "",
+            f"Evidence strength: {(value.get('evidence_strength') or {}).get('score')} / 5",
+            f"Readable pulse: {storage.get('human_summary_path') or 'brain/pulse.md'}",
+            f"Business model: {storage.get('business_model_path') or 'brain/business-model.md'}",
+        ])
+        missing = value.get("missing_metrics") or []
+        if missing:
+            lines.extend(["", "Missing metrics:", *(f"  {item}" for item in missing[:12])])
+        return "\n".join(lines)
+
     if "business" in value and "mode" in value:
         business = value.get("business") or {}
         if isinstance(business, dict):
@@ -625,6 +670,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "",
         "Use sibling Takyon skills as operating methods when they fit:",
         "- takyon:market-research before or alongside market/pricing claims when web/search evidence is available.",
+        "- takyon:business-pulse after business_calculate_pulse for baseline metrics, pulse.md, and business-model.md.",
         "- takyon:pricing-strategy for tiers, limits, and checkout assumptions.",
         "- takyon:build-product for offer, MVP scope, product surface, and app/code work.",
         "- takyon:app-runtime for app plans, app surface contract, checkout, entitlements, and usage budgets.",
@@ -638,6 +684,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Distribution is required thinking, not forced outreach.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
         "takyon:conversation-response / business_conversation_agent_task path to compress it before deciding.",
+        "Call business_calculate_pulse and use takyon:business-pulse to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
+        "Seed or update compact wake/traction notes in brain/wake_journal.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
         "ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.",
         "",
@@ -1311,6 +1359,8 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
     command = tokens[0].lower().lstrip("/")
     if command in {"status", "show"} and len(tokens) == 1 and current_business:
         return ["show", current_business]
+    if command == "pulse" and len(tokens) == 1 and current_business:
+        return ["pulse", current_business]
     if command in {"files", "workspace"} and current_business:
         return ["files", current_business, *tokens[1:]]
     if command == "read" and current_business:
@@ -2126,6 +2176,12 @@ def run_takyon_command(
             raise SystemExit("usage: takyon status <business>")
         slug = _slugify(argv[1])
         return store.read(scope=_scope_for_business(slug), query="summary")
+
+    if command == "pulse":
+        if len(argv) < 2:
+            raise SystemExit("usage: takyon pulse <business>")
+        slug = _slugify(argv[1])
+        return store.calculate_pulse(slug)
 
     if command == "test":
         if len(argv) < 2:

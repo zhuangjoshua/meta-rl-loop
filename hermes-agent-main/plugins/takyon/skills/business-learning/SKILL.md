@@ -13,6 +13,8 @@ The business brain is per-business and freeform under `brain/`. Create whatever 
 brain/
   index.md
   strategy.md
+  business-model.md
+  pulse.md
   pricing.md
   positioning.md
   product.md
@@ -21,6 +23,7 @@ brain/
   customer_segments.md
   objections.md
   failures.md
+  wake_journal.md
   decision_journal.md
   open_questions.md
   playbooks.md
@@ -36,6 +39,8 @@ These are suggestions, not a schema. Sharper files are better when the business 
 - Write beliefs with evidence when available.
 - Mark weak beliefs as hypotheses.
 - Update strategy, ICP, where users concentrate, pricing, positioning, product ideas, distribution, objections, and playbooks whenever new evidence changes the CEO's mind.
+- Preserve compact wake or traction snapshots as observations for future CEO judgment; snapshots should store evidence, not conclusions.
+- Use `brain/business-model.md` for the current business model and `brain/pulse.md` for the latest pulse. Do not use either as raw metric storage.
 - Keep failures useful: what happened, likely cause, what to avoid, and what to try next.
 - Promote lessons from campaign files into `brain/` only when they matter beyond that campaign.
 - Do not put per-business facts in `SOUL.md`.
