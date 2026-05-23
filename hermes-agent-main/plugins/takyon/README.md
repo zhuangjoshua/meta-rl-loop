@@ -26,6 +26,8 @@ takyon wake latexflow "every 6h"
 takyon pause business:latexflow "operator pause"
 takyon resume business:latexflow "operator resume"
 takyon kill business:latexflow/workspace:campaigns/finals "stop campaign"
+takyon delete latexflow
+takyon delete latexflow --confirm
 takyon gc 90
 takyon gc 90 confirm
 takyon "for latexflow, improve the pricing strategy and create the next distribution campaign"
@@ -37,6 +39,7 @@ In an interactive Takyon session, use the slash command:
 /takyon businesses
 /takyon registry tools queue p2_growth
 /takyon kill business:latexflow/workspace:campaigns/finals "stop campaign"
+/takyon delete latexflow
 /takyon market-research compare latex tools for finals week
 /takyon skill python-debugpy help debug this failing test
 ```
@@ -99,6 +102,7 @@ business_read_business
 business_read_file
 business_list_files
 business_upsert_business
+business_delete_business
 business_set_mode
 business_create_workspace
 business_write_file
@@ -119,8 +123,10 @@ business_record_app_usage
 business_enqueue_job
 business_publish_test_outreach
 business_claude_agent_task
+business_conversation_agent_task
 business_upsert_conversation_thread
 business_record_conversation_message
+business_update_conversation_message_status
 business_record_event
 business_record_agent
 business_set_control
@@ -128,7 +134,9 @@ business_schedule_ceo_wakeup
 business_gc
 ```
 
-Conversation threads and messages are first-class business state. They are stored in `state.sqlite3` as structured rows and mirrored into each business filesystem under `conversations/` as Markdown for CEO review.
+Conversation threads and messages are first-class business state. They are stored in `state.sqlite3` as structured rows, mirrored into each business filesystem under `conversations/` as Markdown for CEO review, and appended to permanent per-business JSONL corpus files under `conversations/corpus/messages.jsonl` and `conversations/corpus/events.jsonl` for later review, learning, and training-oriented export.
+
+High-volume replies should be delegated by CEO judgment, not handled by a fixed inbox rule. `business_conversation_agent_task` prepares a bounded conversation slice in `conversations/tasks/...`, runs a scoped response agent, and can optionally apply capped local actions such as outbound conversation records, status updates, job requests, or memory updates through guarded business tools. External sends/posts still require explicit queued jobs or concrete receipts.
 
 Business product apps use canonical Hermes app rails for product subusers/customers, magic-link auth, app sessions, plan policies, entitlements, Stripe checkout intents/sessions, subscription lifecycle reconciliation, revenue events, and usage budget caps. This state is stored in `state.sqlite3` and mirrored under each business filesystem at `app/`.
 
@@ -148,13 +156,13 @@ POST /api/webhooks/stripe
 
 The legacy `/api/generated-apps/<business>/...` route is accepted only as a compatibility alias.
 
-Web search comes from Takyon's web toolset. Ad posting, deploys, vendor calls, media generation, and other external side effects are represented as guarded business requests or receipts through `business_enqueue_job` with `requires_api` or `requires_env`. Checkout/subscription work should use the canonical app tools. Takyon must not claim outside-world execution happened unless a concrete receipt exists.
+Web search comes from Takyon's web toolset. Ad posting, deploys, vendor calls, media generation, and other external side effects are represented as guarded business requests or receipts through `business_enqueue_job` with `requires_api` or `requires_env`. Product and website publication may happen in test mode when the normal gates pass; acquisition, outbound messaging, paid spend, and payment collection stay suppressed. Checkout/subscription work should use the canonical app tools. Takyon must not claim outside-world execution happened unless a concrete receipt exists.
 
 ## Test Mode
 
-`businesses.mode` is the source of truth for live/test behavior. `business_set_mode` and `takyon test <business> on|off|status` switch one business only. Test mode keeps CEO wakeups, local planning, drafts, app rails, conversations, and follow-up review active, but suppresses outbound delivery and spend.
+`businesses.mode` is the source of truth for live/test behavior. `business_set_mode` and `takyon test <business> on|off|status` switch one business only. Test mode keeps CEO wakeups, local planning, product/website build and publication, app rails, conversations, and follow-up review active. It suppresses outbound acquisition, outreach delivery, paid spend, and money movement, not the product surface itself.
 
-In test mode, guarded `business_enqueue_job` requests with missing provider credentials are still recorded with `external_side_effects=suppressed` and the missing credentials listed in the job payload. Use `business_publish_test_outreach` to publish outreach locally under `outreach/local-published/`, write a receipt under `receipts/outreach/`, and mirror the outbound message into `conversations/` without sending externally. Stripe checkout and Postmark magic-link sends create local suppressed receipts in test mode instead of calling providers.
+In test mode, guarded `business_enqueue_job` requests with missing provider credentials are still recorded with `external_side_effects=suppressed` and the missing credentials listed in the job payload. Product/website jobs may be real when credentials and budgets exist; otherwise the CEO should still build the local product surface under the business filesystem and record the blocked deploy. Use `business_publish_test_outreach` to publish outreach locally under `outreach/local-published/`, write a receipt under `receipts/outreach/`, and mirror the outbound message into `conversations/` without sending externally. Stripe checkout and Postmark sends create local suppressed receipts in test mode instead of calling providers.
 
 General agentic workspace work can use `business_claude_agent_task`, which runs Claude Agent SDK inside one business workspace with path containment, Anthropic credential checks, budget allocation, no Bash, and an agent-run audit record.
 
@@ -180,6 +188,8 @@ The CEO can create arbitrary brain files and workspace trees. The code only hard
 
 GC is deliberately conservative. It can prune old events, terminal jobs, and agent-run rows, but it does not delete business files, ledgers, control states, budgets, workspaces, or idempotency records.
 
+Business deletion is separate from GC. `business_delete_business` and `takyon delete <business>` dry-run by default; with `--confirm` they remove the business database rows, `.takyon/businesses/<business>`, matching Takyon CEO cron jobs, and the business-owned Vercel subdomain under `PUBLIC_COMPANY_BASE_DOMAIN` (default `fourmanifold.com`).
+
 ## Skills
 
 Skills are business operating methods. They are intentionally separate from tools:
@@ -196,6 +206,7 @@ takyon:outreach
 takyon:conversion-review
 takyon:failure-recovery
 takyon:claude-agent-sdk
+takyon:conversation-response
 takyon:app-runtime
 ```
 

@@ -31,15 +31,25 @@ The shared Hermes app runtime owns backend rails only: auth/session protocol, pa
 
 Do not hardcode the final product's look, layout, copy, theme, or information architecture in the runtime. Store that per business with the `business_upsert_app_surface_contract` tool, mirrored at `app/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
 
+Safety constraints must not erase the operator's specified business domain. Preserve the operator's intent in direct, accurate, non-sensational language while obeying claims, safety, credential, and provider guardrails. Physical subject matter does not imply physical fulfillment: unless the operator explicitly asks this business to sell, ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.
+
 ## Operating Model
 
 Takyon should be a skill-based Hermes CEO system, not a fixed workflow cockpit.
 
-Practice parsimony and no slop. Prefer one clear operator affordance with flags over multiple overlapping commands, aliases, or workflow shortcuts. If a shell action is part of creating a business, put it on `/create` as an explicit flag such as `--test`, `--schedule`, or `--no-auto`; do not add separate slash commands that duplicate the creation path.
+Practice parsimony and no slop. Parsimony means the system works through the smallest Hermes-native surface that genuinely handles the job for every business and every relevant mode. Do not create a second path for test mode, a one-off shell workaround, a special-case business bootstrap, or a fake/demo product behavior when the same skill, business-scoped tool, receipt, or runtime rail can express the work with the right gates. Mode differences should be explicit guardrails on the same path: in test mode suppress or stub external side effects with receipts; in live mode require the real provider, budget, permission, and receipt. Prefer one clear operator affordance with flags over multiple overlapping commands, aliases, or workflow shortcuts. If a shell action is part of creating a business, put it on `/create` as an explicit flag such as `--test`, `--schedule`, or `--no-auto`; do not add separate slash commands that duplicate the creation path.
 
 Use canonical sources of truth wherever they exist. Runtime config belongs in `$TAKYON_HOME/config.yaml`; tool and skill metadata belong in `plugins/takyon/registry.py`; shell/harness command metadata belongs in `plugins/takyon/harness/settings.json` and `plugins/takyon/harness/commands/*.md`; business facts belong in `state.sqlite3` and the per-business filesystem. Do not duplicate those facts in prompts or UI code when they can be read from the canonical source.
 
+Do not answer diagnosis with artifact edits. If the operator asks why something happened, whether behavior is correct, or how to improve it, inspect the relevant source of truth and answer. Do not patch a generated business website, outreach file, app copy, or local artifact unless the operator explicitly asks to change that artifact. If the fix is systemic, make the smallest Hermes-native change in the relevant skill, tool, registry, harness metadata, or AGENTS instruction.
+
+The CEO's prime directive is to find users and become profitable. Product, ICP, distribution, pricing, conversations, and follow-up are subordinate to that directive. On initial CEO bootstrap and every scheduled CEO wake, the CEO must re-evaluate the current ICP, where that ICP concentrates, what promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed since the last run, what should change in product, ICP, pricing, or distribution, and the highest expected-profit move now. Treat those answers as revisable beliefs stored in the business brain, not permanent metadata. Distribution is required thinking, not forced outreach; choose, defer, or revise distribution tactics based on the business state and record the reasoning when it should guide future wakes.
+
+When conversation, outreach, or user evidence is too large, noisy, or operational for the CEO to inspect cheaply, use the existing `business_conversation_agent_task` / `takyon:conversation-response` path to summarize responses, extract objections and lead patterns, identify ICP/product/pricing/distribution implications, and optionally draft replies. The CEO remains the decider; delegate outputs become evidence for brain updates and business actions, not a separate workflow.
+
 Cron should wake the Hermes/Takyon CEO for a business. The CEO must inspect the current business state, honor the latest operator query, infer what matters now, and then choose the active Takyon skill or concrete `business_*` tool that fits. Do not encode brittle funnels, stage ladders, fixed next-workflow catalogs, or "if no X then always do Y" strategy in prompts, runtime code, cron, or AGENTS instructions.
+
+Inbound replies, comments, support messages, and outreach results are business evidence, not a hardcoded interrupt policy. Store them durably per business and make them visible to the CEO, but do not add rules like "always handle every reply before outreach" or "always respond to all unresolved messages." The CEO should triage, batch, ignore, escalate, learn from, or answer messages based on business impact, volume, recency, risk, budget, operator direction, and current strategy.
 
 Hardcode only durable rails and safety primitives: business isolation, path containment, idempotency, credential gates, budget caps, audit events, pause/resume/kill controls, conservative cleanup, and the shared Hermes app runtime APIs. Strategy, prioritization, product direction, outreach motion, design, and learning belong in per-business brain/workspace state plus active Takyon skills.
 
@@ -48,7 +58,7 @@ Use the active skills under `hermes-agent-main/plugins/takyon/skills/` as operat
 - Use `takyon:ceo` as the state-aware router.
 - Use `takyon:claude-agent-sdk` / `business_claude_agent_task` when difficult coding, source inspection, or business-scoped workspace edits need a focused Claude Agent SDK worker with path, budget, credential, and audit guardrails.
 - Use `takyon:app-runtime` and the canonical app tools for product customer auth, magic links, sessions, app customers/subusers, entitlements, plan policy, checkout, Stripe webhook reconciliation, revenue, and usage budgets.
-- Use `takyon:outreach`, `takyon:distribution-campaign`, `takyon:ad-creative`, `takyon:market-research`, `takyon:pricing-strategy`, `takyon:conversion-review`, `takyon:business-learning`, and `takyon:failure-recovery` when the evidence and operator query call for them.
+- Use `takyon:outreach`, `takyon:conversation-response`, `takyon:distribution-campaign`, `takyon:ad-creative`, `takyon:market-research`, `takyon:pricing-strategy`, `takyon:conversion-review`, `takyon:business-learning`, and `takyon:failure-recovery` when the evidence and operator query call for them.
 
 External side effects such as posting, sending, enrichment, deploys, vendor calls, paid spend, and media generation require explicit budget/API/env gates and concrete receipts. Queue or record them through guarded business tools; do not claim execution from a draft, plan, or model guess.
 
@@ -58,7 +68,7 @@ Archived `polsia3` reference files may mention fixed workflow IDs or old workflo
 
 Do not claim Takyon is running in test mode unless a specific business has `businesses.mode = 'test'`. Test mode is per business, not global. It still writes durable test-marked state to `.takyon/state.sqlite3` and `.takyon/businesses/<business>/`; it is not a separate `TAKYON_HOME`.
 
-In test mode, Takyon should keep planning, local outreach publication, receipts, conversations, app rails, cron wakeups, and follow-up review active. Outbound external side effects such as posting, sending, ads, spend, live Stripe checkout creation, and Postmark email delivery must be suppressed or stubbed locally with concrete receipts such as `external_side_effects=suppressed`. Missing outbound-provider keys should not skip local test outreach. Missing core model/runtime capability is still a blocker.
+In test mode, Takyon should keep planning, product/website build and publication, receipts, conversations, app rails, cron wakeups, and follow-up review active. Product and website surfaces may be built, published locally, or deployed when the normal path, budget, credential, and receipt/job gates pass. Outbound acquisition and money-movement side effects such as outreach posting, sending, enrichment, ads, spend, live Stripe charging, and Postmark marketing/email delivery must be suppressed or stubbed locally with concrete receipts such as `external_side_effects=suppressed`. Missing outbound-provider keys should not block local execution of a chosen external distribution tactic. Missing core model/runtime capability is still a blocker.
 
 Operator changes to live/test mode must go through `business_set_mode` or the registry-driven shell command `/test on|off|status`. Do not add parallel per-channel test flags.
 
@@ -83,6 +93,8 @@ For actionable business requests, the shell/CEO posture is autonomous execution.
 Slash commands are narrow shell controls only: scope navigation, local status/inspection, setup/config, debug/doctor, server start/stop, and exit. Product-building behavior belongs in skills, tools, registry metadata, and per-business state.
 
 Business creation belongs to one shell command: `/create`. Creation-time choices such as test mode, immediate CEO start, and wake cadence should be flags on `/create`, not separate slash commands.
+
+When the CEO is working, the shell must leave a visible operator lane. Do not use spinners, carriage-return redraws, explanatory status text, or progress output that occupies or clears the input row. The active-run indicator should be minimal and visual: use a blinking `*` only when it can be cleared on completion, and let streaming tool progress stand alone when progress lines are visible. If true mid-turn injection is not available, document that in help/status surfaces rather than cluttering the active input area.
 
 ## Agent Behavior
 

@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -50,10 +51,22 @@ DEFAULT_TAKYON_DIRNAME = "takyon"
 DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-7"
 MAX_READ_CHARS = 64_000
 MAX_WRITE_CHARS = 1_000_000
+NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
+- You are not allowed to invent backend behavior.
+- Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
+- Use canonical Hermes/Takyon runtime tools or endpoints for auth, billing, entitlements, usage, outreach, and receipts.
+- If no browser endpoint exists for auth, billing, entitlements, usage, or outreach, build the screen as unavailable/blocking, not fake.
+- If a runtime endpoint or provider path is unavailable in this workspace, show a visible DEBUG/blocked state that says the feature is not wired yet.
+- Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
+"""
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
+_DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
 
 # Guardrail aliases only. Agents can always pass explicit env names through
 # requires_env when an API is not listed here.
@@ -80,6 +93,7 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "community_research": ("tavily",),
     "meta_seedance": ("openai",),
     "product_backend": ("vercel",),
+    "product.deploy": ("vercel",),
     "product_ui": ("vercel",),
     "stripe_setup": ("stripe",),
     "website_build_deploy": ("vercel",),
@@ -191,6 +205,15 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def _append_jsonl(path: Path, value: Any) -> None:
+    line = _json_dumps(value) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def _read_text_limited(path: Path, limit: int = MAX_READ_CHARS) -> str:
     data = path.read_text(encoding="utf-8", errors="replace")
     if len(data) > limit:
@@ -266,6 +289,19 @@ def _as_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _boolish(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "confirm", "confirmed"}:
+        return True
+    if text in {"0", "false", "no", "off", "dry-run", "preview"}:
+        return False
+    return default
+
+
 def _missing_env_for_requirement(requirement: str) -> list[str]:
     key = str(requirement or "").strip()
     if not key:
@@ -278,9 +314,10 @@ def _missing_env_for_requirement(requirement: str) -> list[str]:
 
 def _credential_requirements(op: dict[str, Any]) -> list[str]:
     required_api = list(_as_list(op.get("requires_api")))
-    if str(op.get("action") or "") == "job.enqueue":
+    action = str(op.get("action") or "")
+    if action == "job.enqueue":
         required_api.extend(_JOB_API_REQUIREMENTS.get(str(op.get("kind") or ""), ()))
-    if str(op.get("provider") or "").strip():
+    if action != "outreach.local_publish" and str(op.get("provider") or "").strip():
         required_api.append(str(op.get("provider")))
     return [str(req) for req in required_api if str(req).strip()]
 
@@ -311,6 +348,150 @@ def _require_api_access(op: dict[str, Any], *, business_mode: str = "live") -> d
             f"{action} requires missing API/env credential(s): {', '.join(missing_unique)}"
         )
     return {"business_mode": business_mode, "missing_credentials_suppressed": []}
+
+
+_PRODUCT_SOURCE_EXTENSIONS = {".html", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
+_PRODUCT_SOURCE_SKIP_DIRS = {
+    ".git",
+    ".next",
+    "__fixtures__",
+    "build",
+    "dist",
+    "docs",
+    "fixtures",
+    "node_modules",
+    "references",
+}
+_PRETEND_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "browser-local auth/session/account state",
+        re.compile(
+            r"localStorage(?:\.(?:getItem|setItem|removeItem)|\[['\"](?:getItem|setItem|removeItem)['\"]\])"
+            r"\(\s*['\"][^'\"]*"
+            r"(?:session|auth|account|user|entitlement|subscription|checkout)[^'\"]*['\"]",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "demo login or demo session",
+        re.compile(
+            r"(?:[?&]demo=|(?:params|searchParams)\.(?:get|has|set)\(\s*['\"]demo['\"]|demo@)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "fake payment or checkout",
+        re.compile(
+            r"(?:fake\s+(?:checkout|payment|billing)|local://takyon/checkout|"
+            r"href\s*=\s*['\"][^'\"]*(?:fake|demo|test)[^'\"]*(?:checkout|billing|stripe)[^'\"]*['\"]|"
+            r"(?:checkout|billing|stripe)[^'\"]*(?:fake|demo|test)|stripe_called\s*[:=]\s*false)",
+            re.IGNORECASE,
+        ),
+    ),
+    ("hardcoded test account", re.compile(r"\btest[\w.-]*@[\w.-]+\.[a-z]{2,}\b", re.IGNORECASE)),
+)
+_RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bfetch\s*\("),
+    re.compile(r"\bXMLHttpRequest\b"),
+    re.compile(r"/api/takyon/apps/"),
+    re.compile(r"\bHermes\b.*\bruntime\b", re.IGNORECASE),
+)
+_ACCOUNT_LOADING_TOKENS = {
+    "account",
+    "account-email",
+    "billing",
+    "checkout",
+    "customer",
+    "entitlement",
+    "plan",
+    "session-email",
+    "subscription",
+}
+
+
+def _product_source_is_skipped(path: Path) -> bool:
+    return any(part in _PRODUCT_SOURCE_SKIP_DIRS for part in path.parts)
+
+
+def _source_has_runtime_backing(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _RUNTIME_BACKED_PATTERNS)
+
+
+def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
+    """Detect product-source code that pretends real auth/billing/integration state."""
+    findings: list[dict[str, Any]] = []
+    if not root.exists():
+        return findings
+    for path in sorted(root.rglob("*")):
+        if len(findings) >= limit:
+            break
+        if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+            continue
+        if _product_source_is_skipped(path):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        lines = text.splitlines()
+        runtime_backed = _source_has_runtime_backing(text)
+        for number, line in enumerate(lines, start=1):
+            for label, pattern in _PRETEND_PRODUCT_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        {
+                            "path": str(path.relative_to(root)),
+                            "line": number,
+                            "issue": label,
+                            "snippet": line.strip()[:240],
+                        }
+                    )
+                    break
+            if "Loading..." in line and not runtime_backed:
+                window = "\n".join(lines[max(0, number - 5): min(len(lines), number + 4)]).lower()
+                if any(token in window for token in _ACCOUNT_LOADING_TOKENS):
+                    findings.append(
+                        {
+                            "path": str(path.relative_to(root)),
+                            "line": number,
+                            "issue": "unbacked account/billing loading widget",
+                            "snippet": line.strip()[:240],
+                        }
+                    )
+            if len(findings) >= limit:
+                break
+    return findings
+
+
+_BRAIN_COMPLETION_MARKERS = (
+    re.compile(r"\b(?:complete|completed|done|built|published|deployed|wired)\b", re.IGNORECASE),
+    re.compile(r"✅"),
+)
+_BRAIN_COMPLETION_EVIDENCE_TERMS = (
+    ("source files", ("source file", "source files", "source_path", "source path")),
+    ("runtime/tool endpoint used", ("runtime/tool endpoint", "runtime endpoint", "tool endpoint", "endpoint used", "tool used", "runtime used")),
+    ("receipt or test record", ("receipt", "test record", "test_record", "job id", "agent record")),
+    ("remaining blocker", ("remaining blocker", "blocker", "blocked", "not wired")),
+)
+
+
+def _validate_brain_index_completion_gate(rel: str, content: str) -> None:
+    if rel != "brain/index.md":
+        return
+    if not any(pattern.search(content) for pattern in _BRAIN_COMPLETION_MARKERS):
+        return
+    lowered = content.lower()
+    missing = [
+        label
+        for label, needles in _BRAIN_COMPLETION_EVIDENCE_TERMS
+        if not any(needle in lowered for needle in needles)
+    ]
+    if missing:
+        raise TakyonError(
+            "brain/index.md cannot claim complete/built/done work without a feature evidence ledger. "
+            "For each feature list source files, runtime/tool endpoint used, receipt or test record, "
+            f"and remaining blocker. Missing: {', '.join(missing)}"
+        )
 
 
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -349,6 +530,51 @@ def _normalize_email(value: str) -> str:
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         raise TakyonError("valid email is required")
     return email
+
+
+def _normalize_domain_name(value: str, *, field: str = "domain") -> str:
+    raw = str(value or "").strip().lower().rstrip(".")
+    if not raw:
+        raise TakyonError(f"{field} is required")
+    parsed = urllib.parse.urlparse(raw if "://" in raw else f"//{raw}")
+    domain = (parsed.netloc or parsed.path).split("/", 1)[0].strip().rstrip(".")
+    if ":" in domain:
+        domain = domain.split(":", 1)[0]
+    if not _DOMAIN_RE.match(domain):
+        raise TakyonError(f"{field} is not a valid DNS name: {value!r}")
+    return domain
+
+
+def _company_base_domain(value: Any = None) -> str:
+    load_takyon_env()
+    configured = (
+        str(value or "").strip()
+        or os.getenv("PUBLIC_COMPANY_BASE_DOMAIN", "").strip()
+        or os.getenv("TAKYON_COMPANY_BASE_DOMAIN", "").strip()
+        or _DEFAULT_COMPANY_BASE_DOMAIN
+    )
+    return _normalize_domain_name(configured, field="base_domain")
+
+
+def _business_domain_candidates(slug: str, *, base_domain: Any = None, explicit: Any = None) -> list[str]:
+    business = _slugify(slug)
+    base = _company_base_domain(base_domain)
+    candidates = [f"{business}.{base}"]
+    for item in _as_list(explicit):
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        domain = _normalize_domain_name(raw if "." in raw else f"{raw}.{base}", field="subdomain")
+        suffix = f".{base}"
+        if domain == base or not domain.endswith(suffix):
+            raise TakyonError(f"business subdomain must be under {base}: {domain}")
+        if domain != f"{business}.{base}" and not domain.endswith(f".{business}.{base}"):
+            raise TakyonError(
+                f"refusing to delete {domain}; explicit subdomains must belong to business:{business}"
+            )
+        if domain not in candidates:
+            candidates.append(domain)
+    return candidates
 
 
 def _status_rank(status: str) -> int:
@@ -826,6 +1052,48 @@ class TakyonStore:
         label = str(thread.get("external_id") or thread.get("title") or thread.get("id") or "thread")
         return f"conversations/{source}/{_file_slug(label, 'thread')}.md"
 
+    def _conversation_corpus_message(self, thread: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "takyon.conversation.message.v1",
+            "business": message.get("business_slug") or thread.get("business_slug"),
+            "thread_id": thread.get("id"),
+            "thread_source": thread.get("source"),
+            "thread_external_id": thread.get("external_id"),
+            "thread_title": thread.get("title"),
+            "thread_url": thread.get("url"),
+            "message_id": message.get("id"),
+            "source": message.get("source"),
+            "external_id": message.get("external_id"),
+            "direction": message.get("direction"),
+            "status": message.get("status"),
+            "author_label": message.get("author_label"),
+            "body": message.get("body"),
+            "received_at": message.get("received_at"),
+            "created_at": message.get("created_at"),
+            "updated_at": message.get("updated_at"),
+            "consent": "unknown",
+            "pii_review": "unreviewed",
+        }
+
+    def _append_conversation_message_corpus(self, slug: str, thread: dict[str, Any], message: dict[str, Any]) -> str:
+        rel = "conversations/corpus/messages.jsonl"
+        _append_jsonl(self._business_root(slug) / rel, self._conversation_corpus_message(thread, message))
+        return rel
+
+    def _append_conversation_event_corpus(self, slug: str, event_type: str, payload: Any) -> str:
+        rel = "conversations/corpus/events.jsonl"
+        _append_jsonl(
+            self._business_root(slug) / rel,
+            {
+                "schema": "takyon.conversation.event.v1",
+                "business": slug,
+                "event_type": event_type,
+                "payload": payload,
+                "created_at": _now(),
+            },
+        )
+        return rel
+
     def _conversation_index(self, conn: sqlite3.Connection, slug: str) -> None:
         rows = [
             self._row_to_dict(row)
@@ -841,6 +1109,13 @@ class TakyonStore:
             for row in rows:
                 rel = self._conversation_thread_relpath(row)
                 lines.append(f"- [{row['title']}]({rel}) — {row['source']} — {row['status']}")
+        lines.extend([
+            "",
+            "## Permanent Corpus",
+            "",
+            "- conversations/corpus/messages.jsonl",
+            "- conversations/corpus/events.jsonl",
+        ])
         _atomic_write_text(self._business_root(slug) / "conversations" / "index.md", "\n".join(lines) + "\n")
 
     def _rewrite_conversation_thread_file(self, conn: sqlite3.Connection, slug: str, thread_id: str) -> str:
@@ -1156,6 +1431,251 @@ class TakyonStore:
             "state": updated.get("state") if updated else existing.get("state"),
         }
 
+    def _filesystem_summary(self, root: Path) -> dict[str, Any]:
+        if not root.exists():
+            return {"path": str(root), "exists": False, "files": 0, "dirs": 0}
+        files = 0
+        dirs = 0
+        for child in root.rglob("*"):
+            if child.is_dir():
+                dirs += 1
+            else:
+                files += 1
+        return {"path": str(root), "exists": True, "files": files, "dirs": dirs}
+
+    def _business_cron_jobs(self, slug: str) -> list[dict[str, Any]]:
+        from cron.jobs import list_jobs
+
+        business = _slugify(slug)
+        expected_name = f"takyon-ceo:{business}"
+        matches: list[dict[str, Any]] = []
+        for job in list_jobs(include_disabled=True):
+            name = str(job.get("name") or "")
+            origin = job.get("origin") if isinstance(job.get("origin"), dict) else {}
+            if name == expected_name or str(origin.get("business") or "") == business:
+                matches.append(job)
+        return matches
+
+    def _delete_business_crons(self, slug: str, *, confirm: bool) -> dict[str, Any]:
+        jobs = self._business_cron_jobs(slug)
+        summary = [
+            {
+                "id": job.get("id"),
+                "name": job.get("name"),
+                "state": job.get("state"),
+                "schedule": job.get("schedule_display") or job.get("schedule"),
+            }
+            for job in jobs
+        ]
+        if not confirm:
+            return {"matched": summary, "removed": []}
+
+        from cron.jobs import remove_job
+
+        removed = []
+        for job in jobs:
+            removed.append({
+                "id": job.get("id"),
+                "name": job.get("name"),
+                "removed": remove_job(str(job.get("id") or "")),
+            })
+        return {"matched": summary, "removed": removed}
+
+    def _delete_vercel_project_domain(self, domain: str) -> dict[str, Any]:
+        load_takyon_env()
+        token = os.getenv("VERCEL_TOKEN")
+        project = os.getenv("VERCEL_PROJECT_ID")
+        team = os.getenv("VERCEL_TEAM_ID")
+        if not token:
+            raise TakyonError("domain cleanup requires VERCEL_TOKEN")
+        if not project:
+            raise TakyonError("domain cleanup requires VERCEL_PROJECT_ID")
+
+        query = urllib.parse.urlencode({"teamId": team}) if team else ""
+        url = (
+            "https://api.vercel.com/v9/projects/"
+            f"{urllib.parse.quote(project, safe='')}/domains/{urllib.parse.quote(domain, safe='')}"
+            f"{'?' + query if query else ''}"
+        )
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"removeRedirects": True}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response.read()
+                return {
+                    "domain": domain,
+                    "provider": "vercel",
+                    "status": "removed",
+                    "http_status": int(getattr(response, "status", 200) or 200),
+                    "external_side_effects": "deleted",
+                }
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 404:
+                return {
+                    "domain": domain,
+                    "provider": "vercel",
+                    "status": "not_found",
+                    "http_status": 404,
+                    "external_side_effects": "none",
+                }
+            raise TakyonError(f"Vercel domain cleanup failed for {domain}: {exc.code} {body}") from exc
+
+    def _delete_business_domains(self, domains: list[str], *, confirm: bool) -> dict[str, Any]:
+        if not confirm:
+            return {"provider": "vercel", "candidates": domains, "results": []}
+        results = [self._delete_vercel_project_domain(domain) for domain in domains]
+        return {"provider": "vercel", "candidates": domains, "results": results}
+
+    def _business_delete_db_counts(self, conn: sqlite3.Connection, slug: str) -> dict[str, int]:
+        business = _slugify(slug)
+        scope = f"business:{business}"
+        scope_like = f"{scope}/%"
+        counts: dict[str, int] = {}
+        by_business = [
+            "businesses",
+            "workspaces",
+            "jobs",
+            "ledger_entries",
+            "events",
+            "conversation_threads",
+            "conversation_messages",
+            "app_budgets",
+            "app_plan_policies",
+            "app_surface_contracts",
+            "app_users",
+            "app_magic_links",
+            "app_sessions",
+            "app_entitlements",
+            "app_checkout_intents",
+            "app_checkout_sessions",
+            "app_revenue_events",
+            "app_usage_events",
+        ]
+        for table in by_business:
+            key = "slug" if table == "businesses" else "business_slug"
+            counts[table] = int(
+                conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {key} = ?", (business,)).fetchone()["count"]
+            )
+        for table in ("jobs", "ledger_entries", "events"):
+            counts[table] = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE business_slug = ? OR scope = ? OR scope LIKE ?",
+                    (business, scope, scope_like),
+                ).fetchone()["count"]
+            )
+        counts["agent_runs"] = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM agent_runs WHERE scope = ? OR scope LIKE ?",
+                (scope, scope_like),
+            ).fetchone()["count"]
+        )
+        counts["control_states"] = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM control_states WHERE scope = ? OR scope LIKE ?",
+                (scope, scope_like),
+            ).fetchone()["count"]
+        )
+        return counts
+
+    def _delete_business_db_rows(self, conn: sqlite3.Connection, slug: str) -> dict[str, int]:
+        business = _slugify(slug)
+        scope = f"business:{business}"
+        scope_like = f"{scope}/%"
+        deleted: dict[str, int] = {}
+
+        for table in ("agent_runs", "control_states"):
+            cursor = conn.execute(f"DELETE FROM {table} WHERE scope = ? OR scope LIKE ?", (scope, scope_like))
+            deleted[table] = int(cursor.rowcount or 0)
+        for table in ("jobs", "ledger_entries", "events"):
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE business_slug = ? OR scope = ? OR scope LIKE ?",
+                (business, scope, scope_like),
+            )
+            deleted[table] = int(cursor.rowcount or 0)
+        cursor = conn.execute("DELETE FROM businesses WHERE slug = ?", (business,))
+        deleted["businesses"] = int(cursor.rowcount or 0)
+        return deleted
+
+    def _delete_business(self, conn: sqlite3.Connection, op: dict[str, Any], *, reason: str, actor: str) -> dict[str, Any]:
+        slug = _slugify(str(op.get("business_slug") or op.get("business") or ""))
+        confirm = _boolish(op.get("confirm"), default=False)
+        delete_files = _boolish(op.get("delete_files"), default=True)
+        delete_cron = _boolish(op.get("delete_cron"), default=True)
+        delete_domains = _boolish(op.get("delete_domains"), default=True)
+
+        business = self._ensure_business(conn, slug)
+        root = self._business_root(slug).resolve()
+        businesses_root = (self.root / "businesses").resolve()
+        if businesses_root not in (root, *root.parents):
+            raise TakyonError("refusing to delete filesystem outside Takyon businesses root")
+
+        domains = (
+            _business_domain_candidates(
+                slug,
+                base_domain=op.get("base_domain"),
+                explicit=op.get("subdomains") or op.get("domains"),
+            )
+            if delete_domains
+            else []
+        )
+        filesystem = self._filesystem_summary(root)
+        cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
+        db_counts = self._business_delete_db_counts(conn, slug)
+
+        result: dict[str, Any] = {
+            "action": "business.delete",
+            "business": slug,
+            "dry_run": not confirm,
+            "business_record": business,
+            "filesystem": filesystem,
+            "cron": cron_preview,
+            "domains": {"provider": "vercel", "candidates": domains, "results": []},
+            "database": {"candidates": db_counts, "deleted": {}},
+        }
+        if not confirm:
+            result["next_step"] = "rerun with confirm=true or --confirm to permanently delete"
+            return result
+
+        if domains:
+            result["domains"] = self._delete_business_domains(domains, confirm=True)
+        if delete_cron:
+            result["cron"] = self._delete_business_crons(slug, confirm=True)
+        if delete_files and root.exists():
+            shutil.rmtree(root)
+            result["filesystem"] = {**filesystem, "removed": True}
+        elif delete_files:
+            result["filesystem"] = {**filesystem, "removed": False}
+        else:
+            result["filesystem"] = {**filesystem, "removed": False, "skipped": True}
+
+        deleted = self._delete_business_db_rows(conn, slug)
+        result["database"] = {"candidates": db_counts, "deleted": deleted}
+        self._record_event(
+            conn,
+            scope="global",
+            business_slug=None,
+            event_type="business.delete",
+            payload={
+                "business": slug,
+                "reason": reason,
+                "actor": actor,
+                "filesystem": result["filesystem"],
+                "cron": result["cron"],
+                "domains": result["domains"],
+                "database": result["database"],
+            },
+        )
+        return result
+
     def read(
         self,
         *,
@@ -1351,9 +1871,11 @@ class TakyonStore:
             "app.usage.record",
             "artifact.patch",
             "artifact.write",
+            "business.delete",
             "business.upsert",
             "business.mode.set",
             "conversation.message.record",
+            "conversation.message.status.set",
             "conversation.thread.upsert",
             "control.set",
             "cron.ensure_ceo_wakeup",
@@ -1378,7 +1900,7 @@ class TakyonStore:
         if business_slug and action != "business.upsert":
             business_mode = str(self._ensure_business(conn, business_slug).get("mode") or "live")
         credential_gate = _require_api_access(op, business_mode=business_mode)
-        if action not in {"control.set"}:
+        if action not in {"business.delete", "control.set"}:
             blocker = self._control_blocker(conn, target_scope)
             if blocker:
                 raise TakyonError(
@@ -1414,6 +1936,8 @@ class TakyonStore:
             goal = str(op.get("goal") or "")
             budget = op.get("budget")
             metadata = op.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {"value": metadata}
             mode = str(op.get("mode") or "").strip().lower()
             if mode and mode not in _BUSINESS_MODES:
                 raise TakyonError(f"business mode must be one of {sorted(_BUSINESS_MODES)}")
@@ -1451,6 +1975,9 @@ class TakyonStore:
                 payload={"mode": mode, "reason": reason, "actor": actor},
             )
             return {"action": action, "business": slug, "mode": mode}
+
+        if action == "business.delete":
+            return self._delete_business(conn, op, reason=reason, actor=actor)
 
         if action == "control.set":
             state = str(op.get("state") or "").strip().lower()
@@ -1677,6 +2204,17 @@ class TakyonStore:
                 raise TakyonError(f"app user not found: {user_id}")
             now = _now()
             entitlement_id = op.get("id") or uuid.uuid4().hex
+            tier_value = str(op.get("tier") or "free")
+            source_value = str(op.get("source") or "manual")
+            metadata = op.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = {"value": metadata}
+            has_stripe_evidence = bool(op.get("stripe_customer_id") or op.get("stripe_subscription_id") or op.get("stripe_checkout_session_id"))
+            explicit_non_billing = bool(metadata.get("non_billing") or source_value in {"internal", "owner", "comp", "test"})
+            if tier_value not in {"", "free"} and source_value == "manual" and not has_stripe_evidence and not explicit_non_billing:
+                raise TakyonError(
+                    "manual paid entitlement would fake billing state; use Stripe/webhook evidence or an explicit non-billing source"
+                )
             conn.execute(
                 """
                 INSERT INTO app_entitlements (
@@ -1690,22 +2228,22 @@ class TakyonStore:
                     entitlement_id,
                     slug,
                     user_id,
-                    str(op.get("tier") or "free"),
+                    tier_value,
                     str(op.get("status") or "active"),
-                    str(op.get("source") or "manual"),
+                    source_value,
                     op.get("stripe_customer_id"),
                     op.get("stripe_subscription_id"),
                     op.get("stripe_checkout_session_id"),
                     op.get("plan_key"),
                     op.get("current_period_end"),
-                    _json_dumps(op.get("metadata") or {}),
+                    _json_dumps(metadata),
                     now,
                     now,
                 ),
             )
             tier = self._sync_user_tier(conn, slug, user_id)
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": user_id, "tier": tier, "source": op.get("source") or "manual"})
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": user_id, "tier": tier, "source": source_value})
             return {"action": action, "business": slug, "app_user_id": user_id, "entitlement": entitlement_id, "tier": tier}
 
         if action == "app.usage.record":
@@ -1790,8 +2328,9 @@ class TakyonStore:
                 content = existing + content
             elif mode != "replace":
                 raise TakyonError("write mode must be 'replace' or 'append'")
-            _atomic_write_text(file_path, content)
             rel = str(file_path.relative_to(self._business_root(slug)))
+            _validate_brain_index_completion_gate(rel, content)
+            _atomic_write_text(file_path, content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": rel}
 
@@ -1806,8 +2345,10 @@ class TakyonStore:
             content = file_path.read_text(encoding="utf-8", errors="replace")
             if old not in content:
                 raise TakyonError("artifact.patch old text not found")
-            _atomic_write_text(file_path, content.replace(old, new, 1))
+            updated_content = content.replace(old, new, 1)
             rel = str(file_path.relative_to(self._business_root(slug)))
+            _validate_brain_index_completion_gate(rel, updated_content)
+            _atomic_write_text(file_path, updated_content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": rel}
 
@@ -1915,6 +2456,10 @@ class TakyonStore:
             thread_external_id = str(op.get("thread_external_id") or f"{source}:{_file_slug(target, 'target')}")
             now = created_at
             thread_id = str(op.get("thread_id") or uuid.uuid4().hex)
+            existing_message = conn.execute(
+                "SELECT 1 FROM conversation_messages WHERE business_slug = ? AND source = ? AND external_id = ?",
+                (slug, source, str(op.get("external_id") or f"{publish_id}:local-outbound")),
+            ).fetchone()
             conn.execute(
                 "INSERT INTO conversation_threads (id, business_slug, source, external_id, title, url, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?) "
@@ -1938,6 +2483,10 @@ class TakyonStore:
                 (slug, source, message_external_id),
             ).fetchone())
             mirror = self._rewrite_conversation_thread_file(conn, slug, str(thread["id"]))
+            corpus = None
+            if not existing_message:
+                corpus = self._append_conversation_message_corpus(slug, thread, row)
+            self._append_conversation_event_corpus(slug, action, {"receipt": receipt_rel, "thread": thread["id"], "message": row["id"]})
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=receipt)
             return {
                 "action": action,
@@ -1949,6 +2498,7 @@ class TakyonStore:
                 "thread": thread["id"],
                 "message": row["id"],
                 "conversation_file": mirror,
+                "conversation_corpus": corpus or "conversations/corpus/messages.jsonl",
                 "external_side_effects": "suppressed",
             }
 
@@ -1972,6 +2522,7 @@ class TakyonStore:
                 (slug, source, external_id),
             ).fetchone())
             file_path = self._rewrite_conversation_thread_file(conn, slug, str(row["id"]))
+            self._append_conversation_event_corpus(slug, action, {"thread": row["id"], "source": source, "external_id": external_id, "status": row["status"]})
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"thread": row["id"], "source": source})
             return {"action": action, "business": slug, "thread": row["id"], "file": file_path}
 
@@ -2010,6 +2561,10 @@ class TakyonStore:
             message_external_id = str(op.get("external_id") or f"{thread['id']}:{direction}:{op.get('received_at') or now}:{str(op.get('body') or '')[:80]}").strip()
             message_id = str(op.get("id") or uuid.uuid4().hex)
             received_at = str(op.get("received_at") or now)
+            existing_message = conn.execute(
+                "SELECT 1 FROM conversation_messages WHERE business_slug = ? AND source = ? AND external_id = ?",
+                (slug, source, message_external_id),
+            ).fetchone()
             conn.execute(
                 "INSERT INTO conversation_messages (id, business_slug, thread_id, source, external_id, direction, author_label, body, status, received_at, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
@@ -2022,8 +2577,41 @@ class TakyonStore:
                 (slug, source, message_external_id),
             ).fetchone())
             file_path = self._rewrite_conversation_thread_file(conn, slug, str(thread["id"]))
+            corpus = None
+            if not existing_message:
+                corpus = self._append_conversation_message_corpus(slug, thread, row)
+            self._append_conversation_event_corpus(slug, action, {"thread": thread["id"], "message": row["id"], "direction": direction, "status": row["status"]})
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"thread": thread["id"], "message": row["id"], "direction": direction, "status": row["status"]})
-            return {"action": action, "business": slug, "thread": thread["id"], "message": row["id"], "file": file_path, "status": row["status"]}
+            return {"action": action, "business": slug, "thread": thread["id"], "message": row["id"], "file": file_path, "status": row["status"], "conversation_corpus": corpus or "conversations/corpus/messages.jsonl"}
+
+        if action == "conversation.message.status.set":
+            status = str(op.get("status") or "").strip().lower()
+            if status not in {"needs_response", "responded", "ignored", "archived"}:
+                raise TakyonError("conversation message status must be needs_response, responded, ignored, or archived")
+            message = None
+            if op.get("message_id"):
+                message = self._row_to_dict(conn.execute(
+                    "SELECT * FROM conversation_messages WHERE business_slug = ? AND id = ?",
+                    (slug, str(op.get("message_id"))),
+                ).fetchone())
+            if not message:
+                source = _file_slug(str(op.get("source") or "unknown"), "unknown")
+                external_id = str(op.get("external_id") or "").strip()
+                if not external_id:
+                    raise TakyonError("conversation status update requires message_id or source/external_id")
+                message = self._row_to_dict(conn.execute(
+                    "SELECT * FROM conversation_messages WHERE business_slug = ? AND source = ? AND external_id = ?",
+                    (slug, source, external_id),
+                ).fetchone())
+            if not message:
+                raise TakyonError("conversation message not found")
+            now = _now()
+            conn.execute("UPDATE conversation_messages SET status = ?, updated_at = ? WHERE business_slug = ? AND id = ?", (status, now, slug, message["id"]))
+            row = self._row_to_dict(conn.execute("SELECT * FROM conversation_messages WHERE business_slug = ? AND id = ?", (slug, message["id"])).fetchone())
+            file_path = self._rewrite_conversation_thread_file(conn, slug, str(row["thread_id"]))
+            self._append_conversation_event_corpus(slug, action, {"message": row["id"], "status": status, "reason": reason, "actor": actor})
+            self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"message": row["id"], "status": status, "reason": reason, "actor": actor})
+            return {"action": action, "business": slug, "message": row["id"], "status": status, "file": file_path}
 
         if action == "agent.record":
             run_id = op.get("id") or uuid.uuid4().hex
@@ -2118,8 +2706,9 @@ class TakyonStore:
             "Use the concrete business_* tools to read state, update business memory, create workspaces, enqueue jobs, "
             "allocate budget, and adjust the next wakeup if useful. Decide the highest expected-impact move under "
             "the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
-            "memory inside this business scope. Honor business mode: in test mode, keep planning, local publishing, "
-            "receipts, conversations, and follow-up review active, but do not send external outreach or spend."
+            "memory inside this business scope. Honor business mode: in test mode, keep product/website build and "
+            "publication, app rails, receipts, conversations, and follow-up review active. Suppress external outreach, "
+            "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
         )
         enabled_toolsets = ["takyon", "web", "skills", "todo", "delegation"]
         existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
@@ -2360,6 +2949,20 @@ def handle_business_upsert_business(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata") or {},
     }
     return _commit_tool(args, operation, scope=f"business:{args.get('business')}")
+
+
+def handle_business_delete_business(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "business.delete",
+        "business": args.get("business"),
+        "confirm": args.get("confirm"),
+        "delete_files": args.get("delete_files") if args.get("delete_files") is not None else True,
+        "delete_cron": args.get("delete_cron") if args.get("delete_cron") is not None else True,
+        "delete_domains": args.get("delete_domains") if args.get("delete_domains") is not None else True,
+        "base_domain": args.get("base_domain"),
+        "subdomains": args.get("subdomains") or args.get("domains") or [],
+    }
+    return _commit_tool(args, operation)
 
 
 def handle_business_set_mode(args: dict, **_: Any) -> str:
@@ -2954,6 +3557,18 @@ def handle_business_record_conversation_message(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_update_conversation_message_status(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "conversation.message.status.set",
+        "business": args.get("business"),
+        "message_id": args.get("message_id"),
+        "source": args.get("source"),
+        "external_id": args.get("external_id"),
+        "status": args.get("status"),
+    }
+    return _commit_tool(args, operation)
+
+
 def handle_business_record_event(args: dict, **_: Any) -> str:
     operation = {
         "action": "event.record",
@@ -3080,12 +3695,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or _model_from_config("claude_agent_default", "deep_work_default")
             or DEFAULT_CLAUDE_AGENT_MODEL
         ).strip()
+        worker_instruction = instruction.rstrip() + "\n\n" + NO_PRETEND_PRODUCT_CONTRACT
         payload = {
             "business": business,
             "workspace": workspace_raw,
             "cwd": str(workspace_path),
             "root": str(business_root),
-            "instruction": instruction,
+            "instruction": worker_instruction,
             "model": model,
             "maxTurns": max_turns,
             "timeoutMs": timeout_ms,
@@ -3110,6 +3726,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if proc.returncode != 0:
             sdk_result.setdefault("success", False)
             sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+        pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
+        if pretend_findings:
+            sdk_result["success"] = False
+            sdk_result["pretend_product_findings"] = pretend_findings
+            sdk_result["error"] = (
+                "Claude Agent SDK output blocked by Hermes no-pretend contract: "
+                "product source contains fake/demo auth, account, checkout, or integration state. "
+                "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
+            )
         status = "completed" if sdk_result.get("success") else "failed"
 
         agent_record = store.commit(
@@ -3120,13 +3745,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "business": business,
                     "scope": f"business:{business}/workspace:{workspace_raw}",
                     "status": status,
-                    "prompt": instruction,
+                    "prompt": worker_instruction,
                     "result": {
                         "source": "claude-agent-sdk",
                         "workspace": workspace_raw,
                         "model": model,
                         "summary": sdk_result.get("summary") or "",
                         "error": sdk_result.get("error") or None,
+                        "pretend_product_findings": pretend_findings,
                     },
                 }
             ],
@@ -3146,10 +3772,288 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "agent_record": agent_record,
                 "summary": sdk_result.get("summary") or "",
                 "error": sdk_result.get("error"),
+                "pretend_product_findings": pretend_findings,
             }
         )
     except subprocess.TimeoutExpired as exc:
         return tool_error(f"Claude Agent SDK task timed out: {exc}", success=False)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+_CONVERSATION_AGENT_TASK_TYPES = {
+    "triage",
+    "cluster",
+    "draft_replies",
+    "respond",
+    "extract_learnings",
+    "identify_leads",
+}
+
+
+def _read_conversation_agent_actions(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    if not isinstance(data, dict):
+        raise TakyonError("conversation agent actions.json must be an object")
+    return data
+
+
+def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
+    """Delegate bounded conversation response work to a business-scoped worker."""
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        task_type = _file_slug(str(args.get("task_type") or "triage"), "triage")
+        if task_type not in _CONVERSATION_AGENT_TASK_TYPES:
+            raise TakyonError(f"conversation task_type must be one of {sorted(_CONVERSATION_AGENT_TASK_TYPES)}")
+        objective = str(args.get("objective") or "").strip() or f"{task_type} conversation backlog"
+        limit = _clamp_int(args.get("limit"), default=100, minimum=1, maximum=500)
+        direction = str(args.get("direction") or "inbound").strip().lower()
+        status = str(args.get("status") or "needs_response").strip().lower()
+        source_filter = str(args.get("source") or "").strip()
+        max_actions = _clamp_int(args.get("max_actions"), default=20, minimum=0, maximum=100)
+        apply_actions = bool(args.get("apply_actions") or args.get("execute_actions"))
+        allow_outbound_messages = bool(args.get("allow_outbound_messages", True))
+        allow_external_jobs = bool(args.get("allow_external_jobs", False))
+
+        task_id = hashlib.sha256(f"{business}:{idempotency_key}:conversation-agent".encode("utf-8")).hexdigest()
+        workspace_raw = str(args.get("workspace") or f"conversations/tasks/{_now()[:10]}-{task_type}-{task_id[:8]}").strip()
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+        workspace_path = store._resolve_business_file(business, workspace_raw)
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        if not workspace_path.is_dir():
+            raise TakyonError(f"conversation agent workspace is not a directory: {workspace_raw}")
+
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            filters = ["m.business_slug = ?"]
+            params: list[Any] = [business]
+            if direction and direction != "all":
+                filters.append("m.direction = ?")
+                params.append(direction)
+            if status and status != "all":
+                filters.append("m.status = ?")
+                params.append(status)
+            if source_filter:
+                filters.append("m.source = ?")
+                params.append(_file_slug(source_filter, "source"))
+            where = " AND ".join(filters)
+            rows = conn.execute(
+                f"""
+                SELECT
+                  m.*,
+                  t.source AS thread_source,
+                  t.external_id AS thread_external_id,
+                  t.title AS thread_title,
+                  t.url AS thread_url
+                FROM conversation_messages m
+                JOIN conversation_threads t ON t.id = m.thread_id
+                WHERE {where}
+                ORDER BY m.received_at DESC, m.created_at DESC
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+            messages = [store._row_to_dict(row) for row in rows]
+            summary = store._conversation_summary(conn, business, limit=20)
+            brain_index = []
+            brain_root = store._business_root(business) / "brain"
+            if brain_root.exists():
+                brain_index = [
+                    str(path.relative_to(store._business_root(business)))
+                    for path in sorted(brain_root.rglob("*"))
+                    if path.is_file()
+                ][:50]
+
+        input_md = [
+            f"# Conversation Agent Task: {task_type}",
+            "",
+            f"- Business: {business}",
+            f"- Business mode: {business_row.get('mode') or 'live'}",
+            f"- Objective: {objective}",
+            f"- Selected messages: {len(messages)}",
+            f"- Direction filter: {direction}",
+            f"- Status filter: {status}",
+            f"- Source filter: {source_filter or 'all'}",
+            f"- Max structured actions Takyon may apply: {max_actions}",
+            f"- Apply actions requested: {'yes' if apply_actions else 'no'}",
+            f"- Allow local outbound conversation records: {'yes' if allow_outbound_messages else 'no'}",
+            f"- Allow queued external send/post jobs: {'yes' if allow_external_jobs else 'no'}",
+            "",
+            "## Business",
+            "",
+            f"- Name: {business_row.get('name') or business}",
+            f"- Goal: {business_row.get('goal') or 'not set'}",
+            "",
+            "## Inbox Summary",
+            "",
+            f"- Active threads: {summary.get('active_threads')}",
+            f"- Unresolved messages: {summary.get('unresolved_messages')}",
+            f"- Latest message: {summary.get('latest_message_at') or 'none'}",
+            "",
+            "## Brain Files",
+            "",
+            *(f"- {item}" for item in brain_index),
+            "",
+            "## Required Outputs",
+            "",
+            "- `triage.md`: compressed findings, priority groups, recommended CEO-level decisions.",
+            "- `drafts.md`: human-readable drafts or response principles when useful.",
+            "- `learnings.md`: reusable objections, language, opportunities, and strategy updates.",
+            "- `actions.json`: optional structured actions Takyon can apply after this worker returns.",
+        ]
+        _atomic_write_text(workspace_path / "input.md", "\n".join(input_md).rstrip() + "\n")
+        _atomic_write_text(workspace_path / "messages.jsonl", "".join(_json_dumps(message) + "\n" for message in messages))
+        _atomic_write_text(
+            workspace_path / "actions.json",
+            _json_dumps({
+                "outbound_messages": [],
+                "status_updates": [],
+                "job_requests": [],
+                "memory_updates": [],
+            }) + "\n",
+        )
+
+        instruction = "\n".join([
+            "Use the takyon:conversation-response method for this bounded task.",
+            "Read input.md and messages.jsonl in the current workspace.",
+            "Do not try to read every historical conversation unless the task slice requires it.",
+            "Use business impact, volume, recency, risk, budget, and the stated objective to decide what matters.",
+            "You may triage, batch, sample, ignore, escalate, learn from, or draft replies; do not assume every message deserves a response.",
+            "Do not perform external side effects. If external sending/posting is warranted, add a guarded job request to actions.json instead of claiming it happened.",
+            "Write triage.md, drafts.md, learnings.md, and actions.json.",
+            "actions.json schema: outbound_messages[], status_updates[], job_requests[], memory_updates[].",
+            "outbound_messages are local conversation records, not external sends; include source, thread_external_id or thread_id, thread_title, body, and optional external_id.",
+            "status_updates include message_id or source/external_id plus status: needs_response, responded, ignored, or archived.",
+            "job_requests include kind, payload, requires_api[], requires_env[].",
+            "memory_updates include path, content, and optional mode.",
+            f"Task objective: {objective}",
+        ])
+        worker_raw = handle_business_claude_agent_task(
+            {
+                "business": business,
+                "workspace": workspace_raw,
+                "instruction": instruction,
+                "budget_usd": args.get("budget_usd") or 2.0,
+                "model": args.get("model"),
+                "max_turns": args.get("max_turns") or 12,
+                "timeout_ms": args.get("timeout_ms") or 300_000,
+                "idempotency_key": f"{idempotency_key}:conversation-worker",
+                "reason": args.get("reason") or "conversation response agent task",
+                "actor": args.get("actor") or "agent",
+            }
+        )
+        worker = json.loads(worker_raw)
+        action_commit = None
+        action_error = None
+        action_counts: dict[str, int] = {}
+        if worker.get("success") and apply_actions and max_actions > 0:
+            try:
+                actions = _read_conversation_agent_actions(workspace_path / "actions.json")
+                operations: list[dict[str, Any]] = []
+                for item in list(actions.get("outbound_messages") or [])[:max_actions]:
+                    if not allow_outbound_messages or not isinstance(item, dict):
+                        continue
+                    operations.append({
+                        "action": "conversation.message.record",
+                        "business": business,
+                        "source": item.get("source") or source_filter or "conversation-agent",
+                        "thread_id": item.get("thread_id"),
+                        "thread_external_id": item.get("thread_external_id"),
+                        "thread_title": item.get("thread_title") or item.get("subject") or "Response agent thread",
+                        "url": item.get("url"),
+                        "external_id": item.get("external_id") or f"{task_id}:outbound:{len(operations)}",
+                        "direction": "outbound",
+                        "author_label": item.get("author_label") or "Takyon response agent",
+                        "body": item.get("body") or "",
+                        "status": item.get("status") or "responded",
+                    })
+                for item in list(actions.get("status_updates") or [])[:max_actions]:
+                    if not isinstance(item, dict):
+                        continue
+                    operations.append({
+                        "action": "conversation.message.status.set",
+                        "business": business,
+                        "message_id": item.get("message_id"),
+                        "source": item.get("source"),
+                        "external_id": item.get("external_id"),
+                        "status": item.get("status"),
+                    })
+                if allow_external_jobs:
+                    for item in list(actions.get("job_requests") or [])[:max_actions]:
+                        if not isinstance(item, dict):
+                            continue
+                        operations.append({
+                            "action": "job.enqueue",
+                            "business": business,
+                            "scope": f"business:{business}/workspace:{workspace_raw}",
+                            "kind": item.get("kind") or "conversation_response_send",
+                            "payload": item.get("payload") or {},
+                            "requires_api": item.get("requires_api") or [],
+                            "requires_env": item.get("requires_env") or [],
+                        })
+                for item in list(actions.get("memory_updates") or [])[:max_actions]:
+                    if not isinstance(item, dict):
+                        continue
+                    operations.append({
+                        "action": "memory.write",
+                        "business": business,
+                        "path": item.get("path") or "conversation-learnings.md",
+                        "content": item.get("content") or "",
+                        "mode": item.get("mode") or "replace",
+                    })
+                if operations:
+                    action_commit = store.commit(
+                        scope=f"business:{business}/workspace:{workspace_raw}",
+                        operations=operations[:max_actions],
+                        idempotency_key=f"{idempotency_key}:conversation-actions",
+                        reason=args.get("reason") or "apply conversation response agent actions",
+                        actor=args.get("actor") or "conversation-agent",
+                    )
+                    for result in action_commit.get("results") or []:
+                        key = str(result.get("action") or "unknown")
+                        action_counts[key] = action_counts.get(key, 0) + 1
+            except Exception as exc:
+                action_error = str(exc)
+
+        event_payload = {
+            "task_type": task_type,
+            "objective": objective,
+            "workspace": workspace_raw,
+            "selected_messages": len(messages),
+            "apply_actions": apply_actions,
+            "action_counts": action_counts,
+            "action_error": action_error,
+            "worker_success": bool(worker.get("success")),
+        }
+        event_record = store.commit(
+            scope=f"business:{business}/workspace:{workspace_raw}",
+            operations=[{"action": "event.record", "business": business, "event_type": "conversation.agent_task", "payload": event_payload}],
+            idempotency_key=f"{idempotency_key}:conversation-event",
+            reason=args.get("reason") or "record conversation response agent task",
+            actor=args.get("actor") or "agent",
+        )
+
+        return tool_result({
+            "success": bool(worker.get("success")) and not action_error,
+            "business": business,
+            "task_type": task_type,
+            "workspace": workspace_raw,
+            "input": f"{workspace_raw}/input.md",
+            "messages": f"{workspace_raw}/messages.jsonl",
+            "actions": f"{workspace_raw}/actions.json",
+            "selected_messages": len(messages),
+            "worker": worker,
+            "action_commit": action_commit,
+            "action_error": action_error,
+            "event_record": event_record,
+        })
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -3207,6 +4111,28 @@ TAKYON_TOOL_DEFINITIONS = [
             "business_upsert_business",
             "Create or update a business.",
             {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "budget": {"type": "object"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_delete_business",
+        "description": "Dry-run or permanently delete one business, including filesystem, CEO cron jobs, and its fourmanifold.com/Vercel subdomain.",
+        "handler": handle_business_delete_business,
+        "schema": _schema(
+            "business_delete_business",
+            "Delete a business and owned runtime artifacts. Dry-run unless confirm=true.",
+            {
+                "business": _BUSINESS_PROP,
+                "confirm": {"type": "boolean", "description": "Required true for permanent deletion; false previews only"},
+                "delete_files": {"type": "boolean", "description": "Delete .takyon/businesses/<business> filesystem tree; default true"},
+                "delete_cron": {"type": "boolean", "description": "Delete Takyon CEO cron jobs for this business; default true"},
+                "delete_domains": {"type": "boolean", "description": "Remove the business subdomain from the Vercel project; default true"},
+                "base_domain": {"type": "string", "description": "Base domain for business subdomains; defaults to PUBLIC_COMPANY_BASE_DOMAIN or fourmanifold.com"},
+                "subdomains": {"type": "array", "items": {"type": "string"}, "description": "Additional explicit business-owned subdomains under the base domain"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
             ["business", "idempotency_key"],
         ),
     },
@@ -3306,7 +4232,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_grant_app_entitlement",
-        "description": "Grant a product customer an entitlement such as free, paid, owner, active, past_due, or cancelled.",
+        "description": "Grant a product customer a free or explicit non-billing entitlement. Paid billing entitlements require Stripe/webhook evidence.",
         "handler": handle_business_grant_app_entitlement,
         "schema": _schema("business_grant_app_entitlement", "Grant product app entitlement.", {"business": _BUSINESS_PROP, "app_user_id": {"type": "string"}, "email": {"type": "string"}, "tier": {"type": "string"}, "status": {"type": "string"}, "source": {"type": "string"}, "plan_key": {"type": "string"}, "current_period_end": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "tier", "idempotency_key"]),
     },
@@ -3386,6 +4312,37 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
+        "name": "business_conversation_agent_task",
+        "description": "Delegate bounded per-business conversation response work to a scoped worker, optionally applying capped local conversation actions through guarded tools.",
+        "handler": handle_business_conversation_agent_task,
+        "schema": _schema(
+            "business_conversation_agent_task",
+            "Run a scoped conversation response agent task for a business.",
+            {
+                "business": _BUSINESS_PROP,
+                "task_type": {"type": "string", "description": "triage, cluster, draft_replies, respond, extract_learnings, or identify_leads"},
+                "objective": {"type": "string", "description": "Business objective for this conversation slice"},
+                "source": {"type": "string", "description": "Optional source/channel filter"},
+                "direction": {"type": "string", "description": "Message direction filter; default inbound, or all"},
+                "status": {"type": "string", "description": "Message status filter; default needs_response, or all"},
+                "limit": {"type": "integer", "description": "Maximum messages to pass to the worker, default 100 and capped at 500"},
+                "workspace": {"type": "string", "description": "Optional business-relative task workspace"},
+                "apply_actions": {"type": "boolean", "description": "Apply capped actions from actions.json after worker completes"},
+                "allow_outbound_messages": {"type": "boolean", "description": "Allow local outbound conversation records from actions.json"},
+                "allow_external_jobs": {"type": "boolean", "description": "Allow queued external send/post job requests from actions.json"},
+                "max_actions": {"type": "integer", "description": "Maximum structured actions to apply, default 20 and capped at 100"},
+                "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped by the underlying worker"},
+                "model": {"type": "string", "description": "Optional Claude model override"},
+                "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_upsert_conversation_thread",
         "description": "Create or update a business-owned conversation thread and its Markdown mirror under conversations/.",
         "handler": handle_business_upsert_conversation_thread,
@@ -3405,6 +4362,17 @@ TAKYON_TOOL_DEFINITIONS = [
             "Record a business conversation message.",
             {"business": _BUSINESS_PROP, "source": {"type": "string"}, "thread_id": {"type": "string"}, "thread_external_id": {"type": "string"}, "thread_title": {"type": "string"}, "url": {"type": "string"}, "external_id": {"type": "string"}, "direction": {"type": "string"}, "author_label": {"type": "string"}, "body": {"type": "string"}, "status": {"type": "string"}, "received_at": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "source", "thread_title", "body", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_update_conversation_message_status",
+        "description": "Update one business conversation message status without rewriting the message body.",
+        "handler": handle_business_update_conversation_message_status,
+        "schema": _schema(
+            "business_update_conversation_message_status",
+            "Update a business conversation message status.",
+            {"business": _BUSINESS_PROP, "message_id": {"type": "string"}, "source": {"type": "string"}, "external_id": {"type": "string"}, "status": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            ["business", "status", "idempotency_key"],
         ),
     },
     {

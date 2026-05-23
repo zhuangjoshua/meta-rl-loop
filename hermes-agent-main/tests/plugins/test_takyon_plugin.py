@@ -13,6 +13,9 @@ from plugins.takyon.core import (
     TAKYON_TOOL_DEFINITIONS,
     TakyonError,
     TakyonStore,
+    _API_ENV_ALIASES,
+    _scan_for_pretend_product_state,
+    handle_business_delete_business,
     handle_business_list_businesses,
     handle_business_registry,
     handle_business_upsert_business,
@@ -60,6 +63,9 @@ def test_plugin_registers_skill_pack():
         "build-product",
         "business-learning",
         "ceo",
+        "app-runtime",
+        "claude-agent-sdk",
+        "conversation-response",
         "conversion-review",
         "distribution-campaign",
         "failure-recovery",
@@ -292,6 +298,176 @@ def test_required_env_must_exist(tmp_path, monkeypatch):
         )
 
 
+def test_product_deploy_job_is_vercel_gated_in_test_mode(tmp_path, monkeypatch):
+    monkeypatch.setitem(_API_ENV_ALIASES, "vercel", ("TAKYON_TEST_VERCEL_TOKEN",))
+    monkeypatch.delenv("TAKYON_TEST_VERCEL_TOKEN", raising=False)
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer", "mode": "test"}],
+        "init",
+    )
+
+    result = _commit(
+        store,
+        "business:longer",
+        [{"action": "job.enqueue", "kind": "product.deploy", "payload": {"source_path": "product/site"}}],
+        "deploy",
+    )["results"][0]
+
+    assert result["external_side_effects"] == "suppressed"
+    assert result["missing_credentials_suppressed"] == ["TAKYON_TEST_VERCEL_TOKEN"]
+    job = store.read(scope="business:longer", query="summary")["jobs"][0]
+    assert job["payload"]["missing_credentials_suppressed"] == ["TAKYON_TEST_VERCEL_TOKEN"]
+
+
+def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_path, monkeypatch):
+    monkeypatch.setitem(_API_ENV_ALIASES, "reddit", ("TAKYON_TEST_REDDIT_TOKEN",))
+    monkeypatch.delenv("TAKYON_TEST_REDDIT_TOKEN", raising=False)
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer", "mode": "test"}],
+        "init",
+    )
+
+    result = _commit(
+        store,
+        "business:longer",
+        [
+            {
+                "action": "outreach.local_publish",
+                "business": "longer",
+                "provider": "reddit",
+                "channel": "reddit",
+                "target": "r/example",
+                "subject": "Local test",
+                "body": "Suppressed local body",
+            }
+        ],
+        "local-outreach",
+    )["results"][0]
+
+    assert result["external_side_effects"] == "suppressed"
+    assert result["sent"] is False
+    assert (tmp_path / "businesses" / "longer" / result["artifact"]).exists()
+    assert (tmp_path / "businesses" / "longer" / result["receipt"]).exists()
+
+
+def test_manual_paid_entitlement_requires_billing_evidence(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer"}],
+        "init",
+    )
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "app.customer.upsert", "email": "customer@example.com"}],
+        "customer",
+    )
+
+    with pytest.raises(TakyonError, match="fake billing state"):
+        _commit(
+            store,
+            "business:longer",
+            [{"action": "app.entitlement.upsert", "email": "customer@example.com", "tier": "pro"}],
+            "manual-pro",
+        )
+
+
+def test_product_source_scanner_blocks_fake_auth_but_allows_local_product_logs(tmp_path):
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "app.js").write_text(
+        "localStorage.setItem('longer_logs', JSON.stringify([]));\n"
+        "localStorage.setItem('longer_session', JSON.stringify({email: 'demo@example.com'}));\n",
+        encoding="utf-8",
+    )
+
+    findings = _scan_for_pretend_product_state(site)
+
+    assert [finding["issue"] for finding in findings] == [
+        "browser-local auth/session/account state",
+    ]
+
+
+def test_product_source_scanner_blocks_demo_checkout_and_unbacked_loading(tmp_path):
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "account.html").write_text(
+        "<div id=\"account-email\">Loading...</div>\n"
+        "<a href=\"/demo-checkout\">Checkout</a>\n"
+        "<script>new URLSearchParams(location.search).has('demo')</script>\n",
+        encoding="utf-8",
+    )
+    docs = site / "docs"
+    docs.mkdir()
+    (docs / "fixture.html").write_text(
+        "<script>new URLSearchParams(location.search).has('demo')</script>\n",
+        encoding="utf-8",
+    )
+
+    findings = _scan_for_pretend_product_state(site)
+
+    assert sorted(finding["issue"] for finding in findings) == sorted([
+        "fake payment or checkout",
+        "demo login or demo session",
+        "unbacked account/billing loading widget",
+    ])
+
+
+def test_brain_index_completion_gate_requires_feature_evidence(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer"}],
+        "init",
+    )
+
+    with pytest.raises(TakyonError, match="feature evidence ledger"):
+        _commit(
+            store,
+            "business:longer",
+            [
+                {
+                    "action": "memory.write",
+                    "business": "longer",
+                    "path": "index.md",
+                    "content": "# Longer\n\nBootstrap: COMPLETE\n",
+                }
+            ],
+            "bad-index",
+        )
+
+    result = _commit(
+        store,
+        "business:longer",
+        [
+            {
+                "action": "memory.write",
+                "business": "longer",
+                "path": "index.md",
+                "content": (
+                    "# Longer\n\n"
+                    "Bootstrap: COMPLETE\n\n"
+                    "| Feature | Source files | Runtime/tool endpoint used | Receipt or test record | Remaining blocker |\n"
+                    "|---|---|---|---|---|\n"
+                    "| Account | product/site/account.html | /api/takyon/apps/longer/account | agent record abc | blocked until browser endpoint is wired |\n"
+                ),
+            }
+        ],
+        "good-index",
+    )
+
+    assert result["results"][0]["path"] == "brain/index.md"
+
+
 def test_gc_is_dry_run_by_default_and_keeps_protected_rows(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(
@@ -319,6 +495,85 @@ def test_gc_is_dry_run_by_default_and_keeps_protected_rows(tmp_path):
     assert store.read(scope="global", query="list_businesses")["businesses"][0]["slug"] == "latexflow"
 
 
+def test_delete_business_dry_run_keeps_state_and_files(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-delete-preview",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "path": "product/spec.md", "content": "# Spec\n"}],
+        "write-delete-preview",
+    )
+
+    result = _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.delete", "business": "latexflow", "delete_domains": False}],
+        "delete-preview",
+    )
+    deletion = result["results"][0]
+
+    assert deletion["dry_run"] is True
+    assert deletion["filesystem"]["files"] >= 1
+    assert (tmp_path / "businesses" / "latexflow" / "product" / "spec.md").exists()
+    assert store.read(scope="global", query="list_businesses")["businesses"][0]["slug"] == "latexflow"
+
+
+def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
+    import cron.jobs as cron_jobs
+
+    cron_dir = tmp_path / "cron"
+    monkeypatch.setattr(cron_jobs, "CRON_DIR", cron_dir)
+    monkeypatch.setattr(cron_jobs, "JOBS_FILE", cron_dir / "jobs.json")
+    monkeypatch.setattr(cron_jobs, "OUTPUT_DIR", cron_dir / "output")
+
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-delete-confirm",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "path": "product/spec.md", "content": "# Spec\n"}],
+        "write-delete-confirm",
+    )
+    cron_jobs.create_job(
+        prompt="CEO wakeup for business:latexflow.",
+        schedule="every 1h",
+        name="takyon-ceo:latexflow",
+        skills=["takyon:ceo"],
+    )
+
+    result = _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.delete",
+                "business": "latexflow",
+                "confirm": True,
+                "delete_domains": False,
+            }
+        ],
+        "delete-confirm",
+    )
+    deletion = result["results"][0]
+
+    assert deletion["dry_run"] is False
+    assert deletion["filesystem"]["removed"] is True
+    assert not (tmp_path / "businesses" / "latexflow").exists()
+    assert store.read(scope="global", query="list_businesses")["businesses"] == []
+    assert cron_jobs.list_jobs(include_disabled=True) == []
+
+
 def test_tool_handlers_return_json(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     create = json.loads(
@@ -335,3 +590,100 @@ def test_tool_handlers_return_json(tmp_path, monkeypatch):
     read = json.loads(handle_business_list_businesses({}))
     assert read["success"] is True
     assert read["businesses"][0]["slug"] == "latexflow"
+
+    preview = json.loads(
+        handle_business_delete_business(
+            {
+                "business": "latexflow",
+                "delete_domains": False,
+                "idempotency_key": "handler-delete-preview",
+            }
+        )
+    )
+    assert preview["success"] is True
+    assert preview["results"][0]["dry_run"] is True
+
+
+def test_conversation_messages_append_permanent_corpus(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    result = _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "conversation.message.record",
+                "business": "latexflow",
+                "source": "reddit",
+                "thread_external_id": "post-1",
+                "thread_title": "Launch reply thread",
+                "external_id": "comment-1",
+                "direction": "inbound",
+                "author_label": "grad-student",
+                "body": "Does it support git sync?",
+            }
+        ],
+        "reply",
+    )
+
+    message_result = result["results"][0]
+    assert message_result["status"] == "needs_response"
+    corpus = tmp_path / "businesses" / "latexflow" / "conversations" / "corpus" / "messages.jsonl"
+    events = tmp_path / "businesses" / "latexflow" / "conversations" / "corpus" / "events.jsonl"
+    lines = corpus.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["business"] == "latexflow"
+    assert row["thread_external_id"] == "post-1"
+    assert row["body"] == "Does it support git sync?"
+    assert "conversation.message.record" in events.read_text(encoding="utf-8")
+
+
+def test_conversation_message_status_update_rewrites_thread(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "conversation.message.record",
+                "business": "latexflow",
+                "source": "x",
+                "thread_external_id": "post-2",
+                "thread_title": "Pricing replies",
+                "external_id": "reply-1",
+                "direction": "inbound",
+                "body": "Too expensive",
+            }
+        ],
+        "reply",
+    )
+    result = _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "conversation.message.status.set",
+                "business": "latexflow",
+                "source": "x",
+                "external_id": "reply-1",
+                "status": "ignored",
+            }
+        ],
+        "ignore",
+    )
+
+    assert result["results"][0]["status"] == "ignored"
+    thread_path = tmp_path / "businesses" / "latexflow" / result["results"][0]["file"]
+    assert "Status: ignored" in thread_path.read_text(encoding="utf-8")

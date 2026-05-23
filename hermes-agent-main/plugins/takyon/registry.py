@@ -101,11 +101,18 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Create or update a business, goal, metadata, and optional budget cap.",
     },
     {
+        "name": "business_delete_business",
+        "category": "control",
+        "priority_bands": ["p0_control", "p4_maintenance"],
+        "effect": "external_side_effect",
+        "purpose": "Dry-run or permanently delete one business, including filesystem, CEO cron jobs, and its Vercel/fourmanifold.com subdomain.",
+    },
+    {
         "name": "business_set_mode",
         "category": "control",
         "priority_bands": ["p0_control", "p1_ceo"],
         "effect": "guarded_write",
-        "purpose": "Set a business to live or test mode; test mode keeps local work and cron active while suppressing outbound side effects.",
+        "purpose": "Set a business to live or test mode; test mode keeps product/website work and cron active while suppressing outreach, spend, and money movement.",
     },
     {
         "name": "business_create_workspace",
@@ -175,7 +182,7 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "app",
         "priority_bands": ["p2_growth"],
         "effect": "guarded_write",
-        "purpose": "Grant or update product customer entitlements such as free, paid, or owner.",
+        "purpose": "Grant or update product customer entitlements; paid billing state must come from Stripe/webhook evidence, not manual fiction.",
     },
     {
         "name": "business_request_app_magic_link",
@@ -241,6 +248,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Run a general Claude Agent SDK worker inside a business workspace with path, credential, budget, and audit guardrails.",
     },
     {
+        "name": "business_conversation_agent_task",
+        "category": "conversation",
+        "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
+        "effect": "agentic_write",
+        "purpose": "Delegate bounded conversation response work to a scoped worker that triages, drafts, learns, and optionally applies capped local conversation actions through guarded tools.",
+    },
+    {
         "name": "business_upsert_conversation_thread",
         "category": "conversation",
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
@@ -253,6 +267,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "priority_bands": ["p0_control", "p1_ceo", "p2_growth", "p3_learning"],
         "effect": "durable_write",
         "purpose": "Record inbound, outbound, or internal messages; unresolved inbound replies become CEO-visible business evidence.",
+    },
+    {
+        "name": "business_update_conversation_message_status",
+        "category": "conversation",
+        "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
+        "effect": "durable_write",
+        "purpose": "Update one business conversation message status, such as responded, ignored, archived, or needs_response.",
     },
     {
         "name": "business_record_event",
@@ -369,6 +390,13 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "category": "agent",
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
         "purpose": "Use a bounded Claude Agent SDK worker for general business-scoped tasks, not just websites.",
+    },
+    {
+        "name": "conversation-response",
+        "skill": "takyon:conversation-response",
+        "category": "conversation",
+        "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
+        "purpose": "Delegate high-volume replies, comments, outreach results, and support conversations to a scoped response agent under CEO objectives and guardrails.",
     },
     {
         "name": "app-runtime",

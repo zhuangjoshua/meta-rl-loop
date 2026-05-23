@@ -8,13 +8,10 @@ import hashlib
 import io
 import json
 import os
-import select
 import shlex
 import shutil
 import sys
-import termios
 import threading
-import tty
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +51,7 @@ _COLOR_ENABLED = (
 _ANSI = {
     "reset": "\x1b[0m",
     "bold": "\x1b[1m",
+    "blink": "\x1b[5m",
     "dim": "\x1b[2m",
     "red": "\x1b[31m",
     "green": "\x1b[32m",
@@ -78,6 +76,10 @@ _THEME = {
 
 def _color(text: str, code: str) -> str:
     return f"{code}{text}{_ANSI['reset']}" if _COLOR_ENABLED else text
+
+
+def _blink(text: str) -> str:
+    return _color(text, _ANSI["blink"] + _THEME["primary"])
 
 
 def _bold(text: str) -> str:
@@ -147,7 +149,7 @@ def _input_bar_top(current_business: str | None) -> str:
 def _input_prompt(current_business: str | None) -> str:
     if not sys.stdout.isatty():
         return f"takyon/{_scope_label(current_business)} > "
-    return _color("› ", _THEME["primary"])
+    return "> "
 
 
 def _render_pixel_mascot_line(line: str, width: int = 16) -> str:
@@ -414,6 +416,26 @@ def _format_operation_result(item: Any) -> str:
         return f"business:{business or item.get('business')} filesystem -> {root}"
     if action == "business.mode.set":
         return f"business:{business or item.get('business')} mode -> {item.get('mode')}"
+    if action == "business.delete":
+        cron = item.get("cron") or {}
+        domains = item.get("domains") or {}
+        filesystem = item.get("filesystem") or {}
+        if item.get("dry_run"):
+            return (
+                f"delete preview for business:{business or item.get('business')}; "
+                f"filesystem {filesystem.get('files', 0)} files/{filesystem.get('dirs', 0)} dirs; "
+                f"cron {len(cron.get('matched') or [])}; "
+                f"domains {', '.join(domains.get('candidates') or []) or 'none'}; "
+                "rerun with --confirm"
+            )
+        domain_results = domains.get("results") or []
+        domain_text = ", ".join(f"{row.get('domain')}:{row.get('status')}" for row in domain_results) or "none"
+        removed_cron = [row for row in cron.get("removed") or [] if row.get("removed")]
+        return (
+            f"deleted business:{business or item.get('business')}; "
+            f"filesystem -> {filesystem.get('path')} removed={filesystem.get('removed')}; "
+            f"cron removed={len(removed_cron)}; domains {domain_text}"
+        )
     if action == "control.set":
         cron = item.get("cron")
         cron_text = f"; cron {cron}" if cron else ""
@@ -516,6 +538,77 @@ def _parse_business_start_args(
     return slug, raw_name, goal, mode, schedule, auto_start, no_auto
 
 
+def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
+    usage = "usage: takyon delete <business> [--confirm] [--no-files] [--no-cron] [--no-domains] [--domain <subdomain>]"
+    tokens = list(argv[1:])
+    if not tokens:
+        raise SystemExit(usage)
+    result: dict[str, Any] = {
+        "business": "",
+        "confirm": False,
+        "delete_files": True,
+        "delete_cron": True,
+        "delete_domains": True,
+        "subdomains": [],
+    }
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--confirm", "confirm"}:
+            result["confirm"] = True
+        elif token == "--no-files":
+            result["delete_files"] = False
+        elif token == "--no-cron":
+            result["delete_cron"] = False
+        elif token == "--no-domains":
+            result["delete_domains"] = False
+        elif token == "--domain":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            result["subdomains"].append(tokens[index])
+        elif token.startswith("--"):
+            raise SystemExit(f"unknown delete flag {token!r}\n{usage}")
+        elif not result["business"]:
+            result["business"] = _slugify(token)
+        else:
+            raise SystemExit(usage)
+        index += 1
+    if not result["business"]:
+        raise SystemExit(usage)
+    return result
+
+
+def _idempotency_key(prefix: str, *parts: Any, max_length: int = 180) -> str:
+    def key_slug(value: Any, limit: int = 48) -> str:
+        raw = str(value or "").strip().lower()
+        chars: list[str] = []
+        previous_dash = False
+        for char in raw:
+            if char.isalnum() or char == "_":
+                chars.append(char)
+                previous_dash = False
+            elif char == "-" or char.isspace() or char in ":/.":
+                if not previous_dash:
+                    chars.append("-")
+                    previous_dash = True
+            elif not previous_dash:
+                chars.append("-")
+                previous_dash = True
+        slug = "".join(chars).strip("-_")[:limit].strip("-_")
+        return slug or "part"
+
+    raw_parts = [str(part) for part in parts if part is not None and str(part) != ""]
+    raw = json.dumps([prefix, *raw_parts], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    human_parts = [key_slug(prefix), *(key_slug(part) for part in raw_parts)]
+    human = ":".join(part for part in human_parts if part).strip(":") or "takyon"
+    suffix = f":{digest}"
+    if len(human) + len(suffix) > max_length:
+        human = human[: max(1, max_length - len(suffix))].rstrip(":-")
+    return f"{human}{suffix}"
+
+
 def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
     lines = [
@@ -538,10 +631,22 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "- takyon:outreach or takyon:distribution-campaign for demand creation and follow-up tracking.",
         "- takyon:claude-agent-sdk / business_claude_agent_task for bounded product source edits under the business filesystem.",
         "",
+        "Prime directive: find users and become profitable. Re-evaluate ICP, where that ICP concentrates, what",
+        "promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed,",
+        "what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.",
+        "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in the business brain.",
+        "Distribution is required thinking, not forced outreach.",
+        "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
+        "takyon:conversation-response / business_conversation_agent_task path to compress it before deciding.",
+        "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
+        "ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.",
+        "",
         "In this bootstrap turn, make durable progress where safe: brain/strategy, product offer/spec/design/pricing,",
-        "app plans/surface/budget, local test outreach and suppressed receipts in test mode, guarded jobs for external",
-        "side effects, and the next CEO wake. If something is blocked, record the blocker and continue with local/test",
+        "app plans/surface/budget, product/website build or publication where possible, chosen distribution assets,",
+        "guarded jobs or suppressed local receipts for selected external side effects, and the next CEO wake. If something is blocked, record the blocker and continue with local/test",
         "artifacts that do not require that provider.",
+        "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
+        "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
         "",
         "Final response: concise status only. Include business filesystem root, files changed, receipts/jobs/wakeups,",
         "what is still missing, and whether pricing/research is evidence-backed or a recorded hypothesis.",
@@ -549,8 +654,11 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
     if active_mode == "test":
         lines.extend([
             "",
-            "Test mode rules: do not send, post, buy ads, deploy, charge, or call live providers. Build local artifacts,",
-            "publish local test outreach with suppressed receipts, and queue guarded external work with credential gates.",
+            "Test mode rules: product and website build/publication/deploy are allowed when they are the business-owned",
+            "product surface and the normal path, budget, credential, and receipt/job gates pass. Product deploy is Vercel-gated.",
+            "Do not send outreach, post to social/forums, buy ads, charge customers, or send marketing emails externally.",
+            "If the chosen distribution tactic has an external side effect, suppress or stub it locally with a concrete receipt,",
+            "or queue guarded external work with credential gates.",
         ])
     return "\n".join(lines)
 
@@ -559,7 +667,7 @@ def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[st
     return store.commit(
         scope=scope,
         operations=[{"action": "control.set", "scope": scope, "state": state, "reason": reason}],
-        idempotency_key=f"operator-control:{scope}:{state}:{reason}",
+        idempotency_key=_idempotency_key("operator-control", scope, state, reason),
         reason=reason,
         actor="operator",
     )
@@ -872,47 +980,57 @@ def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_busi
     ])
 
 
-def _longest_common_prefix(values: list[str]) -> str:
-    if not values:
-        return ""
-    prefix = values[0]
-    for value in values[1:]:
-        while not value.startswith(prefix) and prefix:
-            prefix = prefix[:-1]
-    return prefix
+def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[dict[str, Any]]) -> str:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.completion import Completer, Completion
 
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):  # noqa: ANN001
+            text = document.text_before_cursor
+            if not _should_show_slash_palette(text):
+                return
+            for entry in _slash_matches(entries, text, current_business):
+                name = f"/{entry['name']}"
+                scope = "business" if entry.get("requires_business") else "global"
+                kind = "skill" if entry.get("kind") == "skill" else "control"
+                meta = f"{kind} {scope}"
+                if entry.get("priority_band"):
+                    meta += f" {entry.get('priority_band')}"
+                description = str(entry.get("description") or "").strip()
+                if description:
+                    meta += f"  {description}"
+                yield Completion(
+                    name,
+                    start_position=-len(text),
+                    display=name,
+                    display_meta=_truncate_plain(meta, 72),
+                )
 
-def _complete_slash_line(line: str, entries: list[dict[str, Any]], current_business: str | None) -> str:
-    if not _should_show_slash_palette(line):
-        return line
-    matches = [str(item["name"]) for item in _slash_matches(entries, line, current_business)]
-    if not matches:
-        return line
-    prefix = _slash_prefix(line)
-    if len(matches) == 1:
-        return f"/{matches[0]} "
-    common = _longest_common_prefix(matches)
-    if common and common != prefix:
-        return f"/{common}"
-    return line
+    def slash_toolbar() -> str:
+        try:
+            text = get_app().current_buffer.document.text_before_cursor
+        except Exception:
+            return ""
+        if not _should_show_slash_palette(text):
+            return ""
+        matches = _slash_matches(entries, text, current_business)
+        if not matches:
+            return "no slash matches"
+        visible = "  ".join(f"/{item['name']}" for item in matches[:8])
+        if len(matches) > 8:
+            visible += f"  +{len(matches) - 8} more"
+        return visible
 
-
-def _redraw_shell_line(line: str, current_business: str | None, entries: list[dict[str, Any]], palette_offset: int) -> None:
-    prompt = _input_prompt(current_business)
-    sys.stdout.write("\r\x1b[K")
-    sys.stdout.write(prompt + line)
-    sys.stdout.write("\x1b[s\x1b[E\x1b[J")
-    if _should_show_slash_palette(line):
-        sys.stdout.write(_render_slash_palette(entries, line, current_business, palette_offset) + "\n")
-    sys.stdout.write("\x1b[u")
+    session = PromptSession(
+        completer=SlashCompleter(),
+        complete_while_typing=True,
+        reserve_space_for_menu=max(4, min(_slash_page_size() + 2, 12)),
+        bottom_toolbar=slash_toolbar,
+    )
+    sys.stdout.write(_input_bar_top(current_business) + "\n")
     sys.stdout.flush()
-
-
-def _clear_shell_popup() -> None:
-    if not sys.stdout.isatty():
-        return
-    sys.stdout.write("\x1b[s\x1b[E\x1b[J\x1b[u")
-    sys.stdout.flush()
+    return session.prompt(_input_prompt(current_business))
 
 
 def _thinking_ui_config() -> dict[str, Any]:
@@ -1124,7 +1242,7 @@ class _ShellProgress:
     def emit(self, line: str) -> None:
         if self.fd is None:
             return
-        text = f"\r\x1b[K{_color('->', _THEME['secondary'])} {line}\n"
+        text = f"{_color('->', _THEME['secondary'])} {line}\n"
         try:
             os.write(self.fd, text.encode("utf-8", errors="replace"))
         except OSError:
@@ -1147,32 +1265,18 @@ def _thinking_indicator(enabled: bool):
         yield
         return
     writer_fd = os.dup(1)
-    stop = threading.Event()
-    label = str(config["label"])
-    frames = list(config["frames"])
-    interval = float(config["interval"])
-
-    def animate() -> None:
-        index = 0
-        while not stop.is_set():
-            frame = frames[index % len(frames)]
-            line = f"\r\x1b[K{_color(frame, _THEME['primary'])} {_dim(label)}"
-            try:
-                os.write(writer_fd, line.encode("utf-8", errors="replace"))
-            except OSError:
-                return
-            index += 1
-            stop.wait(interval)
-
-    thread = threading.Thread(target=animate, name="takyon-thinking-indicator", daemon=True)
-    thread.start()
+    line = f"{_blink('*')}\n"
+    try:
+        os.write(writer_fd, line.encode("utf-8", errors="replace"))
+    except OSError:
+        os.close(writer_fd)
+        yield
+        return
     try:
         yield
     finally:
-        stop.set()
-        thread.join(timeout=interval + 0.2)
         try:
-            os.write(writer_fd, b"\r\x1b[K")
+            os.write(writer_fd, b"\x1b[1A\x1b[2K")
         except OSError:
             pass
         os.close(writer_fd)
@@ -1181,68 +1285,13 @@ def _thinking_indicator(enabled: bool):
 def _read_shell_line(current_business: str | None, entries: list[dict[str, Any]]) -> str:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return input(f"takyon/{current_business or 'global'} > ")
-    config = _read_model_config(TakyonStore())
-    if not _config_bool(config.get("shell_enhanced_input"), default=True):
-        sys.stdout.write(_input_bar_top(current_business) + "\n")
-        sys.stdout.flush()
-        return input(_input_prompt(current_business))
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    line = ""
-    palette_offset = 0
-    sys.stdout.write(_input_bar_top(current_business) + "\n")
-    sys.stdout.write(_input_prompt(current_business))
-    sys.stdout.flush()
     try:
-        tty.setcbreak(fd)
-        while True:
-            ch = sys.stdin.read(1)
-            if ch in {"\r", "\n"}:
-                submitted = line
-                _clear_shell_popup()
-                if submitted.strip():
-                    sys.stdout.write("\r\x1b[K" + _input_prompt(current_business) + submitted)
-                    sys.stdout.write("\n" + _color("─" * _shell_width(), _THEME["muted"]) + "\n")
-                else:
-                    sys.stdout.write("\r\x1b[K")
-                sys.stdout.flush()
-                return submitted
-            if ch == "\x03":
-                _clear_shell_popup()
-                raise KeyboardInterrupt
-            if ch == "\x04":
-                if not line:
-                    _clear_shell_popup()
-                    raise EOFError
-                continue
-            if ch in {"\x7f", "\b"}:
-                line = line[:-1]
-                palette_offset = 0
-                _redraw_shell_line(line, current_business, entries, palette_offset)
-                continue
-            if ch == "\t":
-                line = _complete_slash_line(line, entries, current_business)
-                palette_offset = 0
-                _redraw_shell_line(line, current_business, entries, palette_offset)
-                continue
-            if ch == "\x1b":
-                seq = ""
-                while select.select([sys.stdin], [], [], 0.01)[0]:
-                    seq += sys.stdin.read(1)
-                    if len(seq) >= 2:
-                        break
-                if seq == "[A":
-                    palette_offset = max(0, palette_offset - 1)
-                elif seq == "[B":
-                    palette_offset += 1
-                _redraw_shell_line(line, current_business, entries, palette_offset)
-                continue
-            if ch >= " ":
-                line += ch
-                palette_offset = 0
-                _redraw_shell_line(line, current_business, entries, palette_offset)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        return _read_shell_line_prompt_toolkit(current_business, entries)
+    except (ImportError, ModuleNotFoundError):
+        pass
+    sys.stdout.write(_input_bar_top(current_business) + "\n")
+    sys.stdout.flush()
+    return input(_input_prompt(current_business))
 
 
 def _business_exists(store: TakyonStore, slug: str) -> bool:
@@ -1274,6 +1323,10 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
             return ["test", current_business, *tokens[1:]]
     if command in {"wake", "run", "goal", "/goal"} and current_business:
         return [command, current_business, *tokens[1:]]
+    if command == "delete" and current_business:
+        first_arg_is_flag = len(tokens) >= 2 and (tokens[1].startswith("--") or tokens[1] == "confirm")
+        if len(tokens) == 1 or first_arg_is_flag:
+            return ["delete", current_business, *tokens[1:]]
     if command in {"budget"} and current_business and (len(tokens) == 1 or tokens[1] in {"show", "status", "set"}):
         return [command, *tokens[1:2], current_business, *tokens[2:]] if len(tokens) > 1 else [command, current_business]
     if command in {"memory"} and current_business and (len(tokens) == 1 or tokens[1] in {"list", "record"}):
@@ -1584,6 +1637,8 @@ def _handle_shell_line(
 ) -> tuple[str, str | None]:
     is_slash = line.startswith("/")
     raw = line.lstrip("/") if is_slash else line
+    if is_slash and not raw.strip():
+        return _render_slash_palette(_slash_entries(), "/", current_business), current_business
     tokens = shlex.split(raw)
     if not tokens:
         return "", current_business
@@ -1650,7 +1705,18 @@ def _handle_shell_line(
             show_indicator=True,
             shell_history=shell_history,
         )
-        return _format_cli_value(result), current_business
+        next_business = current_business
+        if normalized and normalized[0].lower() == "delete":
+            deleted = any(
+                isinstance(item, dict)
+                and item.get("action") == "business.delete"
+                and not item.get("dry_run")
+                and str(item.get("business") or "") == str(current_business or "")
+                for item in (result.get("results") if isinstance(result, dict) else []) or []
+            )
+            if deleted:
+                next_business = None
+        return _format_cli_value(result), next_business
 
     if is_slash:
         skill_ref = _resolve_skill_reference(command)
@@ -1903,8 +1969,9 @@ def _run_agent(
         "explicitly asks for explanation only or says not to implement. "
         "Use concrete business_* tools for all durable business state changes. "
         "Read business state before broad changes. Keep every write business-scoped. "
-        "Do not claim a file write, budget allocation, job enqueue, agent record, or wakeup schedule succeeded "
-        "unless the specific business tool returned success."
+        "Do not claim a file write, budget allocation, job enqueue, agent record, wakeup schedule, auth state, billing state, "
+        "checkout, subscription, entitlement, deploy, outreach, revenue, metric, or provider result succeeded unless the specific "
+        "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or a visible DEBUG/blocked state."
     )
 
     progress = _ShellProgress(show_indicator and not show_agent_activity)
@@ -1931,7 +1998,7 @@ def _run_agent(
         if show_agent_activity:
             result = invoke()
         else:
-            with _thinking_indicator(show_indicator):
+            with _thinking_indicator(show_indicator and not progress.enabled):
                 with _silence_process_stdio():
                     result = invoke()
         return str(result.get("final_response") or "")
@@ -2017,6 +2084,25 @@ def run_takyon_command(
     if command in {"businesses", "business", "list"}:
         return store.read(scope="global", query="list_businesses")
 
+    if command == "delete":
+        parsed_delete = _parse_business_delete_args(argv)
+        slug = str(parsed_delete["business"])
+        return store.commit(
+            scope=_scope_for_business(slug),
+            operations=[{"action": "business.delete", **parsed_delete}],
+            idempotency_key=_idempotency_key(
+                "operator-business-delete-v1",
+                slug,
+                parsed_delete["confirm"],
+                parsed_delete["delete_files"],
+                parsed_delete["delete_cron"],
+                parsed_delete["delete_domains"],
+                ",".join(parsed_delete["subdomains"]),
+            ),
+            reason="operator requested business deletion" if parsed_delete["confirm"] else "operator previewed business deletion",
+            actor="operator",
+        )
+
     if command == "registry":
         kind = "all"
         category = None
@@ -2056,7 +2142,7 @@ def run_takyon_command(
         return store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "business.mode.set", "business": slug, "mode": mode}],
-            idempotency_key=f"operator-test-mode:{slug}:{mode}",
+            idempotency_key=_idempotency_key("operator-test-mode", slug, mode),
             reason="operator set business test mode",
             actor="operator",
         )
@@ -2126,7 +2212,7 @@ def run_takyon_command(
         return store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
-            idempotency_key=f"operator-wake:{slug}:{schedule}",
+            idempotency_key=_idempotency_key("operator-wake", slug, schedule),
             reason="operator requested CEO wake/sleep cron",
             actor="operator",
         )
@@ -2157,7 +2243,7 @@ def run_takyon_command(
         business_result = store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}],
-            idempotency_key=f"operator-init-v3:{slug}:{mode or 'keep'}:{goal}",
+            idempotency_key=_idempotency_key("operator-init-v4", slug, mode or "keep", goal),
             reason="operator initialized business",
             actor="operator",
         )
@@ -2166,7 +2252,7 @@ def run_takyon_command(
         cron_result = store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
-            idempotency_key=f"operator-init-v2-wake:{slug}:{schedule}",
+            idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
             reason="operator initialized business CEO wake loop",
             actor="operator",
         )
@@ -2210,7 +2296,7 @@ def run_takyon_command(
             return store.commit(
                 scope=_scope_for_business(slug),
                 operations=[{"action": "business.upsert", "business": slug, "budget": {"amount": amount, "currency": "USD"}}],
-                idempotency_key=f"operator-budget-set:{slug}:{amount}",
+                idempotency_key=_idempotency_key("operator-budget-set", slug, amount),
                 reason="operator set business budget cap",
                 actor="operator",
             )
@@ -2242,7 +2328,7 @@ def run_takyon_command(
             return store.commit(
                 scope=_scope_for_business(slug),
                 operations=[{"action": "memory.write", "path": "operator-notes.md", "content": content, "mode": "append"}],
-                idempotency_key=f"operator-memory:{slug}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}",
+                idempotency_key=_idempotency_key("operator-memory", slug, hashlib.sha256(content.encode("utf-8")).hexdigest()),
                 reason="operator recorded memory",
                 actor="operator",
             )
@@ -2285,7 +2371,7 @@ def run_takyon_command(
         return store.commit(
             scope="global",
             operations=[{"action": "maintenance.gc", "older_than_days": days, "confirm": confirm}],
-            idempotency_key=f"operator-gc:{days}:{confirm}",
+            idempotency_key=_idempotency_key("operator-gc", days, confirm),
             reason="operator requested Takyon maintenance GC",
             actor="operator",
         )

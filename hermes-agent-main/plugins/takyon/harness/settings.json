@@ -22,6 +22,7 @@
   },
   "selfHelp": [
     {"whenAll": ["create", "business"], "command": "create"},
+    {"whenAll": ["delete", "business"], "command": "delete"},
     {"whenAll": ["test", "mode"], "command": "test"}
   ],
   "controlCommands": [
@@ -50,7 +51,7 @@
         }
       ],
       "flags": [
-        {"name": "--test", "description": "isolate external side effects; publish local test outreach only"},
+        {"name": "--test", "description": "allow product/website publish; suppress outreach, spend, and money movement"},
         {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
         {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
         {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
@@ -66,7 +67,7 @@
       "requiresBusiness": true,
       "priorityBand": "p0_control",
       "usage": "/test on|off|status",
-      "summary": "Test mode is per business.",
+      "summary": "Test mode is per business: product/website work can publish, outreach and spend stay suppressed.",
       "examples": [
         {"label": "Create directly in test mode", "command": "/create --test <name> \"<goal>\""},
         {"label": "Create, start the CEO, and schedule wakeups in test mode", "command": "/create --test --schedule \"every 6h\" <name> \"<goal>\""},
@@ -81,6 +82,21 @@
     {"name": "pause", "description": "Pause the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
     {"name": "resume", "description": "Resume the current business", "requiresBusiness": true, "priorityBand": "p0_control"},
     {"name": "kill", "description": "Kill a scope", "requiresBusiness": true, "priorityBand": "p0_control"},
+    {
+      "name": "delete",
+      "description": "Delete the current business after preview",
+      "requiresBusiness": true,
+      "priorityBand": "p0_control",
+      "usage": "/delete [--confirm] [--no-files] [--no-cron] [--no-domains] [--domain <subdomain>]",
+      "summary": "Dry-run by default; with `--confirm` deletes the business database rows, `.takyon/businesses/<business>`, Takyon CEO cron jobs, and the business subdomain on fourmanifold.com via Vercel.",
+      "flags": [
+        {"name": "--confirm", "description": "permanently delete after showing the same candidates in preview"},
+        {"name": "--no-files", "description": "leave the business filesystem tree in place"},
+        {"name": "--no-cron", "description": "leave matching Takyon cron jobs in place"},
+        {"name": "--no-domains", "description": "skip Vercel/fourmanifold.com subdomain cleanup"},
+        {"name": "--domain", "description": "also remove an explicit business-owned subdomain under the base domain"}
+      ]
+    },
     {"name": "commands", "description": "Show slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
     {"name": "skills", "description": "Alias for slash command palette", "requiresBusiness": false, "priorityBand": "p1_ceo"},
     {"name": "model", "description": "Show or set model provider", "requiresBusiness": false, "priorityBand": "p0_control"},

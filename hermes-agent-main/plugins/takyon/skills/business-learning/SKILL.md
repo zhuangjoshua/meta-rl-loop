@@ -35,7 +35,7 @@ These are suggestions, not a schema. Sharper files are better when the business 
 - Keep learning inside the business scope.
 - Write beliefs with evidence when available.
 - Mark weak beliefs as hypotheses.
-- Update strategy, pricing, positioning, product ideas, distribution, objections, and playbooks whenever new evidence changes the CEO's mind.
+- Update strategy, ICP, where users concentrate, pricing, positioning, product ideas, distribution, objections, and playbooks whenever new evidence changes the CEO's mind.
 - Keep failures useful: what happened, likely cause, what to avoid, and what to try next.
 - Promote lessons from campaign files into `brain/` only when they matter beyond that campaign.
 - Do not put per-business facts in `SOUL.md`.

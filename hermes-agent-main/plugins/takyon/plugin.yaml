@@ -10,6 +10,7 @@ provides_tools:
   - business_read_file
   - business_list_files
   - business_upsert_business
+  - business_delete_business
   - business_set_mode
   - business_create_workspace
   - business_write_file
@@ -30,8 +31,10 @@ provides_tools:
   - business_enqueue_job
   - business_publish_test_outreach
   - business_claude_agent_task
+  - business_conversation_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message
+  - business_update_conversation_message_status
   - business_record_event
   - business_record_agent
   - business_set_control
