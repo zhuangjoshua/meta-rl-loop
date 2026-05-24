@@ -3776,6 +3776,8 @@ class TakyonStore:
             "marketing means choose only marketing, demand, research, outreach, pricing, conversion, campaign, or sales work; "
             "product means choose only product, offer, app runtime, checkout, surface, build, verification, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
+            "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
+            "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
             "the same motion. "
@@ -4887,6 +4889,68 @@ def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_publish_outreach(args: dict, **_: Any) -> str:
+    try:
+        store = _store()
+        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        if not business:
+            raise TakyonError("business is required")
+        body = str(args.get("body") or args.get("content") or "").strip()
+        if not body:
+            raise TakyonError("body is required")
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            business_mode = str(business_row.get("mode") or "live")
+
+        canonical_args = dict(args)
+        canonical_args["business"] = business
+        canonical_args["body"] = body
+        if business_mode == "test":
+            return handle_business_publish_test_outreach(canonical_args)
+
+        channel = str(args.get("channel") or args.get("provider") or "outreach").strip()
+        provider = str(args.get("provider") or channel).strip()
+        requires_api = [
+            str(item).strip()
+            for item in _as_list(args.get("requires_api"))
+            if str(item).strip()
+        ]
+        requires_env = [
+            str(item).strip()
+            for item in _as_list(args.get("requires_env"))
+            if str(item).strip()
+        ]
+        if provider:
+            requires_api.append(provider)
+        if not requires_api and not requires_env:
+            raise TakyonError("live outreach publish requires provider, requires_api, or requires_env")
+
+        payload = {
+            "channel": channel,
+            "provider": provider,
+            "target": args.get("target") or args.get("recipient"),
+            "recipient": args.get("recipient"),
+            "subject": args.get("subject") or args.get("title"),
+            "body": body,
+            "thread_external_id": args.get("thread_external_id"),
+            "metadata": args.get("metadata") or {},
+            "requested_external_side_effect": "publish_outreach",
+        }
+        operation = {
+            "action": "job.enqueue",
+            "business": business,
+            "scope": args.get("scope") or f"business:{business}",
+            "kind": args.get("kind") or f"{_file_slug(channel, 'outreach')}.publish_outreach",
+            "status": args.get("status") or "pending",
+            "payload": payload,
+            "requires_api": sorted(set(requires_api)),
+            "requires_env": sorted(set(requires_env)),
+        }
+        return _commit_tool(canonical_args, operation, scope=operation["scope"])
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
     try:
         store = _store()
@@ -5933,6 +5997,17 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Record a guarded request for external work such as ad posting, publishing, vendor calls, builds, or deploys.",
         "handler": handle_business_enqueue_job,
         "schema": _schema("business_enqueue_job", "Record a guarded business work request.", {"business": _BUSINESS_PROP, "scope": {"type": "string"}, "kind": {"type": "string"}, "payload": {"type": "object"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "kind", "idempotency_key"]),
+    },
+    {
+        "name": "business_publish_outreach",
+        "description": "Publish outreach through one mode-aware intent: test mode creates a local suppressed receipt and conversation mirror; live mode records a gated provider publish job.",
+        "handler": handle_business_publish_outreach,
+        "schema": _schema(
+            "business_publish_outreach",
+            "Publish outreach using the business mode bright line.",
+            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            ["business", "body", "idempotency_key"],
+        ),
     },
     {
         "name": "business_publish_test_outreach",

@@ -20,6 +20,7 @@ from plugins.takyon.core import (
     handle_business_delete_business,
     handle_business_generate_creative_asset,
     handle_business_list_businesses,
+    handle_business_publish_outreach,
     handle_business_registry,
     handle_business_request_app_magic_link,
     handle_business_set_work_focus,
@@ -1109,3 +1110,82 @@ def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_pat
     assert receipt["external_side_effects"] == "local_asset_only"
     assert receipt["posted"] is False
     assert receipt["provider"] == "fal"
+
+
+def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "test",
+            }
+        ],
+        "init-jobtailor",
+    )
+
+    result = json.loads(
+        handle_business_publish_outreach(
+            {
+                "business": "jobtailor",
+                "channel": "meta",
+                "target": "local-meta-test",
+                "subject": "Try JobTailor",
+                "body": "Paste a job description and see what your resume is missing.",
+                "idempotency_key": "jobtailor-meta-local-publish",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    assert publish["external_side_effects"] == "suppressed"
+    artifact = tmp_path / "businesses" / "jobtailor" / publish["artifact"]
+    receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
+    assert artifact.is_file()
+    assert receipt.is_file()
+    assert "External side effects: suppressed" in artifact.read_text(encoding="utf-8")
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["sent"] is False
+    assert receipt_payload["artifact_path"] == publish["artifact"]
+
+
+def test_business_publish_outreach_live_requires_provider_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.delenv("META_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("FACEBOOK_ACCESS_TOKEN", raising=False)
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "live",
+            }
+        ],
+        "init-jobtailor-live",
+    )
+
+    result = json.loads(
+        handle_business_publish_outreach(
+                {
+                    "business": "jobtailor",
+                    "channel": "meta",
+                    "provider": "MISSING_OUTREACH_PROVIDER",
+                    "subject": "Try JobTailor",
+                    "body": "Paste a job description and see what your resume is missing.",
+                    "idempotency_key": "jobtailor-meta-live-publish",
+                }
+        )
+    )
+
+    assert result["success"] is False
+    assert "requires missing API/env credential" in result["error"]

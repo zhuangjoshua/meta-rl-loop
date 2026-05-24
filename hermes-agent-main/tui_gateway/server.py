@@ -4800,6 +4800,53 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             }
         )
 
+    def file_card(rel: str) -> dict[str, Any] | None:
+        try:
+            path = store._business_root(slug) / rel
+            if not path.is_file():
+                return None
+            stat = path.stat()
+            return {"path": rel, "updated_at": int(stat.st_mtime * 1000)}
+        except Exception:
+            return None
+
+    def latest_under(rel_root: str, suffixes: set[str] | None = None) -> dict[str, Any] | None:
+        try:
+            root = store._business_root(slug) / rel_root
+            if not root.is_dir():
+                return None
+            matches = [
+                path for path in root.rglob("*")
+                if path.is_file() and (suffixes is None or path.suffix.lower() in suffixes)
+            ]
+            if not matches:
+                return None
+            latest = max(matches, key=lambda path: path.stat().st_mtime)
+            return {
+                "path": str(latest.relative_to(store._business_root(slug))),
+                "updated_at": int(latest.stat().st_mtime * 1000),
+                "count": len(matches),
+            }
+        except Exception:
+            return None
+
+    source_root = source_path.strip().strip("/")
+    website_candidates = [
+        f"{source_root}/index.html" if source_root else "",
+        "product/site/index.html",
+    ]
+    website = next((file_card(rel) for rel in website_candidates if rel), None)
+    deploy_pending = any(
+        "deploy" in str(job.get("kind") or "").lower()
+        and str(job.get("status") or "").lower() not in {"done", "complete", "completed", "success"}
+        for job in jobs
+    )
+    outreach_latest = latest_under("outreach/local-published", {".md", ".txt"})
+    outreach_receipt = latest_under("receipts/outreach", {".json"})
+    outreach_draft = file_card("distribution/outreach-drafts.md") or latest_under("outreach", {".md", ".txt"})
+    creative_latest = latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES) or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
+    creative_receipt = latest_under("receipts/creative-assets", {".json"})
+
     routes = surface.get("routes") if isinstance(surface.get("routes"), list) else []
     business_budget = as_dict(current_state.get("business_budget"))
     return {
@@ -4838,6 +4885,29 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "files": files,
         "jobs": jobs,
         "posts": posts[:12],
+        "artifacts": {
+            "website": {
+                "status": "local_source" if website else "missing",
+                "path": (website or {}).get("path", ""),
+                "updated_at": (website or {}).get("updated_at"),
+                "deploy_status": "pending" if deploy_pending else "",
+                "source_path": source_path,
+            },
+            "outreach": {
+                "status": "published_local" if outreach_latest and outreach_receipt else ("draft_only" if outreach_draft else "missing"),
+                "path": (outreach_latest or outreach_draft or {}).get("path", ""),
+                "receipt": (outreach_receipt or {}).get("path", ""),
+                "updated_at": (outreach_latest or outreach_draft or {}).get("updated_at"),
+                "published_count": (outreach_latest or {}).get("count", 0),
+            },
+            "creative_assets": {
+                "status": "generated" if creative_latest and creative_receipt else ("asset_without_receipt" if creative_latest else "missing"),
+                "path": (creative_latest or {}).get("path", ""),
+                "receipt": (creative_receipt or {}).get("path", ""),
+                "updated_at": (creative_latest or {}).get("updated_at"),
+                "count": (creative_latest or {}).get("count", 0),
+            },
+        },
         "conversations": {
             "active_threads": as_int(conversations.get("active_threads")),
             "unresolved_messages": as_int(conversations.get("unresolved_messages")),
@@ -4856,6 +4926,18 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
         return "image", "Generated image asset"
     parts = path.split("/")
     top = parts[0] if parts else ""
+    if path == "product/site/index.html":
+        return "file", "Website surface (local source)"
+    if path.startswith("product/site/"):
+        return "file", "Website source asset"
+    if path.startswith("receipts/outreach/"):
+        return "receipt", "Outreach publish receipt"
+    if path.startswith("receipts/creative-assets/"):
+        return "receipt", "Creative asset receipt"
+    if path.startswith("distribution/outreach-drafts"):
+        return "file", "Outreach draft only"
+    if "ugc" in path.lower() and suffix in {".md", ".txt"}:
+        return "file", "Creative brief draft only"
     if top == "receipts":
         return "receipt", "Business receipt"
     if top in {"reports", "outputs"}:
@@ -4897,6 +4979,7 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         "brain/wake_journal.md",
         "product/design-brief.md",
         "product/mvp-spec.md",
+        "product/site/index.html",
     }
     for rel in exact_paths:
         path = root / rel
@@ -4910,8 +4993,9 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         "campaigns",
         "outreach/local-published",
         "distribution",
+        "product/site",
     ]
-    allowed_suffixes = {".md", ".html", ".txt", ".json", *_TAKYON_MEDIA_SUFFIXES}
+    allowed_suffixes = {".md", ".html", ".css", ".js", ".txt", ".json", *_TAKYON_MEDIA_SUFFIXES}
     for rel_root in recursive_roots:
         directory = root / rel_root
         if not directory.exists() or not directory.is_dir():

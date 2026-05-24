@@ -154,6 +154,17 @@ interface BusinessOverviewConversations {
   latest_message_at?: string;
 }
 
+interface BusinessArtifactSummary {
+  status?: string;
+  path?: string;
+  receipt?: string;
+  updated_at?: number;
+  deploy_status?: string;
+  source_path?: string;
+  count?: number;
+  published_count?: number;
+}
+
 interface BusinessOverviewPost {
   id?: string;
   title?: string;
@@ -178,6 +189,11 @@ interface BusinessOverview {
   files?: BusinessOverviewFile[];
   jobs?: BusinessOverviewJob[];
   posts?: BusinessOverviewPost[];
+  artifacts?: {
+    website?: BusinessArtifactSummary;
+    outreach?: BusinessArtifactSummary;
+    creative_assets?: BusinessArtifactSummary;
+  };
   conversations?: BusinessOverviewConversations;
   generated_at?: string;
   pulse_warning?: string;
@@ -273,7 +289,7 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "chat-creative-assets-2026-05-24";
+const CHAT_UI_REVISION = "chat-artifact-completion-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
   { id: "next", label: "Next" },
@@ -359,6 +375,26 @@ function humanizeJobKind(kind?: string): string {
   return value
     .replace(/[._-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function humanizeArtifactStatus(status?: string): string {
+  switch ((status || "").trim()) {
+    case "local_source":
+      return "Local";
+    case "published_local":
+      return "Published local";
+    case "draft_only":
+      return "Draft only";
+    case "generated":
+      return "Generated";
+    case "asset_without_receipt":
+      return "No receipt";
+    case "missing":
+    case "":
+      return "Missing";
+    default:
+      return humanizeJobKind(status);
+  }
 }
 
 function gatedActionDetail(job: BusinessOverviewJob): string {
@@ -1785,6 +1821,7 @@ function BusinessSnapshot({
   const budget = overview.budget || {};
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
+  const artifacts = overview.artifacts || {};
 
   if (!scope.business) {
     return (
@@ -1854,6 +1891,12 @@ function BusinessSnapshot({
   const visibleJobs = jobs
     .filter((job) => job.status || job.kind)
     .slice(0, 4);
+  const website = artifacts.website || {};
+  const outreach = artifacts.outreach || {};
+  const creativeAssets = artifacts.creative_assets || {};
+  const creativeAssetsDir = creativeAssets.path
+    ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
+    : ".";
 
   return (
     <PanelSection icon={<Briefcase className="h-4 w-4" />} title="Business">
@@ -1936,6 +1979,91 @@ function BusinessSnapshot({
               : `${product.routes_count || 0} routes recorded`}
           </div>
         )}
+      </PreviewCard>
+
+      <PreviewCard
+        icon={<Globe2 className="h-4 w-4" />}
+        title="Website"
+        value={
+          website.deploy_status === "pending"
+            ? "Deploy pending"
+            : humanizeArtifactStatus(website.status)
+        }
+        detail={website.path || "No website source visible yet."}
+      >
+        <div className="flex flex-wrap gap-2">
+          {website.path && (
+            <PanelActionButton
+              icon={<FileText className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${website.path}`)}
+            >
+              Index
+            </PanelActionButton>
+          )}
+          <PanelActionButton
+            icon={<Folder className="h-3.5 w-3.5" />}
+            onClick={() => onCommand(`/files ${website.source_path || "product/site"}`)}
+          >
+            Source
+          </PanelActionButton>
+        </div>
+      </PreviewCard>
+
+      <PreviewCard
+        icon={<MessageCircle className="h-4 w-4" />}
+        title="Outreach"
+        value={humanizeArtifactStatus(outreach.status)}
+        detail={
+          outreach.path ||
+          (outreach.status === "draft_only"
+            ? "Draft exists, but no local publish receipt."
+            : "No local outreach publication visible yet.")
+        }
+      >
+        <div className="flex flex-wrap gap-2">
+          {outreach.path && (
+            <PanelActionButton
+              icon={<FileText className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${outreach.path}`)}
+            >
+              {outreach.status === "draft_only" ? "Draft" : "Post"}
+            </PanelActionButton>
+          )}
+          {outreach.receipt && (
+            <PanelActionButton
+              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${outreach.receipt}`)}
+            >
+              Receipt
+            </PanelActionButton>
+          )}
+        </div>
+      </PreviewCard>
+
+      <PreviewCard
+        icon={<Play className="h-4 w-4" />}
+        title="Creative assets"
+        value={humanizeArtifactStatus(creativeAssets.status)}
+        detail={creativeAssets.path || "No generated image/video asset visible yet."}
+      >
+        <div className="flex flex-wrap gap-2">
+          {creativeAssets.path && (
+            <PanelActionButton
+              icon={<Play className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
+            >
+              Files
+            </PanelActionButton>
+          )}
+          {creativeAssets.receipt && (
+            <PanelActionButton
+              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
+            >
+              Receipt
+            </PanelActionButton>
+          )}
+        </div>
       </PreviewCard>
 
       <PreviewCard
@@ -2337,7 +2465,7 @@ function DeliverablesPanel({
         )}
 
         {effectiveTab === "outputs" && (
-          <OutputsPanel onResolveMedia={onResolveMedia} outputs={outputs} />
+          <OutputsPanel onCommand={onCommand} onResolveMedia={onResolveMedia} outputs={outputs} />
         )}
 
         {effectiveTab === "dev" && (
@@ -2615,9 +2743,11 @@ function FilesPanel({
 }
 
 function OutputsPanel({
+  onCommand,
   onResolveMedia,
   outputs,
 }: {
+  onCommand: (line: string) => void;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   outputs: Deliverable[];
 }) {
@@ -2627,7 +2757,12 @@ function OutputsPanel({
         <EmptyPanelLine text="No historical or current-session outputs yet." />
       ) : (
         outputs.map((item) => (
-          <DeliverableItem item={item} key={item.id} onResolveMedia={onResolveMedia} />
+          <DeliverableItem
+            item={item}
+            key={item.id}
+            onCommand={onCommand}
+            onResolveMedia={onResolveMedia}
+          />
         ))
       )}
     </PanelSection>
@@ -2741,9 +2876,11 @@ function PanelSection({
 
 function DeliverableItem({
   item,
+  onCommand,
   onResolveMedia,
 }: {
   item: Deliverable;
+  onCommand: (line: string) => void;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
 }) {
   const [media, setMedia] = useState<BusinessMediaResponse | null>(null);
@@ -2768,19 +2905,28 @@ function DeliverableItem({
       <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">
         {item.detail}
       </div>
-      {item.path && mediaKind && (
+      {item.path && (
         <div className="mt-2 flex flex-wrap gap-2">
-          <PanelActionButton
-            icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
-            onClick={() => {
-              setError("");
-              void onResolveMedia(item.path || "")
-                .then(setMedia)
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-            }}
-          >
-            Preview
-          </PanelActionButton>
+          {mediaKind ? (
+            <PanelActionButton
+              icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
+              onClick={() => {
+                setError("");
+                void onResolveMedia(item.path || "")
+                  .then(setMedia)
+                  .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+              }}
+            >
+              Preview
+            </PanelActionButton>
+          ) : (
+            <PanelActionButton
+              icon={<FileText className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${item.path || ""}`)}
+            >
+              Read
+            </PanelActionButton>
+          )}
           <PanelActionButton
             icon={<FileText className="h-3.5 w-3.5" />}
             onClick={() => window.navigator.clipboard?.writeText(item.path || "")}

@@ -720,6 +720,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "app plans/surface/budget, product/website build or publication where possible, chosen distribution assets,",
         "guarded jobs or suppressed local receipts for selected external side effects, and the next CEO wake. If something is blocked, record the blocker and continue with local/test",
         "artifacts that do not require that provider.",
+        "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace videos, local outreach publication, websites, checkout, deploys, or provider-backed work with Markdown summaries.",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
         "",
@@ -2145,6 +2146,8 @@ def _run_agent(
         "Do not answer with a command recipe, implementation checklist, or 'say X and I will' handoff unless the operator "
         "explicitly asks for explanation only or says not to implement. "
         "Use concrete business_* tools for all durable business state changes. "
+        "If an operator asks for a video/image, outreach publication, website, deploy, checkout, provider call, or other first-class artifact, use the matching business tool or report the exact missing gate; do not substitute a Markdown brief. "
+        "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'; answer, act, ask one necessary question, or report the blocker. "
         "Read business state before broad changes. Honor a business work_focus of marketing or product as an operator constraint "
         "for manual turns and scheduled wakes. Keep every write business-scoped. "
         "Do not claim a file write, budget allocation, job enqueue, agent record, wakeup schedule, auth state, billing state, "
