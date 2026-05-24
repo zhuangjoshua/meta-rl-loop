@@ -173,6 +173,8 @@ interface ScopeState {
   businesses: BusinessSummary[];
   overview?: BusinessOverview;
   warning?: string;
+  auto_switched_business?: string;
+  auto_scope_warning?: string;
 }
 
 interface SlashCompletionItem {
@@ -195,6 +197,11 @@ interface TakyonShellResponse extends ScopeState {
 
 interface TakyonPromptContextResponse extends ScopeState {
   text?: string;
+}
+
+interface BusinessFilesResponse extends ScopeState {
+  path?: string;
+  files?: BusinessOverviewFile[];
 }
 
 interface ToolEntry {
@@ -447,6 +454,14 @@ function normalizeScopeState(value: Partial<ScopeState> | null | undefined): Sco
     businesses,
     overview,
     warning: typeof value?.warning === "string" ? value.warning : undefined,
+    auto_switched_business:
+      typeof value?.auto_switched_business === "string"
+        ? value.auto_switched_business
+        : undefined,
+    auto_scope_warning:
+      typeof value?.auto_scope_warning === "string"
+        ? value.auto_scope_warning
+        : undefined,
   };
 }
 
@@ -653,7 +668,24 @@ export default function ChatPage() {
                 10_000,
               )
               .then((scope) => {
-                if (!cancelled) setScopeState(normalizeScopeState(scope));
+                if (!cancelled) {
+                  const nextScope = normalizeScopeState(scope);
+                  setScopeState(nextScope);
+                  if (nextScope.auto_switched_business) {
+                    setMessages((prev) => [
+                      ...prev,
+                      makeMessage(
+                        "system",
+                        `Entered business:${nextScope.auto_switched_business}`,
+                      ),
+                    ]);
+                  } else if (nextScope.auto_scope_warning) {
+                    setMessages((prev) => [
+                      ...prev,
+                      makeMessage("system", nextScope.auto_scope_warning || ""),
+                    ]);
+                  }
+                }
               })
               .catch(() => {
                 /* scope refresh is best effort */
@@ -1017,6 +1049,20 @@ export default function ChatPage() {
     [appendSystem, executeTakyonSlash, state],
   );
 
+  const listBusinessFiles = useCallback(
+    async (path: string): Promise<BusinessOverviewFile[]> => {
+      if (!sessionId) return [];
+      const res = await gw.request<BusinessFilesResponse>(
+        "takyon.files.list",
+        { session_id: sessionId, path },
+        10_000,
+      );
+      setScopeState(normalizeScopeState(res));
+      return Array.isArray(res.files) ? res.files : [];
+    },
+    [gw, sessionId],
+  );
+
   const handleSubmit = useCallback(async () => {
     const text = input.trim();
     if (state !== "open") return;
@@ -1198,6 +1244,7 @@ export default function ChatPage() {
             deliverables={deliverables}
             onCommand={runTakyonLine}
             onCreateInTestModeChange={setCreateInTestMode}
+            onListFiles={listBusinessFiles}
             onClose={() => setRightOpen(false)}
             scope={scopeState}
             sessionId={sessionId}
@@ -1560,9 +1607,11 @@ function ScopeOption({
 }
 
 function BusinessSnapshot({
+  onListFiles,
   onCommand,
   scope,
 }: {
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onCommand: (line: string) => void;
   scope: ScopeState;
 }) {
@@ -1639,7 +1688,6 @@ function BusinessSnapshot({
     asNumber(overview.conversations?.unresolved_messages);
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-  const visibleFiles = files.slice(0, 6);
   const visibleJobs = jobs
     .filter((job) => job.status || job.kind)
     .slice(0, 4);
@@ -1746,36 +1794,15 @@ function BusinessSnapshot({
       <PreviewCard
         icon={<Folder className="h-4 w-4" />}
         title="Files"
-        value={visibleFiles.length ? `${visibleFiles.length} shown` : "No files"}
+        value={files.length ? `${files.length} shown` : "Browse"}
         detail="Business workspace root"
       >
-        {visibleFiles.length === 0 ? (
-          <EmptyPanelLine text="No business files visible yet." />
-        ) : (
-          <div className="grid gap-1.5">
-            {visibleFiles.map((item) => (
-              <button
-                className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
-                key={`${item.type}-${item.path}`}
-                onClick={() =>
-                  onCommand(
-                    item.type === "dir"
-                      ? `/files ${item.path || "."}`
-                      : `/read ${item.path || "."}`,
-                  )
-                }
-                title={item.path}
-                type="button"
-              >
-                <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-                <span className="min-w-0 truncate">{compactPath(item.path)}</span>
-                <span className="ml-auto shrink-0 text-[0.65rem] text-zinc-700">
-                  {item.type || "file"}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+        <BusinessFileBrowser
+          key={scope.business}
+          initialFiles={files}
+          onCommand={onCommand}
+          onListFiles={onListFiles}
+        />
       </PreviewCard>
 
       {visibleJobs.length > 0 && (
@@ -1805,6 +1832,100 @@ function BusinessSnapshot({
         </PreviewCard>
       )}
     </PanelSection>
+  );
+}
+
+function BusinessFileBrowser({
+  initialFiles,
+  onCommand,
+  onListFiles,
+}: {
+  initialFiles: BusinessOverviewFile[];
+  onCommand: (line: string) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+}) {
+  const [path, setPath] = useState(".");
+  const [files, setFiles] = useState(initialFiles);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const openPath = useCallback(
+    async (nextPath: string) => {
+      setLoading(true);
+      setError("");
+      try {
+        const nextFiles = await onListFiles(nextPath || ".");
+        setPath(nextPath || ".");
+        setFiles(nextFiles);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [onListFiles],
+  );
+
+  const parentPath = useMemo(() => {
+    if (!path || path === ".") return "";
+    const parts = path.split("/").filter(Boolean);
+    parts.pop();
+    return parts.length ? parts.join("/") : ".";
+  }, [path]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-600">
+        <span className="truncate">/{path === "." ? "" : path}</span>
+        {parentPath && (
+          <button
+            className="ml-auto rounded-md border border-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-500 transition-colors hover:border-zinc-800 hover:text-zinc-200"
+            onClick={() => void openPath(parentPath)}
+            type="button"
+          >
+            Up
+          </button>
+        )}
+      </div>
+      {error && <EmptyPanelLine text={error} />}
+      {loading ? (
+        <EmptyPanelLine text="Loading files..." />
+      ) : files.length === 0 ? (
+        <EmptyPanelLine text="No business files visible here." />
+      ) : (
+        <div className="grid gap-1.5">
+          {files.slice(0, 10).map((item) => {
+            const itemPath = item.path || ".";
+            const isDir = item.type === "dir";
+            return (
+              <button
+                className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
+                key={`${item.type}-${itemPath}`}
+                onClick={() => {
+                  if (isDir) {
+                    void openPath(itemPath);
+                    return;
+                  }
+                  onCommand(`/read ${itemPath}`);
+                }}
+                title={itemPath}
+                type="button"
+              >
+                {isDir ? (
+                  <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                ) : (
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                )}
+                <span className="min-w-0 truncate">{compactPath(itemPath)}</span>
+                <span className="ml-auto shrink-0 text-[0.65rem] text-zinc-700">
+                  {isDir ? "dir" : "file"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1942,6 +2063,7 @@ function DeliverablesPanel({
   deliverables,
   onCommand,
   onCreateInTestModeChange,
+  onListFiles,
   onClose,
   scope,
   sessionId,
@@ -1954,6 +2076,7 @@ function DeliverablesPanel({
   deliverables: Deliverable[];
   onCommand: (line: string) => void;
   onCreateInTestModeChange: (enabled: boolean) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onClose: () => void;
   scope: ScopeState;
   sessionId: string | null;
@@ -1987,7 +2110,11 @@ function DeliverablesPanel({
           onChange={onCreateInTestModeChange}
         />
 
-        <BusinessSnapshot onCommand={onCommand} scope={scope} />
+        <BusinessSnapshot
+          onCommand={onCommand}
+          onListFiles={onListFiles}
+          scope={scope}
+        />
 
         <PanelSection className="mt-6" icon={<FileText className="h-4 w-4" />} title="Outputs">
           {deliverables.length === 0 ? (

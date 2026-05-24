@@ -151,10 +151,13 @@ GET  /api/takyon/apps/<business>/session
 GET  /api/takyon/apps/<business>/account
 POST /api/takyon/apps/<business>/checkout
 POST /api/takyon/apps/<business>/usage
+POST /api/takyon/apps/<business>/generate
 POST /api/webhooks/stripe
 ```
 
 The legacy `/api/generated-apps/<business>/...` route is accepted only as a compatibility alias.
+
+AI-backed product generation belongs on a server-side business-scoped route. The canonical runtime route `POST /api/takyon/apps/<business>/generate` authenticates the app session, checks the business app usage budget before calling Anthropic, keeps provider credentials server-side, and records a `business_record_app_usage` receipt with tokens, model, provider request id, and cost estimate. A product-owned serverless `/api/generate` route may proxy to this same behavior, but browser-only demos or exposed provider keys are not real product behavior.
 
 Web search comes from Takyon's web toolset. Ad posting, deploys, vendor calls, media generation, and other external side effects are represented as guarded business requests or receipts through `business_enqueue_job` with `requires_api` or `requires_env`. Product and website publication may happen in test mode when the normal gates pass; acquisition, outbound messaging, paid spend, and payment collection stay suppressed. Checkout/subscription work should use the canonical app tools. Takyon must not claim outside-world execution happened unless a concrete receipt exists.
 

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -4576,6 +4577,77 @@ def _takyon_business_payload(store: Any, slug: str) -> dict[str, Any] | None:
         return None
 
 
+def _takyon_business_slugs(businesses: Any) -> set[str]:
+    if not isinstance(businesses, list):
+        return set()
+    return {
+        str(item.get("slug") or "").strip()
+        for item in businesses
+        if isinstance(item, dict) and str(item.get("slug") or "").strip()
+    }
+
+
+_TAKYON_CREATE_BUSINESS_PATTERNS = (
+    re.compile(r"\b(?:create|build|make|start|launch|bootstrap|set\s+up)\b.{0,80}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
+    re.compile(r"\b(?:new|another)\b.{0,40}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
+)
+
+
+def _takyon_prompt_may_create_business(text: str) -> bool:
+    compact = " ".join(str(text or "").strip().split())
+    if not compact:
+        return False
+    return any(pattern.search(compact) for pattern in _TAKYON_CREATE_BUSINESS_PATTERNS)
+
+
+def _takyon_prompt_mentions_budget(text: str) -> bool:
+    compact = " ".join(str(text or "").strip().split()).lower()
+    if not compact:
+        return False
+    if re.search(r"(?:^|\s)--budget(?:\s|=|$)", compact):
+        return True
+    if re.search(r"\b(?:budget|cap|spend limit|spend cap|runway|limit)\b", compact):
+        return True
+    return bool(re.search(r"(?:\$|usd\s*)\d+(?:[,.]\d+)?|\d+(?:[,.]\d+)?\s*(?:usd|dollars?)\b", compact))
+
+
+def _takyon_maybe_auto_enter_created_business(
+    session: dict | None,
+    businesses: list[Any],
+) -> tuple[str | None, str | None]:
+    if session is None:
+        return None, None
+
+    known = _takyon_business_slugs(businesses)
+    pending = bool(session.get("takyon_pending_business_create"))
+    pending_at = float(session.get("takyon_pending_business_create_at") or 0)
+    current = str(session.get("takyon_current_business") or "").strip()
+
+    auto_slug: str | None = None
+    warning: str | None = None
+    if pending and (time.time() - pending_at) <= 900:
+        before = set(session.get("takyon_businesses_before_prompt") or [])
+        created = sorted(known - before)
+        if not current and len(created) == 1:
+            auto_slug = created[0]
+            session["takyon_current_business"] = auto_slug
+            session.pop("takyon_pending_business_create", None)
+            session.pop("takyon_businesses_before_prompt", None)
+            session.pop("takyon_pending_business_create_at", None)
+        elif len(created) > 1:
+            warning = "Multiple new businesses were created; choose one from the scope menu."
+            session.pop("takyon_pending_business_create", None)
+            session.pop("takyon_businesses_before_prompt", None)
+            session.pop("takyon_pending_business_create_at", None)
+    elif pending:
+        session.pop("takyon_pending_business_create", None)
+        session.pop("takyon_businesses_before_prompt", None)
+        session.pop("takyon_pending_business_create_at", None)
+
+    session["takyon_known_businesses"] = sorted(known)
+    return auto_slug, warning
+
+
 def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     def as_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
@@ -4727,12 +4799,13 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
         from plugins.takyon.cli import TakyonStore, _slugify
 
         store = TakyonStore()
-        raw_business = str((session or {}).get("takyon_current_business") or "").strip()
-        current_business = _slugify(raw_business) if raw_business else ""
         data = store.read(scope="global", query="list_businesses")
         businesses = data.get("businesses") if isinstance(data, dict) else []
         if not isinstance(businesses, list):
             businesses = []
+        auto_slug, auto_warning = _takyon_maybe_auto_enter_created_business(session, businesses)
+        raw_business = str((session or {}).get("takyon_current_business") or "").strip()
+        current_business = _slugify(raw_business) if raw_business else ""
         exists = any(
             isinstance(item, dict) and str(item.get("slug") or "") == current_business
             for item in businesses
@@ -4753,6 +4826,8 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
             "current": current or {},
             "businesses": businesses,
             "overview": overview,
+            "auto_switched_business": auto_slug or "",
+            "auto_scope_warning": auto_warning or "",
         }
     except Exception as e:
         return {
@@ -4836,6 +4911,24 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5042, str(e))
 
 
+@method("takyon.files.list")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = str(session.get("takyon_current_business") or "").strip()
+    if not business:
+        return _err(rid, 4004, "business scope required")
+    path = str(params.get("path") or ".").strip() or "."
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        data = TakyonStore().read(scope=f"business:{business}", query="list_files", path=path, limit=100)
+        return _ok(rid, {**data, **_takyon_scope_payload(session)})
+    except Exception as e:
+        return _err(rid, 5045, str(e))
+
+
 @method("takyon.shell.exec")
 def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
@@ -4887,10 +4980,31 @@ def _(rid, params: dict) -> dict:
         from plugins.takyon.cli import _operator_context_message
 
         current_business = str(session.get("takyon_current_business") or "") or None
+        prompt_text = _operator_context_message(text, current_business)
+        if _takyon_prompt_may_create_business(text):
+            try:
+                from plugins.takyon.cli import TakyonStore
+
+                data = TakyonStore().read(scope="global", query="list_businesses", limit=200)
+                session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
+                session["takyon_pending_business_create"] = True
+                session["takyon_pending_business_create_at"] = time.time()
+            except Exception:
+                session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
+                session["takyon_pending_business_create"] = True
+                session["takyon_pending_business_create_at"] = time.time()
+            if not _takyon_prompt_mentions_budget(text):
+                prompt_text = (
+                    "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
+                    "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
+                    "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
+                    "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
+                    + prompt_text
+                )
         return _ok(
             rid,
             {
-                "text": _operator_context_message(text, current_business),
+                "text": prompt_text,
                 **_takyon_scope_payload(session),
             },
         )
