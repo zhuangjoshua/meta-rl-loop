@@ -81,29 +81,34 @@ function RootRedirect() {
   return <Navigate to="/sessions" replace />;
 }
 
-function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
+function UnknownRouteFallback({
+  embeddedChat,
+  pluginsLoading,
+}: {
+  embeddedChat: boolean;
+  pluginsLoading: boolean;
+}) {
   if (pluginsLoading) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to={embeddedChat ? "/" : "/sessions"} replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
   label: "Chat",
-  icon: Terminal,
+  icon: MessageSquare,
 };
 
 /**
- * Built-in routes except /chat.  Chat is rendered persistently (outside
+ * Built-in routes except / and /chat.  Chat is rendered persistently (outside
  * <Routes>) when embedded — see the persistent chat host block rendered
- * inline near the bottom of this file — so the PTY child, WebSocket,
- * and xterm instance survive when the user visits another tab and comes
- * back.  A `display:none` toggle hides the terminal without unmounting.
- * Routing still owns the URL so /chat deep-links, browser back/forward,
- * and nav highlight keep working.
+ * inline near the bottom of this file — so the gateway session survives
+ * when the user visits another tab and comes back.  A `display:none`
+ * toggle hides the chat without unmounting.  Routing still owns the URL
+ * so root and /chat deep-links, browser back/forward, and nav highlight keep working.
  */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
@@ -120,10 +125,10 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/docs": DocsPage,
 };
 
-// Route placeholder for /chat.  The persistent ChatPage host (rendered
+// Route placeholder for root and /chat.  The persistent ChatPage host (rendered
 // outside <Routes> when embedded chat is on) paints on top; this empty
 // element just claims the path so the `*` catch-all redirect doesn't
-// fire when the user navigates to /chat.
+// fire when the user navigates to the public chat surface.
 function ChatRouteSink() {
   return null;
 }
@@ -314,8 +319,8 @@ export default function App() {
   const closeMobile = useCallback(() => setMobileOpen(false), []);
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
-  const isChatRoute = normalizedPath === "/chat";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
+  const isChatRoute = embeddedChat && (normalizedPath === "/" || normalizedPath === "/chat");
 
   // `dashboard.show_token_analytics` gates the Analytics nav item.  The
   // page itself remains reachable by URL (it renders an explanation when
@@ -336,7 +341,7 @@ export default function App() {
   // in its manifest.  When one does, `buildRoutes` already swaps the route
   // element for <PluginPage /> — but we also have to suppress the
   // persistent ChatPage host below, or the plugin's page and the built-in
-  // terminal would paint on top of each other.  The override is niche
+  // chat would paint on top of each other.  The override is niche
   // (nothing ships overriding /chat today) but it's an advertised
   // extension point, so preserve the pre-persistence contract: when a
   // plugin owns /chat, the built-in chat UI is entirely absent.
@@ -357,7 +362,7 @@ export default function App() {
   const builtinRoutes = useMemo(
     () => ({
       ...BUILTIN_ROUTES_CORE,
-      ...(embeddedChat ? { "/chat": ChatRouteSink } : {}),
+      ...(embeddedChat ? { "/": ChatRouteSink, "/chat": ChatRouteSink } : {}),
     }),
     [embeddedChat],
   );
@@ -389,6 +394,7 @@ export default function App() {
   );
 
   const layoutVariant = theme.layoutVariant ?? "standard";
+  const chatFocusRoute = embeddedChat && isChatRoute;
 
   useEffect(() => {
     if (!mobileOpen) return;
@@ -416,10 +422,13 @@ export default function App() {
   return (
     <div
       data-layout-variant={layoutVariant}
-      className="font-mondwest flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black uppercase text-midground antialiased"
+      className={cn(
+        "font-mondwest flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black antialiased",
+        chatFocusRoute ? "normal-case text-zinc-100" : "uppercase text-midground",
+      )}
     >
       <SelectionSwitcher />
-      <Backdrop />
+      {!chatFocusRoute && <Backdrop />}
       <PluginSlot name="backdrop" />
 
       <header
@@ -428,6 +437,7 @@ export default function App() {
           "flex items-center gap-2 px-4 py-2",
           "border-b border-current/20",
           "bg-background-base/90 backdrop-blur-sm",
+          chatFocusRoute && "hidden",
         )}
         style={{
           background: "var(--component-header-background)",
@@ -469,7 +479,12 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-14 lg:pt-0">
+      <div
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+          chatFocusRoute ? "pt-0" : "pt-14 lg:pt-0",
+        )}
+      >
         <div className="flex min-h-0 min-w-0 flex-1">
           <aside
             id="app-sidebar"
@@ -481,6 +496,7 @@ export default function App() {
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
               "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0",
+              chatFocusRoute && "hidden",
             )}
             style={{
               background: "var(--component-sidebar-background)",
@@ -586,9 +602,11 @@ export default function App() {
             <div
               className={cn(
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
-                "px-3 sm:px-6",
+                chatFocusRoute ? "p-0" : "px-3 sm:px-6",
                 isChatRoute
-                  ? "pb-0 pt-1 sm:pt-2 lg:pt-4"
+                  ? chatFocusRoute
+                    ? "pb-0"
+                    : "pb-0 pt-1 sm:pt-2 lg:pt-4"
                   : "pt-2 sm:pt-4 lg:pt-6",
                 isDocsRoute && "min-h-0 flex-1",
               )}
@@ -610,7 +628,10 @@ export default function App() {
                   <Route
                     path="*"
                     element={
-                      <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                      <UnknownRouteFallback
+                        embeddedChat={embeddedChat}
+                        pluginsLoading={pluginsLoading}
+                      />
                     }
                   />
                 </Routes>
@@ -639,7 +660,7 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatPage isActive={isChatRoute} />
+                      <ChatPage />
                     </div>
                   ))}
               </div>
