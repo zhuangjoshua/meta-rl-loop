@@ -153,6 +153,7 @@ _LONG_HANDLERS = frozenset(
         "shell.exec",
         "skills.manage",
         "slash.exec",
+        "takyon.shell.exec",
     }
 )
 
@@ -4564,6 +4565,337 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5016, "cli.exec: timeout")
     except Exception as e:
         return _err(rid, 5017, str(e))
+
+
+def _takyon_business_payload(store: Any, slug: str) -> dict[str, Any] | None:
+    try:
+        data = store.read(scope=f"business:{slug}", query="summary")
+        business = data.get("business") if isinstance(data, dict) else None
+        return business if isinstance(business, dict) else None
+    except Exception:
+        return None
+
+
+def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    def as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def brief_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (str, int, float, bool)):
+            return str(value)
+        return ""
+
+    summary = as_dict(store.read(scope=f"business:{slug}", query="summary", limit=12))
+    business = as_dict(summary.get("business"))
+    app = as_dict(summary.get("app"))
+    surface = as_dict(app.get("surface_contract") or app.get("surface"))
+    metadata = as_dict(surface.get("metadata"))
+    validation = as_dict(metadata.get("takyon_surface_validation"))
+    verification = as_dict(validation.get("latest_verification"))
+    source_path = brief_text(surface.get("source_path"))
+
+    if not verification:
+        for event in as_list(summary.get("events")):
+            event_dict = as_dict(event)
+            if event_dict.get("event_type") != "product.surface.verify":
+                continue
+            payload = as_dict(event_dict.get("payload"))
+            if source_path and payload.get("source_path") != source_path:
+                continue
+            verification = {**payload, "event_created_at": event_dict.get("created_at")}
+            break
+
+    try:
+        pulse = as_dict(store.calculate_pulse(slug, limit=5))
+    except Exception as exc:
+        pulse = {"warning": str(exc)}
+
+    current_state = as_dict(pulse.get("current_state"))
+    app_budget = as_dict(current_state.get("app_budget"))
+    pulse_summary = as_dict(pulse.get("summary"))
+    app_revenue = as_dict(app.get("revenue"))
+    app_usage = as_dict(app.get("usage_this_period"))
+    conversations = as_dict(summary.get("conversations"))
+
+    try:
+        cron_jobs_raw = as_list(store._business_cron_jobs(slug))
+    except Exception:
+        cron_jobs_raw = []
+    cron_jobs = []
+    for job in cron_jobs_raw[:8]:
+        job_dict = as_dict(job)
+        cron_jobs.append(
+            {
+                "id": brief_text(job_dict.get("id")),
+                "name": brief_text(job_dict.get("name")),
+                "enabled": bool(job_dict.get("enabled", True)),
+                "state": brief_text(job_dict.get("state") or job_dict.get("status")),
+                "schedule": brief_text(job_dict.get("schedule_display") or job_dict.get("schedule")),
+                "next_run": brief_text(job_dict.get("next_run_at") or job_dict.get("next_run")),
+                "last_run": brief_text(job_dict.get("last_run_at") or job_dict.get("last_run")),
+            }
+        )
+
+    try:
+        files_data = as_dict(store.read(scope=f"business:{slug}", query="list_files", path=".", limit=18))
+        files_raw = as_list(files_data.get("files"))
+    except Exception:
+        files_raw = []
+    files = [
+        {"path": brief_text(as_dict(item).get("path")), "type": brief_text(as_dict(item).get("type"))}
+        for item in files_raw
+        if brief_text(as_dict(item).get("path"))
+    ]
+
+    jobs = []
+    for job in as_list(summary.get("jobs"))[:8]:
+        job_dict = as_dict(job)
+        jobs.append(
+            {
+                "id": brief_text(job_dict.get("id")),
+                "kind": brief_text(job_dict.get("kind") or job_dict.get("type") or job_dict.get("name")),
+                "status": brief_text(job_dict.get("status") or job_dict.get("state")),
+                "updated_at": brief_text(job_dict.get("updated_at")),
+                "created_at": brief_text(job_dict.get("created_at")),
+            }
+        )
+
+    routes = surface.get("routes") if isinstance(surface.get("routes"), list) else []
+    business_budget = as_dict(current_state.get("business_budget"))
+    return {
+        "goal": brief_text(business.get("goal")),
+        "mode": brief_text(business.get("mode") or business.get("status") or business.get("state")),
+        "product": {
+            "status": brief_text(surface.get("status") or "missing"),
+            "source_path": source_path,
+            "design_brief_path": brief_text(surface.get("design_brief_path") or "product/design-brief.md"),
+            "runtime_api_base": brief_text(surface.get("runtime_api_base")),
+            "routes_count": len(routes),
+            "verification_status": brief_text(validation.get("status") or verification.get("status")),
+            "verification_receipt": brief_text(validation.get("receipt") or verification.get("receipt_path")),
+            "filesystem_index": brief_text(app.get("filesystem_index") or "app/index.md"),
+            "notes": brief_text(surface.get("notes")),
+        },
+        "metrics": {
+            "users": as_int(pulse_summary.get("users")),
+            "paid_customers": as_int(pulse_summary.get("paid_customers")),
+            "mrr_cents": as_int(pulse_summary.get("mrr_cents")),
+            "revenue_cents": as_int(pulse_summary.get("revenue_cents") or app_revenue.get("amount_paid_cents")),
+            "checkout_intents": as_int(pulse_summary.get("checkout_intents")),
+            "usage_events": as_int(pulse_summary.get("usage_events") or app_usage.get("events")),
+            "unresolved_inbound": as_int(pulse_summary.get("unresolved_inbound") or conversations.get("unresolved_messages")),
+            "queued_jobs": as_int(pulse_summary.get("queued_jobs")),
+        },
+        "budget": {
+            "business_amount": business_budget.get("amount"),
+            "business_status": brief_text(business_budget.get("status")),
+            "app_status": brief_text(app_budget.get("status")),
+            "app_limit_microusd": as_int(app_budget.get("hard_limit_microusd")),
+            "app_spent_microusd": as_int(app_budget.get("spent_microusd")),
+            "app_remaining_microusd": as_int(app_budget.get("remaining_microusd")),
+        },
+        "cron": cron_jobs,
+        "files": files,
+        "jobs": jobs,
+        "conversations": {
+            "active_threads": as_int(conversations.get("active_threads")),
+            "unresolved_messages": as_int(conversations.get("unresolved_messages")),
+            "latest_message_at": brief_text(conversations.get("latest_message_at")),
+        },
+        "generated_at": brief_text(pulse.get("generated_at")),
+        "pulse_warning": brief_text(pulse.get("warning")),
+    }
+
+
+def _takyon_session(params: dict) -> dict | None:
+    return _sessions.get(str(params.get("session_id") or ""))
+
+
+def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
+    try:
+        from plugins.takyon.cli import TakyonStore, _slugify
+
+        store = TakyonStore()
+        raw_business = str((session or {}).get("takyon_current_business") or "").strip()
+        current_business = _slugify(raw_business) if raw_business else ""
+        data = store.read(scope="global", query="list_businesses")
+        businesses = data.get("businesses") if isinstance(data, dict) else []
+        if not isinstance(businesses, list):
+            businesses = []
+        exists = any(
+            isinstance(item, dict) and str(item.get("slug") or "") == current_business
+            for item in businesses
+        )
+        if current_business and not exists:
+            current_business = ""
+            if session is not None:
+                session["takyon_current_business"] = ""
+        current = _takyon_business_payload(store, current_business) if current_business else None
+        overview = (
+            _takyon_business_overview_payload(store, current_business)
+            if current_business
+            else {}
+        )
+        return {
+            "scope": f"business:{current_business}" if current_business else "global",
+            "business": current_business,
+            "current": current or {},
+            "businesses": businesses,
+            "overview": overview,
+        }
+    except Exception as e:
+        return {
+            "scope": "global",
+            "business": "",
+            "current": {},
+            "businesses": [],
+            "overview": {},
+            "warning": str(e),
+        }
+
+
+@method("takyon.scope.get")
+def _(rid, params: dict) -> dict:
+    return _ok(rid, _takyon_scope_payload(_takyon_session(params)))
+
+
+@method("takyon.scope.set")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+
+    business = str(params.get("business") or "").strip()
+    if business.lower() in {"", "global", "root", "none"}:
+        session["takyon_current_business"] = ""
+        return _ok(rid, _takyon_scope_payload(session))
+
+    try:
+        from plugins.takyon.cli import TakyonStore, _slugify
+
+        slug = _slugify(business)
+        data = TakyonStore().read(scope="global", query="list_businesses")
+        businesses = data.get("businesses") if isinstance(data, dict) else []
+        exists = any(
+            isinstance(item, dict) and str(item.get("slug") or "") == slug
+            for item in (businesses if isinstance(businesses, list) else [])
+        )
+        if not exists:
+            return _err(rid, 4041, f"business:{slug} does not exist")
+        session["takyon_current_business"] = slug
+        return _ok(rid, _takyon_scope_payload(session))
+    except Exception as e:
+        return _err(rid, 5041, str(e))
+
+
+@method("takyon.slash.complete")
+def _(rid, params: dict) -> dict:
+    text = str(params.get("text") or "")
+    session = _takyon_session(params)
+    current_business = str((session or {}).get("takyon_current_business") or "").strip()
+    if not text.startswith("/"):
+        return _ok(rid, {"items": [], "replace_from": 0})
+    try:
+        from plugins.takyon.cli import _slash_entries, _slash_matches
+
+        items: list[dict[str, Any]] = []
+        for entry in _slash_matches(_slash_entries(), text, current_business)[:30]:
+            name = str(entry.get("name") or "").strip().lstrip("/")
+            if not name:
+                continue
+            scope = "business" if entry.get("requires_business") else "global"
+            kind = "skill" if entry.get("kind") == "skill" else "control"
+            priority = str(entry.get("priority_band") or "").strip()
+            description = str(entry.get("description") or "").strip()
+            meta_parts = [kind, scope]
+            if priority:
+                meta_parts.append(priority)
+            items.append(
+                {
+                    "text": f"/{name}",
+                    "display": f"/{name}",
+                    "meta": " ".join(meta_parts),
+                    "description": description,
+                    "requires_business": bool(entry.get("requires_business")),
+                    "kind": kind,
+                }
+            )
+        return _ok(rid, {"items": items, "replace_from": 0})
+    except Exception as e:
+        return _err(rid, 5042, str(e))
+
+
+@method("takyon.shell.exec")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    line = str(params.get("line") or "").strip()
+    if not line:
+        return _err(rid, 4004, "empty command")
+
+    try:
+        from plugins.takyon.cli import (
+            TakyonStore,
+            _handle_shell_line,
+            _record_shell_turn,
+        )
+
+        history = session.setdefault("takyon_shell_history", [])
+        output, next_business = _handle_shell_line(
+            line,
+            current_business=str(session.get("takyon_current_business") or "") or None,
+            store=TakyonStore(),
+            model=os.getenv("TAKYON_MODEL", ""),
+            max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),
+            shell_history=history if isinstance(history, list) else None,
+        )
+        session["takyon_current_business"] = next_business or ""
+        if isinstance(history, list):
+            _record_shell_turn(history, line, output)
+        return _ok(
+            rid,
+            {
+                "output": output,
+                **_takyon_scope_payload(session),
+            },
+        )
+    except SystemExit as e:
+        return _ok(rid, {"output": str(e), **_takyon_scope_payload(session)})
+    except Exception as e:
+        return _err(rid, 5043, str(e))
+
+
+@method("takyon.prompt.context")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    text = str(params.get("text") or "")
+    try:
+        from plugins.takyon.cli import _operator_context_message
+
+        current_business = str(session.get("takyon_current_business") or "") or None
+        return _ok(
+            rid,
+            {
+                "text": _operator_context_message(text, current_business),
+                **_takyon_scope_payload(session),
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5044, str(e))
 
 
 @method("command.resolve")
