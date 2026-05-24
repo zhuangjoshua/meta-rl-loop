@@ -248,7 +248,7 @@ interface Deliverable {
   at: number;
 }
 
-type PanelTab = "home" | "tasks" | "files" | "outputs" | "dev";
+type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
@@ -266,10 +266,10 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "chat-tabs-2026-05-24";
+const CHAT_UI_REVISION = "chat-next-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
-  { id: "tasks", label: "Tasks" },
+  { id: "next", label: "Next" },
   { id: "files", label: "Files" },
   { id: "outputs", label: "Outputs" },
   { id: "dev", label: "Dev" },
@@ -337,6 +337,44 @@ function readableDate(value?: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function humanizeJobKind(kind?: string): string {
+  const value = (kind || "gated action").trim();
+  if (value === "product.deploy") return "Deploy product site";
+  if (value === "vendor.stripe_setup") return "Set up Stripe products";
+  if (value === "product.api_route") return "Wire product API route";
+  return value
+    .replace(/[._-]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function gatedActionDetail(job: BusinessOverviewJob): string {
+  const kind = job.kind || "";
+  const updated = job.updated_at ? `Updated ${readableDate(job.updated_at)}` : "";
+  let gate = "Queued only as gated follow-up work; the CEO decides when state changes.";
+  if (kind === "product.deploy") {
+    gate = "Requires deploy target, domain/provider config, and live approval.";
+  } else if (kind === "vendor.stripe_setup") {
+    gate = "Requires live mode, Stripe credentials, products/prices, and webhook setup.";
+  } else if (kind === "product.api_route") {
+    gate = "Requires provider credentials, product auth, budget gates, and usage receipts.";
+  }
+  return [gate, updated].filter(Boolean).join(" · ");
+}
+
+function wakeupLabel(job: BusinessOverviewCron): string {
+  if (/takyon-ceo|ceo/i.test(job.name || "")) return "CEO check-in";
+  return job.name || "Scheduled check-in";
+}
+
+function wakeupDetail(job: BusinessOverviewCron): string {
+  const parts = [
+    "Review replies, usage, blockers, and choose the next action",
+    job.schedule,
+    job.next_run ? `next ${readableDate(job.next_run)}` : "",
+  ];
+  return parts.filter(Boolean).join(" · ");
 }
 
 function compactPath(path?: string): string {
@@ -2186,17 +2224,19 @@ function DeliverablesPanel({
   tools: ToolEntry[];
 }) {
   const [activeTab, setActiveTab] = useState<PanelTab>("home");
+  const effectiveTab: PanelTab = scope.business ? activeTab : "home";
   const outputs = useMemo(
     () => mergeOutputs(deliverables, historicalOutputs),
     [deliverables, historicalOutputs],
   );
+  useEffect(() => {
+    if (!scope.business && activeTab !== "home") setActiveTab("home");
+  }, [activeTab, scope.business]);
   const panelTitle = scope.business
-    ? activeTab === "home"
+    ? effectiveTab === "home"
       ? "Business home"
-      : `${PANEL_TABS.find((tab) => tab.id === activeTab)?.label || "Business"}`
-    : activeTab === "home"
-      ? "Takyon home"
-      : PANEL_TABS.find((tab) => tab.id === activeTab)?.label || "Takyon";
+      : `${PANEL_TABS.find((tab) => tab.id === effectiveTab)?.label || "Business"}`
+    : "Takyon home";
 
   return (
     <div className="flex min-h-0 w-full flex-col bg-black text-zinc-100">
@@ -2216,10 +2256,10 @@ function DeliverablesPanel({
         )}
       </header>
 
-      <PanelTabs active={activeTab} onChange={setActiveTab} />
+      {scope.business && <PanelTabs active={effectiveTab} onChange={setActiveTab} />}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {activeTab === "home" && (
+        {effectiveTab === "home" && (
           <>
             <CreateModeToggle
               enabled={createInTestMode}
@@ -2229,11 +2269,11 @@ function DeliverablesPanel({
           </>
         )}
 
-        {activeTab === "tasks" && (
-          <TasksPanel onCommand={onCommand} scope={scope} />
+        {effectiveTab === "next" && (
+          <NextPanel onCommand={onCommand} scope={scope} />
         )}
 
-        {activeTab === "files" && (
+        {effectiveTab === "files" && (
           <FilesPanel
             onCommand={onCommand}
             onListFiles={onListFiles}
@@ -2241,9 +2281,9 @@ function DeliverablesPanel({
           />
         )}
 
-        {activeTab === "outputs" && <OutputsPanel outputs={outputs} />}
+        {effectiveTab === "outputs" && <OutputsPanel outputs={outputs} />}
 
-        {activeTab === "dev" && (
+        {effectiveTab === "dev" && (
           <DevPanel
             cwd={cwd}
             scope={scope}
@@ -2287,7 +2327,7 @@ function PanelTabs({
   );
 }
 
-function TasksPanel({
+function NextPanel({
   onCommand,
   scope,
 }: {
@@ -2299,22 +2339,17 @@ function TasksPanel({
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
   const posts = overview.posts || [];
+  const unresolvedReplies = asNumber(overview.conversations?.unresolved_messages);
+  const usageEvents = asNumber(metrics.usage_events);
+  const checkoutIntents = asNumber(metrics.checkout_intents);
   const blockedJobs = jobs.filter((job) =>
     /blocked|error|fail|paused/i.test(`${job.status || ""} ${job.kind || ""}`),
   );
-  const queuedJobs = asNumber(metrics.queued_jobs) || jobs.filter((job) =>
-    /queued|running|pending|blocked/i.test(job.status || ""),
-  ).length;
+  const gatedActions = jobs.filter((job) => job.kind || job.status);
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-
-  if (!scope.business) {
-    return (
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Tasks">
-        <EmptyPanelLine text="Choose a business to see jobs, wakeups, posts, and blocked work." />
-      </PanelSection>
-    );
-  }
+  const hasWaitingSignal =
+    posts.length > 0 || unresolvedReplies > 0 || usageEvents > 0 || checkoutIntents > 0;
 
   return (
     <div className="space-y-6">
@@ -2322,8 +2357,8 @@ function TasksPanel({
         <div className="grid grid-cols-2 gap-2">
           <SnapshotMetric
             icon={<Activity className="h-3.5 w-3.5" />}
-            label="Queued"
-            value={formatCount(queuedJobs)}
+            label="Gated"
+            value={formatCount(gatedActions.length)}
           />
           <SnapshotMetric
             icon={<AlertCircle className="h-3.5 w-3.5" />}
@@ -2338,9 +2373,9 @@ function TasksPanel({
           />
           <SnapshotMetric
             icon={<MessageCircle className="h-3.5 w-3.5" />}
-            label="Posts"
-            value={formatCount(posts.length)}
-            detail={`${formatCount(overview.conversations?.unresolved_messages)} replies`}
+            label="Replies"
+            value={formatCount(unresolvedReplies)}
+            detail={`${formatCount(posts.length)} posts`}
           />
         </div>
       </PanelSection>
@@ -2359,15 +2394,38 @@ function TasksPanel({
         )}
       </PanelSection>
 
-      <PanelSection icon={<Activity className="h-4 w-4" />} title="Jobs">
-        {jobs.length === 0 ? (
-          <EmptyPanelLine text="No durable business jobs recorded." />
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Waiting">
+        {!hasWaitingSignal ? (
+          <EmptyPanelLine text="No waiting signals recorded. On wakeup, the CEO checks current state before choosing work." />
         ) : (
-          jobs.map((job, index) => (
+          <div className="space-y-2">
+            {posts.length > 0 && (
+              <TaskRow
+                detail={`${formatCount(unresolvedReplies)} unresolved replies across ${formatCount(posts.length)} recorded posts`}
+                label="Watch outreach responses"
+                status="signal"
+              />
+            )}
+            {(usageEvents > 0 || checkoutIntents > 0) && (
+              <TaskRow
+                detail={`${formatCount(usageEvents)} usage events · ${formatCount(checkoutIntents)} checkout intents`}
+                label="Watch product/customer signal"
+                status="signal"
+              />
+            )}
+          </div>
+        )}
+      </PanelSection>
+
+      <PanelSection icon={<Activity className="h-4 w-4" />} title="Gated Actions">
+        {gatedActions.length === 0 ? (
+          <EmptyPanelLine text="No gated follow-up actions recorded." />
+        ) : (
+          gatedActions.map((job, index) => (
             <TaskRow
-              detail={job.updated_at ? `Updated ${readableDate(job.updated_at)}` : "Recorded job"}
+              detail={gatedActionDetail(job)}
               key={job.id || `${job.kind}-${index}`}
-              label={job.kind || "job"}
+              label={humanizeJobKind(job.kind)}
               status={job.status || "recorded"}
             />
           ))
@@ -2380,12 +2438,9 @@ function TasksPanel({
         ) : (
           cron.map((job, index) => (
             <TaskRow
-              detail={[
-                job.schedule,
-                job.next_run ? `next ${readableDate(job.next_run)}` : "",
-              ].filter(Boolean).join(" · ")}
+              detail={wakeupDetail(job)}
               key={job.id || `${job.name}-${index}`}
-              label={job.name || "CEO wakeup"}
+              label={wakeupLabel(job)}
               status={job.enabled === false ? "off" : job.state || "scheduled"}
             />
           ))
