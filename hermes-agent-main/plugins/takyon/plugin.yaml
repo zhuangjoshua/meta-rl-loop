@@ -12,6 +12,7 @@ provides_tools:
   - business_upsert_business
   - business_delete_business
   - business_set_mode
+  - business_set_work_focus
   - business_create_workspace
   - business_write_file
   - business_patch_file
@@ -30,6 +31,7 @@ provides_tools:
   - business_record_app_usage
   - business_enqueue_job
   - business_publish_test_outreach
+  - business_generate_creative_asset
   - business_claude_agent_task
   - business_conversation_agent_task
   - business_upsert_conversation_thread

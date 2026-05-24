@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .core import TakyonError, TakyonStore, _slugify, load_takyon_env
+from .core import TakyonError, TakyonStore, _normalize_work_focus, _slugify, load_takyon_env
 from .registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_SKILL_REGISTRY, business_registry_snapshot
 
 
@@ -38,6 +38,7 @@ _CLI_ONLY_COMMANDS = {
     "api",
     "show",
     "test",
+    "focus",
     "/goal",
     "init",
     "build",
@@ -360,6 +361,16 @@ def _format_cli_value(value: Any) -> str:
             mode = value.get("mode") or "live"
         return f"business:{slug} mode -> {mode}"
 
+    if "business" in value and "work_focus" in value:
+        business = value.get("business") or {}
+        if isinstance(business, dict):
+            slug = business.get("slug") or business.get("business") or "<unknown>"
+            focus = value.get("work_focus") or business.get("work_focus") or "all"
+        else:
+            slug = str(business or "<unknown>")
+            focus = value.get("work_focus") or "all"
+        return f"business:{slug} work focus -> {focus}"
+
     if "businesses" in value and value.get("scope") == "global":
         businesses = value.get("businesses") or []
         lines = ["Businesses:"]
@@ -371,7 +382,9 @@ def _format_cli_value(value: Any) -> str:
             goal = item.get("goal") or ""
             status = item.get("status") or "active"
             mode = item.get("mode") or "live"
-            lines.append(f"  {slug} [{status}/{mode}] {name}{f' - {goal}' if goal else ''}")
+            focus = item.get("work_focus") or "all"
+            focus_text = f"/{focus}" if focus != "all" else ""
+            lines.append(f"  {slug} [{status}/{mode}{focus_text}] {name}{f' - {goal}' if goal else ''}")
         controls = value.get("controls") or []
         if controls:
             lines.append("Controls:")
@@ -387,6 +400,8 @@ def _format_cli_value(value: Any) -> str:
             lines.append(f"Filesystem: {_business_root(str(slug))}")
         if business.get("mode"):
             lines.append(f"Mode: {business.get('mode')}")
+        if business.get("work_focus"):
+            lines.append(f"Work focus: {business.get('work_focus')}")
         if business.get("goal"):
             lines.append(f"Goal: {business.get('goal')}")
         if business.get("budget"):
@@ -461,6 +476,8 @@ def _format_operation_result(item: Any) -> str:
         return f"business:{business or item.get('business')} filesystem -> {root}"
     if action == "business.mode.set":
         return f"business:{business or item.get('business')} mode -> {item.get('mode')}"
+    if action == "business.focus.set":
+        return f"business:{business or item.get('business')} work focus -> {item.get('work_focus') or 'all'}"
     if action == "business.delete":
         cron = item.get("cron") or {}
         domains = item.get("domains") or {}
@@ -683,14 +700,9 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "First read current business state and registry metadata. If relevant assets already exist, advance the missing",
         "highest-impact pieces instead of recreating them.",
         "",
-        "Use sibling Takyon skills as operating methods when they fit:",
-        "- takyon:market-research before or alongside market/pricing claims when web/search evidence is available.",
-        "- takyon:business-pulse after business_calculate_pulse for baseline metrics, pulse.md, and business-model.md.",
-        "- takyon:pricing-strategy for tiers, limits, and checkout assumptions.",
-        "- takyon:build-product for offer, MVP scope, product surface, and app/code work.",
-        "- takyon:app-runtime for app plans, app surface contract, checkout, entitlements, and usage budgets.",
-        "- takyon:outreach or takyon:distribution-campaign for demand creation and follow-up tracking.",
-        "- takyon:claude-agent-sdk / business_claude_agent_task for bounded product source edits under the business filesystem.",
+        "Use business_registry as the canonical Takyon skill/tool index. Load sibling skills as operating methods",
+        "when their registry purpose, use_when, category, and priority band fit the chosen move; do not follow",
+        "a separate hardcoded bootstrap stage list.",
         "",
         "Prime directive: find users and become profitable. Re-evaluate ICP, where that ICP concentrates, what",
         "promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed,",
@@ -699,7 +711,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Distribution is required thinking, not forced outreach.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
         "takyon:conversation-response / business_conversation_agent_task path to compress it before deciding.",
-        "Call business_calculate_pulse and use takyon:business-pulse to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
+        "Call business_calculate_pulse and use the registry pulse skill to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
         "Seed or update compact wake/traction notes in brain/wake_journal.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
         "ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.",
@@ -1320,6 +1332,9 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         elif action == "business.mode.set":
             if business:
                 lines.append(f"business:{business} mode -> {item.get('mode')}")
+        elif action == "business.focus.set":
+            if business:
+                lines.append(f"business:{business} work focus -> {item.get('work_focus') or 'all'}")
         elif action == "cron.ensure_ceo_wakeup":
             if business:
                 lines.append(f"CEO wake -> business:{business} {item.get('schedule') or item.get('cron_job')}")
@@ -1431,6 +1446,10 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
         mode_args = {"on", "off", "status", "show", "test", "live"}
         if len(tokens) == 1 or tokens[1] in mode_args:
             return ["test", current_business, *tokens[1:]]
+    if command == "focus" and current_business:
+        focus_args = {"all", "any", "clear", "default", "marketing", "marketing-only", "off", "product", "product-only", "show", "status"}
+        if len(tokens) == 1 or tokens[1] in focus_args:
+            return ["focus", current_business, *tokens[1:]]
     if command in {"wake", "run", "goal", "/goal"} and current_business:
         return [command, current_business, *tokens[1:]]
     if command == "delete" and current_business:
@@ -1460,7 +1479,8 @@ def _operator_context_message(message: str, current_business: str | None) -> str
             f"Scope: business:{current_business}\n"
             "CEO role: scoped business operator.\n\n"
             f"Operator request:\n{message}\n\n"
-            "First read this business state with Takyon business tools. Keep all durable writes business-scoped."
+            "First read this business state with Takyon business tools. Honor the business work_focus field "
+            "if it is marketing-only or product-only. Keep all durable writes business-scoped."
         )
     return (
         "Scope: global\n"
@@ -1481,6 +1501,11 @@ def _format_ceo_focus(current_business: str | None, store: TakyonStore, model: s
     ]
     if current_business:
         lines.append("Plain text will operate inside this business and keep durable writes business-scoped.")
+        try:
+            business = (store.read(scope=_scope_for_business(current_business), query="summary").get("business") or {})
+            lines.append(f"Work focus: {business.get('work_focus') or 'all'}")
+        except Exception:
+            pass
     else:
         lines.append("Plain text will operate at the global Takyon account scope; use /use <business> to enter a business.")
     lines.extend([
@@ -2120,7 +2145,8 @@ def _run_agent(
         "Do not answer with a command recipe, implementation checklist, or 'say X and I will' handoff unless the operator "
         "explicitly asks for explanation only or says not to implement. "
         "Use concrete business_* tools for all durable business state changes. "
-        "Read business state before broad changes. Keep every write business-scoped. "
+        "Read business state before broad changes. Honor a business work_focus of marketing or product as an operator constraint "
+        "for manual turns and scheduled wakes. Keep every write business-scoped. "
         "Do not claim a file write, budget allocation, job enqueue, agent record, wakeup schedule, auth state, billing state, "
         "checkout, subscription, entitlement, deploy, outreach, revenue, metric, or provider result succeeded unless the specific "
         "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or a visible DEBUG/blocked state."
@@ -2312,6 +2338,24 @@ def run_takyon_command(
             operations=[{"action": "business.mode.set", "business": slug, "mode": mode}],
             idempotency_key=_idempotency_key("operator-test-mode", slug, mode),
             reason="operator set business test mode",
+            actor="operator",
+        )
+
+    if command == "focus":
+        if len(argv) < 2:
+            raise SystemExit("usage: takyon focus <business> marketing|product|all|status")
+        slug = _slugify(argv[1])
+        focus_arg = (argv[2] if len(argv) >= 3 else "status").strip().lower()
+        if focus_arg in {"status", "show"}:
+            data = store.read(scope=_scope_for_business(slug), query="summary")
+            business = data.get("business") or {}
+            return {"success": True, "business": business, "work_focus": business.get("work_focus") or "all"}
+        focus = _normalize_work_focus(focus_arg)
+        return store.commit(
+            scope=_scope_for_business(slug),
+            operations=[{"action": "business.focus.set", "business": slug, "work_focus": focus}],
+            idempotency_key=_idempotency_key("operator-work-focus", slug, focus),
+            reason="operator set business work focus",
             actor="operator",
         )
 

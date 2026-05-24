@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
 import json
 import os
 import re
@@ -65,6 +66,7 @@ NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
+_BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
@@ -87,6 +89,7 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "tavily": ("TAVILY_API_KEY",),
     "vercel": ("VERCEL_TOKEN",),
     "x": ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"),
+    "xai": ("XAI_API_KEY",),
 }
 
 _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -184,6 +187,34 @@ def _slugify(value: str) -> str:
     return raw
 
 
+def _normalize_work_focus(value: Any, *, default: str | None = "all") -> str | None:
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not raw:
+        return default
+    aliases = {
+        "any": "all",
+        "none": "all",
+        "off": "all",
+        "clear": "all",
+        "default": "all",
+        "growth": "marketing",
+        "market": "marketing",
+        "marketing-only": "marketing",
+        "marketingonly": "marketing",
+        "distribution": "marketing",
+        "demand": "marketing",
+        "sales": "marketing",
+        "product-only": "product",
+        "productonly": "product",
+        "build": "product",
+        "app": "product",
+    }
+    focus = aliases.get(raw, raw)
+    if focus not in _BUSINESS_WORK_FOCUS_MODES:
+        raise TakyonError(f"business work focus must be one of {sorted(_BUSINESS_WORK_FOCUS_MODES)}")
+    return focus
+
+
 def _file_slug(value: str, fallback: str = "item") -> str:
     raw = str(value or "").strip().lower()
     raw = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-_.")
@@ -212,6 +243,23 @@ def _atomic_write_text(path: Path, content: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -756,6 +804,23 @@ def _javascript_run_script_command(manager: dict[str, Any], script: str, *, root
     return None
 
 
+def _static_surface_can_skip_package_manager(root: Path, scripts: dict[str, Any]) -> bool:
+    if not (root / "index.html").exists():
+        return False
+    if any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts", "vite.config.js", "vite.config.ts", "tsconfig.json")):
+        return False
+    static_suffixes = {".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".txt", ".md"}
+    for path in root.rglob("*"):
+        if not path.is_file() or _product_source_is_skipped(path):
+            continue
+        if path.suffix.lower() not in static_suffixes:
+            return False
+    build = str(scripts.get("build") or "").strip()
+    if not build:
+        return True
+    return bool(re.match(r"^(?::|true|echo\b|printf\b|exit\s+0\b)", build))
+
+
 def _verify_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -814,6 +879,10 @@ def _verify_product_surface_path(
         next_value = str(deps.get("next") or "")
         if re.search(r"\b14\.2\.5\b", next_value):
             result["warnings"].append("next@14.2.5 is known deprecated/vulnerable; update before publication")
+    if _static_surface_can_skip_package_manager(root, scripts):
+        result["warnings"].append("package.json is present, but this surface is static and has no package-managed build requirement")
+        result.update({"status": "passed", "kind": "static_source_present"})
+        return result
     package_manager_name = _javascript_package_manager_name(root, package_data)
     package_manager = _javascript_package_manager_command(package_manager_name)
     result["package_manager"] = {key: package_manager.get(key) for key in ("name", "available", "source")}
@@ -1089,6 +1158,71 @@ def _scope_ancestors(scope: str) -> list[str]:
     return ancestors
 
 
+def _path_starts_with(value: Any, prefixes: tuple[str, ...]) -> bool:
+    raw = str(value or "").strip().lstrip("/")
+    if not raw:
+        return False
+    return any(raw == prefix.rstrip("/") or raw.startswith(prefix) for prefix in prefixes)
+
+
+def _job_kind_matches(kind: Any, needles: tuple[str, ...]) -> bool:
+    normalized = str(kind or "").strip().lower().replace("_", "-")
+    return any(needle in normalized for needle in needles)
+
+
+def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
+    if focus == "all":
+        return
+    action = str(op.get("action") or "")
+    always_allowed = {
+        "agent.record",
+        "business.delete",
+        "business.focus.set",
+        "business.mode.set",
+        "business.upsert",
+        "control.set",
+        "cron.ensure_ceo_wakeup",
+        "event.record",
+        "ledger.allocate",
+        "maintenance.gc",
+        "memory.write",
+    }
+    if action in always_allowed:
+        return
+
+    product_actions = {
+        "app.budget.set",
+        "app.customer.upsert",
+        "app.entitlement.upsert",
+        "app.plan.upsert",
+        "app.surface.upsert",
+        "app.usage.record",
+    }
+    product_paths = ("app/", "product/", "website/")
+    marketing_paths = ("campaigns/", "outreach/", "research/", "sales/")
+
+    if focus == "marketing":
+        if action in product_actions:
+            raise TakyonError(f"business work focus is marketing-only; {action} is product work")
+        if action in {"artifact.write", "artifact.patch", "workspace.upsert"}:
+            candidate = op.get("path") or op.get("workspace") or op.get("source_path")
+            if _path_starts_with(candidate, product_paths):
+                raise TakyonError(f"business work focus is marketing-only; {candidate} is product work")
+        if action == "job.enqueue" and _job_kind_matches(op.get("kind"), ("product", "website", "stripe", "checkout", "app")):
+            raise TakyonError(f"business work focus is marketing-only; job kind {op.get('kind')} is product work")
+        return
+
+    if focus == "product":
+        if action == "outreach.local_publish":
+            raise TakyonError("business work focus is product-only; outreach publication is marketing work")
+        if action in {"artifact.write", "artifact.patch", "workspace.upsert"}:
+            candidate = op.get("path") or op.get("workspace") or op.get("source_path")
+            if _path_starts_with(candidate, marketing_paths):
+                raise TakyonError(f"business work focus is product-only; {candidate} is marketing work")
+        if action == "job.enqueue" and _job_kind_matches(op.get("kind"), ("ad", "campaign", "community", "distribution", "outreach", "post", "social", "x-social")):
+            raise TakyonError(f"business work focus is product-only; job kind {op.get('kind')} is marketing work")
+
+
 class TakyonStore:
     """File + SQLite store for isolated business brains and campaign workspaces."""
 
@@ -1115,6 +1249,7 @@ class TakyonStore:
               goal TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'active',
               mode TEXT NOT NULL DEFAULT 'live',
+              work_focus TEXT NOT NULL DEFAULT 'all',
               budget_json TEXT,
               metadata_json TEXT,
               created_at TEXT NOT NULL,
@@ -1434,9 +1569,16 @@ class TakyonStore:
             conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode NOT IN ('live', 'test')")
         elif conn.execute("SELECT 1 FROM businesses WHERE mode IS NULL OR mode NOT IN ('live', 'test') LIMIT 1").fetchone():
             conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode NOT IN ('live', 'test')")
+        if "work_focus" not in business_columns:
+            conn.execute("ALTER TABLE businesses ADD COLUMN work_focus TEXT NOT NULL DEFAULT 'all'")
+            conn.execute("UPDATE businesses SET work_focus = 'all' WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product')")
+        elif conn.execute("SELECT 1 FROM businesses WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product') LIMIT 1").fetchone():
+            conn.execute("UPDATE businesses SET work_focus = 'all' WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product')")
         indexes = {row["name"] for row in conn.execute("PRAGMA index_list(businesses)").fetchall()}
         if "businesses_mode_idx" not in indexes:
             conn.execute("CREATE INDEX businesses_mode_idx ON businesses(mode, updated_at DESC)")
+        if "businesses_work_focus_idx" not in indexes:
+            conn.execute("CREATE INDEX businesses_work_focus_idx ON businesses(work_focus, updated_at DESC)")
 
     def _business_root(self, slug: str) -> Path:
         return self.root / "businesses" / _slugify(slug)
@@ -2736,6 +2878,7 @@ class TakyonStore:
             "artifact.patch",
             "artifact.write",
             "business.delete",
+            "business.focus.set",
             "business.upsert",
             "business.mode.set",
             "conversation.message.record",
@@ -2762,7 +2905,9 @@ class TakyonStore:
             self._ensure_business(conn, business_slug)
         business_mode = "live"
         if business_slug and action != "business.upsert":
-            business_mode = str(self._ensure_business(conn, business_slug).get("mode") or "live")
+            business = self._ensure_business(conn, business_slug)
+            business_mode = str(business.get("mode") or "live")
+            _enforce_business_work_focus(op, str(business.get("work_focus") or "all"))
         credential_gate = _require_api_access(op, business_mode=business_mode)
         if action not in {"business.delete", "control.set"}:
             blocker = self._control_blocker(conn, target_scope)
@@ -2805,17 +2950,18 @@ class TakyonStore:
             mode = str(op.get("mode") or "").strip().lower()
             if mode and mode not in _BUSINESS_MODES:
                 raise TakyonError(f"business mode must be one of {sorted(_BUSINESS_MODES)}")
+            work_focus = _normalize_work_focus(op.get("work_focus"), default=None)
             now = _now()
             existing = self._business(conn, slug)
             if existing:
                 conn.execute(
-                    "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
-                    (name, goal, mode, _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
+                    "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
+                    (name, goal, mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO businesses (slug, name, goal, status, mode, budget_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-                    (slug, name, goal, mode or "live", _json_dumps(budget or {}), _json_dumps(metadata), now, now),
+                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+                    (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), now, now),
                 )
             root = self._business_root(slug)
             (root / "brain").mkdir(parents=True, exist_ok=True)
@@ -2824,6 +2970,20 @@ class TakyonStore:
                 _atomic_write_text(index, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
+
+        if action == "business.focus.set":
+            focus = _normalize_work_focus(op.get("work_focus") or op.get("focus"))
+            now = _now()
+            conn.execute("UPDATE businesses SET work_focus = ?, updated_at = ? WHERE slug = ?", (focus, now, slug))
+            cron = self._refresh_business_ceo_cron_prompt(str(slug))
+            self._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type=action,
+                payload={"work_focus": focus, "reason": reason, "actor": actor, "cron": cron},
+            )
+            return {"action": action, "business": slug, "work_focus": focus, "cron": cron}
 
         if action == "business.mode.set":
             mode = str(op.get("mode") or "").strip().lower()
@@ -3602,6 +3762,54 @@ class TakyonStore:
             "protected": ["businesses", "workspaces", "ledger_entries", "control_states", "idempotency_keys", "files"],
         }
 
+    def _ceo_cron_prompt(self, slug: str) -> str:
+        return (
+            f"CEO wakeup for business:{slug}.\n"
+            "Start with business_calculate_pulse, then use takyon:business-pulse to write brain/pulse.md and record "
+            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update business memory, "
+            "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
+            "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
+            "memory inside this business scope. Read prior wake/traction notes from brain/wake_journal.md and compare "
+            "this state to those notes, including business "
+            "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
+            "After reading business state, honor the business work_focus field as an operator constraint: "
+            "marketing means choose only marketing, demand, research, outreach, pricing, conversion, campaign, or sales work; "
+            "product means choose only product, offer, app runtime, checkout, surface, build, verification, or product-support work; "
+            "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
+            "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
+            "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
+            "the same motion. "
+            "Append a compact wake snapshot to brain/wake_journal.md for future comparison. Never delete prior pulse, "
+            "metric, event, conversation, ledger, job, or wake data during a wake. "
+            "Honor business mode: in test mode, keep product/website build and "
+            "publication, app rails, receipts, conversations, and follow-up review active. Suppress external outreach, "
+            "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
+        )
+
+    def _ceo_cron_toolsets(self) -> list[str]:
+        return ["takyon", "web", "skills", "todo", "delegation"]
+
+    def _refresh_business_ceo_cron_prompt(self, slug: str) -> dict[str, Any]:
+        from cron.jobs import list_jobs, update_job
+
+        name = f"takyon-ceo:{slug}"
+        existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
+        if not existing:
+            return {"updated": False, "reason": "no_existing_ceo_cron"}
+        updated = update_job(
+            existing["id"],
+            {
+                "prompt": self._ceo_cron_prompt(slug),
+                "skills": ["takyon:ceo"],
+                "enabled_toolsets": self._ceo_cron_toolsets(),
+            },
+        )
+        return {
+            "updated": bool(updated),
+            "cron_job": existing["id"],
+            "schedule": (updated or existing).get("schedule_display"),
+        }
+
     def _ensure_ceo_cron(self, slug: str, *, schedule: str, reason: str) -> dict[str, Any]:
         blocker: dict[str, Any] | None
         with self._connect() as conn:
@@ -3612,25 +3820,8 @@ class TakyonStore:
         from cron.jobs import create_job, list_jobs, update_job
 
         name = f"takyon-ceo:{slug}"
-        prompt = (
-            f"CEO wakeup for business:{slug}.\n"
-            "Start with business_calculate_pulse, then use takyon:business-pulse to write brain/pulse.md and record "
-            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update business memory, "
-            "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
-            "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
-            "memory inside this business scope. Read prior wake/traction notes from brain/wake_journal.md and compare "
-            "this state to those notes, including business "
-            "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
-            "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
-            "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
-            "the same motion. "
-            "Append a compact wake snapshot to brain/wake_journal.md for future comparison. Never delete prior pulse, "
-            "metric, event, conversation, ledger, job, or wake data during a wake. "
-            "Honor business mode: in test mode, keep product/website build and "
-            "publication, app rails, receipts, conversations, and follow-up review active. Suppress external outreach, "
-            "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
-        )
-        enabled_toolsets = ["takyon", "web", "skills", "todo", "delegation"]
+        prompt = self._ceo_cron_prompt(slug)
+        enabled_toolsets = self._ceo_cron_toolsets()
         existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
         if existing:
             updated = update_job(
@@ -3677,6 +3868,94 @@ def _commit_tool(args: dict, operation: dict[str, Any], *, scope: str | None = N
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
+
+
+_CREATIVE_ASSET_KINDS = {"video": "mp4", "image": "png"}
+_CREATIVE_ASSET_CHANNELS = {"meta", "tiktok", "x", "linkedin"}
+_CREATIVE_ASSET_FORMATS = {"ugc"}
+
+
+def _normalize_creative_asset_choice(value: Any, allowed: set[str], *, field: str) -> str:
+    clean = str(value or "").strip().lower().replace("_", "-")
+    if clean not in allowed:
+        raise TakyonError(f"{field} must be one of {sorted(allowed)}")
+    return clean
+
+
+def _creative_asset_prompt(args: dict[str, Any]) -> str:
+    prompt = str(args.get("prompt") or args.get("generation_prompt") or "").strip()
+    if prompt:
+        return prompt
+    parts: list[str] = []
+    script = str(args.get("script") or "").strip()
+    if script:
+        parts.extend(["Script:", script])
+    shot_list = args.get("shot_list") or args.get("shots")
+    if isinstance(shot_list, str):
+        shot_text = shot_list.strip()
+    elif isinstance(shot_list, (list, tuple)):
+        shot_text = "\n".join(f"- {str(item).strip()}" for item in shot_list if str(item).strip())
+    else:
+        shot_text = ""
+    if shot_text:
+        parts.extend(["Shot list:", shot_text])
+    return "\n\n".join(parts).strip()
+
+
+def _creative_asset_relpath(
+    *,
+    args: dict[str, Any],
+    kind: str,
+    channel: str,
+    format_name: str,
+    asset_id: str,
+) -> str:
+    default_ext = _CREATIVE_ASSET_KINDS[kind]
+    output_path = str(args.get("output_path") or "").strip()
+    if output_path:
+        rel = _safe_relpath(output_path, field="output_path").as_posix()
+        if Path(rel).suffix:
+            return rel
+        return f"{rel}.{default_ext}"
+    campaign = _file_slug(str(args.get("campaign") or "default"), "default")
+    return f"campaigns/{campaign}/creatives/{channel}-{format_name}/{asset_id}.{default_ext}"
+
+
+def _creative_asset_source_bytes(source: str) -> bytes:
+    raw = str(source or "").strip()
+    if not raw:
+        raise TakyonError("provider result did not include a generated asset path or URL")
+    if raw.startswith("data:"):
+        try:
+            _, payload = raw.split(",", 1)
+            return base64.b64decode(payload)
+        except Exception as exc:
+            raise TakyonError("provider returned an invalid data URL") from exc
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme in {"http", "https"}:
+        request = urllib.request.Request(raw, headers={"User-Agent": "Takyon/creative-asset"})
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return response.read()
+    path = Path(raw).expanduser()
+    if not path.exists() or not path.is_file():
+        raise TakyonError(f"provider asset file not found: {raw}")
+    return path.read_bytes()
+
+
+def _parse_provider_result(raw: str, *, kind: str) -> dict[str, Any]:
+    try:
+        result = json.loads(raw)
+    except Exception as exc:
+        raise TakyonError(f"{kind} generation returned invalid JSON") from exc
+    if not isinstance(result, dict):
+        raise TakyonError(f"{kind} generation returned a non-object result")
+    if not result.get("success"):
+        raise TakyonError(str(result.get("error") or f"{kind} generation failed"))
+    asset_value = result.get(kind) or result.get("url") or result.get("path")
+    if not asset_value:
+        raise TakyonError(f"{kind} generation result did not include {kind}, url, or path")
+    result["_asset_source"] = str(asset_value)
+    return result
 
 
 def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -3926,6 +4205,7 @@ def handle_business_upsert_business(args: dict, **_: Any) -> str:
         "name": args.get("name") or args.get("business"),
         "goal": args.get("goal") or "",
         "mode": args.get("mode"),
+        "work_focus": args.get("work_focus") or args.get("focus"),
         "budget": args.get("budget"),
         "metadata": args.get("metadata") or {},
     }
@@ -3951,6 +4231,15 @@ def handle_business_set_mode(args: dict, **_: Any) -> str:
         "action": "business.mode.set",
         "business": args.get("business"),
         "mode": args.get("mode"),
+    }
+    return _commit_tool(args, operation)
+
+
+def handle_business_set_work_focus(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "business.focus.set",
+        "business": args.get("business"),
+        "work_focus": args.get("work_focus") or args.get("focus"),
     }
     return _commit_tool(args, operation)
 
@@ -4058,7 +4347,8 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         surface: dict[str, Any] = {}
         if not source_path:
             summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-            surface = ((summary.get("app") or {}).get("surface") or {}) if isinstance(summary.get("app"), dict) else {}
+            app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+            surface = app.get("surface") or app.get("surface_contract") or {}
             source_path = str(surface.get("source_path") or "product/site")
         install = bool(args.get("install", True))
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=180, minimum=15, maximum=900)
@@ -4095,7 +4385,8 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         if bool(args.get("activate_on_success", True)) and verification.get("status") == "passed":
             if not surface:
                 summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-                surface = ((summary.get("app") or {}).get("surface") or {}) if isinstance(summary.get("app"), dict) else {}
+                app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+                surface = app.get("surface") or app.get("surface_contract") or {}
             operations.append(
                 {
                     "action": "app.surface.upsert",
@@ -4183,6 +4474,10 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
         send_email = bool(args.get("send_email"))
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
+            _enforce_business_work_focus(
+                {"action": "app.customer.upsert", "business": business},
+                str(business_row.get("work_focus") or "all"),
+            )
             test_mode = str(business_row.get("mode") or "live") == "test"
             now = _now()
             user_id = uuid.uuid4().hex
@@ -4236,7 +4531,11 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
         if not token:
             raise TakyonError("token is required")
         with store._connect() as conn:
-            store._ensure_business(conn, business)
+            business_row = store._ensure_business(conn, business)
+            _enforce_business_work_focus(
+                {"action": "app.customer.upsert", "business": business},
+                str(business_row.get("work_focus") or "all"),
+            )
             link = store._row_to_dict(conn.execute(
                 "SELECT * FROM app_magic_links WHERE business_slug = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
                 (business, _hash_token(token), _now()),
@@ -4315,6 +4614,10 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             raise TakyonError("success_url and cancel_url are required")
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
+            _enforce_business_work_focus(
+                {"action": "app.entitlement.upsert", "business": business},
+                str(business_row.get("work_focus") or "all"),
+            )
             test_mode = str(business_row.get("mode") or "live") == "test"
             plan = store._row_to_dict(conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?", (business, plan_key)).fetchone())
             if not plan:
@@ -4584,6 +4887,179 @@ def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
+    try:
+        store = _store()
+        business = _slugify(str(args.get("business") or ""))
+        kind = _normalize_creative_asset_choice(args.get("kind"), _CREATIVE_ASSET_KINDS.keys(), field="kind")
+        channel = _normalize_creative_asset_choice(args.get("channel"), _CREATIVE_ASSET_CHANNELS, field="channel")
+        format_name = _normalize_creative_asset_choice(args.get("format") or "ugc", _CREATIVE_ASSET_FORMATS, field="format")
+        prompt = _creative_asset_prompt(args)
+        if not prompt:
+            raise TakyonError("prompt, script, or shot_list is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        budget_usd = float(args.get("budget_usd") or args.get("estimated_cost_usd") or 0)
+        if budget_usd <= 0:
+            raise TakyonError("budget_usd > 0 is required for provider-backed creative generation")
+        asset_id = _file_slug(str(args.get("asset_id") or idempotency_key), "asset")
+        rel = _creative_asset_relpath(
+            args=args,
+            kind=kind,
+            channel=channel,
+            format_name=format_name,
+            asset_id=asset_id,
+        )
+        receipt_rel = f"receipts/creative-assets/{asset_id}.json"
+
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            business_mode = str(business_row.get("mode") or "live")
+
+        provider = str(args.get("provider") or "").strip()
+        requires_api = [str(item).strip() for item in _as_list(args.get("requires_api")) if str(item).strip()]
+        if provider:
+            requires_api.append(provider)
+        _require_api_access(
+            {
+                "action": "creative.asset.generate",
+                "business": business,
+                "provider": provider,
+                "requires_api": requires_api,
+                "requires_env": args.get("requires_env") or [],
+            },
+            business_mode=business_mode,
+        )
+
+        asset_path = store._resolve_business_file(business, rel)
+        receipt_path = store._resolve_business_file(business, receipt_rel)
+        if asset_path.exists() and receipt_path.exists():
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except Exception:
+                receipt = {}
+            return tool_result({
+                "success": True,
+                "action": "business_generate_creative_asset",
+                "business": business,
+                "idempotent": True,
+                "kind": kind,
+                "channel": channel,
+                "format": format_name,
+                "path": rel,
+                "receipt": receipt_rel,
+                "deliverable": {"kind": kind, "path": rel, "receipt": receipt_rel},
+                "provider_result": receipt.get("provider_result", {}),
+            })
+
+        store.commit(
+            scope=f"business:{business}",
+            operations=[
+                {
+                    "action": "ledger.allocate",
+                    "business": business,
+                    "amount": budget_usd,
+                    "currency": str(args.get("currency") or "USD"),
+                    "purpose": f"{channel} {format_name} {kind} creative asset generation",
+                    "kind": "creative_asset_generation",
+                    "status": "allocated",
+                    "requires_api": requires_api,
+                    "requires_env": args.get("requires_env") or [],
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:budget",
+            reason=args.get("reason") or "generate local creative asset",
+            actor=args.get("actor") or "agent",
+        )
+
+        if kind == "video":
+            from tools.video_generation_tool import _handle_video_generate
+
+            provider_raw = _handle_video_generate(
+                {
+                    "prompt": prompt,
+                    "image_url": args.get("image_url"),
+                    "reference_image_urls": args.get("reference_image_urls"),
+                    "duration": args.get("duration"),
+                    "aspect_ratio": args.get("aspect_ratio"),
+                    "resolution": args.get("resolution"),
+                    "negative_prompt": args.get("negative_prompt"),
+                    "audio": args.get("audio"),
+                    "seed": args.get("seed"),
+                    "model": args.get("model"),
+                }
+            )
+        else:
+            from tools.image_generation_tool import _handle_image_generate
+
+            provider_raw = _handle_image_generate(
+                {
+                    "prompt": prompt,
+                    "aspect_ratio": args.get("aspect_ratio"),
+                    "model": args.get("model"),
+                }
+            )
+
+        provider_result = _parse_provider_result(provider_raw, kind=kind)
+        _atomic_write_bytes(asset_path, _creative_asset_source_bytes(provider_result["_asset_source"]))
+
+        created_at = _now()
+        receipt = {
+            "id": asset_id,
+            "business": business,
+            "mode": business_mode,
+            "kind": kind,
+            "channel": channel,
+            "format": format_name,
+            "campaign": _file_slug(str(args.get("campaign") or "default"), "default"),
+            "path": rel,
+            "receipt": receipt_rel,
+            "prompt": prompt,
+            "script": str(args.get("script") or ""),
+            "shot_list": args.get("shot_list") or args.get("shots") or [],
+            "provider": provider or provider_result.get("provider") or "",
+            "model": args.get("model") or provider_result.get("model") or "",
+            "budget_usd": budget_usd,
+            "external_side_effects": "local_asset_only",
+            "posted": False,
+            "created_at": created_at,
+            "provider_result": {k: v for k, v in provider_result.items() if k != "_asset_source"},
+        }
+        _atomic_write_text(receipt_path, _json_dumps(receipt) + "\n")
+
+        store.commit(
+            scope=f"business:{business}/campaign:{receipt['campaign']}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "scope": f"business:{business}/campaign:{receipt['campaign']}",
+                    "event_type": "creative.asset.generated",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:event",
+            reason=args.get("reason") or "generated local creative asset",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_generate_creative_asset",
+            "business": business,
+            "kind": kind,
+            "channel": channel,
+            "format": format_name,
+            "path": rel,
+            "receipt": receipt_rel,
+            "deliverable": {"kind": kind, "path": rel, "receipt": receipt_rel},
+            "external_side_effects": "local_asset_only",
+            "posted": False,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
     operation = {
         "action": "conversation.thread.upsert",
@@ -4706,11 +5182,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
 
+        workspace_raw = str(args.get("workspace") or ".").strip() or "."
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            _enforce_business_work_focus(
+                {"action": "workspace.upsert", "business": business, "workspace": workspace_raw},
+                str(business_row.get("work_focus") or "all"),
+            )
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
         store.read(scope=f"business:{business}", query="summary", limit=20)
 
-        workspace_raw = str(args.get("workspace") or ".").strip() or "."
         business_root = store._business_root(business).resolve()
         workspace_path = business_root if workspace_raw in {".", ""} else store._resolve_business_file(business, workspace_raw).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -5247,7 +5729,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_upsert_business",
             "Create or update a business.",
-            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "budget": {"type": "object"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "budget": {"type": "object"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "idempotency_key"],
         ),
     },
@@ -5282,6 +5764,23 @@ TAKYON_TOOL_DEFINITIONS = [
             "Set business live/test mode.",
             {"business": _BUSINESS_PROP, "mode": {"type": "string", "description": "live or test"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "mode", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_set_work_focus",
+        "description": "Set one business to all, marketing-only, or product-only work focus for future CEO turns and cron wakes.",
+        "handler": handle_business_set_work_focus,
+        "schema": _schema(
+            "business_set_work_focus",
+            "Set business work focus.",
+            {
+                "business": _BUSINESS_PROP,
+                "work_focus": {"type": "string", "description": "all, marketing, or product"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "work_focus", "idempotency_key"],
         ),
     },
     {
@@ -5444,6 +5943,44 @@ TAKYON_TOOL_DEFINITIONS = [
             "Publish test outreach locally without sending.",
             {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_generate_creative_asset",
+        "description": "Generate a provider-backed image or video creative as a local business-scoped asset with a receipt; posting and ad spend stay separate queued/gated work.",
+        "handler": handle_business_generate_creative_asset,
+        "schema": _schema(
+            "business_generate_creative_asset",
+            "Generate a local business creative asset.",
+            {
+                "business": _BUSINESS_PROP,
+                "kind": {"type": "string", "description": "video or image"},
+                "channel": {"type": "string", "description": "meta, tiktok, x, or linkedin"},
+                "format": {"type": "string", "description": "creative format, currently ugc"},
+                "campaign": {"type": "string", "description": "Campaign workspace name; default is default"},
+                "asset_id": {"type": "string", "description": "Optional stable asset id; defaults from idempotency_key"},
+                "prompt": {"type": "string", "description": "Generation prompt. If omitted, script and shot_list are combined."},
+                "script": {"type": "string", "description": "UGC script or voiceover text"},
+                "shot_list": {"type": "array", "items": {"type": "string"}, "description": "Ordered UGC shots or beats"},
+                "provider": {"type": "string", "description": "Provider credential alias to gate, e.g. fal, openai, or xai. The active generator backend still comes from Takyon tools config."},
+                "model": {"type": "string", "description": "Optional model override passed to the generator"},
+                "output_path": {"type": "string", "description": "Optional business-relative output path; default campaigns/<campaign>/creatives/<channel>-ugc/<asset-id>.<ext>"},
+                "budget_usd": {"type": "number", "description": "Required spend allocation under the business budget cap before calling a provider"},
+                "image_url": {"type": "string", "description": "Optional source image URL for image-to-video"},
+                "reference_image_urls": {"type": "array", "items": {"type": "string"}},
+                "duration": {"type": "integer"},
+                "aspect_ratio": {"type": "string"},
+                "resolution": {"type": "string"},
+                "negative_prompt": {"type": "string"},
+                "audio": {"type": "boolean"},
+                "seed": {"type": "integer"},
+                "requires_api": _REQUIRES_API_PROP,
+                "requires_env": _REQUIRES_ENV_PROP,
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "kind", "channel", "format", "budget_usd", "idempotency_key"],
         ),
     },
     {

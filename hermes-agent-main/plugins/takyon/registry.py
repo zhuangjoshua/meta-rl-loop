@@ -130,6 +130,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Set a business to live or test mode; test mode keeps product/website work and cron active while suppressing outreach, spend, and money movement.",
     },
     {
+        "name": "business_set_work_focus",
+        "category": "control",
+        "priority_bands": ["p0_control", "p1_ceo"],
+        "effect": "guarded_write",
+        "purpose": "Set a business work focus to all, marketing-only, or product-only so CEO turns and cron wakes stay in that lane.",
+    },
+    {
         "name": "business_create_workspace",
         "category": "workspace",
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
@@ -263,6 +270,13 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "purpose": "Publish test outreach locally, create a suppressed-side-effect receipt, and mirror it into conversations without sending externally.",
     },
     {
+        "name": "business_generate_creative_asset",
+        "category": "creative",
+        "priority_bands": ["p2_growth", "p3_learning"],
+        "effect": "guarded_local_effect",
+        "purpose": "Generate a provider-backed image or video creative as a local business asset with budget, credential, receipt, and no posting/spend side effect.",
+    },
+    {
         "name": "business_claude_agent_task",
         "category": "agent",
         "priority_bands": ["p1_ceo", "p2_growth", "p3_learning"],
@@ -390,7 +404,8 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "skill": "takyon:ad-creative",
         "category": "creative",
         "priority_bands": ["p2_growth", "p3_learning"],
-        "purpose": "Draft ad angles, copy, landing hooks, creative specs, and posting requests.",
+        "purpose": "Draft ad angles, copy, landing hooks, UGC image/video creative assets, and posting requests.",
+        "use_when": "Use for paid-social creative, UGC scripts, shot lists, local generated image/video assets, and ad creative iteration; keep posting/spend as separate gated jobs.",
     },
     {
         "name": "outreach",

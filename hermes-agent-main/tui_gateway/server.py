@@ -1,9 +1,11 @@
 import atexit
+import base64
 import concurrent.futures
 import contextvars
 import copy
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -4847,6 +4849,11 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
 
 def _takyon_output_detail(path: str) -> tuple[str, str]:
+    suffix = Path(path).suffix.lower()
+    if suffix in _TAKYON_VIDEO_SUFFIXES:
+        return "video", "Generated video asset"
+    if suffix in _TAKYON_IMAGE_SUFFIXES:
+        return "image", "Generated image asset"
     parts = path.split("/")
     top = parts[0] if parts else ""
     if top == "receipts":
@@ -4864,6 +4871,12 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
     if top == "distribution":
         return "file", "Distribution artifact"
     return "file", "Business artifact"
+
+
+_TAKYON_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
+_TAKYON_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_TAKYON_MEDIA_SUFFIXES = _TAKYON_VIDEO_SUFFIXES | _TAKYON_IMAGE_SUFFIXES
+_TAKYON_MAX_MEDIA_BYTES = 64 * 1024 * 1024
 
 
 def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40) -> list[dict[str, Any]]:
@@ -4894,10 +4907,11 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         "outputs",
         "reports",
         "receipts",
+        "campaigns",
         "outreach/local-published",
         "distribution",
     ]
-    allowed_suffixes = {".md", ".html", ".txt", ".json"}
+    allowed_suffixes = {".md", ".html", ".txt", ".json", *_TAKYON_MEDIA_SUFFIXES}
     for rel_root in recursive_roots:
         directory = root / rel_root
         if not directory.exists() or not directory.is_dir():
@@ -5069,6 +5083,46 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {**data, **_takyon_scope_payload(session)})
     except Exception as e:
         return _err(rid, 5045, str(e))
+
+
+@method("takyon.file.media")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = str(session.get("takyon_current_business") or "").strip()
+    if not business:
+        return _err(rid, 4004, "business scope required")
+    path = str(params.get("path") or "").strip()
+    if not path:
+        return _err(rid, 4004, "path required")
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        store = TakyonStore()
+        file_path = store._resolve_business_file(business, path)
+        if not file_path.exists() or not file_path.is_file():
+            return _err(rid, 4044, f"file not found: {path}")
+        suffix = file_path.suffix.lower()
+        if suffix not in _TAKYON_MEDIA_SUFFIXES:
+            return _err(rid, 4004, "file is not a supported media asset")
+        size = file_path.stat().st_size
+        if size > _TAKYON_MAX_MEDIA_BYTES:
+            return _err(rid, 4130, f"media asset is too large to preview inline: {size} bytes")
+        mime = mimetypes.guess_type(str(file_path))[0] or ("video/mp4" if suffix in _TAKYON_VIDEO_SUFFIXES else "image/png")
+        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        return _ok(
+            rid,
+            {
+                "path": path,
+                "media_type": mime,
+                "size": size,
+                "url": f"data:{mime};base64,{encoded}",
+                **_takyon_scope_payload(session),
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5047, str(e))
 
 
 @method("takyon.outputs.list")

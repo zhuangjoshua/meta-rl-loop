@@ -15,10 +15,14 @@ from plugins.takyon.core import (
     TakyonStore,
     _API_ENV_ALIASES,
     _scan_for_pretend_product_state,
+    _verify_product_surface_path,
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
+    handle_business_generate_creative_asset,
     handle_business_list_businesses,
     handle_business_registry,
+    handle_business_request_app_magic_link,
+    handle_business_set_work_focus,
     handle_business_upsert_business,
     handle_business_verify_product_surface,
 )
@@ -315,6 +319,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+    assert app["surface_contract"]["routes"] == ["/"]
 
 
 def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypatch):
@@ -344,6 +349,33 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     assert verification["success"] is True
     assert verification["verification"]["status"] == "failed"
     assert "duplicate workspace prefix" in verification["verification"]["error"]
+
+
+def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "inboxpilot"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>InboxPilot</h1>\n<script src=\"app.js\"></script>\n", encoding="utf-8")
+    (site / "app.js").write_text("console.log('ready')\n", encoding="utf-8")
+    (site / "style.css").write_text("body { font-family: sans-serif; }\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "inboxpilot-site",
+                "private": True,
+                "scripts": {"build": "echo 'Static site - no build step required.'"},
+                "devDependencies": {"serve": "^14.2.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("plugins.takyon.core._resolve_runtime_executable", lambda name: None)
+
+    verification = _verify_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    assert verification["kind"] == "static_source_present"
+    assert verification["checks"] == []
 
 
 def test_path_escape_is_rejected(tmp_path):
@@ -483,6 +515,171 @@ def test_product_deploy_job_is_vercel_gated_in_test_mode(tmp_path, monkeypatch):
     assert result["missing_credentials_suppressed"] == ["TAKYON_TEST_VERCEL_TOKEN"]
     job = store.read(scope="business:longer", query="summary")["jobs"][0]
     assert job["payload"]["missing_credentials_suppressed"] == ["TAKYON_TEST_VERCEL_TOKEN"]
+
+
+def test_business_work_focus_persists_and_blocks_cross_lane_writes(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-focus",
+    )
+
+    result = _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.focus.set", "business": "latexflow", "work_focus": "marketing"}],
+        "focus-marketing",
+    )
+
+    assert result["results"][0]["work_focus"] == "marketing"
+    assert store.read(scope="business:latexflow", query="summary")["business"]["work_focus"] == "marketing"
+
+    with pytest.raises(TakyonError, match="marketing-only"):
+        _commit(
+            store,
+            "business:latexflow",
+            [{"action": "app.surface.upsert", "business": "latexflow", "source_path": "product/site"}],
+            "blocked-product-surface",
+        )
+
+    allowed = _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "path": "outreach/test.md", "content": "marketing\n"}],
+        "marketing-file",
+    )
+    assert allowed["results"][0]["path"] == "outreach/test.md"
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.focus.set", "business": "latexflow", "work_focus": "product"}],
+        "focus-product",
+    )
+    with pytest.raises(TakyonError, match="product-only"):
+        _commit(
+            store,
+            "business:latexflow",
+            [{"action": "outreach.local_publish", "channel": "x", "target": "@example", "subject": "Nope", "body": "Nope"}],
+            "blocked-outreach",
+        )
+
+
+def test_business_set_work_focus_handler_returns_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    _commit(
+        TakyonStore(tmp_path),
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-handler-focus",
+    )
+
+    result = json.loads(
+        handle_business_set_work_focus(
+            {
+                "business": "latexflow",
+                "work_focus": "product-only",
+                "idempotency_key": "handler-focus-product",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["results"][0]["work_focus"] == "product"
+
+
+def test_focus_command_uses_current_shell_business(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-shell-focus",
+    )
+
+    from plugins.takyon.cli import _handle_shell_line
+
+    output, current = _handle_shell_line(
+        "/focus marketing",
+        current_business="latexflow",
+        store=store,
+        model="",
+        max_turns=1,
+    )
+
+    assert current == "latexflow"
+    assert "work focus -> marketing" in output
+    assert store.read(scope="business:latexflow", query="summary")["business"]["work_focus"] == "marketing"
+
+
+def test_focus_change_refreshes_existing_ceo_cron_prompt(tmp_path, monkeypatch):
+    import cron.jobs as cron_jobs
+
+    cron_dir = tmp_path / "cron"
+    monkeypatch.setattr(cron_jobs, "CRON_DIR", cron_dir)
+    monkeypatch.setattr(cron_jobs, "JOBS_FILE", cron_dir / "jobs.json")
+    monkeypatch.setattr(cron_jobs, "OUTPUT_DIR", cron_dir / "output")
+
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-cron-focus",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "cron.ensure_ceo_wakeup", "business": "latexflow", "schedule": "every 6h"}],
+        "cron-focus",
+    )
+    job = cron_jobs.list_jobs(include_disabled=True)[0]
+    cron_jobs.update_job(job["id"], {"prompt": "old prompt"})
+
+    result = _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.focus.set", "business": "latexflow", "work_focus": "product"}],
+        "focus-refresh-cron",
+    )
+
+    refreshed = cron_jobs.list_jobs(include_disabled=True)[0]
+    assert result["results"][0]["cron"]["updated"] is True
+    assert "work_focus field" in refreshed["prompt"]
+    assert "product means choose only product" in refreshed["prompt"]
+
+
+def test_work_focus_blocks_direct_product_app_handlers(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-direct-focus",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.focus.set", "business": "latexflow", "work_focus": "marketing"}],
+        "direct-focus-marketing",
+    )
+
+    result = json.loads(
+        handle_business_request_app_magic_link(
+            {
+                "business": "latexflow",
+                "email": "customer@example.com",
+                "origin": "https://example.com",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "marketing-only" in result["error"]
 
 
 def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_path, monkeypatch):
@@ -850,3 +1047,65 @@ def test_conversation_message_status_update_rewrites_thread(tmp_path):
     assert result["results"][0]["status"] == "ignored"
     thread_path = tmp_path / "businesses" / "latexflow" / result["results"][0]["file"]
     assert "Status: ignored" in thread_path.read_text(encoding="utf-8")
+
+
+def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("FAL_KEY", "test-fal-key")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:clipbook",
+        [
+            {
+                "action": "business.upsert",
+                "business": "clipbook",
+                "name": "Clipbook",
+                "budget": {"amount": 5},
+            }
+        ],
+        "init-clipbook",
+    )
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"fake mp4 bytes")
+
+    import tools.video_generation_tool as video_tool
+
+    monkeypatch.setattr(
+        video_tool,
+        "_handle_video_generate",
+        lambda _args: json.dumps(
+            {
+                "success": True,
+                "video": str(source),
+                "provider": "fal",
+                "model": "test-video-model",
+                "prompt": "UGC test",
+            }
+        ),
+    )
+
+    result = json.loads(
+        handle_business_generate_creative_asset(
+            {
+                "business": "clipbook",
+                "kind": "video",
+                "channel": "meta",
+                "format": "ugc",
+                "campaign": "launch",
+                "prompt": "UGC test",
+                "provider": "fal",
+                "budget_usd": 0.25,
+                "idempotency_key": "clipbook-meta-ugc-video",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    asset_path = tmp_path / "businesses" / "clipbook" / result["path"]
+    receipt_path = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert asset_path.read_bytes() == b"fake mp4 bytes"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["external_side_effects"] == "local_asset_only"
+    assert receipt["posted"] is False
+    assert receipt["provider"] == "fal"

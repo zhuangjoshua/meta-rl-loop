@@ -35,6 +35,16 @@ Deterministic checks protect truth; they do not decide strategy. Treat missing m
 
 Use live Takyon state and canonical metadata before general knowledge. Prefer `business_registry`, business read/list tools, loaded skill files, configured model/runtime state, and explicit operator context over memory or assumptions.
 
+## Business Work Focus
+
+Each business may have a durable `work_focus` of `all`, `marketing`, or `product`.
+
+- `all`: choose the highest expected-impact move across the whole business.
+- `marketing`: work only on demand creation, market/customer/channel research, outreach, campaigns, ads, content, sales, pricing, conversion, and marketing learning.
+- `product`: work only on product, offer, app runtime, checkout, product surface, source build/edit/verification, and product-support evidence.
+
+Treat `work_focus` as an operator constraint for manual CEO turns and scheduled wakes. Safety/control reads, pulse calculation, blocker recording, and changing the focus remain allowed. If the operator asks for work outside the active focus, explain the focus briefly and either stay inside it or ask whether to clear/change focus.
+
 For operator questions about what a command does, answer only from known command behavior or say what is unknown. Do not invent follow-on steps, hidden workflow behavior, background jobs, budgets, workspaces, app rails, cron wakeups, or "typical" flows unless the tool, command, business state, or operator request actually establishes them.
 
 The direct `/create <business> [goal]` shell path initializes or updates the business record with a slug and optional goal, schedules the CEO wake loop unless the operator uses `--no-auto`, and starts one CEO bootstrap turn by default. It does not by itself prove that product workspaces, budgets, app plans, checkout, or outreach were created; those require successful business tools in the bootstrap turn. Report actual tool-backed results, not assumed create behavior.
@@ -72,23 +82,11 @@ When outreach is the chosen test-mode distribution tactic, `business_publish_tes
 
 Only go idle after the useful durable work for the current instruction is done, blocked by a named guardrail, or queued with a receipt/job/wakeup. If important next work remains and the operator has not forbidden autonomy, schedule or preserve a CEO wake loop and say what the next wake should inspect. Sleeping is a decision: explain it briefly in the final report when the state is still immature.
 
+Do not defer a repairable local blocker to the next wake. If a missing runtime/package, failed verification, wrong source path, stale receipt, or local PATH issue blocks the current work and can be checked or repaired inside the current budget and permissions, attempt that repair now and record the new receipt. Defer only when the blocker is an external gate, budget/safety limit, operator decision, unavailable credential, or a repair that already failed with evidence.
+
 ## Skill Choice
 
-This CEO skill is the top-level router. Use `business_registry` when you need the current category or priority-band map. Load sibling skills when the work calls for them:
-
-- `takyon:business-learning` for improving per-business memory and strategy.
-- `takyon:business-pulse` for interpreting deterministic pulse metrics against the current business model.
-- `takyon:build-product` when the business has no product or the product needs major shape.
-- `takyon:market-research` when current market/customer/channel evidence is weak.
-- `takyon:pricing-strategy` when packaging, offer, checkout, or margin is the bottleneck.
-- `takyon:distribution-campaign` when the business needs traffic, launches, ads, content, social, or channel tests.
-- `takyon:ad-creative` when the work is ad angles, copy, landing-page hooks, or creative specs.
-- `takyon:outreach` when the work is leads, outbound, partner pitches, or sales sequences.
-- `takyon:conversation-response` when replies, comments, support messages, or outreach results need scoped triage, batching, drafting, selective response, or learning.
-- `takyon:conversion-review` when traffic exists but conversion or revenue is weak.
-- `takyon:failure-recovery` when jobs, campaigns, agents, or assumptions failed or went stale.
-- `takyon:claude-agent-sdk` when a bounded business-scoped workspace task needs a separate Claude SDK file-editing worker.
-- `takyon:app-runtime` when the business needs customer signup, auth, entitlements, checkout, subscriptions, revenue tracking, or app usage budget rails.
+This CEO skill is the top-level router. Use `business_registry` as the canonical skill/tool index, then load sibling skills by their registry `purpose`, `use_when`, category, and priority bands. Do not maintain a separate hardcoded sibling-skill list here; if routing metadata is wrong or incomplete, fix `plugins/takyon/registry.py`.
 
 Cron is not a skill. Cron wakes the CEO; the CEO then uses this skill and any sibling business skills needed.
 
@@ -142,6 +140,7 @@ Use concrete write tools for durable changes:
 - `business_upsert_business`
 - `business_delete_business`
 - `business_set_mode`
+- `business_set_work_focus`
 - `business_create_workspace`
 - `business_write_file`
 - `business_patch_file`
@@ -161,6 +160,7 @@ Use concrete write tools for durable changes:
 - `business_record_app_usage`
 - `business_enqueue_job`
 - `business_publish_test_outreach`
+- `business_generate_creative_asset`
 - `business_claude_agent_task`
 - `business_conversation_agent_task`
 - `business_upsert_conversation_thread`
@@ -176,7 +176,7 @@ Every write needs a stable `idempotency_key`. Reuse the exact same key only for 
 
 Any operation that needs an external provider must include `requires_api` or `requires_env`. In live mode, missing credentials must fail. In test mode, product/website build and publication may still happen when the provider gates pass, or be built locally when deploy credentials are absent. `product.deploy`/`website_build_deploy` is Vercel-gated and is real only when a deploy tool or receipt proves it; otherwise report a local build or a blocked deploy request. Outbound outreach/distribution may still be built and published locally with `business_publish_test_outreach` or queued as a suppressed local request; do not claim an external outreach send, social/forum post, ad, spend, customer charge, or outreach/marketing email delivery happened.
 
-Ad posting, deploys, vendor calls, builds, and other external side effects must be represented as guarded business requests or explicit receipts. Takyon may draft, decide, request, and audit; it must not claim outside-world execution happened unless a concrete receipt exists. In test mode, product/website deploy receipts may be real if the gates pass; outreach, acquisition, paid media, payment, and outreach/marketing email-delivery receipts must stay local/suppressed. Local outreach receipts must say `external_side_effects=suppressed`. Checkout and subscription work must use the canonical app tools when possible; Stripe network calls still require Stripe credentials and webhook receipts in live mode. Manual paid entitlements without Stripe/webhook evidence are fake billing state and must be refused unless explicitly non-billing/internal.
+Ad posting, deploys, vendor calls, builds, and other external side effects must be represented as guarded business requests or explicit receipts. Takyon may draft, decide, request, and audit; it must not claim outside-world execution happened unless a concrete receipt exists. Local generated creative assets are business files, not ad posting; use `business_generate_creative_asset` with provider credentials, budget allocation, and a receipt, then queue posting/spend separately if needed. In test mode, product/website deploy receipts may be real if the gates pass; outreach, acquisition, paid media, payment, and outreach/marketing email-delivery receipts must stay local/suppressed. Local outreach receipts must say `external_side_effects=suppressed`. Checkout and subscription work must use the canonical app tools when possible; Stripe network calls still require Stripe credentials and webhook receipts in live mode. Manual paid entitlements without Stripe/webhook evidence are fake billing state and must be refused unless explicitly non-billing/internal.
 
 Outreach, forum, support, and customer replies are business conversations. Use `business_upsert_conversation_thread`, `business_record_conversation_message`, and `business_update_conversation_message_status` for durable reply state. Conversation history and unresolved replies are business evidence, not a hardcoded interrupt policy: triage, batch, ignore, escalate, learn from, answer selectively, or delegate with `business_conversation_agent_task` based on business impact, volume, recency, risk, budget, operator direction, and current strategy.
 

@@ -225,6 +225,13 @@ interface BusinessOutputsResponse extends ScopeState {
   outputs?: Deliverable[];
 }
 
+interface BusinessMediaResponse extends ScopeState {
+  path?: string;
+  media_type?: string;
+  size?: number;
+  url?: string;
+}
+
 interface ToolEntry {
   id: string;
   tool_id: string;
@@ -244,7 +251,7 @@ interface Deliverable {
   title: string;
   detail: string;
   path?: string;
-  kind: "file" | "diff" | "tool" | "deploy" | "receipt" | "report";
+  kind: "file" | "diff" | "tool" | "deploy" | "receipt" | "report" | "image" | "video";
   at: number;
 }
 
@@ -266,7 +273,7 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "chat-next-2026-05-24";
+const CHAT_UI_REVISION = "chat-creative-assets-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
   { id: "next", label: "Next" },
@@ -274,6 +281,11 @@ const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "outputs", label: "Outputs" },
   { id: "dev", label: "Dev" },
 ];
+const MEDIA_EXTENSIONS = "mp4|mov|webm|m4v|png|jpg|jpeg|webp|gif";
+const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql";
+const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
+const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -436,8 +448,8 @@ function extractPaths(text: string): string[] {
   const patterns = [
     /^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm,
     /^(?:\+\+\+|---) b\/(.+)$/gm,
-    /\b(?:[\w.-]+\/)+[\w.+-]+\.(?:ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql)\b/g,
-    /\b\/(?:[\w .+-]+\/)+[\w .+-]+\.(?:ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql)\b/g,
+    new RegExp(`\\b(?:[\\w.-]+\\/)+[\\w.+-]+\\.(?:${PATH_EXTENSIONS})\\b`, "g"),
+    new RegExp(`\\b\\/(?:[\\w .+-]+\\/)+[\\w .+-]+\\.(?:${PATH_EXTENSIONS})\\b`, "g"),
   ];
 
   for (const pattern of patterns) {
@@ -450,6 +462,13 @@ function extractPaths(text: string): string[] {
   }
 
   return [...paths].slice(0, 8);
+}
+
+function mediaKindForPath(path?: string): "image" | "video" | undefined {
+  const ext = (path?.split("?")[0]?.split(".").pop() || "").toLowerCase();
+  if (VIDEO_EXTENSIONS.has(ext)) return "video";
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  return undefined;
 }
 
 function deliverablesFromTool(tool: ToolEntry): Deliverable[] {
@@ -470,7 +489,7 @@ function deliverablesFromTool(tool: ToolEntry): Deliverable[] {
       title: path.split("/").pop() || path,
       detail: cleanText(tool.summary || `${tool.name} touched this file`),
       path,
-      kind,
+      kind: mediaKindForPath(path) || kind,
       at,
     }));
   }
@@ -1180,6 +1199,20 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
+  const resolveBusinessMedia = useCallback(
+    async (path: string): Promise<BusinessMediaResponse> => {
+      if (!sessionId) throw new Error("Chat is still connecting.");
+      const res = await gw.request<BusinessMediaResponse>(
+        "takyon.file.media",
+        { session_id: sessionId, path },
+        20_000,
+      );
+      setScopeState(normalizeScopeState(res));
+      return res;
+    },
+    [gw, sessionId],
+  );
+
   const handleSubmit = useCallback(async () => {
     const text = input.trim();
     if (state !== "open") return;
@@ -1377,6 +1410,7 @@ export default function ChatPage() {
             onCommand={runTakyonLine}
             onCreateInTestModeChange={setCreateInTestMode}
             onListFiles={listBusinessFiles}
+            onResolveMedia={resolveBusinessMedia}
             onClose={() => setRightOpen(false)}
             scope={scopeState}
             sessionId={sessionId}
@@ -1954,13 +1988,16 @@ function BusinessFileBrowser({
   initialFiles,
   onCommand,
   onListFiles,
+  onResolveMedia,
 }: {
   initialFiles: BusinessOverviewFile[];
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
 }) {
   const [path, setPath] = useState(".");
   const [files, setFiles] = useState(initialFiles);
+  const [preview, setPreview] = useState<BusinessMediaResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -1972,6 +2009,7 @@ function BusinessFileBrowser({
         const nextFiles = await onListFiles(nextPath || ".");
         setPath(nextPath || ".");
         setFiles(nextFiles);
+        setPreview(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -2012,6 +2050,7 @@ function BusinessFileBrowser({
           {files.slice(0, 10).map((item) => {
             const itemPath = item.path || ".";
             const isDir = item.type === "dir";
+            const mediaKind = mediaKindForPath(itemPath);
             return (
               <button
                 className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
@@ -2021,6 +2060,12 @@ function BusinessFileBrowser({
                     void openPath(itemPath);
                     return;
                   }
+                  if (mediaKind) {
+                    void onResolveMedia(itemPath).then(setPreview).catch((err) => {
+                      setError(err instanceof Error ? err.message : String(err));
+                    });
+                    return;
+                  }
                   onCommand(`/read ${itemPath}`);
                 }}
                 title={itemPath}
@@ -2028,17 +2073,24 @@ function BusinessFileBrowser({
               >
                 {isDir ? (
                   <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                ) : mediaKind === "video" ? (
+                  <Play className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                ) : mediaKind === "image" ? (
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
                 ) : (
                   <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
                 )}
                 <span className="min-w-0 truncate">{compactPath(itemPath)}</span>
                 <span className="ml-auto shrink-0 text-[0.65rem] text-zinc-700">
-                  {isDir ? "dir" : "file"}
+                  {isDir ? "dir" : mediaKind || "file"}
                 </span>
               </button>
             );
           })}
         </div>
+      )}
+      {preview?.url && preview.path && (
+        <MediaPreview media={preview} title={preview.path.split("/").pop() || preview.path} />
       )}
     </div>
   );
@@ -2202,6 +2254,7 @@ function DeliverablesPanel({
   onCommand,
   onCreateInTestModeChange,
   onListFiles,
+  onResolveMedia,
   onClose,
   scope,
   sessionId,
@@ -2216,6 +2269,7 @@ function DeliverablesPanel({
   onCommand: (line: string) => void;
   onCreateInTestModeChange: (enabled: boolean) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onClose: () => void;
   scope: ScopeState;
   sessionId: string | null;
@@ -2277,11 +2331,14 @@ function DeliverablesPanel({
           <FilesPanel
             onCommand={onCommand}
             onListFiles={onListFiles}
+            onResolveMedia={onResolveMedia}
             scope={scope}
           />
         )}
 
-        {effectiveTab === "outputs" && <OutputsPanel outputs={outputs} />}
+        {effectiveTab === "outputs" && (
+          <OutputsPanel onResolveMedia={onResolveMedia} outputs={outputs} />
+        )}
 
         {effectiveTab === "dev" && (
           <DevPanel
@@ -2523,10 +2580,12 @@ function PostItem({
 function FilesPanel({
   onCommand,
   onListFiles,
+  onResolveMedia,
   scope,
 }: {
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   scope: ScopeState;
 }) {
   if (!scope.business) {
@@ -2548,19 +2607,28 @@ function FilesPanel({
           initialFiles={scope.overview?.files || []}
           onCommand={onCommand}
           onListFiles={onListFiles}
+          onResolveMedia={onResolveMedia}
         />
       </div>
     </PanelSection>
   );
 }
 
-function OutputsPanel({ outputs }: { outputs: Deliverable[] }) {
+function OutputsPanel({
+  onResolveMedia,
+  outputs,
+}: {
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+  outputs: Deliverable[];
+}) {
   return (
     <PanelSection icon={<FileText className="h-4 w-4" />} title="Outputs">
       {outputs.length === 0 ? (
         <EmptyPanelLine text="No historical or current-session outputs yet." />
       ) : (
-        outputs.map((item) => <DeliverableItem item={item} key={item.id} />)
+        outputs.map((item) => (
+          <DeliverableItem item={item} key={item.id} onResolveMedia={onResolveMedia} />
+        ))
       )}
     </PanelSection>
   );
@@ -2671,7 +2739,17 @@ function PanelSection({
   );
 }
 
-function DeliverableItem({ item }: { item: Deliverable }) {
+function DeliverableItem({
+  item,
+  onResolveMedia,
+}: {
+  item: Deliverable;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+}) {
+  const [media, setMedia] = useState<BusinessMediaResponse | null>(null);
+  const [error, setError] = useState("");
+  const mediaKind = mediaKindForPath(item.path) || (item.kind === "image" || item.kind === "video" ? item.kind : undefined);
+
   return (
     <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
       <div className="flex items-start justify-between gap-2">
@@ -2689,6 +2767,56 @@ function DeliverableItem({ item }: { item: Deliverable }) {
       </div>
       <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">
         {item.detail}
+      </div>
+      {item.path && mediaKind && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <PanelActionButton
+            icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
+            onClick={() => {
+              setError("");
+              void onResolveMedia(item.path || "")
+                .then(setMedia)
+                .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+            }}
+          >
+            Preview
+          </PanelActionButton>
+          <PanelActionButton
+            icon={<FileText className="h-3.5 w-3.5" />}
+            onClick={() => window.navigator.clipboard?.writeText(item.path || "")}
+          >
+            Copy path
+          </PanelActionButton>
+        </div>
+      )}
+      {error && <div className="mt-2 text-xs text-red-300">{error}</div>}
+      {media?.url && <MediaPreview media={media} title={item.title} />}
+    </div>
+  );
+}
+
+function MediaPreview({
+  media,
+  title,
+}: {
+  media: BusinessMediaResponse;
+  title: string;
+}) {
+  const kind = media.media_type?.startsWith("video/") ? "video" : "image";
+  return (
+    <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
+      {kind === "video" ? (
+        <video className="max-h-52 w-full bg-black" controls src={media.url} title={title} />
+      ) : (
+        <img alt={title} className="max-h-52 w-full object-contain" src={media.url} />
+      )}
+      <div className="flex items-center justify-between gap-2 border-t border-zinc-900 px-2 py-1 text-[0.65rem] text-zinc-600">
+        <span className="min-w-0 truncate">{media.path}</span>
+        {media.url && (
+          <a className="shrink-0 text-zinc-400 hover:text-zinc-100" href={media.url} rel="noreferrer" target="_blank">
+            Open
+          </a>
+        )}
       </div>
     </div>
   );
