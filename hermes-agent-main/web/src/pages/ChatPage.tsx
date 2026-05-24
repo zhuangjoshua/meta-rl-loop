@@ -11,6 +11,7 @@ import {
   Clock3,
   Command,
   DollarSign,
+  ExternalLink,
   FileText,
   Folder,
   Gauge,
@@ -18,6 +19,7 @@ import {
   MessageCircle,
   PanelRight,
   Play,
+  Plus,
   RefreshCw,
   Sparkles,
   Square,
@@ -152,6 +154,20 @@ interface BusinessOverviewConversations {
   latest_message_at?: string;
 }
 
+interface BusinessOverviewPost {
+  id?: string;
+  title?: string;
+  source?: string;
+  status?: string;
+  mode?: string;
+  url?: string;
+  artifact_path?: string;
+  conversation_file?: string;
+  created_at?: string;
+  updated_at?: string;
+  unresolved_messages?: number;
+}
+
 interface BusinessOverview {
   goal?: string;
   mode?: string;
@@ -161,6 +177,7 @@ interface BusinessOverview {
   cron?: BusinessOverviewCron[];
   files?: BusinessOverviewFile[];
   jobs?: BusinessOverviewJob[];
+  posts?: BusinessOverviewPost[];
   conversations?: BusinessOverviewConversations;
   generated_at?: string;
   pulse_warning?: string;
@@ -204,6 +221,10 @@ interface BusinessFilesResponse extends ScopeState {
   files?: BusinessOverviewFile[];
 }
 
+interface BusinessOutputsResponse extends ScopeState {
+  outputs?: Deliverable[];
+}
+
 interface ToolEntry {
   id: string;
   tool_id: string;
@@ -223,9 +244,11 @@ interface Deliverable {
   title: string;
   detail: string;
   path?: string;
-  kind: "file" | "diff" | "tool" | "deploy";
+  kind: "file" | "diff" | "tool" | "deploy" | "receipt" | "report";
   at: number;
 }
+
+type PanelTab = "home" | "tasks" | "files" | "outputs" | "dev";
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
@@ -243,6 +266,14 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
+const CHAT_UI_REVISION = "chat-tabs-2026-05-24";
+const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
+  { id: "home", label: "Home" },
+  { id: "tasks", label: "Tasks" },
+  { id: "files", label: "Files" },
+  { id: "outputs", label: "Outputs" },
+  { id: "dev", label: "Dev" },
+];
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -314,6 +345,10 @@ function compactPath(path?: string): string {
   const parts = path.split("/");
   if (parts.length <= 2) return path.slice(0, 31) + "...";
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
+}
+
+function isExternalUrl(value?: string): boolean {
+  return /^https?:\/\//i.test(value || "");
 }
 
 function loadCreateInTestModeDefault(): boolean {
@@ -425,6 +460,15 @@ function upsertDeliverables(prev: Deliverable[], incoming: Deliverable[]): Deliv
   return [...byKey.values()].slice(0, 16);
 }
 
+function mergeOutputs(current: Deliverable[], historical: Deliverable[]): Deliverable[] {
+  const byKey = new Map<string, Deliverable>();
+  for (const item of [...current, ...historical]) {
+    const key = item.path || item.id;
+    if (!byKey.has(key)) byKey.set(key, item);
+  }
+  return [...byKey.values()].sort((a, b) => b.at - a.at).slice(0, 60);
+}
+
 function prettyTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "numeric",
@@ -533,6 +577,10 @@ function isSlashCommandPrefix(value: string): boolean {
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
+  const initialBusinessParam = useMemo(
+    () => normalizeBusinessLookup(searchParams.get("business") || searchParams.get("scope") || ""),
+    [searchParams],
+  );
   const [version, setVersion] = useState(0);
   const gw = useMemo(() => {
     void version;
@@ -545,6 +593,10 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [historicalOutputs, setHistoricalOutputs] = useState<{
+    business: string;
+    items: Deliverable[];
+  }>({ business: "", items: [] });
   const [statusItems, setStatusItems] = useState<string[]>([]);
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [input, setInput] = useState("");
@@ -811,6 +863,21 @@ export default function ChatPage() {
     gw.connect()
       .then(async () => {
         if (cancelled) return;
+        const hydrateScope = async (nextSessionId: string) => {
+          const scope = !resumeParam && initialBusinessParam
+            ? await gw.request<ScopeState>(
+                "takyon.scope.set",
+                { session_id: nextSessionId, business: initialBusinessParam },
+                10_000,
+              )
+            : await gw.request<ScopeState>(
+                "takyon.scope.get",
+                { session_id: nextSessionId },
+                10_000,
+              );
+          if (!cancelled) setScopeState(normalizeScopeState(scope));
+        };
+
         if (resumeParam) {
           const res = await gw.request<SessionResumeResponse>(
             "session.resume",
@@ -819,14 +886,9 @@ export default function ChatPage() {
           if (cancelled) return;
           setSessionId(res.session_id);
           setInfo((prev) => ({ ...prev, ...res.info }));
-          void gw
-            .request<ScopeState>("takyon.scope.get", { session_id: res.session_id }, 10_000)
-            .then((scope) => {
-              if (!cancelled) setScopeState(normalizeScopeState(scope));
-            })
-            .catch(() => {
-              /* scope hydration is best effort */
-            });
+          void hydrateScope(res.session_id).catch(() => {
+            /* scope hydration is best effort */
+          });
           const resumed = (res.messages || [])
             .map(messageFromResume)
             .filter((m): m is ChatMessage => !!m);
@@ -840,14 +902,9 @@ export default function ChatPage() {
         if (cancelled) return;
         setSessionId(res.session_id);
         setInfo((prev) => ({ ...prev, ...res.info }));
-        void gw
-          .request<ScopeState>("takyon.scope.get", { session_id: res.session_id }, 10_000)
-          .then((scope) => {
-            if (!cancelled) setScopeState(normalizeScopeState(scope));
-          })
-          .catch(() => {
-            /* scope hydration is best effort */
-          });
+        void hydrateScope(res.session_id).catch(() => {
+          /* scope hydration is best effort */
+        });
       })
       .catch((err: Error) => {
         if (!cancelled) {
@@ -861,7 +918,29 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, resumeParam]);
+  }, [gw, initialBusinessParam, resumeParam]);
+
+  useEffect(() => {
+    if (state !== "open" || !sessionId || !scopeState.business) return;
+    let cancelled = false;
+    void gw
+      .request<BusinessOutputsResponse>(
+        "takyon.outputs.list",
+        { session_id: sessionId, limit: 50 },
+        10_000,
+      )
+      .then((res) => {
+        if (cancelled) return;
+        const outputs = Array.isArray(res.outputs) ? res.outputs : [];
+        setHistoricalOutputs({ business: scopeState.business, items: outputs });
+      })
+      .catch(() => {
+        /* historical outputs are best effort */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [gw, scopeState.business, sessionId, state]);
 
   useEffect(() => {
     if (state !== "open" || !sessionId || !isSlashCommandPrefix(input)) {
@@ -1113,6 +1192,13 @@ export default function ChatPage() {
     setVersion((v) => v + 1);
   }, []);
 
+  const newChatHref = useMemo(() => {
+    const params = new URLSearchParams();
+    if (scopeState.business) params.set("business", scopeState.business);
+    const query = params.toString();
+    return `/chat${query ? `?${query}` : ""}`;
+  }, [scopeState.business]);
+
   const onComposerSubmit = (event: FormEvent) => {
     event.preventDefault();
     void handleSubmit();
@@ -1165,7 +1251,7 @@ export default function ChatPage() {
 
       {rightOpen && (
         <button
-          aria-label="Close deliverables"
+          aria-label="Close side panel"
           onClick={() => setRightOpen(false)}
           className="fixed inset-0 z-[55] bg-black/70 backdrop-blur-sm lg:hidden"
           type="button"
@@ -1194,12 +1280,15 @@ export default function ChatPage() {
 
             <div className="flex items-center gap-1.5">
               <IconButton
-                label="Open deliverables"
+                label="Open side panel"
                 onClick={() => setRightOpen(true)}
                 className="lg:hidden"
               >
                 <PanelRight className="h-4 w-4" />
               </IconButton>
+              <HeaderLinkActionButton href={newChatHref} label="New chat">
+                <Plus className="h-4 w-4" />
+              </HeaderLinkActionButton>
               <IconButton label="Reconnect chat" onClick={reconnect}>
                 <RefreshCw className="h-4 w-4" />
               </IconButton>
@@ -1242,6 +1331,11 @@ export default function ChatPage() {
             createInTestMode={createInTestMode}
             cwd={info.cwd}
             deliverables={deliverables}
+            historicalOutputs={
+              historicalOutputs.business === scopeState.business
+                ? historicalOutputs.items
+                : []
+            }
             onCommand={runTakyonLine}
             onCreateInTestModeChange={setCreateInTestMode}
             onListFiles={listBusinessFiles}
@@ -1607,11 +1701,9 @@ function ScopeOption({
 }
 
 function BusinessSnapshot({
-  onListFiles,
   onCommand,
   scope,
 }: {
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onCommand: (line: string) => void;
   scope: ScopeState;
 }) {
@@ -1620,7 +1712,6 @@ function BusinessSnapshot({
   const product = overview.product || {};
   const budget = overview.budget || {};
   const cron = overview.cron || [];
-  const files = overview.files || [];
   const jobs = overview.jobs || [];
 
   if (!scope.business) {
@@ -1789,20 +1880,6 @@ function BusinessSnapshot({
             Wake now
           </PanelActionButton>
         </div>
-      </PreviewCard>
-
-      <PreviewCard
-        icon={<Folder className="h-4 w-4" />}
-        title="Files"
-        value={files.length ? `${files.length} shown` : "Browse"}
-        detail="Business workspace root"
-      >
-        <BusinessFileBrowser
-          key={scope.business}
-          initialFiles={files}
-          onCommand={onCommand}
-          onListFiles={onListFiles}
-        />
       </PreviewCard>
 
       {visibleJobs.length > 0 && (
@@ -2009,6 +2086,28 @@ function PanelActionButton({
   );
 }
 
+function PanelLinkButton({
+  children,
+  href,
+  icon,
+}: {
+  children: ReactNode;
+  href: string;
+  icon: ReactNode;
+}) {
+  return (
+    <a
+      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2.5 text-xs text-zinc-300 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-50"
+      href={href}
+      rel="noreferrer"
+      target="_blank"
+    >
+      {icon}
+      <span>{children}</span>
+    </a>
+  );
+}
+
 function CreateModeToggle({
   enabled,
   onChange,
@@ -2061,6 +2160,7 @@ function DeliverablesPanel({
   createInTestMode,
   cwd,
   deliverables,
+  historicalOutputs,
   onCommand,
   onCreateInTestModeChange,
   onListFiles,
@@ -2074,6 +2174,7 @@ function DeliverablesPanel({
   createInTestMode: boolean;
   cwd?: string;
   deliverables: Deliverable[];
+  historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
   onCreateInTestModeChange: (enabled: boolean) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
@@ -2084,13 +2185,24 @@ function DeliverablesPanel({
   statusItems: string[];
   tools: ToolEntry[];
 }) {
+  const [activeTab, setActiveTab] = useState<PanelTab>("home");
+  const outputs = useMemo(
+    () => mergeOutputs(deliverables, historicalOutputs),
+    [deliverables, historicalOutputs],
+  );
+  const panelTitle = scope.business
+    ? activeTab === "home"
+      ? "Business home"
+      : `${PANEL_TABS.find((tab) => tab.id === activeTab)?.label || "Business"}`
+    : activeTab === "home"
+      ? "Takyon home"
+      : PANEL_TABS.find((tab) => tab.id === activeTab)?.label || "Takyon";
+
   return (
     <div className="flex min-h-0 w-full flex-col bg-black text-zinc-100">
       <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4">
         <div className="min-w-0">
-          <div className="text-sm font-medium">
-            {scope.business ? "Business home" : "Takyon home"}
-          </div>
+          <div className="text-sm font-medium">{panelTitle}</div>
           <div className="mt-0.5 truncate text-xs text-zinc-600">
             {scopeDetail(scope)}
             {sessionId ? ` · session ${sessionId}` : ""}
@@ -2098,66 +2210,386 @@ function DeliverablesPanel({
           </div>
         </div>
         {showClose && (
-          <IconButton label="Close deliverables" onClick={onClose}>
+          <IconButton label="Close side panel" onClick={onClose}>
             <X className="h-4 w-4" />
           </IconButton>
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <CreateModeToggle
-          enabled={createInTestMode}
-          onChange={onCreateInTestModeChange}
-        />
+      <PanelTabs active={activeTab} onChange={setActiveTab} />
 
-        <BusinessSnapshot
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {activeTab === "home" && (
+          <>
+            <CreateModeToggle
+              enabled={createInTestMode}
+              onChange={onCreateInTestModeChange}
+            />
+            <BusinessSnapshot onCommand={onCommand} scope={scope} />
+          </>
+        )}
+
+        {activeTab === "tasks" && (
+          <TasksPanel onCommand={onCommand} scope={scope} />
+        )}
+
+        {activeTab === "files" && (
+          <FilesPanel
+            onCommand={onCommand}
+            onListFiles={onListFiles}
+            scope={scope}
+          />
+        )}
+
+        {activeTab === "outputs" && <OutputsPanel outputs={outputs} />}
+
+        {activeTab === "dev" && (
+          <DevPanel
+            cwd={cwd}
+            scope={scope}
+            sessionId={sessionId}
+            statusItems={statusItems}
+            tools={tools}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PanelTabs({
+  active,
+  onChange,
+}: {
+  active: PanelTab;
+  onChange: (tab: PanelTab) => void;
+}) {
+  return (
+    <div className="shrink-0 border-b border-zinc-900 px-3 py-2">
+      <div className="grid grid-cols-5 gap-1 rounded-xl border border-zinc-900 bg-zinc-950 p-1">
+        {PANEL_TABS.map((tab) => (
+          <button
+            className={cn(
+              "h-8 rounded-lg px-1 text-xs font-medium transition-colors",
+              active === tab.id
+                ? "bg-zinc-800 text-zinc-50"
+                : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200",
+            )}
+            key={tab.id}
+            onClick={() => onChange(tab.id)}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TasksPanel({
+  onCommand,
+  scope,
+}: {
+  onCommand: (line: string) => void;
+  scope: ScopeState;
+}) {
+  const overview = scope.overview || {};
+  const metrics = overview.metrics || {};
+  const cron = overview.cron || [];
+  const jobs = overview.jobs || [];
+  const posts = overview.posts || [];
+  const blockedJobs = jobs.filter((job) =>
+    /blocked|error|fail|paused/i.test(`${job.status || ""} ${job.kind || ""}`),
+  );
+  const queuedJobs = asNumber(metrics.queued_jobs) || jobs.filter((job) =>
+    /queued|running|pending|blocked/i.test(job.status || ""),
+  ).length;
+  const activeCron = cron.filter((job) => job.enabled !== false);
+  const nextWake = activeCron.find((job) => job.next_run)?.next_run;
+
+  if (!scope.business) {
+    return (
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Tasks">
+        <EmptyPanelLine text="Choose a business to see jobs, wakeups, posts, and blocked work." />
+      </PanelSection>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <PanelSection icon={<Gauge className="h-4 w-4" />} title="Overview">
+        <div className="grid grid-cols-2 gap-2">
+          <SnapshotMetric
+            icon={<Activity className="h-3.5 w-3.5" />}
+            label="Queued"
+            value={formatCount(queuedJobs)}
+          />
+          <SnapshotMetric
+            icon={<AlertCircle className="h-3.5 w-3.5" />}
+            label="Blocked"
+            value={formatCount(blockedJobs.length)}
+          />
+          <SnapshotMetric
+            icon={<Clock3 className="h-3.5 w-3.5" />}
+            label="Wakeups"
+            value={formatCount(activeCron.length)}
+            detail={nextWake ? readableDate(nextWake) : "none scheduled"}
+          />
+          <SnapshotMetric
+            icon={<MessageCircle className="h-3.5 w-3.5" />}
+            label="Posts"
+            value={formatCount(posts.length)}
+            detail={`${formatCount(overview.conversations?.unresolved_messages)} replies`}
+          />
+        </div>
+      </PanelSection>
+
+      <PanelSection icon={<MessageCircle className="h-4 w-4" />} title="Current Posts">
+        {posts.length === 0 ? (
+          <EmptyPanelLine text="No posts or outreach threads recorded yet." />
+        ) : (
+          posts.map((post, index) => (
+            <PostItem
+              key={post.id || `${post.source}-${post.title}-${index}`}
+              onCommand={onCommand}
+              post={post}
+            />
+          ))
+        )}
+      </PanelSection>
+
+      <PanelSection icon={<Activity className="h-4 w-4" />} title="Jobs">
+        {jobs.length === 0 ? (
+          <EmptyPanelLine text="No durable business jobs recorded." />
+        ) : (
+          jobs.map((job, index) => (
+            <TaskRow
+              detail={job.updated_at ? `Updated ${readableDate(job.updated_at)}` : "Recorded job"}
+              key={job.id || `${job.kind}-${index}`}
+              label={job.kind || "job"}
+              status={job.status || "recorded"}
+            />
+          ))
+        )}
+      </PanelSection>
+
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Wakeups">
+        {cron.length === 0 ? (
+          <EmptyPanelLine text="No CEO wakeups are scheduled." />
+        ) : (
+          cron.map((job, index) => (
+            <TaskRow
+              detail={[
+                job.schedule,
+                job.next_run ? `next ${readableDate(job.next_run)}` : "",
+              ].filter(Boolean).join(" · ")}
+              key={job.id || `${job.name}-${index}`}
+              label={job.name || "CEO wakeup"}
+              status={job.enabled === false ? "off" : job.state || "scheduled"}
+            />
+          ))
+        )}
+        <div className="flex flex-wrap gap-2 pt-1">
+          <PanelActionButton
+            icon={<Clock3 className="h-3.5 w-3.5" />}
+            onClick={() => onCommand("/cron list")}
+          >
+            List
+          </PanelActionButton>
+          <PanelActionButton
+            icon={<Play className="h-3.5 w-3.5" />}
+            onClick={() => onCommand("/wake")}
+          >
+            Wake now
+          </PanelActionButton>
+        </div>
+      </PanelSection>
+    </div>
+  );
+}
+
+function PostItem({
+  onCommand,
+  post,
+}: {
+  onCommand: (line: string) => void;
+  post: BusinessOverviewPost;
+}) {
+  const external = isExternalUrl(post.url);
+  const testPost = post.mode === "test" || !external;
+  const artifactPath = post.artifact_path || (!external ? post.url : "");
+  const updated = post.updated_at || post.created_at;
+
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-zinc-100">
+            {post.title || "Post"}
+          </div>
+          <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[0.68rem] text-zinc-600">
+            <span>{post.source || "outreach"}</span>
+            <span>{testPost ? "test/local" : "live"}</span>
+            {updated && <span>{readableDate(updated)}</span>}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-500">
+          {post.unresolved_messages ? `${post.unresolved_messages} replies` : post.status || "active"}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {external && (
+          <PanelLinkButton href={post.url || ""} icon={<ExternalLink className="h-3.5 w-3.5" />}>
+            Open post
+          </PanelLinkButton>
+        )}
+        {artifactPath && (
+          <PanelActionButton
+            icon={<FileText className="h-3.5 w-3.5" />}
+            onClick={() => onCommand(`/read ${artifactPath}`)}
+          >
+            Local post
+          </PanelActionButton>
+        )}
+        {post.conversation_file && (
+          <PanelActionButton
+            icon={<MessageCircle className="h-3.5 w-3.5" />}
+            onClick={() => onCommand(`/read ${post.conversation_file}`)}
+          >
+            Responses
+          </PanelActionButton>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FilesPanel({
+  onCommand,
+  onListFiles,
+  scope,
+}: {
+  onCommand: (line: string) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  scope: ScopeState;
+}) {
+  if (!scope.business) {
+    return (
+      <PanelSection icon={<Folder className="h-4 w-4" />} title="Files">
+        <EmptyPanelLine text="Choose a business to browse its filesystem." />
+      </PanelSection>
+    );
+  }
+
+  return (
+    <PanelSection icon={<Folder className="h-4 w-4" />} title="Files">
+      <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
+        <div className="mb-3 text-xs text-zinc-600">
+          business:{scope.business} workspace
+        </div>
+        <BusinessFileBrowser
+          key={scope.business}
+          initialFiles={scope.overview?.files || []}
           onCommand={onCommand}
           onListFiles={onListFiles}
-          scope={scope}
         />
-
-        <PanelSection className="mt-6" icon={<FileText className="h-4 w-4" />} title="Outputs">
-          {deliverables.length === 0 ? (
-            <EmptyPanelLine text="No outputs yet." />
-          ) : (
-            deliverables.map((item) => <DeliverableItem item={item} key={item.id} />)
-          )}
-        </PanelSection>
-
-        <PanelSection
-          className="mt-6"
-          icon={<CheckCircle2 className="h-4 w-4" />}
-          title="Tool activity"
-        >
-          {tools.length === 0 ? (
-            <EmptyPanelLine text="No tool calls yet." />
-          ) : (
-            tools
-              .slice()
-              .reverse()
-              .map((tool) => <ToolActivityItem key={tool.id} tool={tool} />)
-          )}
-        </PanelSection>
-
-        <PanelSection
-          className="mt-6"
-          icon={<Clock3 className="h-4 w-4" />}
-          title="Pulse"
-        >
-          {statusItems.length === 0 ? (
-            <EmptyPanelLine text="No pulse yet." />
-          ) : (
-            statusItems.map((item, index) => (
-              <div
-                className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2 text-xs leading-5 text-zinc-400"
-                key={`${item}-${index}`}
-              >
-                {item}
-              </div>
-            ))
-          )}
-        </PanelSection>
       </div>
+    </PanelSection>
+  );
+}
+
+function OutputsPanel({ outputs }: { outputs: Deliverable[] }) {
+  return (
+    <PanelSection icon={<FileText className="h-4 w-4" />} title="Outputs">
+      {outputs.length === 0 ? (
+        <EmptyPanelLine text="No historical or current-session outputs yet." />
+      ) : (
+        outputs.map((item) => <DeliverableItem item={item} key={item.id} />)
+      )}
+    </PanelSection>
+  );
+}
+
+function DevPanel({
+  cwd,
+  scope,
+  sessionId,
+  statusItems,
+  tools,
+}: {
+  cwd?: string;
+  scope: ScopeState;
+  sessionId: string | null;
+  statusItems: string[];
+  tools: ToolEntry[];
+}) {
+  return (
+    <div className="space-y-6">
+      <PanelSection icon={<Command className="h-4 w-4" />} title="Build">
+        <TaskRow
+          detail={scopeDetail(scope)}
+          label={CHAT_UI_REVISION}
+          status="ui"
+        />
+        <TaskRow
+          detail={cwd || "cwd unavailable"}
+          label={sessionId ? `session ${sessionId}` : "session pending"}
+          status="runtime"
+        />
+      </PanelSection>
+
+      <PanelSection icon={<CheckCircle2 className="h-4 w-4" />} title="Tool activity">
+        {tools.length === 0 ? (
+          <EmptyPanelLine text="No tool calls yet." />
+        ) : (
+          tools
+            .slice()
+            .reverse()
+            .map((tool) => <ToolActivityItem key={tool.id} tool={tool} />)
+        )}
+      </PanelSection>
+
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Pulse">
+        {statusItems.length === 0 ? (
+          <EmptyPanelLine text="No pulse yet." />
+        ) : (
+          statusItems.map((item, index) => (
+            <div
+              className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2 text-xs leading-5 text-zinc-400"
+              key={`${item}-${index}`}
+            >
+              {item}
+            </div>
+          ))
+        )}
+      </PanelSection>
+    </div>
+  );
+}
+
+function TaskRow({
+  detail,
+  label,
+  status,
+}: {
+  detail?: string;
+  label: string;
+  status: string;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-sm text-zinc-200">{label}</div>
+        <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-500">
+          {status}
+        </span>
+      </div>
+      {detail && (
+        <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
+          {detail}
+        </div>
+      )}
     </div>
   );
 }
@@ -2264,5 +2696,29 @@ function IconButton({
     >
       {children}
     </button>
+  );
+}
+
+function HeaderLinkActionButton({
+  children,
+  href,
+  label,
+}: {
+  children: ReactNode;
+  href: string;
+  label: string;
+}) {
+  return (
+    <a
+      aria-label={label}
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-zinc-800 px-3 text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-100"
+      href={href}
+      rel="noreferrer"
+      target="_blank"
+      title={label}
+    >
+      {children}
+      <span className="hidden sm:inline">{label}</span>
+    </a>
   );
 }

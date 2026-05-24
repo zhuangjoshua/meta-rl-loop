@@ -4699,6 +4699,61 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     app_revenue = as_dict(app.get("revenue"))
     app_usage = as_dict(app.get("usage_this_period"))
     conversations = as_dict(summary.get("conversations"))
+    unresolved_by_thread: dict[str, int] = {}
+    for message in as_list(conversations.get("unresolved")):
+        message_dict = as_dict(message)
+        thread_id = brief_text(message_dict.get("thread_id"))
+        if thread_id:
+            unresolved_by_thread[thread_id] = unresolved_by_thread.get(thread_id, 0) + 1
+    posts: list[dict[str, Any]] = []
+    for thread in as_list(conversations.get("threads")):
+        thread_dict = as_dict(thread)
+        source = brief_text(thread_dict.get("source"))
+        url = brief_text(thread_dict.get("url"))
+        source_l = source.lower()
+        postish = (
+            source_l.startswith("test-")
+            or bool(url)
+            or source_l == "x"
+            or source_l.startswith("x-")
+            or any(
+                marker in source_l
+                for marker in (
+                    "post",
+                    "outreach",
+                    "reddit",
+                    "hacker",
+                    "twitter",
+                    "linkedin",
+                    "forum",
+                    "social",
+                )
+            )
+        )
+        if not postish:
+            continue
+        artifact_path = "" if re.match(r"^https?://", url, re.I) else url
+        try:
+            conversation_file = brief_text(store._conversation_thread_relpath(thread_dict))
+        except Exception:
+            conversation_file = ""
+        mode = "test" if source_l.startswith("test-") or artifact_path.startswith("outreach/local-published/") else "live"
+        thread_id = brief_text(thread_dict.get("id"))
+        posts.append(
+            {
+                "id": thread_id,
+                "title": brief_text(thread_dict.get("title") or thread_dict.get("external_id") or source),
+                "source": source,
+                "status": brief_text(thread_dict.get("status")),
+                "mode": mode,
+                "url": url,
+                "artifact_path": artifact_path,
+                "conversation_file": conversation_file,
+                "created_at": brief_text(thread_dict.get("created_at")),
+                "updated_at": brief_text(thread_dict.get("updated_at")),
+                "unresolved_messages": unresolved_by_thread.get(thread_id, 0),
+            }
+        )
 
     try:
         cron_jobs_raw = as_list(store._business_cron_jobs(slug))
@@ -4780,6 +4835,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "cron": cron_jobs,
         "files": files,
         "jobs": jobs,
+        "posts": posts[:12],
         "conversations": {
             "active_threads": as_int(conversations.get("active_threads")),
             "unresolved_messages": as_int(conversations.get("unresolved_messages")),
@@ -4788,6 +4844,92 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "generated_at": brief_text(pulse.get("generated_at")),
         "pulse_warning": brief_text(pulse.get("warning")),
     }
+
+
+def _takyon_output_detail(path: str) -> tuple[str, str]:
+    parts = path.split("/")
+    top = parts[0] if parts else ""
+    if top == "receipts":
+        return "receipt", "Business receipt"
+    if top in {"reports", "outputs"}:
+        return "report", "Historical output"
+    if path.startswith("outreach/local-published/"):
+        return "file", "Local published outreach"
+    if top == "app":
+        return "file", "App runtime artifact"
+    if top == "brain":
+        return "file", "Business brain artifact"
+    if top == "product":
+        return "file", "Product artifact"
+    if top == "distribution":
+        return "file", "Distribution artifact"
+    return "file", "Business artifact"
+
+
+def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    try:
+        root = store._business_root(slug)
+    except Exception:
+        return []
+    if not root.exists() or not root.is_dir():
+        return []
+
+    candidates: set[Path] = set()
+    exact_paths = {
+        "app/index.md",
+        "app/surface.md",
+        "app/usage.md",
+        "brain/index.md",
+        "brain/pulse.md",
+        "brain/wake_journal.md",
+        "product/design-brief.md",
+        "product/mvp-spec.md",
+    }
+    for rel in exact_paths:
+        path = root / rel
+        if path.is_file():
+            candidates.add(path)
+
+    recursive_roots = [
+        "outputs",
+        "reports",
+        "receipts",
+        "outreach/local-published",
+        "distribution",
+    ]
+    allowed_suffixes = {".md", ".html", ".txt", ".json"}
+    for rel_root in recursive_roots:
+        directory = root / rel_root
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed_suffixes:
+                continue
+            candidates.add(path)
+
+    outputs: list[dict[str, Any]] = []
+    for path in candidates:
+        try:
+            stat = path.stat()
+            rel = str(path.relative_to(root))
+        except Exception:
+            continue
+        kind, detail = _takyon_output_detail(rel)
+        outputs.append(
+            {
+                "id": f"historical:{slug}:{rel}",
+                "title": path.name,
+                "detail": detail,
+                "path": rel,
+                "kind": kind,
+                "at": int(stat.st_mtime * 1000),
+            }
+        )
+
+    outputs.sort(key=lambda item: int(item.get("at") or 0), reverse=True)
+    return outputs[: max(1, min(int(limit or 40), 100))]
 
 
 def _takyon_session(params: dict) -> dict | None:
@@ -4927,6 +5069,27 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {**data, **_takyon_scope_payload(session)})
     except Exception as e:
         return _err(rid, 5045, str(e))
+
+
+@method("takyon.outputs.list")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = str(session.get("takyon_current_business") or "").strip()
+    if not business:
+        return _ok(rid, {"outputs": [], **_takyon_scope_payload(session)})
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        outputs = _takyon_historical_outputs_payload(
+            TakyonStore(),
+            business,
+            limit=int(params.get("limit") or 40),
+        )
+        return _ok(rid, {"outputs": outputs, **_takyon_scope_payload(session)})
+    except Exception as e:
+        return _err(rid, 5046, str(e))
 
 
 @method("takyon.shell.exec")
