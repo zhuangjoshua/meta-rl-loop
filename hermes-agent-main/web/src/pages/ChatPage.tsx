@@ -599,6 +599,31 @@ function uniqueDocs(items: Array<SourceDocTile | null | undefined>): SourceDocTi
   return [...byPath.values()];
 }
 
+const STATE_STATUSES = new Set([
+  "visible",
+  "available",
+  "previewable",
+  "ready",
+  "done",
+  "complete",
+  "completed",
+  "published",
+  "live",
+]);
+
+const STATE_PHRASE_REGEX =
+  /\b(is|are|was|were|has|have)\b[^.!?]*\b(available|ready|visible|live|published|complete|completed|done|created|generated|previewable)\b/i;
+
+function isActionableTask(
+  task: BusinessOverviewTask | BusinessOverviewJob,
+): boolean {
+  const status = (task.status || "").toLowerCase().trim();
+  if (status && STATE_STATUSES.has(status)) return false;
+  const text = `${task.label || ""} ${task.detail || ""}`.trim();
+  if (text && STATE_PHRASE_REGEX.test(text)) return false;
+  return true;
+}
+
 function loadCreateInTestModeDefault(): boolean {
   if (typeof window === "undefined") return false;
   return window.localStorage.getItem(CREATE_MODE_STORAGE_KEY) === "1";
@@ -2315,7 +2340,6 @@ function CompanyOverview({
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
   const tasks = overview.tasks || [];
-  const ceoLoop = overview.ceo_loop;
   const research = overview.research || {};
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
@@ -2324,14 +2348,6 @@ function CompanyOverview({
   const previewPath = website.source_path || product.source_path || "product/site";
   const publicSiteUrl = website.public_url || product.public_url || "";
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const hasProductSurface = Boolean(
-    website.path ||
-    product.source_path ||
-    product.design_brief_path ||
-    product.filesystem_index ||
-    product.publish_status ||
-    product.verification_status,
-  );
   const outputDocs = recentOutputs
     .filter((item) => item.path)
     .map((item) => ({
@@ -2350,19 +2366,13 @@ function CompanyOverview({
   const productDocs = uniqueDocs([
     docTile(website.path, "Website", "Product"),
     docTile(product.design_brief_path, "Design brief", "Product"),
-    docTile(product.filesystem_index, "App index", "Runtime"),
-    hasProductSurface ? docTile("app/surface.md", "Surface", "Runtime") : null,
-    docTile(product.verification_receipt, "Verification", "Receipt"),
-    docTile(product.publish_receipt_path || website.publish_receipt_path, "Publish receipt", "Receipt"),
-    ...outputDocs.filter((doc) => /^(app|product)\//.test(doc.path)),
+    ...outputDocs.filter((doc) => /^product\//.test(doc.path) && doc.status !== "Receipt"),
   ]);
   const growthDocs = uniqueDocs([
     docTile(outreach.path, "Outreach", "Growth"),
-    docTile(outreach.receipt, "Outreach receipt", "Receipt"),
     docTile(creativeAssets.path, "Creative asset", "Growth"),
-    docTile(creativeAssets.receipt, "Creative receipt", "Receipt"),
     ...posts.map((post) => docTile(post.artifact_path || post.conversation_file, post.title || "Post", post.status)),
-    ...outputDocs.filter((doc) => /^(campaigns|distribution|outreach)\//.test(doc.path)),
+    ...outputDocs.filter((doc) => /^(campaigns|distribution|outreach)\//.test(doc.path) && doc.status !== "Receipt"),
   ]);
   const productStatus = publicSiteUrl
     ? "Live"
@@ -2371,7 +2381,12 @@ function CompanyOverview({
       : product.publish_blocker
         ? "Needs attention"
         : "Not built";
-  const workItems = tasks.length > 0 ? tasks.slice(0, 5) : visibleJobs.slice(0, 5);
+  const actionableTasks = tasks.filter(isActionableTask);
+  const actionableJobs = visibleJobs.filter(isActionableTask);
+  const workItems =
+    actionableTasks.length > 0
+      ? actionableTasks.slice(0, 5)
+      : actionableJobs.slice(0, 5);
   const latestActivity = [
     ...(activeTool ? [{ label: naturalToolLabel(activeTool), detail: toolDetail(activeTool), status: humanizeStatus(activeTool.status), tone: activeTool.status }] : []),
     ...tools
@@ -2392,24 +2407,15 @@ function CompanyOverview({
       tone: "active",
     })),
   ].slice(0, 5);
-  const taskRows = [
-    ...(ceoLoop
-      ? [{
-          detail: ceoLoop.next_action || ceoLoop.detail,
-          id: "ceo-loop",
-          label: ceoLoop.headline || "CEO",
-          status: humanizeStatus(ceoLoop.status),
-          tone: ceoLoop.status,
-        }]
-      : []),
-    ...workItems.map((item, index) => ({
+  const taskRows = workItems
+    .map((item, index) => ({
       detail: taskDetail(item),
       id: item.id || `${taskLabel(item)}-${index}`,
       label: taskLabel(item),
       status: humanizeStatus(item.status),
       tone: item.tone || item.status,
-    })),
-  ].slice(0, 6);
+    }))
+    .slice(0, 6);
   const scheduleRows = activeCron.slice(0, 3).map((job, index) => ({
     detail: job.next_run ? `Next ${readableDate(job.next_run)}` : job.schedule || "",
     id: job.id || `${job.name || "schedule"}-${index}`,
@@ -2486,21 +2492,19 @@ function CompanyOverview({
             tone={research.status === "visible" ? "done" : "waiting"}
           />
           <SourceCard
-            action={
-              <div className="flex flex-wrap gap-2">
-                {publicSiteUrl && (
-                  <PanelActionButton icon={<ExternalLink className="h-3.5 w-3.5" />} onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}>
-                    Open site
-                  </PanelActionButton>
-                )}
-                {website.path && <OpenSitePreviewButton onResolveSitePreview={onResolveSitePreview} path={previewPath} />}
-              </div>
-            }
             docs={productDocs}
-            empty="No product file yet."
+            empty={publicSiteUrl || website.path ? undefined : "No product file yet."}
             icon={<Globe2 className="h-4 w-4" />}
             label="Product"
             onOpenDoc={openDocument}
+            primary={
+              <ProductPreviewHero
+                onResolveSitePreview={onResolveSitePreview}
+                previewPath={previewPath}
+                publicSiteUrl={publicSiteUrl}
+                websitePath={website.path}
+              />
+            }
             status={productStatus}
             tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
           />
@@ -2562,6 +2566,7 @@ function CompanyOverview({
           {viewer && (
             <InlineDocumentViewer
               onClose={() => setViewer(null)}
+              onOpenDoc={openDocument}
               viewer={viewer}
             />
           )}
@@ -2599,6 +2604,7 @@ function SourceCard({
   icon,
   label,
   onOpenDoc,
+  primary,
   status,
   tone,
 }: {
@@ -2609,6 +2615,7 @@ function SourceCard({
   icon: ReactNode;
   label: string;
   onOpenDoc?: (doc: SourceDocTile) => void;
+  primary?: ReactNode;
   status: string;
   tone?: string;
 }) {
@@ -2625,6 +2632,7 @@ function SourceCard({
           {status}
         </span>
       </div>
+      {primary && <div className="mt-3">{primary}</div>}
       {docs.length > 0 ? (
         <div className="mt-3 grid grid-cols-2 gap-2">
           {docs.slice(0, 4).map((doc) => (
@@ -2683,11 +2691,29 @@ function DocumentTileButton({
   );
 }
 
+function resolveSiblingPath(basePath: string, href: string): string {
+  const cleanHref = href.split(/[?#]/)[0];
+  if (!cleanHref) return basePath;
+  if (cleanHref.startsWith("/")) return cleanHref.replace(/^\/+/, "");
+  const segments = basePath.split("/").slice(0, -1);
+  for (const part of cleanHref.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(part);
+  }
+  return segments.join("/");
+}
+
 function InlineDocumentViewer({
   onClose,
+  onOpenDoc,
   viewer,
 }: {
   onClose: () => void;
+  onOpenDoc?: (doc: { label?: string; path?: string }) => void;
   viewer: {
     content?: string;
     error?: string;
@@ -2699,6 +2725,18 @@ function InlineDocumentViewer({
   };
 }) {
   const isMarkdown = /\.md$/i.test(viewer.path);
+  const handleLinkClick = useCallback(
+    (href: string) => {
+      if (/^(https?:|mailto:|tel:)/i.test(href)) return false;
+      if (href.startsWith("#")) return false;
+      const resolved = resolveSiblingPath(viewer.path, href);
+      if (resolved && onOpenDoc) {
+        onOpenDoc({ label: compactPath(resolved), path: resolved });
+      }
+      return true;
+    },
+    [onOpenDoc, viewer.path],
+  );
   return (
     <section className="overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950">
       <div className="flex items-start justify-between gap-3 border-b border-zinc-900 px-3 py-2.5">
@@ -2724,7 +2762,7 @@ function InlineDocumentViewer({
         </div>
       ) : isMarkdown ? (
         <div className="max-h-[60vh] overflow-auto px-3 py-3 text-sm leading-6 text-zinc-300 [&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-black [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
-          <Markdown content={viewer.content || ""} />
+          <Markdown content={viewer.content || ""} onLinkClick={handleLinkClick} />
         </div>
       ) : (
         <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.75rem] leading-5 text-zinc-300">
@@ -2741,11 +2779,15 @@ function InlineDocumentViewer({
 }
 
 function OpenSitePreviewButton({
+  label = "Preview",
   onResolveSitePreview,
   path,
+  variant = "compact",
 }: {
+  label?: string;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   path?: string;
+  variant?: "compact" | "hero";
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -2775,16 +2817,82 @@ function OpenSitePreviewButton({
       .finally(() => setLoading(false));
   }, [onResolveSitePreview, path]);
 
+  if (variant === "hero") {
+    return (
+      <span className="flex flex-col gap-1">
+        <button
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-100 px-4 py-3 text-sm font-medium text-zinc-900 transition-colors hover:bg-white disabled:opacity-60"
+          disabled={loading}
+          onClick={openPreview}
+          type="button"
+        >
+          <ExternalLink className="h-4 w-4" />
+          {loading ? "Opening preview..." : label}
+        </button>
+        {error && <span className="text-xs text-red-400">{error}</span>}
+      </span>
+    );
+  }
+
   return (
     <span className="inline-flex flex-col gap-1">
       <PanelActionButton
         icon={<ExternalLink className="h-3.5 w-3.5" />}
         onClick={openPreview}
       >
-        {loading ? "Opening..." : "Preview"}
+        {loading ? "Opening..." : label}
       </PanelActionButton>
       {error && <span className="text-xs text-red-400">{error}</span>}
     </span>
+  );
+}
+
+function ProductPreviewHero({
+  onResolveSitePreview,
+  previewPath,
+  publicSiteUrl,
+  websitePath,
+}: {
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  previewPath?: string;
+  publicSiteUrl?: string;
+  websitePath?: string;
+}) {
+  if (publicSiteUrl) {
+    return (
+      <div className="flex flex-col gap-2">
+        <button
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-100 px-4 py-3 text-sm font-medium text-zinc-900 transition-colors hover:bg-white"
+          onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
+          type="button"
+        >
+          <ExternalLink className="h-4 w-4" />
+          View live site
+        </button>
+        {websitePath && (
+          <OpenSitePreviewButton
+            label="Open local preview"
+            onResolveSitePreview={onResolveSitePreview}
+            path={previewPath}
+          />
+        )}
+      </div>
+    );
+  }
+  if (websitePath) {
+    return (
+      <OpenSitePreviewButton
+        label="Preview product"
+        onResolveSitePreview={onResolveSitePreview}
+        path={previewPath}
+        variant="hero"
+      />
+    );
+  }
+  return (
+    <div className="rounded-xl border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
+      No product surface built yet.
+    </div>
   );
 }
 
@@ -3688,8 +3796,10 @@ function TaskBoard({
   scope: ScopeState;
 }) {
   const overview = scope.overview || {};
-  const tasks = overview.tasks || [];
-  const fallbackJobs = (overview.jobs || []).filter((job) => job.kind || job.status);
+  const tasks = (overview.tasks || []).filter(isActionableTask);
+  const fallbackJobs = (overview.jobs || [])
+    .filter((job) => job.kind || job.status)
+    .filter(isActionableTask);
   const displayTasks: Array<BusinessOverviewTask | BusinessOverviewJob> =
     tasks.length > 0 ? tasks : fallbackJobs;
   const ceoLoop = overview.ceo_loop;

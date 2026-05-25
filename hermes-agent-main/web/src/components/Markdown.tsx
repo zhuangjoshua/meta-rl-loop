@@ -1,4 +1,9 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, type MouseEvent, type ReactNode } from "react";
+
+export type MarkdownLinkHandler = (
+  href: string,
+  event: MouseEvent<HTMLAnchorElement>,
+) => boolean;
 
 /**
  * Lightweight markdown renderer for LLM output.
@@ -12,10 +17,12 @@ import { useMemo, type ReactNode } from "react";
 export function Markdown({
   content,
   highlightTerms,
+  onLinkClick,
   streaming,
 }: {
   content: string;
   highlightTerms?: string[];
+  onLinkClick?: MarkdownLinkHandler;
   streaming?: boolean;
 }) {
   const blocks = useMemo(() => parseBlocks(content), [content]);
@@ -28,6 +35,7 @@ export function Markdown({
           key={i}
           block={block}
           highlightTerms={highlightTerms}
+          onLinkClick={onLinkClick}
           caret={caret && i === blocks.length - 1 ? caret : null}
         />
       ))}
@@ -159,10 +167,12 @@ function parseBlocks(text: string): BlockNode[] {
 function Block({
   block,
   highlightTerms,
+  onLinkClick,
   caret,
 }: {
   block: BlockNode;
   highlightTerms?: string[];
+  onLinkClick?: MarkdownLinkHandler;
   caret?: ReactNode;
 }) {
   switch (block.type) {
@@ -186,7 +196,7 @@ function Block({
       };
       return (
         <Tag className={sizes[Tag]}>
-          <InlineContent text={block.content} highlightTerms={highlightTerms} />
+          <InlineContent text={block.content} highlightTerms={highlightTerms} onLinkClick={onLinkClick} />
           {caret}
         </Tag>
       );
@@ -209,7 +219,7 @@ function Block({
         >
           {block.items.map((item, i) => (
             <li key={i}>
-              <InlineContent text={item} highlightTerms={highlightTerms} />
+              <InlineContent text={item} highlightTerms={highlightTerms} onLinkClick={onLinkClick} />
               {i === last ? caret : null}
             </li>
           ))}
@@ -220,7 +230,7 @@ function Block({
     case "paragraph":
       return (
         <p>
-          <InlineContent text={block.content} highlightTerms={highlightTerms} />
+          <InlineContent text={block.content} highlightTerms={highlightTerms} onLinkClick={onLinkClick} />
           {caret}
         </p>
       );
@@ -285,9 +295,11 @@ function parseInline(text: string): InlineNode[] {
 function InlineContent({
   text,
   highlightTerms,
+  onLinkClick,
 }: {
   text: string;
   highlightTerms?: string[];
+  onLinkClick?: MarkdownLinkHandler;
 }) {
   const nodes = useMemo(() => parseInline(text), [text]);
 
@@ -332,6 +344,15 @@ function InlineContent({
                 target="_blank"
                 rel="noreferrer"
                 className="text-primary underline underline-offset-2 decoration-primary/30 hover:decoration-primary/60 transition-colors"
+                onClick={
+                  onLinkClick
+                    ? (event) => {
+                        if (onLinkClick(node.href, event)) {
+                          event.preventDefault();
+                        }
+                      }
+                    : undefined
+                }
               >
                 {node.text}
               </a>
