@@ -17,6 +17,12 @@ The old `polsia3` app tree was removed. Archived source material salvaged from i
 
 Do not recreate `polsia3`, do not restore `polsia3/takyon`, and do not describe `polsia3` as "the active Next/Takyon app", "the main trunk", or "one of two trunks".
 
+## Deployment Notes
+
+The current Takyon VPS target is `159.65.217.13` (`argon-alpha-14`). Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access.
+
+The planned public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo; keep it pointed at Vercel until the VPS dashboard is healthy, then cut the `app` record over to `159.65.217.13`.
+
 ## User Terms
 
 Do not conflate Takyon users with product subusers.
@@ -36,6 +42,10 @@ Do not hardcode the final product's look, layout, copy, theme, or information ar
 Takyon should be a skill-based Hermes CEO system, not a fixed workflow cockpit.
 
 Practice parsimony and no slop. Parsimony means the system works through the smallest Hermes-native surface that genuinely handles the job for every business and every relevant mode. Do not create a second path for test mode, a one-off shell workaround, a special-case business bootstrap, or a fake/demo product behavior when the same skill, business-scoped tool, receipt, or runtime rail can express the work with the right gates. Mode differences should be explicit guardrails on the same path: in test mode suppress or stub external side effects with receipts; in live mode require the real provider, budget, permission, and receipt. Prefer one clear operator affordance with flags over multiple overlapping commands, aliases, or workflow shortcuts. If a shell action is part of creating a business, put it on `/create` as an explicit flag such as `--test`, `--schedule`, or `--no-auto`; do not add separate slash commands that duplicate the creation path.
+
+Skill-based does not mean every fix belongs in skill prose. If the real missing piece is tool registration, provider config, registry metadata, harness metadata, a guarded runtime rail, or a UI renderer, fix that canonical surface and let the existing skills use it; edit or add a skill only when the business-facing method, judgment, or routing behavior genuinely changes.
+
+Do not add deterministic business-action routers, fixed if/then workflow funnels, or forced artifact shortcuts to make the CEO pick a business move. Encourage the CEO through registry metadata, skill guidance, tool schemas, capability/read tools, exact gate errors, and regression tests that catch bad substitutions. Deterministic code is appropriate only for durable safety and integrity rails such as scope isolation, path containment, idempotency, credential checks, budget caps, audit receipts, kill/pause controls, and UI rendering mechanics.
 
 Use canonical sources of truth wherever they exist. Runtime config belongs in `$TAKYON_HOME/config.yaml`; tool and skill metadata belong in `plugins/takyon/registry.py`; shell/harness command metadata belongs in `plugins/takyon/harness/settings.json` and `plugins/takyon/harness/commands/*.md`; business facts belong in `state.sqlite3` and the per-business filesystem. Do not duplicate those facts in prompts or UI code when they can be read from the canonical source.
 
