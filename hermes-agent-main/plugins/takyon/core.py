@@ -170,7 +170,62 @@ def _normalize_outreach_body(value: Any) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def _outreach_artifact_markdown(subject: str, body: str) -> str:
+def _normalize_destination_url(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw or any(ch.isspace() for ch in raw):
+        return ""
+    candidate = raw if re.match(r"^https?://", raw, re.IGNORECASE) else f"https://{raw}"
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    host = parsed.netloc.lower()
+    if "." not in host:
+        return ""
+    path = parsed.path or "/"
+    return urllib.parse.urlunparse((parsed.scheme, host, path, "", parsed.query, ""))
+
+
+def _outreach_destination_url(
+    *,
+    channel: Any,
+    provider: Any,
+    target: Any,
+    destination_url: Any = None,
+    metadata: Any = None,
+) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    explicit = (
+        destination_url
+        or metadata.get("destination_url")
+        or metadata.get("intended_destination_url")
+        or metadata.get("publish_url")
+        or metadata.get("submit_url")
+    )
+    explicit_url = _normalize_destination_url(explicit)
+    if explicit_url:
+        return explicit_url
+
+    channel_slug = _file_slug(str(channel or ""), "")
+    provider_slug = _file_slug(str(provider or ""), "")
+    target_text = str(target or "").strip()
+    target_url = _normalize_destination_url(target_text)
+    if channel_slug in {"show_hn", "hacker_news"} or provider_slug in {"hacker_news", "news_ycombinator"}:
+        return "https://news.ycombinator.com/submit"
+    if channel_slug == "reddit" or provider_slug == "reddit":
+        match = re.match(r"^/?r/([A-Za-z0-9_][A-Za-z0-9_]{1,20})/?$", target_text)
+        if match:
+            return f"https://www.reddit.com/r/{match.group(1)}/submit/"
+        return target_url
+    return target_url
+
+
+def _outreach_artifact_markdown(
+    subject: str,
+    body: str,
+    *,
+    destination_url: str = "",
+    destination_label: str = "",
+) -> str:
     title = subject.strip() or "Outreach"
     cleaned_body = _normalize_outreach_body(body)
     lines = cleaned_body.splitlines()
@@ -179,6 +234,11 @@ def _outreach_artifact_markdown(subject: str, body: str) -> str:
         while lines and not lines[0].strip():
             lines = lines[1:]
         cleaned_body = "\n".join(lines).strip()
+    destination = destination_label.strip()
+    if destination_url:
+        destination = f"{destination} — {destination_url}" if destination else destination_url
+    if destination:
+        return f"# {title}\n\nDestination: {destination}\n\n{cleaned_body}\n"
     return f"# {title}\n\n{cleaned_body}\n"
 
 
@@ -3783,13 +3843,29 @@ class TakyonStore:
             target = str(op.get("target") or op.get("recipient") or "local-target").strip() or "local-target"
             subject = str(op.get("subject") or op.get("title") or f"Test outreach to {target}").strip()
             provider = str(op.get("provider") or channel).strip()
-            metadata = op.get("metadata") or {}
+            metadata = op.get("metadata") if isinstance(op.get("metadata"), dict) else {}
+            destination_url = _outreach_destination_url(
+                channel=channel,
+                provider=provider,
+                target=target,
+                destination_url=op.get("destination_url"),
+                metadata=metadata,
+            )
+            destination_label = str(op.get("destination_label") or metadata.get("destination_label") or "").strip()
             publish_id = str(op.get("id") or uuid.uuid4().hex)
             created_at = _now()
             file_stem = f"{created_at[:10]}-{_file_slug(target, 'target')}-{publish_id[:8]}"
             rel = f"outreach/local-published/{channel}/{file_stem}.md"
             receipt_rel = f"receipts/outreach/{publish_id}.json"
-            _atomic_write_text(self._business_root(slug) / rel, _outreach_artifact_markdown(subject, body))
+            _atomic_write_text(
+                self._business_root(slug) / rel,
+                _outreach_artifact_markdown(
+                    subject,
+                    body,
+                    destination_url=destination_url,
+                    destination_label=destination_label,
+                ),
+            )
             receipt = {
                 "id": publish_id,
                 "business": slug,
@@ -3804,6 +3880,10 @@ class TakyonStore:
                 "created_at": created_at,
                 "metadata": metadata,
             }
+            if destination_url:
+                receipt["destination_url"] = destination_url
+            if destination_label:
+                receipt["destination_label"] = destination_label
             _atomic_write_text(self._business_root(slug) / receipt_rel, _json_dumps(receipt) + "\n")
 
             source = _file_slug(f"test-{channel}", "test-outreach")
@@ -3842,7 +3922,7 @@ class TakyonStore:
                 corpus = self._append_conversation_message_corpus(slug, thread, row)
             self._append_conversation_event_corpus(slug, action, {"receipt": receipt_rel, "thread": thread["id"], "message": row["id"]})
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=receipt)
-            return {
+            result = {
                 "action": action,
                 "business": slug,
                 "mode": "test",
@@ -3856,6 +3936,11 @@ class TakyonStore:
                 "external_side_effects": "suppressed",
                 "sent": False,
             }
+            if destination_url:
+                result["destination_url"] = destination_url
+            if destination_label:
+                result["destination_label"] = destination_label
+            return result
 
         if action == "conversation.thread.upsert":
             source = _file_slug(str(op.get("source") or "unknown"), "unknown")
@@ -5252,6 +5337,8 @@ def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
         "recipient": args.get("recipient"),
         "subject": args.get("subject") or args.get("title"),
         "body": args.get("body"),
+        "destination_url": args.get("destination_url") or args.get("intended_destination_url"),
+        "destination_label": args.get("destination_label"),
         "thread_external_id": args.get("thread_external_id"),
         "metadata": args.get("metadata") or {},
     }
@@ -5279,6 +5366,16 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
 
         channel = str(args.get("channel") or args.get("provider") or "outreach").strip()
         provider = str(args.get("provider") or channel).strip()
+        target = args.get("target") or args.get("recipient")
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        destination_url = _outreach_destination_url(
+            channel=channel,
+            provider=provider,
+            target=target,
+            destination_url=args.get("destination_url") or args.get("intended_destination_url"),
+            metadata=metadata,
+        )
+        destination_label = str(args.get("destination_label") or metadata.get("destination_label") or "").strip()
         requires_api = [
             str(item).strip()
             for item in _as_list(args.get("requires_api"))
@@ -5297,12 +5394,14 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
         payload = {
             "channel": channel,
             "provider": provider,
-            "target": args.get("target") or args.get("recipient"),
+            "target": target,
             "recipient": args.get("recipient"),
             "subject": args.get("subject") or args.get("title"),
             "body": body,
+            "destination_url": destination_url,
+            "destination_label": destination_label,
             "thread_external_id": args.get("thread_external_id"),
-            "metadata": args.get("metadata") or {},
+            "metadata": metadata,
             "requested_external_side_effect": "publish_outreach",
         }
         operation = {
@@ -6636,7 +6735,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_publish_outreach",
             "Publish outreach using the business mode bright line.",
-            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },
@@ -6647,7 +6746,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_publish_test_outreach",
             "Publish test outreach locally without sending.",
-            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },

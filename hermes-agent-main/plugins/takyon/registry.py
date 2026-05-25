@@ -267,7 +267,7 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "outreach",
         "priority_bands": ["p2_growth", "p3_learning"],
         "effect": "mode_aware_side_effect",
-        "purpose": "Publish outreach through one intent: test mode writes local suppressed artifacts and conversation mirrors; live mode records a gated provider publish job.",
+        "purpose": "Publish outreach through one intent with an exact intended destination: test mode writes local suppressed artifacts and conversation mirrors; live mode records a gated provider publish job.",
     },
     {
         "name": "business_publish_test_outreach",

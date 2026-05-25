@@ -1250,6 +1250,51 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     assert receipt_payload["artifact_path"] == publish["artifact"]
 
 
+def test_business_publish_outreach_records_intended_destination(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:domainpulse",
+        [
+            {
+                "action": "business.upsert",
+                "business": "domainpulse",
+                "name": "DomainPulse",
+                "mode": "test",
+            }
+        ],
+        "init-domainpulse",
+    )
+
+    result = json.loads(
+        handle_business_publish_outreach(
+            {
+                "business": "domainpulse",
+                "channel": "show_hn",
+                "provider": "hacker_news",
+                "target": "news.ycombinator.com",
+                "subject": "Show HN: DomainPulse",
+                "body": "I built this to compare registrar renewal prices.",
+                "idempotency_key": "domainpulse-show-hn-local-publish",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    assert publish["destination_url"] == "https://news.ycombinator.com/submit"
+    artifact = tmp_path / "businesses" / "domainpulse" / publish["artifact"]
+    receipt = tmp_path / "businesses" / "domainpulse" / publish["receipt"]
+    artifact_text = artifact.read_text(encoding="utf-8")
+    assert "Destination: https://news.ycombinator.com/submit" in artifact_text
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["target"] == "news.ycombinator.com"
+    assert receipt_payload["destination_url"] == "https://news.ycombinator.com/submit"
+    assert receipt_payload["external_side_effects"] == "suppressed"
+    assert receipt_payload["sent"] is False
+
+
 def test_business_publish_outreach_live_requires_provider_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.delenv("META_ACCESS_TOKEN", raising=False)
