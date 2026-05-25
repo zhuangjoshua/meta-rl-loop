@@ -4959,6 +4959,7 @@ _TAKYON_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TAKYON_MEDIA_SUFFIXES = _TAKYON_VIDEO_SUFFIXES | _TAKYON_IMAGE_SUFFIXES
 _TAKYON_MAX_MEDIA_BYTES = 64 * 1024 * 1024
+_TAKYON_MAX_FILE_READ_BYTES = 512 * 1024
 _TAKYON_MAX_SITE_PREVIEW_BYTES = 8 * 1024 * 1024
 
 
@@ -5216,6 +5217,42 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {**data, **_takyon_scope_payload(session)})
     except Exception as e:
         return _err(rid, 5045, str(e))
+
+
+@method("takyon.file.read")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = str(session.get("takyon_current_business") or "").strip()
+    if not business:
+        return _err(rid, 4004, "business scope required")
+    path = str(params.get("path") or "").strip()
+    if not path:
+        return _err(rid, 4004, "path required")
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        store = TakyonStore()
+        file_path = store._resolve_business_file(business, path)
+        if not file_path.exists() or not file_path.is_file():
+            return _err(rid, 4044, f"file not found: {path}")
+        size = file_path.stat().st_size
+        with file_path.open("rb") as fh:
+            raw = fh.read(min(size, _TAKYON_MAX_FILE_READ_BYTES))
+        rel = str(file_path.relative_to(store._business_root(business)))
+        return _ok(
+            rid,
+            {
+                "path": rel,
+                "size": size,
+                "content": raw.decode("utf-8", errors="replace"),
+                "truncated": size > _TAKYON_MAX_FILE_READ_BYTES,
+                **_takyon_scope_payload(session),
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5049, str(e))
 
 
 @method("takyon.file.media")

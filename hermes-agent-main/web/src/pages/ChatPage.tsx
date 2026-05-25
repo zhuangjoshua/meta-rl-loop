@@ -248,6 +248,13 @@ interface BusinessMediaResponse extends ScopeState {
   url?: string;
 }
 
+interface BusinessFileReadResponse extends ScopeState {
+  path?: string;
+  size?: number;
+  content?: string;
+  truncated?: boolean;
+}
+
 interface BusinessSitePreviewResponse extends ScopeState {
   path?: string;
   size?: number;
@@ -281,6 +288,26 @@ type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
 type CompanyView = "floor" | "files" | "dev";
 type FloorRoomId = "product" | "outputs" | "outreach" | "creative" | "signal" | "watch";
 
+interface FloorRoomAccent {
+  border: string;
+  dot: string;
+  glow: string;
+  line: string;
+  pill: string;
+  text: string;
+}
+
+interface FloorArtifactViewerState {
+  content?: string;
+  detail?: string;
+  error?: string;
+  loading?: boolean;
+  media?: BusinessMediaResponse;
+  path: string;
+  title: string;
+  truncated?: boolean;
+}
+
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
@@ -297,7 +324,7 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "company-floor-stage-2026-05-24";
+const CHAT_UI_REVISION = "company-floor-artifact-viewer-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
   { id: "next", label: "Next" },
@@ -310,6 +337,56 @@ const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+const FLOOR_ROOM_ACCENTS: Record<FloorRoomId, FloorRoomAccent> = {
+  product: {
+    border: "border-cyan-300/30",
+    dot: "bg-cyan-300",
+    glow: "shadow-[0_0_0_1px_rgba(103,232,249,0.12)]",
+    line: "bg-cyan-300/60",
+    pill: "border-cyan-300/25 bg-cyan-300/10 text-cyan-100",
+    text: "text-cyan-200",
+  },
+  outputs: {
+    border: "border-amber-300/30",
+    dot: "bg-amber-300",
+    glow: "shadow-[0_0_0_1px_rgba(252,211,77,0.12)]",
+    line: "bg-amber-300/60",
+    pill: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+    text: "text-amber-200",
+  },
+  outreach: {
+    border: "border-sky-300/30",
+    dot: "bg-sky-300",
+    glow: "shadow-[0_0_0_1px_rgba(125,211,252,0.12)]",
+    line: "bg-sky-300/60",
+    pill: "border-sky-300/25 bg-sky-300/10 text-sky-100",
+    text: "text-sky-200",
+  },
+  creative: {
+    border: "border-fuchsia-300/30",
+    dot: "bg-fuchsia-300",
+    glow: "shadow-[0_0_0_1px_rgba(240,171,252,0.12)]",
+    line: "bg-fuchsia-300/60",
+    pill: "border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100",
+    text: "text-fuchsia-200",
+  },
+  signal: {
+    border: "border-violet-300/30",
+    dot: "bg-violet-300",
+    glow: "shadow-[0_0_0_1px_rgba(196,181,253,0.12)]",
+    line: "bg-violet-300/60",
+    pill: "border-violet-300/25 bg-violet-300/10 text-violet-100",
+    text: "text-violet-200",
+  },
+  watch: {
+    border: "border-emerald-300/30",
+    dot: "bg-emerald-300",
+    glow: "shadow-[0_0_0_1px_rgba(110,231,183,0.12)]",
+    line: "bg-emerald-300/60",
+    pill: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+    text: "text-emerald-200",
+  },
+};
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -1260,6 +1337,20 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
+  const readBusinessFile = useCallback(
+    async (path: string): Promise<BusinessFileReadResponse> => {
+      if (!sessionId) throw new Error("Chat is still connecting.");
+      const res = await gw.request<BusinessFileReadResponse>(
+        "takyon.file.read",
+        { session_id: sessionId, path },
+        20_000,
+      );
+      setScopeState(normalizeScopeState(res));
+      return res;
+    },
+    [gw, sessionId],
+  );
+
   const resolveBusinessSitePreview = useCallback(
     async (path?: string): Promise<BusinessSitePreviewResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
@@ -1446,6 +1537,7 @@ export default function ChatPage() {
               historicalOutputs={scopedHistoricalOutputs}
               onCommand={runTakyonLine}
               onListFiles={listBusinessFiles}
+              onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
               scope={scopeState}
@@ -1849,6 +1941,7 @@ function CompanyWorkspace({
   historicalOutputs,
   onCommand,
   onListFiles,
+  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   scope,
@@ -1861,6 +1954,7 @@ function CompanyWorkspace({
   historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   scope: ScopeState;
@@ -1897,6 +1991,7 @@ function CompanyWorkspace({
         {view === "floor" && (
           <CompanyFloor
             onCommand={onCommand}
+            onReadFile={onReadFile}
             onResolveMedia={onResolveMedia}
             onResolveSitePreview={onResolveSitePreview}
             outputs={outputs}
@@ -1909,6 +2004,7 @@ function CompanyWorkspace({
             <FilesPanel
               onCommand={onCommand}
               onListFiles={onListFiles}
+              onReadFile={onReadFile}
               onResolveMedia={onResolveMedia}
               scope={scope}
             />
@@ -1957,6 +2053,7 @@ function CompanyViewButton({
 
 function CompanyFloor({
   onCommand,
+  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   outputs,
@@ -1964,6 +2061,7 @@ function CompanyFloor({
   statusItems,
 }: {
   onCommand: (line: string) => void;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   outputs: Deliverable[];
@@ -2003,12 +2101,65 @@ function CompanyFloor({
             ? "signal"
             : "watch";
   const [selectedRoom, setSelectedRoom] = useState<FloorRoomId>(defaultRoom);
+  const [viewer, setViewer] = useState<FloorArtifactViewerState | null>(null);
 
   useEffect(() => {
     setSelectedRoom(defaultRoom);
+    setViewer(null);
   }, [defaultRoom, scope.business]);
 
+  const openArtifact = useCallback(
+    (
+      item: { detail?: string; path?: string; title?: string },
+      roomId: FloorRoomId = "outputs",
+    ) => {
+      const path = (item.path || "").trim();
+      if (!path) return;
+      const title = item.title || path.split("/").pop() || path;
+      setSelectedRoom(roomId);
+      setViewer({ detail: item.detail, loading: true, path, title });
+      if (mediaKindForPath(path)) {
+        void onResolveMedia(path)
+          .then((media) => {
+            setViewer({ detail: item.detail, loading: false, media, path: media.path || path, title });
+          })
+          .catch((err) => {
+            setViewer({
+              detail: item.detail,
+              error: err instanceof Error ? err.message : String(err),
+              loading: false,
+              path,
+              title,
+            });
+          });
+        return;
+      }
+      void onReadFile(path)
+        .then((res) => {
+          setViewer({
+            content: res.content || "",
+            detail: item.detail,
+            loading: false,
+            path: res.path || path,
+            title,
+            truncated: Boolean(res.truncated),
+          });
+        })
+        .catch((err) => {
+          setViewer({
+            detail: item.detail,
+            error: err instanceof Error ? err.message : String(err),
+            loading: false,
+            path,
+            title,
+          });
+        });
+    },
+    [onReadFile, onResolveMedia],
+  );
+
   const rooms: Array<{
+    accent: FloorRoomAccent;
     id: FloorRoomId;
     camera: string;
     detail: string;
@@ -2017,6 +2168,7 @@ function CompanyFloor({
     body: ReactNode;
   }> = [
     {
+      accent: FLOOR_ROOM_ACCENTS.product,
       id: "product",
       camera: "CAM 01",
       title: "Product Room",
@@ -2049,7 +2201,10 @@ function CompanyFloor({
               </PanelActionButton>
               <PanelActionButton
                 icon={<FileText className="h-3.5 w-3.5" />}
-                onClick={() => onCommand("/read app/surface.md")}
+                onClick={() => openArtifact(
+                  { detail: "App surface contract", path: "app/surface.md", title: "surface.md" },
+                  "product",
+                )}
               >
                 Surface
               </PanelActionButton>
@@ -2079,6 +2234,7 @@ function CompanyFloor({
       ),
     },
     {
+      accent: FLOOR_ROOM_ACCENTS.outputs,
       id: "outputs",
       camera: "CAM 02",
       title: "Objects On The Table",
@@ -2100,7 +2256,7 @@ function CompanyFloor({
             <div className="mt-6">
               <ObservationOutput
                 item={latestOutput}
-                onCommand={onCommand}
+                onOpen={(item) => openArtifact(item, "outputs")}
                 onResolveMedia={onResolveMedia}
               />
             </div>
@@ -2110,7 +2266,7 @@ function CompanyFloor({
               <ObservationOutput
                 item={item}
                 key={item.id}
-                onCommand={onCommand}
+                onOpen={(item) => openArtifact(item, "outputs")}
                 onResolveMedia={onResolveMedia}
               />
             ))}
@@ -2121,6 +2277,7 @@ function CompanyFloor({
       ),
     },
     {
+      accent: FLOOR_ROOM_ACCENTS.outreach,
       id: "outreach",
       camera: "CAM 03",
       title: "Outreach Desk",
@@ -2151,14 +2308,20 @@ function CompanyFloor({
             <div className="flex flex-wrap gap-2">
               <PanelActionButton
                 icon={<FileText className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/read ${outreach.path}`)}
+                onClick={() => openArtifact(
+                  { detail: "Local outreach artifact", path: outreach.path, title: outreach.path?.split("/").pop() || "Local post" },
+                  "outreach",
+                )}
               >
                 Latest local post
               </PanelActionButton>
               {outreach.receipt && (
                 <PanelActionButton
                   icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                  onClick={() => onCommand(`/read ${outreach.receipt}`)}
+                  onClick={() => openArtifact(
+                    { detail: "Outreach receipt", path: outreach.receipt, title: outreach.receipt?.split("/").pop() || "Receipt" },
+                    "outreach",
+                  )}
                 >
                   Receipt
                 </PanelActionButton>
@@ -2169,6 +2332,7 @@ function CompanyFloor({
       ),
     },
     {
+      accent: FLOOR_ROOM_ACCENTS.creative,
       id: "creative",
       camera: "CAM 04",
       title: "Creative Bench",
@@ -2196,7 +2360,10 @@ function CompanyFloor({
               {creativeAssets.receipt && (
                 <PanelActionButton
                   icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                  onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
+                  onClick={() => openArtifact(
+                    { detail: "Creative asset receipt", path: creativeAssets.receipt, title: creativeAssets.receipt?.split("/").pop() || "Receipt" },
+                    "creative",
+                  )}
                 >
                   Receipt
                 </PanelActionButton>
@@ -2221,6 +2388,7 @@ function CompanyFloor({
       ),
     },
     {
+      accent: FLOOR_ROOM_ACCENTS.signal,
       id: "signal",
       camera: "CAM 05",
       title: "CEO Signal",
@@ -2242,6 +2410,7 @@ function CompanyFloor({
       ),
     },
     {
+      accent: FLOOR_ROOM_ACCENTS.watch,
       id: "watch",
       camera: "CAM 06",
       title: "Night Watch",
@@ -2274,9 +2443,13 @@ function CompanyFloor({
 
   return (
     <div className="flex min-h-full flex-col gap-3 p-4">
-      <section className="relative min-h-[430px] overflow-hidden rounded-2xl border border-zinc-900 bg-zinc-950/70 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]">
+      <section className={cn(
+        "relative min-h-[430px] overflow-hidden rounded-2xl border bg-zinc-950/70 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]",
+        selected.accent.border,
+        selected.accent.glow,
+      )}>
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.028)_1px,transparent_1px)] bg-[length:100%_8px] opacity-50" />
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse bg-emerald-300/30" />
+        <div className={cn("pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse", selected.accent.line)} />
         <div className="relative flex min-h-[430px] flex-col p-4 sm:p-5">
           <div className="mb-4 flex items-start justify-between gap-4">
             <div className="min-w-0">
@@ -2289,12 +2462,22 @@ function CompanyFloor({
                 {selected.title}
               </h2>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/5 px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-emerald-300/80">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />
+            <div className={cn("flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.16em]", selected.accent.pill)}>
+              <span className={cn("h-1.5 w-1.5 animate-pulse rounded-full", selected.accent.dot)} />
               live
             </div>
           </div>
-          <div className="min-h-0 flex-1">{selected.body}</div>
+          <div className="min-h-0 flex-1">
+            {viewer ? (
+              <FloorArtifactViewer
+                accent={selected.accent}
+                onClose={() => setViewer(null)}
+                viewer={viewer}
+              />
+            ) : (
+              selected.body
+            )}
+          </div>
         </div>
       </section>
 
@@ -2305,8 +2488,12 @@ function CompanyFloor({
               active={room.id === selectedRoom}
               camera={room.camera}
               detail={room.detail}
+              accent={room.accent}
               key={room.id}
-              onClick={() => setSelectedRoom(room.id)}
+              onClick={() => {
+                setViewer(null);
+                setSelectedRoom(room.id);
+              }}
               status={room.status}
               title={room.title}
             />
@@ -2319,6 +2506,7 @@ function CompanyFloor({
 
 function CameraStripButton({
   active,
+  accent,
   camera,
   detail,
   onClick,
@@ -2326,6 +2514,7 @@ function CameraStripButton({
   title,
 }: {
   active: boolean;
+  accent: FloorRoomAccent;
   camera: string;
   detail: string;
   onClick: () => void;
@@ -2337,14 +2526,14 @@ function CameraStripButton({
       className={cn(
         "relative min-h-32 overflow-hidden rounded-xl border p-3 text-left transition-colors",
         active
-          ? "border-emerald-300/30 bg-zinc-900 text-zinc-100"
+          ? cn(accent.border, accent.glow, "bg-zinc-900 text-zinc-100")
           : "border-zinc-900 bg-zinc-950/70 text-zinc-400 hover:border-zinc-800 hover:bg-zinc-900/80 hover:text-zinc-100",
       )}
       onClick={onClick}
       type="button"
     >
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.025)_1px,transparent_1px)] bg-[length:100%_7px] opacity-40" />
-      {active && <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-emerald-300/60" />}
+      {active && <div className={cn("pointer-events-none absolute inset-x-0 top-0 h-px", accent.line)} />}
       <div className="relative mb-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-zinc-600">
@@ -2354,8 +2543,8 @@ function CameraStripButton({
             {title}
           </div>
         </div>
-        <div className="flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-emerald-300/80">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />
+        <div className={cn("flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.16em]", accent.text)}>
+          <span className={cn("h-1.5 w-1.5 animate-pulse rounded-full", accent.dot)} />
           rec
         </div>
       </div>
@@ -2366,6 +2555,59 @@ function CameraStripButton({
         </div>
       </div>
     </button>
+  );
+}
+
+function FloorArtifactViewer({
+  accent,
+  onClose,
+  viewer,
+}: {
+  accent: FloorRoomAccent;
+  onClose: () => void;
+  viewer: FloorArtifactViewerState;
+}) {
+  const isMarkdown = viewer.path.toLowerCase().endsWith(".md");
+  return (
+    <div className="flex min-h-[320px] flex-col overflow-hidden rounded-2xl border border-zinc-900 bg-black/60">
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-900 px-4 py-3">
+        <div className="min-w-0">
+          <div className={cn("text-xs uppercase tracking-[0.16em]", accent.text)}>Now showing</div>
+          <div className="mt-1 truncate text-2xl font-semibold text-zinc-100">{viewer.title}</div>
+          <div className="mt-0.5 truncate font-mono text-xs text-zinc-600">{viewer.path}</div>
+        </div>
+        <IconButton label="Close artifact" onClick={onClose}>
+          <X className="h-4 w-4" />
+        </IconButton>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        {viewer.loading ? (
+          <ObservationEmpty text="Opening business artifact..." />
+        ) : viewer.error ? (
+          <ObservationEmpty text={viewer.error} />
+        ) : viewer.media?.url ? (
+          <div className="max-w-4xl">
+            <MediaPreview media={viewer.media} title={viewer.title} />
+          </div>
+        ) : isMarkdown ? (
+          <div className="max-w-4xl rounded-xl border border-zinc-900 bg-zinc-950/80 p-4 [&_.text-foreground]:text-zinc-200 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-zinc-900 [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
+            <Markdown content={viewer.content || ""} />
+          </div>
+        ) : (
+          <pre className="max-h-[min(62vh,680px)] overflow-auto whitespace-pre-wrap rounded-xl border border-zinc-900 bg-zinc-950/80 p-4 font-mono text-xs leading-5 text-zinc-300">
+            {viewer.content || ""}
+          </pre>
+        )}
+        {viewer.truncated && (
+          <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100">
+            Preview truncated. Open the file browser for the full source path.
+          </div>
+        )}
+        {viewer.detail && (
+          <div className="mt-3 text-xs leading-5 text-zinc-600">{viewer.detail}</div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2450,11 +2692,11 @@ function ObservationEmpty({ text }: { text: string }) {
 
 function ObservationOutput({
   item,
-  onCommand,
+  onOpen,
   onResolveMedia,
 }: {
   item: Deliverable;
-  onCommand: (line: string) => void;
+  onOpen?: (item: Deliverable) => void;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
 }) {
   const mediaKind = mediaKindForPath(item.path) || (item.kind === "image" || item.kind === "video" ? item.kind : undefined);
@@ -2467,14 +2709,21 @@ function ObservationOutput({
         </div>
       </div>
       <div className="shrink-0">
-        {mediaKind && item.path ? (
+        {item.path && onOpen ? (
+          <PanelActionButton
+            icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />}
+            onClick={() => onOpen(item)}
+          >
+            Open
+          </PanelActionButton>
+        ) : mediaKind && item.path ? (
           <MediaQuickViewButton onResolveMedia={onResolveMedia} path={item.path} />
         ) : item.path ? (
           <PanelActionButton
             icon={<FileText className="h-3.5 w-3.5" />}
-            onClick={() => onCommand(`/read ${item.path}`)}
+            onClick={() => window.navigator.clipboard?.writeText(item.path || "")}
           >
-            Open
+            Copy path
           </PanelActionButton>
         ) : null}
       </div>
@@ -2970,16 +3219,19 @@ function BusinessFileBrowser({
   initialFiles,
   onCommand,
   onListFiles,
+  onReadFile,
   onResolveMedia,
 }: {
   initialFiles: BusinessOverviewFile[];
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onReadFile?: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
 }) {
   const [path, setPath] = useState(".");
   const [files, setFiles] = useState(initialFiles);
   const [preview, setPreview] = useState<BusinessMediaResponse | null>(null);
+  const [textPreview, setTextPreview] = useState<BusinessFileReadResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -2992,6 +3244,7 @@ function BusinessFileBrowser({
         setPath(nextPath || ".");
         setFiles(nextFiles);
         setPreview(null);
+        setTextPreview(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -3043,9 +3296,20 @@ function BusinessFileBrowser({
                     return;
                   }
                   if (mediaKind) {
+                    setTextPreview(null);
                     void onResolveMedia(itemPath).then(setPreview).catch((err) => {
                       setError(err instanceof Error ? err.message : String(err));
                     });
+                    return;
+                  }
+                  if (onReadFile) {
+                    setLoading(true);
+                    setError("");
+                    setPreview(null);
+                    void onReadFile(itemPath)
+                      .then(setTextPreview)
+                      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                      .finally(() => setLoading(false));
                     return;
                   }
                   onCommand(`/read ${itemPath}`);
@@ -3073,6 +3337,26 @@ function BusinessFileBrowser({
       )}
       {preview?.url && preview.path && (
         <MediaPreview media={preview} title={preview.path.split("/").pop() || preview.path} />
+      )}
+      {textPreview?.path && (
+        <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-2">
+            <div className="min-w-0">
+              <div className="truncate text-xs font-medium text-zinc-100">
+                {textPreview.path.split("/").pop() || textPreview.path}
+              </div>
+              <div className="truncate font-mono text-[0.65rem] text-zinc-600">{textPreview.path}</div>
+            </div>
+            {textPreview.truncated && (
+              <span className="shrink-0 rounded-full bg-amber-300/10 px-2 py-0.5 text-[0.65rem] text-amber-100">
+                truncated
+              </span>
+            )}
+          </div>
+          <pre className="max-h-72 overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.72rem] leading-5 text-zinc-300">
+            {textPreview.content || ""}
+          </pre>
+        </div>
       )}
     </div>
   );
@@ -3568,11 +3852,13 @@ function PostItem({
 function FilesPanel({
   onCommand,
   onListFiles,
+  onReadFile,
   onResolveMedia,
   scope,
 }: {
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onReadFile?: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   scope: ScopeState;
 }) {
@@ -3595,6 +3881,7 @@ function FilesPanel({
           initialFiles={scope.overview?.files || []}
           onCommand={onCommand}
           onListFiles={onListFiles}
+          onReadFile={onReadFile}
           onResolveMedia={onResolveMedia}
         />
       </div>
