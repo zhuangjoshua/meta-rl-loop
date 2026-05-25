@@ -284,6 +284,7 @@ def test_app_plan_normalizes_interval_and_records_validation_warnings(tmp_path):
 
 def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
     _commit(
         store,
@@ -319,6 +320,9 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert verification["verification"]["status"] == "passed"
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert (tmp_path / "published-sites" / "latexflow" / "index.html").exists()
     assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
     assert app["surface_contract"]["routes"] == ["/"]
 
@@ -350,6 +354,42 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     assert verification["success"] is True
     assert verification["verification"]["status"] == "failed"
     assert "duplicate workspace prefix" in verification["verification"]["error"]
+
+
+def test_product_verification_records_publish_blocker_when_hosting_root_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", "")
+    monkeypatch.setenv("PUBLIC_COMPANY_SITE_ROOT", "")
+    monkeypatch.setenv("TAKYON_STATIC_SITE_ROOT", "")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-static-site-no-host-root",
+            }
+        )
+    )
+
+    assert verification["success"] is True
+    assert verification["verification"]["status"] == "passed"
+    assert verification["verification"]["done_gate_status"] == "blocked"
+    assert "TAKYON_PRODUCT_SITE_ROOT" in verification["verification"]["blocker"]
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "publish_blocked"
+    assert app["surface_contract"]["publish_status"] == "blocked"
 
 
 def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, monkeypatch):

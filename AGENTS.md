@@ -64,6 +64,14 @@ When changing CEO/runtime behavior, edit the active skills under `hermes-agent-m
 - `takyon:app-runtime` and the canonical app tools own product customer auth, magic links, sessions, app customers/subusers, entitlements, plan policy, checkout, Stripe webhook reconciliation, revenue, and usage budgets.
 - `takyon:business-pulse`, `takyon:outreach`, `takyon:conversation-response`, `takyon:distribution-campaign`, `takyon:ad-creative`, `takyon:market-research`, `takyon:pricing-strategy`, `takyon:conversion-review`, `takyon:business-learning`, and `takyon:failure-recovery` own their respective business methods.
 
+When the operator asks to add a normal new Takyon feature or skill, always use the parsimonious addition path:
+
+1. Add `hermes-agent-main/plugins/takyon/skills/<new-feature>/SKILL.md`.
+2. Add one `TAKYON_SKILL_REGISTRY` entry in `hermes-agent-main/plugins/takyon/registry.py` so the CEO can discover what the skill does, when to use it, its category, and its priority bands.
+3. Add or modify a `business_*` tool only if the feature needs a new canonical state change, guarded side effect, provider call, receipt, budget gate, or durable runtime rail.
+4. Add a harness command only if the operator needs `/new-feature` as a shell affordance; do not create slash commands for ordinary CEO-choosable business methods.
+5. Do not edit the CEO prompt unless the CEO's general policy, routing rule, or safety contract changes.
+
 External side-effect semantics belong in guarded business tools and the relevant skills. Do not duplicate them in `AGENTS.md`, shell prose, or one-off prompts.
 
 Archived `polsia3` reference files may mention fixed workflow IDs or old workflow catalogs. Treat those as historical source material only. Do not copy that architecture back into the active Takyon/Hermes system.

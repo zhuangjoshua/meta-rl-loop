@@ -71,6 +71,9 @@ _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
+_DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_verify"
+_DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
+_DEFAULT_PRODUCT_DONE_GATE = "business_verify_product_surface:verified_and_published_or_exact_blocker"
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -1103,6 +1106,113 @@ def _business_domain_candidates(slug: str, *, base_domain: Any = None, explicit:
     return candidates
 
 
+def _product_publish_target(slug: str, explicit: Any = None) -> str:
+    raw = str(explicit or "").strip()
+    if not raw:
+        return f"https://{_business_domain_candidates(slug)[0]}/"
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise TakyonError(f"publish_target must be an http(s) URL or domain: {explicit!r}")
+    host = _normalize_domain_name(parsed.netloc, field="publish_target")
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return urllib.parse.urlunparse((parsed.scheme, host, path, "", "", ""))
+
+
+def _product_publish_root() -> Path | None:
+    load_takyon_env()
+    raw = (
+        os.getenv("TAKYON_PRODUCT_SITE_ROOT", "").strip()
+        or os.getenv("PUBLIC_COMPANY_SITE_ROOT", "").strip()
+        or os.getenv("TAKYON_STATIC_SITE_ROOT", "").strip()
+    )
+    return Path(raw).expanduser().resolve() if raw else None
+
+
+def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
+    candidates = [
+        ("source", source_root),
+        ("dist", source_root / "dist"),
+        ("out", source_root / "out"),
+        ("build", source_root / "build"),
+        ("public", source_root / "public"),
+    ]
+    for label, candidate in candidates:
+        if candidate.is_dir() and (candidate / "index.html").is_file():
+            return candidate.resolve(), label
+    return None, ""
+
+
+def _publish_product_surface_path(
+    *,
+    business_root: Path,
+    slug: str,
+    source_path: str,
+    publish_target: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "blocked",
+        "publish_target": publish_target,
+        "public_url": "",
+        "published_at": "",
+        "publish_root": "",
+        "publish_source_path": "",
+        "blocker": "",
+    }
+    publish_root = _product_publish_root()
+    if publish_root is None:
+        result["blocker"] = (
+            "product surface verified, but no static hosting root is configured; "
+            "set TAKYON_PRODUCT_SITE_ROOT to the directory served for business subdomains"
+        )
+        return result
+
+    rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    source_root = (business_root / rel).resolve()
+    if business_root.resolve() not in (source_root, *source_root.parents):
+        result["blocker"] = "source path escaped business root"
+        return result
+    publish_source, publish_source_label = _product_static_publish_source(source_root)
+    if publish_source is None:
+        result["blocker"] = (
+            "product surface verified, but no static publish directory with index.html exists; "
+            "provide source/index.html, dist/index.html, out/index.html, or configure a deploy rail"
+        )
+        return result
+
+    target_dir = (publish_root / _slugify(slug)).resolve()
+    if publish_root not in (target_dir, *target_dir.parents):
+        result["blocker"] = "publish target escaped TAKYON_PRODUCT_SITE_ROOT"
+        return result
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {
+            name
+            for name in names
+            if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
+            or name.endswith(".pyc")
+        }
+
+    shutil.copytree(publish_source, target_dir, ignore=ignore)
+    result.update(
+        {
+            "status": "published",
+            "public_url": publish_target,
+            "published_at": _now(),
+            "publish_root": str(target_dir),
+            "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
+            "blocker": "",
+        }
+    )
+    return result
+
+
 def _status_rank(status: str) -> int:
     return {"active": 0, "trialing": 0, "past_due": 1, "cancelled": 2, "canceled": 2, "revoked": 3}.get(status, 9)
 
@@ -1198,6 +1308,7 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "app.customer.upsert",
         "app.entitlement.upsert",
         "app.plan.upsert",
+        "app.surface.publish_result",
         "app.surface.upsert",
         "app.usage.record",
     }
@@ -1395,6 +1506,15 @@ class TakyonStore:
               routes_json TEXT,
               theme_json TEXT,
               constraints_json TEXT,
+              publish_target TEXT,
+              publish_policy TEXT NOT NULL DEFAULT 'publish_after_verify',
+              mode_behavior TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface',
+              done_gate TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker',
+              public_url TEXT,
+              publish_status TEXT NOT NULL DEFAULT 'not_published',
+              published_at TEXT,
+              publish_receipt_path TEXT,
+              publish_blocker TEXT,
               notes TEXT,
               metadata_json TEXT,
               created_at TEXT NOT NULL,
@@ -1582,6 +1702,56 @@ class TakyonStore:
             conn.execute("CREATE INDEX businesses_mode_idx ON businesses(mode, updated_at DESC)")
         if "businesses_work_focus_idx" not in indexes:
             conn.execute("CREATE INDEX businesses_work_focus_idx ON businesses(work_focus, updated_at DESC)")
+        surface_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_surface_contracts)").fetchall()}
+        surface_additions = {
+            "publish_target": "TEXT",
+            "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_verify'",
+            "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
+            "done_gate": "TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker'",
+            "public_url": "TEXT",
+            "publish_status": "TEXT NOT NULL DEFAULT 'not_published'",
+            "published_at": "TEXT",
+            "publish_receipt_path": "TEXT",
+            "publish_blocker": "TEXT",
+        }
+        for column, ddl in surface_additions.items():
+            if column not in surface_columns:
+                conn.execute(f"ALTER TABLE app_surface_contracts ADD COLUMN {column} {ddl}")
+        for row in conn.execute("SELECT business_slug, publish_target FROM app_surface_contracts").fetchall():
+            slug = str(row["business_slug"] or "")
+            if slug and not str(row["publish_target"] or "").strip():
+                conn.execute(
+                    "UPDATE app_surface_contracts SET publish_target = ?, updated_at = COALESCE(updated_at, ?) WHERE business_slug = ?",
+                    (_product_publish_target(slug), _now(), slug),
+                )
+        needs_surface_defaults = conn.execute(
+            """
+            SELECT 1 FROM app_surface_contracts
+            WHERE
+              publish_policy IS NULL OR publish_policy = ''
+              OR mode_behavior IS NULL OR mode_behavior = ''
+              OR done_gate IS NULL OR done_gate = ''
+              OR publish_status IS NULL OR publish_status = ''
+            LIMIT 1
+            """
+        ).fetchone()
+        if needs_surface_defaults:
+            conn.execute(
+                """
+                UPDATE app_surface_contracts
+                SET
+                  publish_policy = COALESCE(NULLIF(publish_policy, ''), ?),
+                  mode_behavior = COALESCE(NULLIF(mode_behavior, ''), ?),
+                  done_gate = COALESCE(NULLIF(done_gate, ''), ?),
+                  publish_status = COALESCE(NULLIF(publish_status, ''), 'not_published')
+                WHERE
+                  publish_policy IS NULL OR publish_policy = ''
+                  OR mode_behavior IS NULL OR mode_behavior = ''
+                  OR done_gate IS NULL OR done_gate = ''
+                  OR publish_status IS NULL OR publish_status = ''
+                """,
+                (_DEFAULT_PRODUCT_PUBLISH_POLICY, _DEFAULT_PRODUCT_MODE_BEHAVIOR, _DEFAULT_PRODUCT_DONE_GATE),
+            )
 
     def _business_root(self, slug: str) -> Path:
         return self.root / "businesses" / _slugify(slug)
@@ -1840,6 +2010,15 @@ class TakyonStore:
                 "no_hardcoded_product_ui": True,
                 "backend_runtime_only": True,
             },
+            "publish_target": _product_publish_target(slug),
+            "publish_policy": _DEFAULT_PRODUCT_PUBLISH_POLICY,
+            "mode_behavior": _DEFAULT_PRODUCT_MODE_BEHAVIOR,
+            "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
+            "public_url": "",
+            "publish_status": "not_published",
+            "published_at": "",
+            "publish_receipt_path": "",
+            "publish_blocker": "",
             "notes": "No product surface contract has been recorded yet.",
             "metadata": {},
             "created_at": None,
@@ -1889,6 +2068,15 @@ class TakyonStore:
                 "latest_verification": latest,
             })
             return "unverified", {**metadata, "takyon_surface_validation": validation}
+        publish = latest.get("publish") if isinstance(latest.get("publish"), dict) else {}
+        if latest.get("done_gate_status") != "passed" or publish.get("status") != "published":
+            validation.update({
+                "status": "publish_blocked",
+                "reason": "no verified and published product.surface.verify receipt for source_path",
+                "source_path": source_path,
+                "latest_verification": latest,
+            })
+            return "publish_blocked", {**metadata, "takyon_surface_validation": validation}
         return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
 
     def _rewrite_app_files(self, conn: sqlite3.Connection, slug: str) -> None:
@@ -1947,6 +2135,15 @@ class TakyonStore:
             f"- Design brief path: {surface.get('design_brief_path') or 'product/design-brief.md'}",
             f"- Source path: {surface.get('source_path') or 'not set'}",
             f"- Runtime API base: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
+            f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
+            f"- Publish policy: {surface.get('publish_policy') or _DEFAULT_PRODUCT_PUBLISH_POLICY}",
+            f"- Mode behavior: {surface.get('mode_behavior') or _DEFAULT_PRODUCT_MODE_BEHAVIOR}",
+            f"- Done gate: {surface.get('done_gate') or _DEFAULT_PRODUCT_DONE_GATE}",
+            f"- Publish status: {surface.get('publish_status') or 'not_published'}",
+            f"- Public URL: {surface.get('public_url') or 'not published'}",
+            f"- Published at: {surface.get('published_at') or 'not published'}",
+            f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
+            f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             f"- Notes: {surface.get('notes') or 'not set'}",
             "",
             "## Routes",
@@ -2876,6 +3073,7 @@ class TakyonStore:
             "app.customer.upsert",
             "app.entitlement.upsert",
             "app.plan.upsert",
+            "app.surface.publish_result",
             "app.surface.upsert",
             "app.usage.record",
             "artifact.patch",
@@ -3072,6 +3270,10 @@ class TakyonStore:
                 "no_hardcoded_product_ui": True,
                 "backend_runtime_only": True,
             }
+            publish_target = _product_publish_target(slug, op.get("publish_target"))
+            publish_policy = str(op.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+            mode_behavior = str(op.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR).strip() or _DEFAULT_PRODUCT_MODE_BEHAVIOR
+            done_gate = str(op.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE).strip() or _DEFAULT_PRODUCT_DONE_GATE
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
@@ -3081,9 +3283,10 @@ class TakyonStore:
                 """
                 INSERT INTO app_surface_contracts (
                   business_slug, status, design_brief_path, source_path, runtime_api_base,
-                  routes_json, theme_json, constraints_json, notes, metadata_json, created_at, updated_at
+                  routes_json, theme_json, constraints_json, publish_target, publish_policy,
+                  mode_behavior, done_gate, notes, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_slug) DO UPDATE SET
                   status = excluded.status,
                   design_brief_path = excluded.design_brief_path,
@@ -3092,6 +3295,10 @@ class TakyonStore:
                   routes_json = excluded.routes_json,
                   theme_json = excluded.theme_json,
                   constraints_json = excluded.constraints_json,
+                  publish_target = excluded.publish_target,
+                  publish_policy = excluded.publish_policy,
+                  mode_behavior = excluded.mode_behavior,
+                  done_gate = excluded.done_gate,
                   notes = excluded.notes,
                   metadata_json = excluded.metadata_json,
                   updated_at = excluded.updated_at
@@ -3105,6 +3312,10 @@ class TakyonStore:
                     _json_dumps(routes),
                     _json_dumps(theme),
                     _json_dumps(constraints),
+                    publish_target,
+                    publish_policy,
+                    mode_behavior,
+                    done_gate,
                     str(op.get("notes") or ""),
                     _json_dumps(metadata),
                     now,
@@ -3112,8 +3323,68 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "metadata": metadata})
-            return {"action": action, "business": slug, "status": status, "surface_contract": "app/surface.md"}
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
+            return {"action": action, "business": slug, "status": status, "surface_contract": "app/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
+
+        if action == "app.surface.publish_result":
+            publish_status = str(op.get("publish_status") or op.get("status") or "").strip().lower()
+            if publish_status not in {"not_published", "published", "blocked"}:
+                raise TakyonError("publish_status must be one of: not_published, published, blocked")
+            public_url = str(op.get("public_url") or "").strip()
+            publish_target = _product_publish_target(slug, op.get("publish_target"))
+            published_at = str(op.get("published_at") or "").strip()
+            receipt_path = None
+            if op.get("receipt_path"):
+                receipt_path = _safe_relpath(str(op.get("receipt_path")), field="receipt_path").as_posix()
+            publish_source_path = None
+            if op.get("publish_source_path"):
+                publish_source_path = _safe_relpath(str(op.get("publish_source_path")), field="publish_source_path").as_posix()
+            blocker = str(op.get("blocker") or "")
+            existing = self._app_surface_contract(conn, slug)
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            metadata = {
+                **metadata,
+                "takyon_publish": {
+                    "status": publish_status,
+                    "public_url": public_url,
+                    "publish_target": publish_target,
+                    "published_at": published_at,
+                    "receipt_path": receipt_path,
+                    "publish_source_path": publish_source_path,
+                    "blocker": blocker,
+                },
+            }
+            conn.execute(
+                """
+                UPDATE app_surface_contracts
+                SET publish_target = ?, public_url = NULLIF(?, ''), publish_status = ?,
+                    published_at = NULLIF(?, ''), publish_receipt_path = ?, publish_blocker = NULLIF(?, ''),
+                    metadata_json = ?, updated_at = ?
+                WHERE business_slug = ?
+                """,
+                (
+                    publish_target,
+                    public_url,
+                    publish_status,
+                    published_at,
+                    receipt_path,
+                    blocker,
+                    _json_dumps(metadata),
+                    _now(),
+                    slug,
+                ),
+            )
+            self._rewrite_app_files(conn, slug)
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=metadata["takyon_publish"])
+            return {
+                "action": action,
+                "business": slug,
+                "publish_status": publish_status,
+                "public_url": public_url,
+                "publish_target": publish_target,
+                "receipt_path": receipt_path,
+                "blocker": blocker,
+            }
 
         if action == "app.plan.upsert":
             plan_key = _file_slug(str(op.get("plan_key") or "free"), "free")
@@ -4369,6 +4640,10 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "routes": args.get("routes") or [],
         "theme": args.get("theme") or {"source": "business design brief"},
         "constraints": args.get("constraints") or {},
+        "publish_target": args.get("publish_target"),
+        "publish_policy": args.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
+        "mode_behavior": args.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
+        "done_gate": args.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
         "notes": args.get("notes") or "",
         "metadata": args.get("metadata") or {},
     }
@@ -4384,13 +4659,15 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
+        summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
+        app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+        surface = app.get("surface") or app.get("surface_contract") or {}
+        if not isinstance(surface, dict):
+            surface = {}
         source_path = str(args.get("source_path") or "").strip()
-        surface: dict[str, Any] = {}
         if not source_path:
-            summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-            app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
-            surface = app.get("surface") or app.get("surface_contract") or {}
             source_path = str(surface.get("source_path") or "product/site")
+        publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
         install = bool(args.get("install", True))
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=180, minimum=15, maximum=900)
         verification = _verify_product_surface_path(
@@ -4399,9 +4676,35 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
             install=install,
             timeout_seconds=timeout_seconds,
         )
+        if verification.get("status") == "passed":
+            publish = _publish_product_surface_path(
+                business_root=store._business_root(business),
+                slug=business,
+                source_path=str(verification.get("source_path") or source_path),
+                publish_target=publish_target,
+            )
+        else:
+            publish = {
+                "status": "blocked",
+                "publish_target": publish_target,
+                "public_url": "",
+                "published_at": "",
+                "publish_root": "",
+                "publish_source_path": "",
+                "blocker": f"verification did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
+            }
         receipt_id = uuid.uuid4().hex
         receipt_path = f"receipts/product-surface/{receipt_id}.json"
-        verification = {**verification, "business": business, "receipt_path": receipt_path}
+        done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
+        verification = {
+            **verification,
+            "business": business,
+            "receipt_path": receipt_path,
+            "publish": publish,
+            "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
+            "done_gate_status": done_gate_status,
+            "blocker": "" if done_gate_status == "passed" else (publish.get("blocker") or verification.get("error") or "product surface is not published"),
+        }
         operations: list[dict[str, Any]] = [
             {
                 "action": "artifact.write",
@@ -4420,27 +4723,44 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                     "error": verification.get("error"),
                     "warnings": verification.get("warnings") or [],
                     "receipt_path": receipt_path,
+                    "publish": publish,
+                    "done_gate_status": done_gate_status,
+                    "blocker": verification.get("blocker") or "",
                 },
             },
         ]
         if bool(args.get("activate_on_success", True)) and verification.get("status") == "passed":
-            if not surface:
-                summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-                app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
-                surface = app.get("surface") or app.get("surface_contract") or {}
+            next_status = "active" if publish.get("status") == "published" else "publish_blocked"
             operations.append(
                 {
                     "action": "app.surface.upsert",
                     "business": business,
-                    "status": "active",
+                    "status": next_status,
                     "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
                     "source_path": verification.get("source_path"),
                     "runtime_api_base": surface.get("runtime_api_base"),
                     "routes": surface.get("routes") or [],
                     "theme": surface.get("theme") or {"source": "business design brief"},
                     "constraints": surface.get("constraints") or {},
+                    "publish_target": publish_target,
+                    "publish_policy": surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
+                    "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
+                    "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
                     "notes": surface.get("notes") or "",
                     "metadata": {**(surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}), "verification_receipt": receipt_path},
+                }
+            )
+            operations.append(
+                {
+                    "action": "app.surface.publish_result",
+                    "business": business,
+                    "publish_status": publish.get("status") or "blocked",
+                    "publish_target": publish_target,
+                    "public_url": publish.get("public_url") or "",
+                    "published_at": publish.get("published_at") or "",
+                    "receipt_path": receipt_path,
+                    "publish_source_path": publish.get("publish_source_path") or verification.get("source_path") or "",
+                    "blocker": publish.get("blocker") or "",
                 }
             )
         result = store.commit(
@@ -6191,7 +6511,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_app_surface_contract",
-        "description": "Record the business-owned product surface contract: design brief, source path, runtime API base, routes, theme source, and UI constraints.",
+        "description": "Record the business-owned product surface contract: source/design/routes plus publish target, policy, and done gate.",
         "handler": handle_business_upsert_app_surface_contract,
         "schema": _schema(
             "business_upsert_app_surface_contract",
@@ -6205,6 +6525,10 @@ TAKYON_TOOL_DEFINITIONS = [
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
+                "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify"},
+                "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
+                "done_gate": {"type": "string", "description": "Defaults to verified and published, or exact blocker"},
                 "notes": {"type": "string"},
                 "metadata": {"type": "object"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
@@ -6216,17 +6540,18 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_verify_product_surface",
-        "description": "Verify that a business product/website source path exists and builds or record a concrete blocker receipt.",
+        "description": "Verify that a business product/website source path exists/builds, publish it when possible, and record a receipt or exact blocker.",
         "handler": handle_business_verify_product_surface,
         "schema": _schema(
             "business_verify_product_surface",
-            "Verify product surface source/build and write a receipt.",
+            "Verify product surface source/build, publish, and write a receipt.",
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
+                "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout; default 180"},
-                "activate_on_success": {"type": "boolean", "description": "Mark the app surface active when verification passes; default true"},
+                "activate_on_success": {"type": "boolean", "description": "Update app surface status after verification; active only when publication succeeds; default true"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

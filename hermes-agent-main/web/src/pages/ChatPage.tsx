@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
+  Code2,
   Command,
   DollarSign,
   ExternalLink,
@@ -16,11 +17,14 @@ import {
   Folder,
   Gauge,
   Globe2,
+  ListChecks,
   MessageCircle,
   PanelRight,
   Play,
   Plus,
   RefreshCw,
+  Rocket,
+  Search,
   Sparkles,
   Square,
   Users,
@@ -98,6 +102,13 @@ interface BusinessOverviewProduct {
   source_path?: string;
   design_brief_path?: string;
   runtime_api_base?: string;
+  publish_target?: string;
+  publish_policy?: string;
+  publish_status?: string;
+  public_url?: string;
+  published_at?: string;
+  publish_receipt_path?: string;
+  publish_blocker?: string;
   routes_count?: number;
   verification_status?: string;
   verification_receipt?: string;
@@ -146,6 +157,48 @@ interface BusinessOverviewJob {
   status?: string;
   updated_at?: string;
   created_at?: string;
+  label?: string;
+  detail?: string;
+  tone?: string;
+}
+
+interface BusinessOverviewTask {
+  id?: string;
+  source?: string;
+  label?: string;
+  status?: string;
+  detail?: string;
+  tone?: string;
+  updated_at?: string;
+}
+
+interface BusinessOverviewStatusCard {
+  label?: string;
+  status?: string;
+  detail?: string;
+  tone?: string;
+}
+
+interface BusinessOverviewCeoLoop {
+  status?: string;
+  headline?: string;
+  detail?: string;
+  next_action?: string;
+}
+
+interface BusinessOverviewResearch {
+  status?: string;
+  latest_path?: string;
+  strategy_path?: string;
+  icp_path?: string;
+  channels_path?: string;
+  count?: number;
+}
+
+interface BusinessOverviewWakeHealth {
+  status?: string;
+  headline?: string;
+  detail?: string;
 }
 
 interface BusinessOverviewConversations {
@@ -161,6 +214,11 @@ interface BusinessArtifactSummary {
   updated_at?: number;
   deploy_status?: string;
   source_path?: string;
+  public_url?: string;
+  publish_target?: string;
+  publish_status?: string;
+  publish_blocker?: string;
+  publish_receipt_path?: string;
   count?: number;
   published_count?: number;
 }
@@ -188,6 +246,12 @@ interface BusinessOverview {
   cron?: BusinessOverviewCron[];
   files?: BusinessOverviewFile[];
   jobs?: BusinessOverviewJob[];
+  agent_runs?: BusinessOverviewTask[];
+  tasks?: BusinessOverviewTask[];
+  status_cards?: BusinessOverviewStatusCard[];
+  ceo_loop?: BusinessOverviewCeoLoop;
+  research?: BusinessOverviewResearch;
+  wake_health?: BusinessOverviewWakeHealth;
   posts?: BusinessOverviewPost[];
   artifacts?: {
     website?: BusinessArtifactSummary;
@@ -285,7 +349,7 @@ interface Deliverable {
 }
 
 type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
-type CompanyView = "floor" | "files" | "dev";
+type CompanyView = "floor" | "tasks" | "files" | "dev";
 type FloorRoomId = "product" | "outputs" | "outreach" | "creative" | "signal" | "watch";
 
 interface FloorRoomAccent {
@@ -482,6 +546,55 @@ function humanizeArtifactStatus(status?: string): string {
   }
 }
 
+function humanizeStatus(status?: string): string {
+  const value = (status || "").trim().toLowerCase();
+  if (!value) return "Recorded";
+  if (/blocked|fail|error|overdue|attention|missing/.test(value)) return "Needs attention";
+  if (/recover/.test(value)) return "Recovering";
+  if (/queued|pending|waiting|scheduled|needed/.test(value)) return "Waiting";
+  if (/running|active|watch|working|research_first/.test(value)) return "Working";
+  if (/done|complete|success|passed|visible|previewable/.test(value)) return "Ready";
+  if (value === "quiet") return "Quiet";
+  return humanizeJobKind(value);
+}
+
+function taskLabel(task: BusinessOverviewTask | BusinessOverviewJob): string {
+  const source = (task as BusinessOverviewTask).source;
+  const kind = (task as BusinessOverviewJob).kind;
+  return task.label || humanizeJobKind(source || kind);
+}
+
+function taskDetail(task: BusinessOverviewTask | BusinessOverviewJob): string {
+  if (task.detail) return task.detail;
+  if ("kind" in task) return gatedActionDetail(task);
+  return task.updated_at ? `Updated ${readableDate(task.updated_at)}` : "";
+}
+
+function toneClasses(tone?: string): string {
+  const value = (tone || "").toLowerCase();
+  if (/blocked|error|fail/.test(value)) return "border-red-400/25 bg-red-400/10 text-red-100";
+  if (/done|ready|success/.test(value)) return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
+  if (/active|working|running/.test(value)) return "border-sky-400/25 bg-sky-400/10 text-sky-100";
+  if (/waiting|pending|queued/.test(value)) return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  return "border-zinc-800 bg-zinc-900 text-zinc-400";
+}
+
+function quoteTakyonArg(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '""';
+  if (/^[a-zA-Z0-9._:/-]+$/.test(trimmed)) return trimmed;
+  return `"${trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function friendlyError(message?: string | null): string {
+  const text = (message || "").trim();
+  if (!text) return "";
+  if (/No inference provider configured|OPENROUTER_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY/i.test(text)) {
+    return "Model connection unavailable.";
+  }
+  return text.split(/\n/)[0].slice(0, 140);
+}
+
 function gatedActionDetail(job: BusinessOverviewJob): string {
   const kind = job.kind || "";
   const updated = job.updated_at ? `Updated ${readableDate(job.updated_at)}` : "";
@@ -494,20 +607,6 @@ function gatedActionDetail(job: BusinessOverviewJob): string {
     gate = "Requires provider credentials, product auth, budget gates, and usage receipts.";
   }
   return [gate, updated].filter(Boolean).join(" · ");
-}
-
-function wakeupLabel(job: BusinessOverviewCron): string {
-  if (/takyon-ceo|ceo/i.test(job.name || "")) return "CEO check-in";
-  return job.name || "Scheduled check-in";
-}
-
-function wakeupDetail(job: BusinessOverviewCron): string {
-  const parts = [
-    "Review replies, usage, blockers, and choose the next action",
-    job.schedule,
-    job.next_run ? `next ${readableDate(job.next_run)}` : "",
-  ];
-  return parts.filter(Boolean).join(" · ");
 }
 
 function compactPath(path?: string): string {
@@ -780,7 +879,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
-  const [createInTestMode, setCreateInTestMode] = useState(loadCreateInTestModeDefault);
+  const [createInTestMode] = useState(loadCreateInTestModeDefault);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__TAKYON_SESSION_TOKEN__
@@ -1477,7 +1576,7 @@ export default function ChatPage() {
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-black normal-case text-zinc-100 [font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
       <PluginSlot name="chat:top" />
 
-      {rightOpen && (
+      {inBusiness && rightOpen && (
         <button
           aria-label="Close side panel"
           onClick={() => setRightOpen(false)}
@@ -1491,7 +1590,7 @@ export default function ChatPage() {
           "grid min-h-0 min-w-0 flex-1 bg-black",
           inBusiness
             ? "lg:grid-cols-[minmax(0,1fr)_minmax(320px,26vw)]"
-            : "lg:grid-cols-[minmax(0,1fr)_380px]",
+            : "lg:grid-cols-[minmax(0,1fr)]",
         )}
       >
         <main className="flex min-h-0 min-w-0 flex-col bg-black">
@@ -1514,13 +1613,15 @@ export default function ChatPage() {
             </div>
 
             <div className="flex items-center gap-1.5">
-              <IconButton
-                label={inBusiness ? "Open CEO intercom" : "Open side panel"}
-                onClick={() => setRightOpen(true)}
-                className="lg:hidden"
-              >
-                <PanelRight className="h-4 w-4" />
-              </IconButton>
+              {inBusiness && (
+                <IconButton
+                  label="Open CEO intercom"
+                  onClick={() => setRightOpen(true)}
+                  className="lg:hidden"
+                >
+                  <PanelRight className="h-4 w-4" />
+                </IconButton>
+              )}
               <HeaderLinkActionButton href={newChatHref} label="New chat">
                 <Plus className="h-4 w-4" />
               </HeaderLinkActionButton>
@@ -1546,34 +1647,23 @@ export default function ChatPage() {
               tools={tools}
             />
           ) : (
-            <Thread
+            <GlobalLaunchpad
               error={error}
-              messages={messages}
+              onCreate={runTakyonLine}
+              onSelectBusiness={setTakyonScope}
               running={running}
               scope={scopeState}
-              scrollerRef={scrollerRef}
-            >
-              <Composer
-                canAct={canAct}
-                inputRef={inputRef}
-                isRunning={running}
-                onChange={setInput}
-                onKeyDown={onComposerKeyDown}
-                onSlashApply={applySlashCompletion}
-                onSubmit={onComposerSubmit}
-                slashIndex={slashIndex}
-                slashItems={slashItems}
-                setSlashIndex={setSlashIndex}
-                value={input}
-              />
-            </Thread>
+              state={state}
+              statusItems={statusItems}
+              tools={tools}
+            />
           )}
         </main>
 
         <aside
           className={cn(
             "min-h-0 overflow-hidden border-l border-zinc-900 bg-black",
-            "lg:relative lg:z-auto lg:flex",
+            inBusiness ? "lg:relative lg:z-auto lg:flex" : "hidden",
             rightOpen
               ? "fixed inset-y-0 right-0 z-[60] flex w-[min(92vw,390px)]"
               : "hidden",
@@ -1593,6 +1683,8 @@ export default function ChatPage() {
                 running={running}
                 scope={scopeState}
                 scrollerRef={scrollerRef}
+                statusItems={statusItems}
+                tools={tools}
               >
                 <Composer
                   canAct={canAct}
@@ -1612,12 +1704,10 @@ export default function ChatPage() {
             </IntercomPanel>
           ) : (
             <DeliverablesPanel
-              createInTestMode={createInTestMode}
               cwd={info.cwd}
               deliverables={deliverables}
               historicalOutputs={scopedHistoricalOutputs}
               onCommand={runTakyonLine}
-              onCreateInTestModeChange={setCreateInTestMode}
               onListFiles={listBusinessFiles}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -1637,6 +1727,202 @@ export default function ChatPage() {
   );
 }
 
+function GlobalLaunchpad({
+  error,
+  onCreate,
+  onSelectBusiness,
+  running,
+  scope,
+  state,
+  statusItems,
+  tools,
+}: {
+  error: string | null;
+  onCreate: (line: string) => void;
+  onSelectBusiness: (business: string) => Promise<void>;
+  running: boolean;
+  scope: ScopeState;
+  state: ConnectionState;
+  statusItems: string[];
+  tools: ToolEntry[];
+}) {
+  const [name, setName] = useState("");
+  const [goal, setGoal] = useState("");
+  const [mode, setMode] = useState<"test" | "live">("test");
+  const [budget, setBudget] = useState("25");
+  const [schedule, setSchedule] = useState("every 6h");
+  const recentBusinesses = scope.businesses.slice(0, 6);
+  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
+  const latestStatus = activeTool?.name || statusItems[0] || "";
+  const canCreate = state === "open" && !running && (!!name.trim() || !!goal.trim());
+  const displayError = friendlyError(error);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const rawName = name.trim() || goal.trim().split(/\s+/).slice(0, 3).join(" ");
+    const slug = normalizeBusinessLookup(rawName);
+    if (!slug) return;
+    const parts = ["/create", mode === "test" ? "--test" : "--live"];
+    const budgetValue = Number.parseFloat(budget);
+    if (Number.isFinite(budgetValue) && budgetValue >= 0) {
+      parts.push("--budget", String(budgetValue));
+    }
+    if (schedule.trim()) {
+      parts.push("--schedule", quoteTakyonArg(schedule));
+    }
+    parts.push(slug);
+    if (goal.trim()) parts.push(quoteTakyonArg(goal));
+    onCreate(parts.join(" "));
+  };
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto bg-black px-4 py-5 sm:px-6">
+      <div className="mx-auto grid max-w-5xl gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
+        <form className="rounded-2xl border border-zinc-900 bg-[#050505] p-4" onSubmit={submit}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+              <Rocket className="h-4 w-4 text-zinc-500" />
+              New company
+            </div>
+            <span className={cn("h-2 w-2 rounded-full", running ? "animate-pulse bg-sky-300" : "bg-emerald-400")} />
+          </div>
+          {displayError && (
+            <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100">
+              {displayError}
+            </div>
+          )}
+          {running && (
+            <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/5 px-3 py-2 text-xs text-sky-100">
+              {latestStatus || "Working"}
+            </div>
+          )}
+
+          <div className="mt-4 grid gap-3">
+            <label className="grid gap-1.5">
+              <span className="text-xs text-zinc-500">Name</span>
+              <input
+                className="h-10 rounded-lg border border-zinc-800 bg-black px-3 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-700 focus:border-zinc-600"
+                onChange={(event) => setName(event.target.value)}
+                placeholder="latexflow"
+                value={name}
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs text-zinc-500">Goal</span>
+              <textarea
+                className="min-h-28 resize-none rounded-lg border border-zinc-800 bg-black px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition-colors placeholder:text-zinc-700 focus:border-zinc-600"
+                onChange={(event) => setGoal(event.target.value)}
+                placeholder="Build a business around..."
+                value={goal}
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-[1.2fr_0.8fr_1fr]">
+            <div className="rounded-lg border border-zinc-900 bg-black p-2">
+              <div className="mb-2 text-xs text-zinc-500">Mode</div>
+              <div className="grid grid-cols-2 gap-1 rounded-md bg-zinc-950 p-1">
+                {(["test", "live"] as const).map((option) => (
+                  <button
+                    className={cn(
+                      "h-8 rounded px-2 text-xs font-medium transition-colors",
+                      mode === option ? "bg-zinc-100 text-black" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-100",
+                    )}
+                    key={option}
+                    onClick={() => setMode(option)}
+                    type="button"
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="grid gap-2 rounded-lg border border-zinc-900 bg-black p-2">
+              <span className="text-xs text-zinc-500">Budget</span>
+              <input
+                className="h-8 min-w-0 rounded-md border border-zinc-900 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-zinc-700"
+                inputMode="decimal"
+                onChange={(event) => setBudget(event.target.value)}
+                value={budget}
+              />
+            </label>
+            <label className="grid gap-2 rounded-lg border border-zinc-900 bg-black p-2">
+              <span className="text-xs text-zinc-500">Wake</span>
+              <input
+                className="h-8 min-w-0 rounded-md border border-zinc-900 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-zinc-700"
+                onChange={(event) => setSchedule(event.target.value)}
+                value={schedule}
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <div className="flex min-w-0 gap-2 text-[0.68rem] text-zinc-600">
+              <span className="rounded-full border border-zinc-900 px-2 py-1">research first</span>
+              <span className="rounded-full border border-zinc-900 px-2 py-1">{STATE_LABEL[state]}</span>
+            </div>
+            <button
+              className={cn(
+                "inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors",
+                canCreate ? "bg-zinc-100 text-black hover:bg-white" : "bg-zinc-900 text-zinc-600",
+              )}
+              disabled={!canCreate}
+              type="submit"
+            >
+              <Rocket className="h-4 w-4" />
+              Create
+            </button>
+          </div>
+        </form>
+
+        <section className="rounded-2xl border border-zinc-900 bg-[#050505] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+              <Building2 className="h-4 w-4 text-zinc-500" />
+              Companies
+            </div>
+            <span className="rounded-full border border-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-600">
+              {formatCount(scope.businesses.length)}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2">
+            {recentBusinesses.length === 0 ? (
+              <EmptyPanelLine text="No companies yet." />
+            ) : (
+              recentBusinesses.map((item) => {
+                const slug = item.slug || "";
+                return (
+                  <button
+                    className="group min-w-0 rounded-xl border border-zinc-900 bg-black px-3 py-2.5 text-left transition-colors hover:border-zinc-800 hover:bg-zinc-950"
+                    disabled={!slug || state !== "open"}
+                    key={slug || item.name}
+                    onClick={() => {
+                      if (slug) void onSelectBusiness(slug);
+                    }}
+                    type="button"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium text-zinc-100">
+                          {item.name || slug}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-zinc-600">
+                          business:{slug} · {businessModeLabel(item)}
+                        </div>
+                      </div>
+                      <ChevronRight className="h-4 w-4 shrink-0 text-zinc-700 transition-colors group-hover:text-zinc-300" />
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function Thread({
   children,
   compact = false,
@@ -1645,6 +1931,8 @@ function Thread({
   running,
   scope,
   scrollerRef,
+  statusItems,
+  tools,
 }: {
   children: ReactNode;
   compact?: boolean;
@@ -1653,6 +1941,8 @@ function Thread({
   running: boolean;
   scope: ScopeState;
   scrollerRef: RefObject<HTMLDivElement | null>;
+  statusItems?: string[];
+  tools?: ToolEntry[];
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1677,7 +1967,7 @@ function Thread({
               {messages.map((message) => (
                 <Message compact={compact} key={message.id} message={message} />
               ))}
-              {running && <LoadingIndicator />}
+              {running && <LoadingIndicator statusItems={statusItems} tools={tools} />}
             </div>
           )}
         </div>
@@ -1882,21 +2172,57 @@ function Message({ compact = false, message }: { compact?: boolean; message: Cha
   );
 }
 
-function LoadingIndicator() {
+function LoadingIndicator({
+  statusItems = [],
+  tools = [],
+}: {
+  statusItems?: string[];
+  tools?: ToolEntry[];
+}) {
+  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
+  const latest = activeTool?.preview || activeTool?.context || activeTool?.name || statusItems[0] || "CEO is working";
+  const stages = activeTool
+    ? ["Reading", "Editing", "Checking", "Saving"]
+    : ["Researching", "Planning", "Writing", "Recording"];
   return (
-    <div className="flex items-center gap-1.5 py-2">
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.15s]" />
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" />
+    <div className="rounded-2xl border border-zinc-900 bg-zinc-950 px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-sky-300" />
+          <div className="min-w-0 truncate text-sm text-zinc-200">{latest}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.15s]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" />
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        {stages.map((stage, index) => (
+          <div
+            className={cn(
+              "rounded-lg border px-2 py-1.5 text-center text-[0.68rem]",
+              index === 0
+                ? "border-sky-300/30 bg-sky-300/10 text-sky-100"
+                : "border-zinc-900 bg-black text-zinc-600",
+            )}
+            key={stage}
+          >
+            {stage}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 function ErrorBanner({ message }: { message: string }) {
+  const display = friendlyError(message);
+  if (!display) return null;
   return (
-    <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+    <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-300/25 bg-amber-300/5 px-3 py-2 text-sm text-amber-100">
       <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-      <span className="min-w-0 whitespace-pre-wrap">{message}</span>
+      <span className="min-w-0 whitespace-pre-wrap">{display}</span>
     </div>
   );
 }
@@ -1980,8 +2306,9 @@ function CompanyWorkspace({
             {scope.current?.name || scope.business}
           </div>
         </div>
-        <div className="grid shrink-0 grid-cols-3 gap-1 rounded-full border border-zinc-800 bg-black p-1">
+        <div className="grid shrink-0 grid-cols-4 gap-1 rounded-full border border-zinc-800 bg-black p-1">
           <CompanyViewButton active={view === "floor"} label="Floor" onClick={() => setView("floor")} />
+          <CompanyViewButton active={view === "tasks"} label="Tasks" onClick={() => setView("tasks")} />
           <CompanyViewButton active={view === "files"} label="Files" onClick={() => setView("files")} />
           <CompanyViewButton active={view === "dev"} label="Dev" onClick={() => setView("dev")} />
         </div>
@@ -2008,6 +2335,11 @@ function CompanyWorkspace({
               onResolveMedia={onResolveMedia}
               scope={scope}
             />
+          </div>
+        )}
+        {view === "tasks" && (
+          <div className="p-4">
+            <TaskBoard onCommand={onCommand} scope={scope} />
           </div>
         )}
         {view === "dev" && (
@@ -2077,6 +2409,10 @@ function CompanyFloor({
   const posts = overview.posts || [];
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
+  const tasks = overview.tasks || [];
+  const statusCards = overview.status_cards || [];
+  const ceoLoop = overview.ceo_loop;
+  const research = overview.research || {};
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
   const recentOutputs = outputs.slice(0, 6);
@@ -2085,6 +2421,7 @@ function CompanyFloor({
     ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
     : ".";
   const productPath = website.source_path || product.source_path || "product/site";
+  const publicSiteUrl = website.public_url || product.public_url || "";
   const latestOutput = recentOutputs[0];
   const openMessages =
     asNumber(overview.conversations?.unresolved_messages) ||
@@ -2172,21 +2509,33 @@ function CompanyFloor({
       id: "product",
       camera: "CAM 01",
       title: "Product Room",
-      status: website.path ? "site visible" : product.source_path ? "source noted" : "quiet",
-      detail: website.path || product.source_path || "product/site",
+      status: publicSiteUrl ? "site live" : website.path ? "site visible" : product.source_path ? "source noted" : "quiet",
+      detail: publicSiteUrl || website.path || product.source_path || "product/site",
       body: (
         <div className="grid min-h-full gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
           <div className="flex min-h-[280px] flex-col justify-between rounded-2xl border border-zinc-900 bg-black/50 p-5">
             <div>
               <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Customer surface</div>
               <div className="mt-3 max-w-2xl text-2xl font-semibold leading-tight text-zinc-100">
-                {website.path ? "Website source is on the floor." : "No website is on the floor yet."}
+                {publicSiteUrl
+                  ? "Website is live."
+                  : website.path
+                    ? "Website source is on the floor."
+                    : "No website is on the floor yet."}
               </div>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
                 {overview.goal || scope.current?.goal || "The product room shows the customer-facing surface when one exists."}
               </p>
             </div>
             <div className="mt-8 flex flex-wrap gap-2">
+              {publicSiteUrl && (
+                <PanelActionButton
+                  icon={<ExternalLink className="h-3.5 w-3.5" />}
+                  onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
+                >
+                  Open Site
+                </PanelActionButton>
+              )}
               {website.path && (
                 <OpenSitePreviewButton
                   onResolveSitePreview={onResolveSitePreview}
@@ -2215,7 +2564,18 @@ function CompanyFloor({
               icon={<Gauge className="h-3.5 w-3.5" />}
               label="State"
               value={humanizeArtifactStatus(website.status || product.status)}
-              detail={product.verification_status || `${formatCount(product.routes_count)} routes`}
+              detail={
+                product.publish_blocker ||
+                product.publish_status ||
+                product.verification_status ||
+                `${formatCount(product.routes_count)} routes`
+              }
+            />
+            <StageReadout
+              icon={<Search className="h-3.5 w-3.5" />}
+              label="Research"
+              value={humanizeStatus(research.status)}
+              detail={research.latest_path || research.strategy_path || research.icp_path || "ICP/channel evidence"}
             />
             <StageReadout
               icon={<Users className="h-3.5 w-3.5" />}
@@ -2415,23 +2775,34 @@ function CompanyFloor({
       camera: "CAM 06",
       title: "Night Watch",
       status: activeCron.length ? "watching" : "quiet",
-      detail: nextWake ? `Next wake ${readableDate(nextWake)}` : "no scheduled CEO wake visible",
+      detail: overview.wake_health?.headline || (nextWake ? `Next wake ${readableDate(nextWake)}` : "no scheduled CEO wake visible"),
       body: (
         <div className="grid gap-2 lg:grid-cols-2">
           <TaskRow
-            detail={nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible."}
+            detail={overview.wake_health?.detail || (nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible.")}
             label="CEO wake loop"
-            status={activeCron.length ? "watching" : "quiet"}
+            status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
           />
-          {visibleJobs.length === 0 ? (
+          {tasks.length === 0 && visibleJobs.length === 0 ? (
             <ObservationEmpty text="No gated follow-up actions recorded." />
+          ) : tasks.length > 0 ? (
+            tasks.slice(0, 5).map((task, index) => (
+              <TaskRow
+                detail={taskDetail(task)}
+                key={task.id || `${task.source}-${index}`}
+                label={taskLabel(task)}
+                status={humanizeStatus(task.status)}
+                tone={task.tone}
+              />
+            ))
           ) : (
             visibleJobs.map((job, index) => (
               <TaskRow
                 detail={gatedActionDetail(job)}
                 key={job.id || `${job.kind}-${index}`}
                 label={humanizeJobKind(job.kind)}
-                status={job.status || "recorded"}
+                status={humanizeStatus(job.status || "recorded")}
+                tone={job.tone}
               />
             ))
           )}
@@ -2443,6 +2814,12 @@ function CompanyFloor({
 
   return (
     <div className="flex min-h-full flex-col gap-3 p-4">
+      {ceoLoop && (
+        <CeoLoopBanner ceoLoop={ceoLoop} onCommand={onCommand} />
+      )}
+      {statusCards.length > 0 && (
+        <StatusCardStrip cards={statusCards} />
+      )}
       <section className={cn(
         "relative min-h-[430px] overflow-hidden rounded-2xl border bg-zinc-950/70 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]",
         selected.accent.border,
@@ -2500,6 +2877,77 @@ function CompanyFloor({
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CeoLoopBanner({
+  ceoLoop,
+  onCommand,
+}: {
+  ceoLoop: BusinessOverviewCeoLoop;
+  onCommand: (line: string) => void;
+}) {
+  return (
+    <section className="rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+            <Sparkles className="h-3.5 w-3.5" />
+            CEO loop
+          </div>
+          <div className="mt-2 text-lg font-semibold leading-7 text-zinc-100">
+            {ceoLoop.headline || "CEO is deciding the next move."}
+          </div>
+          {ceoLoop.detail && (
+            <div className="mt-1 max-w-3xl text-sm leading-6 text-zinc-500">
+              {ceoLoop.detail}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <span className={cn("inline-flex h-7 items-center rounded-lg border px-2.5 text-xs", toneClasses(ceoLoop.status))}>
+            {humanizeStatus(ceoLoop.status)}
+          </span>
+          <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
+            Wake now
+          </PanelActionButton>
+        </div>
+      </div>
+      {ceoLoop.next_action && (
+        <div className="mt-3 rounded-xl border border-zinc-900 bg-black px-3 py-2 text-xs leading-5 text-zinc-500">
+          {ceoLoop.next_action}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StatusCardStrip({ cards }: { cards: BusinessOverviewStatusCard[] }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      {cards.slice(0, 4).map((card, index) => (
+        <div
+          className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5"
+          key={`${card.label}-${index}`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-zinc-100">
+                {card.label || "Status"}
+              </div>
+              {card.detail && (
+                <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
+                  {card.detail}
+                </div>
+              )}
+            </div>
+            <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(card.tone || card.status))}>
+              {humanizeStatus(card.status)}
+            </span>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -3464,61 +3912,11 @@ function PanelLinkButton({
   );
 }
 
-function CreateModeToggle({
-  enabled,
-  onChange,
-}: {
-  enabled: boolean;
-  onChange: (enabled: boolean) => void;
-}) {
-  return (
-    <div className="mb-4 rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-medium text-zinc-100">New businesses</div>
-          <div className="mt-0.5 text-xs leading-5 text-zinc-600">
-            {enabled
-              ? "Created in test mode unless you type --live."
-              : "Created with the command default unless you type --test."}
-          </div>
-        </div>
-        <button
-          aria-label={
-            enabled
-              ? "Disable new business test mode default"
-              : "Enable new business test mode default"
-          }
-          aria-pressed={enabled}
-          className={cn(
-            "flex h-7 w-12 shrink-0 items-center rounded-full border p-0.5 transition-colors",
-            enabled
-              ? "border-emerald-400/40 bg-emerald-400/15"
-              : "border-zinc-800 bg-black",
-          )}
-          onClick={() => onChange(!enabled)}
-          type="button"
-        >
-          <span
-            className={cn(
-              "h-5 w-5 rounded-full transition-transform",
-              enabled
-                ? "translate-x-5 bg-emerald-300"
-                : "translate-x-0 bg-zinc-600",
-            )}
-          />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function DeliverablesPanel({
-  createInTestMode,
   cwd,
   deliverables,
   historicalOutputs,
   onCommand,
-  onCreateInTestModeChange,
   onListFiles,
   onResolveMedia,
   onResolveSitePreview,
@@ -3529,12 +3927,10 @@ function DeliverablesPanel({
   statusItems,
   tools,
 }: {
-  createInTestMode: boolean;
   cwd?: string;
   deliverables: Deliverable[];
   historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
-  onCreateInTestModeChange: (enabled: boolean) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
@@ -3583,10 +3979,6 @@ function DeliverablesPanel({
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {effectiveTab === "home" && (
           <>
-            <CreateModeToggle
-              enabled={createInTestMode}
-              onChange={onCreateInTestModeChange}
-            />
             <BusinessSnapshot
               onCommand={onCommand}
               onResolveSitePreview={onResolveSitePreview}
@@ -3663,134 +4055,7 @@ function NextPanel({
   onCommand: (line: string) => void;
   scope: ScopeState;
 }) {
-  const overview = scope.overview || {};
-  const metrics = overview.metrics || {};
-  const cron = overview.cron || [];
-  const jobs = overview.jobs || [];
-  const posts = overview.posts || [];
-  const unresolvedReplies = asNumber(overview.conversations?.unresolved_messages);
-  const usageEvents = asNumber(metrics.usage_events);
-  const checkoutIntents = asNumber(metrics.checkout_intents);
-  const blockedJobs = jobs.filter((job) =>
-    /blocked|error|fail|paused/i.test(`${job.status || ""} ${job.kind || ""}`),
-  );
-  const gatedActions = jobs.filter((job) => job.kind || job.status);
-  const activeCron = cron.filter((job) => job.enabled !== false);
-  const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-  const hasWaitingSignal =
-    posts.length > 0 || unresolvedReplies > 0 || usageEvents > 0 || checkoutIntents > 0;
-
-  return (
-    <div className="space-y-6">
-      <PanelSection icon={<Gauge className="h-4 w-4" />} title="Overview">
-        <div className="grid grid-cols-2 gap-2">
-          <SnapshotMetric
-            icon={<Activity className="h-3.5 w-3.5" />}
-            label="Gated"
-            value={formatCount(gatedActions.length)}
-          />
-          <SnapshotMetric
-            icon={<AlertCircle className="h-3.5 w-3.5" />}
-            label="Blocked"
-            value={formatCount(blockedJobs.length)}
-          />
-          <SnapshotMetric
-            icon={<Clock3 className="h-3.5 w-3.5" />}
-            label="Wakeups"
-            value={formatCount(activeCron.length)}
-            detail={nextWake ? readableDate(nextWake) : "none scheduled"}
-          />
-          <SnapshotMetric
-            icon={<MessageCircle className="h-3.5 w-3.5" />}
-            label="Replies"
-            value={formatCount(unresolvedReplies)}
-            detail={`${formatCount(posts.length)} posts`}
-          />
-        </div>
-      </PanelSection>
-
-      <PanelSection icon={<MessageCircle className="h-4 w-4" />} title="Current Posts">
-        {posts.length === 0 ? (
-          <EmptyPanelLine text="No posts or outreach threads recorded yet." />
-        ) : (
-          posts.map((post, index) => (
-            <PostItem
-              key={post.id || `${post.source}-${post.title}-${index}`}
-              onCommand={onCommand}
-              post={post}
-            />
-          ))
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Waiting">
-        {!hasWaitingSignal ? (
-          <EmptyPanelLine text="No waiting signals recorded. On wakeup, the CEO checks current state before choosing work." />
-        ) : (
-          <div className="space-y-2">
-            {posts.length > 0 && (
-              <TaskRow
-                detail={`${formatCount(unresolvedReplies)} unresolved replies across ${formatCount(posts.length)} recorded posts`}
-                label="Watch outreach responses"
-                status="signal"
-              />
-            )}
-            {(usageEvents > 0 || checkoutIntents > 0) && (
-              <TaskRow
-                detail={`${formatCount(usageEvents)} usage events · ${formatCount(checkoutIntents)} checkout intents`}
-                label="Watch product/customer signal"
-                status="signal"
-              />
-            )}
-          </div>
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<Activity className="h-4 w-4" />} title="Gated Actions">
-        {gatedActions.length === 0 ? (
-          <EmptyPanelLine text="No gated follow-up actions recorded." />
-        ) : (
-          gatedActions.map((job, index) => (
-            <TaskRow
-              detail={gatedActionDetail(job)}
-              key={job.id || `${job.kind}-${index}`}
-              label={humanizeJobKind(job.kind)}
-              status={job.status || "recorded"}
-            />
-          ))
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Wakeups">
-        {cron.length === 0 ? (
-          <EmptyPanelLine text="No CEO wakeups are scheduled." />
-        ) : (
-          cron.map((job, index) => (
-            <TaskRow
-              detail={wakeupDetail(job)}
-              key={job.id || `${job.name}-${index}`}
-              label={wakeupLabel(job)}
-              status={job.enabled === false ? "off" : job.state || "scheduled"}
-            />
-          ))
-        )}
-        <div className="flex flex-wrap gap-2 pt-1">
-          <PanelActionButton
-            icon={<Clock3 className="h-3.5 w-3.5" />}
-            onClick={() => onCommand("/cron list")}
-          >
-            List
-          </PanelActionButton>
-          <PanelActionButton
-            icon={<Play className="h-3.5 w-3.5" />}
-            onClick={() => onCommand("/wake")}
-          >
-            Wake now
-          </PanelActionButton>
-        </div>
-      </PanelSection>
-    </div>
-  );
+  return <TaskBoard onCommand={onCommand} scope={scope} />;
 }
 
 function PostItem({
@@ -3916,6 +4181,117 @@ function OutputsPanel({
   );
 }
 
+function TaskBoard({
+  onCommand,
+  scope,
+}: {
+  onCommand: (line: string) => void;
+  scope: ScopeState;
+}) {
+  const overview = scope.overview || {};
+  const tasks = overview.tasks || [];
+  const fallbackJobs = (overview.jobs || []).filter((job) => job.kind || job.status);
+  const displayTasks: Array<BusinessOverviewTask | BusinessOverviewJob> =
+    tasks.length > 0 ? tasks : fallbackJobs;
+  const ceoLoop = overview.ceo_loop;
+  const statusCards = overview.status_cards || [];
+  const research = overview.research || {};
+  const wakeHealth = overview.wake_health;
+
+  return (
+    <div className="space-y-6">
+      {ceoLoop && (
+        <PanelSection icon={<Sparkles className="h-4 w-4" />} title="CEO Loop">
+          <TaskRow
+            detail={ceoLoop.detail || ceoLoop.next_action}
+            label={ceoLoop.headline || "CEO is choosing the next move"}
+            status={humanizeStatus(ceoLoop.status)}
+            tone={ceoLoop.status}
+          />
+          {ceoLoop.next_action && (
+            <TaskRow
+              detail={ceoLoop.next_action}
+              label="Next move"
+              status="Visible"
+              tone="active"
+            />
+          )}
+        </PanelSection>
+      )}
+
+      <PanelSection icon={<Gauge className="h-4 w-4" />} title="Company State">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+          {statusCards.length === 0 ? (
+            <EmptyPanelLine text="No status cards recorded yet." />
+          ) : (
+            statusCards.map((card, index) => (
+              <TaskRow
+                detail={card.detail}
+                key={`${card.label}-${index}`}
+                label={card.label || "Status"}
+                status={humanizeStatus(card.status)}
+                tone={card.tone || card.status}
+              />
+            ))
+          )}
+        </div>
+      </PanelSection>
+
+      <PanelSection icon={<Search className="h-4 w-4" />} title="Research">
+        <div className="grid gap-2 md:grid-cols-2">
+          <TaskRow
+            detail={research.latest_path || research.strategy_path || research.icp_path || "ICP, channel, and strategy evidence should appear here first."}
+            label="ICP and strategy"
+            status={humanizeStatus(research.status)}
+            tone={research.status === "visible" ? "done" : "waiting"}
+          />
+          <TaskRow
+            detail={research.channels_path || "Channel evidence and reachable-user strategy"}
+            label="Channels"
+            status={research.channels_path ? "Ready" : "Waiting"}
+            tone={research.channels_path ? "done" : "waiting"}
+          />
+        </div>
+      </PanelSection>
+
+      <PanelSection icon={<ListChecks className="h-4 w-4" />} title="Tasks">
+        {displayTasks.length === 0 ? (
+          <EmptyPanelLine text="No task records are visible yet." />
+        ) : (
+          <div className="grid gap-2 lg:grid-cols-2">
+            {displayTasks.slice(0, 12).map((task, index) => (
+              <TaskRow
+                detail={taskDetail(task)}
+                key={task.id || `${taskLabel(task)}-${index}`}
+                label={taskLabel(task)}
+                status={humanizeStatus(task.status)}
+                tone={task.tone || task.status}
+              />
+            ))}
+          </div>
+        )}
+      </PanelSection>
+
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Wakeups">
+        <TaskRow
+          detail={wakeHealth?.detail || "No scheduled CEO wake signal is visible."}
+          label={wakeHealth?.headline || "CEO wake loop"}
+          status={humanizeStatus(wakeHealth?.status)}
+          tone={wakeHealth?.status}
+        />
+        <div className="flex flex-wrap gap-2 pt-1">
+          <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
+            List
+          </PanelActionButton>
+          <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
+            Wake now
+          </PanelActionButton>
+        </div>
+      </PanelSection>
+    </div>
+  );
+}
+
 function DevPanel({
   cwd,
   scope,
@@ -3929,8 +4305,51 @@ function DevPanel({
   statusItems: string[];
   tools: ToolEntry[];
 }) {
+  const builderItems = tools
+    .filter((tool) => /tool|file|write|patch|shell|exec|agent|build|verify|npm|python|git|code/i.test(`${tool.name} ${tool.context || ""} ${tool.summary || ""}`))
+    .slice()
+    .reverse()
+    .slice(0, 5);
+  const visibleTasks = (scope.overview?.tasks || []).filter((task) =>
+    /agent|job/.test(task.source || ""),
+  );
+
   return (
     <div className="space-y-6">
+      <PanelSection icon={<Code2 className="h-4 w-4" />} title="Codegen">
+        <div className="space-y-2">
+          {builderItems.length === 0 && visibleTasks.length === 0 ? (
+            <TaskRow
+              detail={scope.overview?.product?.source_path || "No builder activity recorded in this session."}
+              label="Builder feed"
+              status="Quiet"
+              tone="neutral"
+            />
+          ) : (
+            <>
+              {builderItems.map((tool) => (
+                <TaskRow
+                  detail={tool.preview || tool.summary || tool.context || tool.error}
+                  key={tool.id}
+                  label={tool.name}
+                  status={humanizeStatus(tool.status)}
+                  tone={tool.status}
+                />
+              ))}
+              {visibleTasks.slice(0, 3).map((task, index) => (
+                <TaskRow
+                  detail={taskDetail(task)}
+                  key={task.id || `${task.source}-${index}`}
+                  label={taskLabel(task)}
+                  status={humanizeStatus(task.status)}
+                  tone={task.tone || task.status}
+                />
+              ))}
+            </>
+          )}
+        </div>
+      </PanelSection>
+
       <PanelSection icon={<Command className="h-4 w-4" />} title="Build">
         <TaskRow
           detail={scopeDetail(scope)}
@@ -3977,16 +4396,18 @@ function TaskRow({
   detail,
   label,
   status,
+  tone,
 }: {
   detail?: string;
   label: string;
   status: string;
+  tone?: string;
 }) {
   return (
     <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 truncate text-sm text-zinc-200">{label}</div>
-        <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-500">
+        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
           {status}
         </span>
       </div>

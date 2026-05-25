@@ -4670,6 +4670,72 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             return str(value)
         return ""
 
+    def parse_ts(value: Any) -> float | None:
+        text = brief_text(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+
+    def human_kind(value: Any) -> str:
+        text = brief_text(value).strip() or "work request"
+        text = re.sub(r"[._-]+", " ", text)
+        return " ".join(part.capitalize() for part in text.split())
+
+    def status_tone(value: Any) -> str:
+        text = brief_text(value).lower()
+        if re.search(r"blocked|fail|error|stale|attention|missing", text):
+            return "blocked"
+        if re.search(r"pending|queued|scheduled|waiting", text):
+            return "waiting"
+        if re.search(r"done|complete|completed|success|succeeded|passed", text):
+            return "done"
+        if re.search(r"running|active|watch", text):
+            return "active"
+        return "neutral"
+
+    def job_label(kind: Any) -> str:
+        value = brief_text(kind)
+        if value == "product.deploy":
+            return "Publish product site"
+        if value == "product.build":
+            return "Build product surface"
+        if value.startswith("distribution.") or value.startswith("outreach."):
+            return "Publish or test outreach"
+        if value.startswith("vendor.stripe"):
+            return "Prepare Stripe approval"
+        if "creative" in value or "ad" in value:
+            return "Generate ad creative"
+        return human_kind(value)
+
+    def job_detail(job: dict[str, Any]) -> str:
+        kind = brief_text(job.get("kind"))
+        status = brief_text(job.get("status") or "recorded")
+        payload = as_dict(job.get("payload"))
+        blockers = [brief_text(item) for item in as_list(payload.get("blockers")) if brief_text(item)]
+        missing = [
+            brief_text(item)
+            for item in as_list(payload.get("missing_credentials_suppressed") or payload.get("requires_env"))
+            if brief_text(item)
+        ]
+        blocked_reason = brief_text(payload.get("blocked_reason") or payload.get("error") or payload.get("note"))
+        if kind == "product.deploy":
+            if blockers:
+                return "Website is local; deploy waits on " + ", ".join(blockers[:3]) + "."
+            return "Website deploy is recorded as gated follow-up work."
+        if kind == "product.build" and blocked_reason:
+            return blocked_reason
+        if kind.startswith("distribution.") or kind.startswith("outreach."):
+            if payload.get("external_side_effects") == "suppressed":
+                return "Test-mode outreach is local only; external posting is suppressed."
+            if missing:
+                return "External posting waits on " + ", ".join(missing[:3]) + "."
+        if kind.startswith("vendor.stripe"):
+            return blocked_reason or "Checkout cannot go live until Stripe/provider approval is complete."
+        return blocked_reason or f"{job_label(kind)} is {status}."
+
     summary = as_dict(store.read(scope=f"business:{slug}", query="summary", limit=12))
     business = as_dict(summary.get("business"))
     app = as_dict(summary.get("app"))
@@ -4790,6 +4856,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     jobs = []
     for job in as_list(summary.get("jobs"))[:8]:
         job_dict = as_dict(job)
+        payload = as_dict(job_dict.get("payload"))
         jobs.append(
             {
                 "id": brief_text(job_dict.get("id")),
@@ -4797,8 +4864,45 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "status": brief_text(job_dict.get("status") or job_dict.get("state")),
                 "updated_at": brief_text(job_dict.get("updated_at")),
                 "created_at": brief_text(job_dict.get("created_at")),
+                "label": job_label(job_dict.get("kind") or job_dict.get("type") or job_dict.get("name")),
+                "detail": job_detail({**job_dict, "payload": payload}),
+                "tone": status_tone(job_dict.get("status") or job_dict.get("state")),
             }
         )
+
+    agent_runs: list[dict[str, Any]] = []
+    conn = None
+    try:
+        conn = store._connect()
+        rows = conn.execute(
+            "SELECT * FROM agent_runs WHERE scope = ? OR scope LIKE ? ORDER BY updated_at DESC LIMIT ?",
+            (f"business:{slug}", f"business:{slug}/%", 8),
+        ).fetchall()
+        for row in rows:
+            run = as_dict(store._row_to_dict(row))
+            result = as_dict(run.get("result"))
+            completed = len(as_list(result.get("completed")))
+            blockers = len(as_list(result.get("blockers")))
+            detail_parts = []
+            if completed:
+                detail_parts.append(f"{completed} completed")
+            if blockers:
+                detail_parts.append(f"{blockers} blocker{'s' if blockers != 1 else ''}")
+            agent_runs.append(
+                {
+                    "id": brief_text(run.get("id")),
+                    "status": brief_text(run.get("status")),
+                    "updated_at": brief_text(run.get("updated_at") or run.get("created_at")),
+                    "label": "CEO or worker run",
+                    "detail": ", ".join(detail_parts) or brief_text(run.get("prompt"))[:160] or "Run recorded in audit trail.",
+                    "tone": status_tone(run.get("status")),
+                }
+            )
+    except Exception:
+        agent_runs = []
+    finally:
+        if conn is not None:
+            conn.close()
 
     def file_card(rel: str) -> dict[str, Any] | None:
         try:
@@ -4846,6 +4950,143 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     outreach_draft = file_card("distribution/outreach-drafts.md") or latest_under("outreach", {".md", ".txt"})
     creative_latest = latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES) or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
     creative_receipt = latest_under("receipts/creative-assets", {".json"})
+    research_latest = latest_under("research", {".md", ".txt"}) or latest_under("brain", {".md", ".txt"})
+    strategy_file = file_card("brain/strategy.md") or file_card("brain/business-model.md")
+    icp_file = file_card("research/icp.md") or file_card("brain/strategy.md")
+    channel_file = file_card("research/channels.md") or file_card("campaigns/research.md")
+
+    now_ts = time.time()
+    active_cron = [job for job in cron_jobs if job.get("enabled", True)]
+    overdue_cron = [
+        job for job in active_cron
+        if parse_ts(job.get("next_run")) is not None and (parse_ts(job.get("next_run")) or now_ts) < now_ts - 60
+    ]
+    never_ran_cron = [job for job in active_cron if not job.get("last_run")]
+    if active_cron and overdue_cron:
+        wake_health = {
+            "status": "needs_attention",
+            "headline": "CEO wakeups are scheduled but appear overdue.",
+            "detail": "Run /cron tick or start the Takyon gateway so scheduled CEO checks can fire.",
+        }
+    elif active_cron and never_ran_cron:
+        wake_health = {
+            "status": "watching",
+            "headline": "CEO wakeups are scheduled and waiting for their first run.",
+            "detail": "The next wake should review evidence, blockers, replies, and the next highest-impact move.",
+        }
+    elif active_cron:
+        wake_health = {
+            "status": "watching",
+            "headline": "CEO wake loop is active.",
+            "detail": "Scheduled wakes keep checking customer signal, blocked work, and the next move.",
+        }
+    else:
+        wake_health = {
+            "status": "quiet",
+            "headline": "No CEO wake loop is visible.",
+            "detail": "Use /wake for one run or /create --schedule when creating the next business.",
+        }
+
+    task_cards: list[dict[str, Any]] = []
+    for job in jobs[:8]:
+        task_cards.append({
+            "id": f"job:{job.get('id')}",
+            "source": "job",
+            "label": job.get("label") or human_kind(job.get("kind")),
+            "status": job.get("status") or "recorded",
+            "detail": job.get("detail") or "",
+            "tone": job.get("tone") or status_tone(job.get("status")),
+            "updated_at": job.get("updated_at") or job.get("created_at") or "",
+        })
+    for run in agent_runs[:4]:
+        task_cards.append({
+            "id": f"agent:{run.get('id')}",
+            "source": "agent",
+            "label": run.get("label") or "CEO run",
+            "status": run.get("status") or "recorded",
+            "detail": run.get("detail") or "Run recorded in audit trail.",
+            "tone": run.get("tone") or status_tone(run.get("status")),
+            "updated_at": run.get("updated_at") or "",
+        })
+    for job in cron_jobs[:4]:
+        label = "CEO wake loop" if re.search(r"takyon-ceo|ceo", brief_text(job.get("name")), re.I) else brief_text(job.get("name") or "Scheduled work")
+        task_cards.append({
+            "id": f"cron:{job.get('id')}",
+            "source": "cron",
+            "label": label,
+            "status": "overdue" if job in overdue_cron else brief_text(job.get("state") or "scheduled"),
+            "detail": wake_health["detail"] if job in overdue_cron else (
+                f"Next wake {job.get('next_run')}" if job.get("next_run") else "Scheduled CEO check."
+            ),
+            "tone": "blocked" if job in overdue_cron else "waiting",
+            "updated_at": job.get("last_run") or job.get("next_run") or "",
+        })
+
+    blocked_count = sum(1 for task in task_cards if task.get("tone") == "blocked")
+    product_visible = bool(website)
+    research_visible = bool(research_latest or strategy_file or icp_file or channel_file)
+    if wake_health["status"] == "needs_attention":
+        ceo_loop = {
+            "status": "needs_attention",
+            "headline": wake_health["headline"],
+            "detail": wake_health["detail"],
+            "next_action": "Run /cron tick or wake the CEO now.",
+        }
+    elif blocked_count:
+        ceo_loop = {
+            "status": "recovering",
+            "headline": f"{blocked_count} blocker{'s' if blocked_count != 1 else ''} need CEO recovery.",
+            "detail": "Blocked work is preserved as tasks instead of disappearing into logs.",
+            "next_action": "Open Tasks, resolve a gate, or wake the CEO to choose a recovery move.",
+        }
+    elif not research_visible:
+        ceo_loop = {
+            "status": "research_first",
+            "headline": "Research is the next visible company-building move.",
+            "detail": "The CEO should clarify ICP, channels, offer, and strategy before building product by default.",
+            "next_action": "Create ICP and channel research, then decide product.",
+        }
+    elif product_visible:
+        ceo_loop = {
+            "status": "working",
+            "headline": "Product is visible locally.",
+            "detail": "The workspace has a customer surface that can be previewed while strategy and distribution continue.",
+            "next_action": "Preview the product and keep testing the ICP/channel bet.",
+        }
+    else:
+        ceo_loop = {
+            "status": "working",
+            "headline": "The company has strategy context and is ready for the next move.",
+            "detail": "Use research, outreach, creative, or product work based on evidence.",
+            "next_action": "Wake the CEO or pick a focused task.",
+        }
+
+    status_cards = [
+        {
+            "label": "CEO loop",
+            "status": ceo_loop["status"],
+            "detail": ceo_loop["headline"],
+            "tone": status_tone(ceo_loop["status"]),
+        },
+        {
+            "label": "Research",
+            "status": "visible" if research_visible else "needed",
+            "detail": (research_latest or strategy_file or {}).get("path", "ICP/channel strategy should come before product by default."),
+            "tone": "done" if research_visible else "waiting",
+        },
+        {
+            "label": "Product",
+            "status": "previewable" if product_visible else "not built yet",
+            "detail": (website or {}).get("path", "No local product surface is visible yet."),
+            "tone": "done" if product_visible else "waiting",
+        },
+        {
+            "label": "Wakeups",
+            "status": wake_health["status"],
+            "detail": wake_health["headline"],
+            "tone": status_tone(wake_health["status"]),
+        },
+    ]
 
     routes = surface.get("routes") if isinstance(surface.get("routes"), list) else []
     business_budget = as_dict(current_state.get("business_budget"))
@@ -4857,6 +5098,13 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "source_path": source_path,
             "design_brief_path": brief_text(surface.get("design_brief_path") or "product/design-brief.md"),
             "runtime_api_base": brief_text(surface.get("runtime_api_base")),
+            "publish_target": brief_text(surface.get("publish_target")),
+            "publish_policy": brief_text(surface.get("publish_policy")),
+            "publish_status": brief_text(surface.get("publish_status")),
+            "public_url": brief_text(surface.get("public_url")),
+            "published_at": brief_text(surface.get("published_at")),
+            "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
+            "publish_blocker": brief_text(surface.get("publish_blocker")),
             "routes_count": len(routes),
             "verification_status": brief_text(validation.get("status") or verification.get("status")),
             "verification_receipt": brief_text(validation.get("receipt") or verification.get("receipt_path")),
@@ -4884,14 +5132,38 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "cron": cron_jobs,
         "files": files,
         "jobs": jobs,
+        "agent_runs": agent_runs,
+        "tasks": task_cards[:16],
+        "status_cards": status_cards,
+        "ceo_loop": ceo_loop,
+        "wake_health": wake_health,
+        "research": {
+            "status": "visible" if research_visible else "needed",
+            "latest_path": (research_latest or {}).get("path", ""),
+            "strategy_path": (strategy_file or {}).get("path", ""),
+            "icp_path": (icp_file or {}).get("path", ""),
+            "channels_path": (channel_file or {}).get("path", ""),
+            "count": (research_latest or {}).get("count", 0),
+        },
         "posts": posts[:12],
         "artifacts": {
             "website": {
-                "status": "local_source" if website else "missing",
+                "status": (
+                    "published"
+                    if brief_text(surface.get("publish_status")) == "published" and brief_text(surface.get("public_url"))
+                    else "publish_blocked"
+                    if brief_text(surface.get("publish_status")) == "blocked"
+                    else "local_source" if website else "missing"
+                ),
                 "path": (website or {}).get("path", ""),
                 "updated_at": (website or {}).get("updated_at"),
                 "deploy_status": "pending" if deploy_pending else "",
                 "source_path": source_path,
+                "public_url": brief_text(surface.get("public_url")),
+                "publish_target": brief_text(surface.get("publish_target")),
+                "publish_status": brief_text(surface.get("publish_status")),
+                "publish_blocker": brief_text(surface.get("publish_blocker")),
+                "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
             },
             "outreach": {
                 "status": "published_local" if outreach_latest and outreach_receipt else ("draft_only" if outreach_draft else "missing"),

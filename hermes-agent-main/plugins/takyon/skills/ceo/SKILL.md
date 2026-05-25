@@ -73,6 +73,8 @@ Treat "how do I build/run/start this business" as operational when it is asked i
 
 For a new or mostly empty business, aggressively set up useful assets in the same turn when the operator's request allows it. Re-evaluate product and distribution from current evidence before building; treat ICP, offer, product model, pricing, and distribution as revisable beliefs stored in the business brain, not permanent metadata. Ask the same business questions used on wake: current ICP, where that ICP concentrates, what promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed, what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.
 
+For a new or low-evidence business, default to research-first visible progress unless the operator explicitly asks to build, publish, or ship a product now. Research-first still means acting in the same turn: use `takyon:market-research` to create durable ICP, customer/channel, competitor, pricing, and strategy evidence; update the business brain with hypotheses and next moves; then decide whether product work is justified. Do not build a product immediately just because the business is empty. Build product immediately only when the operator asked for product/source/publication, when existing evidence makes the product bet clear enough, or when the smallest useful product artifact is itself the best evidence-gathering move.
+
 - Business mode and goal.
 - Brain files for strategy, positioning, assumptions, and next questions.
 - Product workspace files such as offer, MVP spec, product rails, design brief, and website/app source. Notes/specs alone do not count as a built or published product surface.
@@ -98,11 +100,13 @@ Cron is not a skill. Cron wakes the CEO; the CEO then uses this skill and any si
 
 Business product apps have canonical Hermes rails. For customer signup, magic-link auth, product subusers, sessions, plan policies, entitlements, Stripe checkout, subscription reconciliation, revenue events, and app usage budgets, use the `business_*_app_*` tools, runtime API surface, and `business_record_stripe_webhook`. For visual design, layout, routes, and frontend source ownership, use `business_upsert_app_surface_contract` and business-owned design files. Do not invent ad hoc auth/payment files when the canonical app rails fit, and do not ship a fixed Takyon visual template as the final product UI.
 
-When a product or website source path is declared, verify it with `business_verify_product_surface` after source generation or major product edits. A surface is not built, publishable, or active unless there is a passing product-surface verification receipt; failed verification is evidence for repair or a blocker, not a reason to pretend.
+When creating or updating a product surface, record the publish target and policy in `business_upsert_app_surface_contract`. A product surface is not complete unless `business_verify_product_surface` returns verified and published, or an exact blocker. Failed verification or publication is evidence for repair or a blocker, not a reason to pretend.
 
 When a worker or product build appears blocked by missing local packages, runtimes, or package managers, use `business_check_runtime_capabilities` or the verification receipt before deciding. Missing capabilities are exact repair/provision/blocker evidence, not strategy and not a reason to make fake product state. Do not turn one machine's missing executable into a permanent business lesson.
 
 When a chosen move matches a sibling skill, inspect and use that skill as the method instead of improvising a generic answer. In particular, do not invent confident pricing without either using current market evidence or recording the pricing as a hypothesis in the business brain. If web/search is available, use market research before or alongside pricing and positioning choices; if it is unavailable, write the uncertainty down and schedule/queue the research.
+
+Short creative requests still need the right business method. If the operator says "make an ad", "make a video ad", "make UGC", or similar, route through `takyon:ad-creative`. If they asked for an actual image or video asset, use `business_generate_creative_asset` or report the exact provider, credential, budget, or capability gate that prevented generation. A script, shot list, or concept is not a completed generated video unless the operator only asked for that supporting artifact.
 
 ## Priority Bands
 

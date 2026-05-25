@@ -29,7 +29,8 @@
   "selfHelp": [
     {"whenAll": ["create", "business"], "command": "create"},
     {"whenAll": ["delete", "business"], "command": "delete"},
-    {"whenAll": ["test", "mode"], "command": "test"}
+    {"whenAll": ["test", "mode"], "command": "test"},
+    {"whenAll": ["work", "focus"], "command": "focus"}
   ],
   "controlCommands": [
     {"name": "ceo", "description": "Focus the scoped CEO conversation", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
@@ -84,6 +85,21 @@
         {"label": "Switch the current business later", "command": "/test on"},
         {"label": "Return the current business to live mode", "command": "/test off"},
         {"label": "Check mode", "command": "/test status"}
+      ]
+    },
+    {
+      "name": "focus",
+      "description": "Set current business work focus",
+      "requiresBusiness": true,
+      "priorityBand": "p0_control",
+      "palette": "advanced",
+      "usage": "/focus marketing|product|all|status",
+      "summary": "Work focus is per business: marketing-only keeps future CEO turns and crons on demand/research/outreach/conversion work; product-only keeps them on product/app/build/checkout work.",
+      "examples": [
+        {"label": "Marketing only", "command": "/focus marketing"},
+        {"label": "Product only", "command": "/focus product"},
+        {"label": "Clear focus", "command": "/focus all"},
+        {"label": "Check focus", "command": "/focus status"}
       ]
     },
     {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},

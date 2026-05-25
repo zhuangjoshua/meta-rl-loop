@@ -525,6 +525,11 @@ def _format_operation_result(item: Any) -> str:
         return "; ".join(bits)
     if action == "app.surface.upsert" and business:
         return f"app surface -> {_business_artifact_path(business, 'app/surface.md')}"
+    if action == "app.surface.publish_result" and business:
+        status = str(item.get("publish_status") or "not_published")
+        url = str(item.get("public_url") or item.get("publish_target") or "")
+        suffix = f" ({url})" if url else ""
+        return f"app surface publish {status} for business:{business}{suffix}"
     if action == "app.plan.upsert" and business:
         plan = str(item.get("plan_key") or "")
         suffix = f" ({plan})" if plan else ""
@@ -748,16 +753,20 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
         "ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.",
         "",
-        "In this bootstrap turn, make durable progress where safe: brain/strategy, product offer/spec/design/pricing,",
-        "app plans/surface/budget, product/website build or publication where possible, chosen distribution assets,",
-        "guarded jobs or suppressed local receipts for selected external side effects, and the next CEO wake. If something is blocked, record the blocker and continue with local/test",
+        "In this bootstrap turn, make visible durable progress where safe. For a new or low-evidence business, default",
+        "to research-first progress: ICP, customer/channel evidence, competitor/pricing notes, strategy, and business-brain",
+        "hypotheses before product. Build product/source/publication now only if the operator explicitly asked for it,",
+        "existing evidence makes the product bet clear enough, or the smallest product artifact is the best way to gather evidence.",
+        "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution assets,",
+        "guarded jobs or suppressed local receipts, and the next CEO wake when they are the justified move. If something is blocked, record the blocker and continue with local/test",
         "artifacts that do not require that provider.",
         "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace videos, local outreach publication, websites, checkout, deploys, or provider-backed work with Markdown summaries.",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
         "",
-        "Final response: concise status only. Include business filesystem root, files changed, receipts/jobs/wakeups,",
-        "what is still missing, and whether pricing/research is evidence-backed or a recorded hypothesis.",
+        "Final response: concise status only. Include business filesystem root, research/strategy created or updated,",
+        "files changed, receipts/jobs/wakeups, the next CEO action, what is still missing, and whether pricing/research",
+        "is evidence-backed or a recorded hypothesis.",
     ]
     if active_mode == "test":
         lines.extend([
@@ -1344,6 +1353,12 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         elif action == "app.surface.upsert":
             if business:
                 lines.append(f"app surface -> {_business_artifact_path(business, 'app/surface.md')}")
+        elif action == "app.surface.publish_result":
+            if business:
+                status = str(item.get("publish_status") or "not_published")
+                url = str(item.get("public_url") or item.get("publish_target") or "")
+                suffix = f" ({url})" if url else ""
+                lines.append(f"app surface publish {status} for business:{business}{suffix}")
         elif action == "app.plan.upsert":
             if business:
                 plan = str(item.get("plan_key") or "")

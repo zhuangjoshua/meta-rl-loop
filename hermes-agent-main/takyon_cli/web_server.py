@@ -10,6 +10,9 @@ Usage:
 """
 
 import asyncio
+import base64
+import hashlib
+import html
 import hmac
 import importlib.util
 import json
@@ -22,6 +25,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,7 +57,7 @@ from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 except ImportError:
@@ -64,7 +69,7 @@ except ImportError:
         _lazy_ensure("tool.dashboard", prompt=False)
         from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
     except Exception:
@@ -85,6 +90,397 @@ app = FastAPI(title="Takyon Agent", version=__version__)
 # ---------------------------------------------------------------------------
 _SESSION_TOKEN = secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Takyon-Session-Token"
+
+_AUTH0_SESSION_COOKIE = "takyon_dashboard_auth"
+_AUTH0_STATE_COOKIE = "takyon_auth0_state"
+_AUTH0_NONCE_COOKIE = "takyon_auth0_nonce"
+_AUTH0_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60
+_AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
+_AUTH0_JWKS_CLIENTS: dict[str, Any] = {}
+
+
+@dataclass(frozen=True)
+class Auth0DashboardConfig:
+    """Runtime Auth0 settings for the dashboard gate."""
+
+    domain: str
+    client_id: str
+    client_secret: str
+    secret: str
+    base_url: str
+    allowed_domains: tuple[str, ...]
+    allowed_emails: tuple[str, ...]
+    force: bool
+
+
+class Auth0ConfigError(RuntimeError):
+    """Raised when Auth0 is explicitly requested but not usable."""
+
+
+def _env_value(key: str) -> str:
+    """Read dashboard env values from the process or TAKYON_HOME/.env."""
+    value = os.getenv(key)
+    if value is not None:
+        return value.strip()
+    try:
+        return str(load_env().get(key) or "").strip()
+    except Exception:
+        return ""
+
+
+def _env_flag(key: str) -> Optional[bool]:
+    raw = _env_value(key).strip().lower()
+    if raw in {"1", "true", "yes", "on", "required", "force"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disabled", "disable"}:
+        return False
+    return None
+
+
+def _csv_env(*keys: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in keys:
+        raw = _env_value(key)
+        if not raw:
+            continue
+        for item in raw.replace(";", ",").split(","):
+            cleaned = item.strip().lower()
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+    return tuple(values)
+
+
+def _normalise_auth0_domain(domain: str) -> str:
+    domain = domain.strip().rstrip("/")
+    if not domain:
+        return ""
+    if not domain.startswith(("http://", "https://")):
+        domain = f"https://{domain}"
+    return domain.rstrip("/")
+
+
+def _default_public_base_url() -> str:
+    return (
+        _env_value("TAKYON_DASHBOARD_PUBLIC_URL")
+        or _env_value("APP_BASE_URL")
+        or _env_value("APP_URL")
+        or ""
+    ).rstrip("/")
+
+
+def _auth0_config() -> Optional[Auth0DashboardConfig]:
+    """Return Auth0 settings when configured.
+
+    Auth0 only becomes mandatory for requests when `_auth0_required_for_host`
+    says so. This lets a machine keep using the localhost dashboard even when
+    the shared Fourmanifold deployment secrets are present.
+    """
+    force = _env_flag("TAKYON_DASHBOARD_AUTH0")
+    if force is False:
+        return None
+
+    domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
+    client_id = _env_value("AUTH0_CLIENT_ID")
+    client_secret = _env_value("AUTH0_CLIENT_SECRET")
+    secret = _env_value("AUTH0_SECRET")
+    base_url = _default_public_base_url()
+
+    required = {
+        "AUTH0_DOMAIN": domain,
+        "AUTH0_CLIENT_ID": client_id,
+        "AUTH0_CLIENT_SECRET": client_secret,
+        "AUTH0_SECRET": secret,
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        if force is True:
+            raise Auth0ConfigError(
+                "Auth0 dashboard auth is enabled but missing: "
+                + ", ".join(sorted(missing))
+            )
+        return None
+
+    return Auth0DashboardConfig(
+        domain=domain,
+        client_id=client_id,
+        client_secret=client_secret,
+        secret=secret,
+        base_url=base_url,
+        allowed_domains=_csv_env(
+            "TAKYON_DASHBOARD_ALLOWED_EMAIL_DOMAINS",
+            "AUTH0_ALLOWED_EMAIL_DOMAINS",
+            "ARGON_BETA_ALLOWED_EMAIL_DOMAINS",
+        ),
+        allowed_emails=_csv_env(
+            "TAKYON_DASHBOARD_ALLOWED_EMAILS",
+            "AUTH0_ALLOWED_EMAILS",
+        ),
+        force=force is True,
+    )
+
+
+def _host_without_port(host_header: str) -> str:
+    host = (host_header or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        close = host.find("]")
+        return host[1:close] if close != -1 else host.strip("[]")
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _configured_public_host() -> str:
+    base_url = _default_public_base_url()
+    if not base_url:
+        return ""
+    parsed = urllib.parse.urlparse(base_url)
+    return _host_without_port(parsed.netloc)
+
+
+def _request_host(headers: Any) -> str:
+    return _host_without_port(
+        headers.get("x-forwarded-host")
+        or headers.get("host")
+        or ""
+    )
+
+
+def _auth0_required_for_host(headers: Any) -> bool:
+    cfg = _auth0_config()
+    if not cfg:
+        return False
+    if cfg.force:
+        return True
+    public_host = _configured_public_host()
+    return bool(public_host and _request_host(headers) == public_host)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
+def _sign_payload(secret: str, payload: dict[str, Any]) -> str:
+    body = _b64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{_b64url_encode(sig)}"
+
+
+def _unsign_payload(secret: str, token: str) -> Optional[dict[str, Any]]:
+    try:
+        body, sig = token.split(".", 1)
+        expected = hmac.new(
+            secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(_b64url_decode(sig), expected):
+            return None
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _cookie_value(cookie_header: str, name: str) -> str:
+    cookie = SimpleCookie(cookie_header or "")
+    morsel = cookie.get(name)
+    return morsel.value if morsel else ""
+
+
+def _https_for_cookie(headers: Any, base_url: str) -> bool:
+    if str(headers.get("x-forwarded-proto") or "").lower() == "https":
+        return True
+    return urllib.parse.urlparse(base_url).scheme == "https"
+
+
+def _same_origin_path(path: str) -> str:
+    if not path or not path.startswith("/") or path.startswith("//"):
+        return "/"
+    return path
+
+
+def _auth0_redirect_uri(cfg: Auth0DashboardConfig, request: Request) -> str:
+    base_url = cfg.base_url
+    if not base_url:
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        base_url = f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+    return f"{base_url.rstrip('/')}/auth/callback"
+
+
+def _auth0_login_path(request: Request) -> str:
+    return_to = request.url.path
+    if request.url.query:
+        return_to = f"{return_to}?{request.url.query}"
+    return "/auth/login?" + urllib.parse.urlencode({"return_to": return_to})
+
+
+def _auth0_cookie_response(
+    response: Response,
+    cfg: Auth0DashboardConfig,
+    request: Request,
+    *,
+    key: str,
+    value: str,
+    max_age: int,
+) -> None:
+    response.set_cookie(
+        key,
+        value,
+        max_age=max_age,
+        path="/",
+        secure=_https_for_cookie(request.headers, cfg.base_url),
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _clear_auth0_cookies(response: Response, *, include_session: bool = True) -> None:
+    keys = [_AUTH0_STATE_COOKIE, _AUTH0_NONCE_COOKIE]
+    if include_session:
+        keys.insert(0, _AUTH0_SESSION_COOKIE)
+    for key in keys:
+        response.delete_cookie(key, path="/")
+
+
+def _email_allowed(email: str, cfg: Auth0DashboardConfig) -> bool:
+    email = email.strip().lower()
+    if not email or "@" not in email:
+        return False
+    if cfg.allowed_emails and email in cfg.allowed_emails:
+        return True
+    domain = email.rsplit("@", 1)[1]
+    if cfg.allowed_domains:
+        return domain in cfg.allowed_domains
+    return True
+
+
+def _session_from_cookie_header(
+    cookie_header: str,
+    cfg: Auth0DashboardConfig,
+) -> Optional[dict[str, Any]]:
+    token = _cookie_value(cookie_header, _AUTH0_SESSION_COOKIE)
+    if not token:
+        return None
+    payload = _unsign_payload(cfg.secret, token)
+    if not payload:
+        return None
+    try:
+        if int(payload.get("exp") or 0) < int(time.time()):
+            return None
+    except (TypeError, ValueError):
+        return None
+    email = str(payload.get("email") or "")
+    return payload if _email_allowed(email, cfg) else None
+
+
+def _auth0_public_path(path: str) -> bool:
+    if path.startswith("/auth/"):
+        return True
+    if path in {"/favicon.ico", "/robots.txt"}:
+        return True
+    return path.startswith((
+        "/assets/",
+        "/fonts/",
+        "/fonts-terminal/",
+        "/ds-assets/",
+        "/dashboard-plugins/",
+    ))
+
+
+async def _auth0_exchange_code(
+    cfg: Auth0DashboardConfig,
+    *,
+    code: str,
+    redirect_uri: str,
+) -> dict[str, Any]:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
+        resp = await client.post(
+            f"{cfg.domain}/oauth/token",
+            json={
+                "grant_type": "authorization_code",
+                "client_id": cfg.client_id,
+                "client_secret": cfg.client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    if not isinstance(data, dict) or not data.get("id_token"):
+        raise Auth0ConfigError("Auth0 token response did not include an id_token")
+    return data
+
+
+def _auth0_verify_id_token(
+    cfg: Auth0DashboardConfig,
+    *,
+    id_token: str,
+    expected_nonce: str,
+) -> dict[str, Any]:
+    try:
+        import jwt
+        from jwt import PyJWKClient
+    except ImportError as exc:  # pragma: no cover - dependency is pinned.
+        raise Auth0ConfigError("PyJWT[crypto] is required for Auth0 validation") from exc
+
+    issuer = f"{cfg.domain}/"
+    jwks_client = _AUTH0_JWKS_CLIENTS.get(cfg.domain)
+    if jwks_client is None:
+        jwks_client = PyJWKClient(f"{cfg.domain}/.well-known/jwks.json")
+        _AUTH0_JWKS_CLIENTS[cfg.domain] = jwks_client
+    signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+    claims = jwt.decode(
+        id_token,
+        signing_key.key,
+        algorithms=["RS256"],
+        audience=cfg.client_id,
+        issuer=issuer,
+        options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+    )
+    if claims.get("nonce") != expected_nonce:
+        raise Auth0ConfigError("Auth0 nonce mismatch")
+    return claims
+
+
+def _auth0_authorize_claims(
+    cfg: Auth0DashboardConfig,
+    claims: dict[str, Any],
+) -> dict[str, Any]:
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        raise Auth0ConfigError("Auth0 profile did not include an email address")
+    if claims.get("email_verified") is not True:
+        raise Auth0ConfigError("Auth0 email address is not verified")
+    if not _email_allowed(email, cfg):
+        raise Auth0ConfigError(f"{email} is not allowed for this dashboard")
+    return {
+        "sub": str(claims.get("sub") or ""),
+        "email": email,
+        "name": str(claims.get("name") or email),
+        "email_verified": True,
+    }
+
+
+def _auth0_error_response(message: str, status_code: int = 403) -> Response:
+    safe_message = html.escape(message)
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Takyon Auth</title></head>
+<body style="font-family:system-ui,sans-serif;margin:3rem;max-width:42rem">
+<h1>Access denied</h1><p>{safe_message}</p><p><a href="/auth/login">Try again</a></p>
+</body></html>""",
+        status_code=status_code,
+    )
+
 
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``takyon dashboard --tui``
 # or TAKYON_DASHBOARD_TUI=1.  Set from :func:`start_server`.
@@ -176,17 +572,7 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Plain hosts/v4:
     #   localhost:9119
     #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
+    host_only = _host_without_port(host_header)
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -197,6 +583,12 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
+        try:
+            public_host = _configured_public_host() if _auth0_config() else ""
+        except Auth0ConfigError:
+            public_host = ""
+        if public_host and host_only == public_host:
+            return True
         return host_only in _LOOPBACK_HOST_VALUES
 
     # Explicit non-loopback bind: require exact host match
@@ -244,6 +636,205 @@ async def auth_middleware(request: Request, call_next):
                 content={"detail": "Unauthorized"},
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def auth0_middleware(request: Request, call_next):
+    """Optional Auth0 gate for the public dashboard host."""
+    try:
+        cfg = _auth0_config()
+    except Auth0ConfigError as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    if not cfg or not _auth0_required_for_host(request.headers):
+        return await call_next(request)
+
+    path = request.url.path
+    if _auth0_public_path(path):
+        return await call_next(request)
+
+    session = _session_from_cookie_header(
+        request.headers.get("cookie", ""),
+        cfg,
+    )
+    if session:
+        request.state.auth0_user = session
+        return await call_next(request)
+
+    if path.startswith("/api/"):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Auth0 login required"},
+        )
+    return RedirectResponse(_auth0_login_path(request), status_code=302)
+
+
+@app.get("/auth/login")
+async def auth0_login(request: Request):
+    cfg = _auth0_config()
+    if not cfg:
+        return JSONResponse(
+            {"detail": "Auth0 dashboard auth is not configured"},
+            status_code=404,
+        )
+
+    state = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
+    return_to = _same_origin_path(request.query_params.get("return_to") or "/")
+    state_payload = _sign_payload(
+        cfg.secret,
+        {
+            "state": state,
+            "return_to": return_to,
+            "iat": int(time.time()),
+        },
+    )
+    redirect_uri = _auth0_redirect_uri(cfg, request)
+    params = {
+        "response_type": "code",
+        "client_id": cfg.client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "openid profile email",
+        "state": state,
+        "nonce": nonce,
+    }
+    auth_url = f"{cfg.domain}/authorize?{urllib.parse.urlencode(params)}"
+    response = RedirectResponse(auth_url, status_code=302)
+    _auth0_cookie_response(
+        response,
+        cfg,
+        request,
+        key=_AUTH0_STATE_COOKIE,
+        value=state_payload,
+        max_age=_AUTH0_STATE_MAX_AGE_SECONDS,
+    )
+    _auth0_cookie_response(
+        response,
+        cfg,
+        request,
+        key=_AUTH0_NONCE_COOKIE,
+        value=_sign_payload(cfg.secret, {"nonce": nonce, "iat": int(time.time())}),
+        max_age=_AUTH0_STATE_MAX_AGE_SECONDS,
+    )
+    return response
+
+
+@app.get("/auth/callback")
+async def auth0_callback(request: Request):
+    cfg = _auth0_config()
+    if not cfg:
+        return JSONResponse(
+            {"detail": "Auth0 dashboard auth is not configured"},
+            status_code=404,
+        )
+
+    if request.query_params.get("error"):
+        return _auth0_error_response(
+            str(request.query_params.get("error_description") or "Auth0 login failed"),
+            status_code=403,
+        )
+
+    code = request.query_params.get("code") or ""
+    state = request.query_params.get("state") or ""
+    if not code or not state:
+        return _auth0_error_response("Missing Auth0 callback code or state", 400)
+
+    state_payload = _unsign_payload(
+        cfg.secret,
+        _cookie_value(request.headers.get("cookie", ""), _AUTH0_STATE_COOKIE),
+    )
+    nonce_payload = _unsign_payload(
+        cfg.secret,
+        _cookie_value(request.headers.get("cookie", ""), _AUTH0_NONCE_COOKIE),
+    )
+    now = int(time.time())
+    if (
+        not state_payload
+        or state_payload.get("state") != state
+        or int(state_payload.get("iat") or 0) < now - _AUTH0_STATE_MAX_AGE_SECONDS
+    ):
+        return _auth0_error_response("Auth0 state mismatch", 400)
+    if (
+        not nonce_payload
+        or int(nonce_payload.get("iat") or 0) < now - _AUTH0_STATE_MAX_AGE_SECONDS
+    ):
+        return _auth0_error_response("Auth0 nonce expired", 400)
+
+    try:
+        token_data = await _auth0_exchange_code(
+            cfg,
+            code=code,
+            redirect_uri=_auth0_redirect_uri(cfg, request),
+        )
+        claims = _auth0_verify_id_token(
+            cfg,
+            id_token=str(token_data["id_token"]),
+            expected_nonce=str(nonce_payload.get("nonce") or ""),
+        )
+        user = _auth0_authorize_claims(cfg, claims)
+    except Exception as exc:
+        _log.warning("Auth0 dashboard login rejected: %s", exc)
+        return _auth0_error_response(str(exc), 403)
+
+    expires_at = now + _AUTH0_COOKIE_MAX_AGE_SECONDS
+    session_token = _sign_payload(cfg.secret, {**user, "iat": now, "exp": expires_at})
+    response = RedirectResponse(
+        _same_origin_path(str(state_payload.get("return_to") or "/")),
+        status_code=302,
+    )
+    _auth0_cookie_response(
+        response,
+        cfg,
+        request,
+        key=_AUTH0_SESSION_COOKIE,
+        value=session_token,
+        max_age=_AUTH0_COOKIE_MAX_AGE_SECONDS,
+    )
+    _clear_auth0_cookies(response, include_session=False)
+    return response
+
+
+@app.get("/auth/logout")
+async def auth0_logout(request: Request):
+    cfg = _auth0_config()
+    return_to = _same_origin_path(request.query_params.get("return_to") or "/")
+    response: Response
+    if cfg:
+        base_url = cfg.base_url or str(request.base_url).rstrip("/")
+        logout_params = {
+            "client_id": cfg.client_id,
+            "returnTo": f"{base_url.rstrip('/')}{return_to}",
+        }
+        response = RedirectResponse(
+            f"{cfg.domain}/v2/logout?{urllib.parse.urlencode(logout_params)}",
+            status_code=302,
+        )
+    else:
+        response = RedirectResponse(return_to, status_code=302)
+    _clear_auth0_cookies(response)
+    return response
+
+
+@app.get("/auth/me")
+async def auth0_me(request: Request):
+    cfg = _auth0_config()
+    if not cfg or not _auth0_required_for_host(request.headers):
+        return {"authenticated": False, "auth0_required": False}
+    session = _session_from_cookie_header(request.headers.get("cookie", ""), cfg)
+    if not session:
+        return JSONResponse(
+            {"authenticated": False, "auth0_required": True},
+            status_code=401,
+        )
+    return {
+        "authenticated": True,
+        "auth0_required": True,
+        "user": {
+            "email": session.get("email"),
+            "name": session.get("name"),
+            "sub": session.get("sub"),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3311,6 +3902,17 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
         return True
     return client_host in _LOOPBACK_HOSTS
 
+
+def _ws_auth0_session_is_allowed(ws: "WebSocket") -> bool:
+    """Require the Auth0 dashboard cookie on the configured public host."""
+    try:
+        cfg = _auth0_config()
+    except Auth0ConfigError:
+        return False
+    if not cfg or not _auth0_required_for_host(ws.headers):
+        return True
+    return _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None
+
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
 # the chat tab generates on mount; entries auto-evict when the last subscriber
@@ -3409,6 +4011,10 @@ async def pty_ws(ws: WebSocket) -> None:
     token = ws.query_params.get("token", "")
     expected = _SESSION_TOKEN
     if not hmac.compare_digest(token.encode(), expected.encode()):
+        await ws.close(code=4401)
+        return
+
+    if not _ws_auth0_session_is_allowed(ws):
         await ws.close(code=4401)
         return
 
@@ -3531,6 +4137,10 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
+    if not _ws_auth0_session_is_allowed(ws):
+        await ws.close(code=4401)
+        return
+
     if not _ws_client_is_allowed(ws):
         await ws.close(code=4403)
         return
@@ -3563,6 +4173,10 @@ async def pub_ws(ws: WebSocket) -> None:
         await ws.close(code=4401)
         return
 
+    if not _ws_auth0_session_is_allowed(ws):
+        await ws.close(code=4401)
+        return
+
     if not _ws_client_is_allowed(ws):
         await ws.close(code=4403)
         return
@@ -3589,6 +4203,10 @@ async def events_ws(ws: WebSocket) -> None:
 
     token = ws.query_params.get("token", "")
     if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        await ws.close(code=4401)
+        return
+
+    if not _ws_auth0_session_is_allowed(ws):
         await ws.close(code=4401)
         return
 
@@ -4525,18 +5143,24 @@ def start_server(
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
 
+    auth0_cfg = _auth0_config()
+    auth0_all_hosts = bool(auth0_cfg and auth0_cfg.force)
     _LOCALHOST = ("127.0.0.1", "localhost", "::1")
-    if host not in _LOCALHOST and not allow_public:
+    if host not in _LOCALHOST and not allow_public and not auth0_all_hosts:
         raise SystemExit(
             f"Refusing to bind to {host} — the dashboard exposes API keys "
             f"and config without robust authentication.\n"
-            f"Use --insecure to override (NOT recommended on untrusted networks)."
+            f"Use --insecure to override (NOT recommended on untrusted networks), "
+            f"or set TAKYON_DASHBOARD_AUTH0=1 to require Auth0 on every host."
         )
     if host not in _LOCALHOST:
-        _log.warning(
-            "Binding to %s with --insecure — the dashboard has no robust "
-            "authentication. Only use on trusted networks.", host,
-        )
+        if auth0_all_hosts:
+            _log.info("Binding to %s with Auth0 required on every host.", host)
+        else:
+            _log.warning(
+                "Binding to %s with --insecure — dashboard Auth0 is only "
+                "host-scoped unless TAKYON_DASHBOARD_AUTH0=1 is set.", host,
+            )
 
     # Record the bound host so host_header_middleware can validate incoming
     # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
@@ -4577,6 +5201,11 @@ def start_server(
             )
 
     print(f"  Takyon Web UI → http://{host}:{port}")
+    if auth0_cfg:
+        public_host = _configured_public_host()
+        scope = "all hosts" if auth0_cfg.force else (public_host or "configured public host")
+        allowed = ", ".join(auth0_cfg.allowed_domains) or "all Auth0 users"
+        print(f"  Auth0 gate → {scope} ({allowed})")
     # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the
     # loopback gate when behind a reverse proxy).

@@ -3,6 +3,10 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+if [ -z "${TAKYON_HOME:-}" ] && [ -d "$ROOT/../.takyon" ]; then
+  export TAKYON_HOME="$ROOT/../.takyon"
+fi
+
 find_python() {
   for candidate in \
     "$ROOT/.venv/bin/python" \

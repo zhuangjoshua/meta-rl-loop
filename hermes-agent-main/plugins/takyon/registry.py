@@ -183,14 +183,14 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "app",
         "priority_bands": ["p2_growth"],
         "effect": "durable_write",
-        "purpose": "Record the business-owned app surface contract so UI look, routes, and source path come from per-business context.",
+        "purpose": "Record the business-owned app surface contract so UI look, routes, source path, publish target, publish policy, and done gate come from per-business context.",
     },
     {
         "name": "business_verify_product_surface",
         "category": "product",
         "priority_bands": ["p1_ceo", "p2_growth", "p4_maintenance"],
         "effect": "durable_write",
-        "purpose": "Verify a product/website source path and record a receipt or blocker without deciding strategy.",
+        "purpose": "Verify a product/website source path, publish it to the business subdomain when possible, and record a receipt or exact blocker without deciding strategy.",
     },
     {
         "name": "business_upsert_app_plan",
@@ -395,6 +395,9 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "category": "product",
         "priority_bands": ["p2_growth"],
         "purpose": "Shape or improve product and offer when the business lacks a usable product surface.",
+        "use_when": "Use when the operator asks for product/source/publication, when evidence makes the product bet clear enough, or when a small product artifact is the best evidence-gathering move; defer default new-business bootstrap to market research when ICP/channel evidence is weak.",
+        "keywords": ["build product", "website", "app surface", "product source", "publish site", "MVP", "checkout", "product verification"],
+        "capabilities": ["app_surface_contract", "product_source_generation", "product_surface_verification", "canonical_app_runtime"],
     },
     {
         "name": "market-research",
@@ -402,6 +405,9 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "category": "research",
         "priority_bands": ["p2_growth", "p3_learning"],
         "purpose": "Gather customer, competitor, channel, pricing, and demand evidence.",
+        "use_when": "Use by default for new or low-evidence businesses before product: clarify ICP, customer concentration, buyer pain, channels, competitors, pricing, positioning, and the high-level strategy needed to reach those people.",
+        "keywords": ["ICP", "customer research", "market research", "channel strategy", "competitor research", "pricing evidence", "new business bootstrap", "research first", "who to reach"],
+        "capabilities": ["research_first_bootstrap", "icp_strategy", "channel_evidence", "business_brain_updates"],
     },
     {
         "name": "pricing-strategy",
@@ -423,8 +429,8 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "category": "creative",
         "priority_bands": ["p2_growth", "p3_learning"],
         "purpose": "Draft ad angles, copy, landing hooks, UGC image/video creative assets, and posting requests.",
-        "use_when": "Use for paid-social creative, UGC scripts, shot lists, local generated image/video assets, and ad creative iteration; keep posting/spend as separate gated jobs.",
-        "keywords": ["UGC video", "Sora", "creative asset", "local generated asset", "Meta UGC", "ad video", "paid social"],
+        "use_when": "Use for direct short requests like make an ad or make a video ad, paid-social creative, UGC scripts, shot lists, local generated image/video assets, and ad creative iteration; keep posting/spend as separate gated jobs.",
+        "keywords": ["make an ad", "make a video ad", "UGC video", "Sora", "creative asset", "local generated asset", "Meta UGC", "ad video", "paid social"],
         "capabilities": ["routes_to_business_generate_creative_asset", "local_generated_asset", "ugc_video"],
     },
     {
