@@ -218,6 +218,103 @@ def check_video_generation_requirements() -> bool:
     return False
 
 
+def get_video_generation_capability_snapshot() -> Dict[str, Any]:
+    """Return non-secret video-generation capability state for agents/tools.
+
+    This is intentionally read-only and diagnostic. It lets Takyon discover
+    "video generation available: openai/sora" from the canonical provider
+    registry instead of guessing from skill prose.
+    """
+    configured = _read_configured_video_provider()
+    configured_model = _read_configured_video_model()
+    snapshot: Dict[str, Any] = {
+        "available": False,
+        "configured_provider": configured or "",
+        "configured_model": configured_model or "",
+        "active_provider": "",
+        "active_model": configured_model or "",
+        "display_name": "",
+        "registered_providers": [],
+        "models": [],
+        "capabilities": {},
+        "missing_env": [],
+        "gate": "no_provider_configured" if not configured else "provider_not_registered",
+        "summary": "video generation unavailable",
+    }
+
+    try:
+        from agent.video_gen_registry import get_provider, list_providers
+        from takyon_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        providers = {provider.name: provider for provider in list_providers()}
+        snapshot["registered_providers"] = sorted(providers)
+        provider = get_provider(configured) if configured else _resolve_active_provider()
+    except Exception as exc:
+        snapshot.update({
+            "gate": "provider_registry_error",
+            "error": str(exc),
+            "summary": f"video generation registry error: {exc}",
+        })
+        return snapshot
+
+    if provider is None:
+        if configured:
+            snapshot["summary"] = f"video generation provider not registered: {configured}"
+        return snapshot
+
+    try:
+        models = provider.list_models() or []
+    except Exception:
+        models = []
+    try:
+        caps = provider.capabilities() or {}
+    except Exception:
+        caps = {}
+    active_model = configured_model or provider.default_model() or ""
+
+    try:
+        available = bool(provider.is_available())
+    except Exception as exc:
+        snapshot.update({
+            "gate": "provider_unavailable",
+            "error": str(exc),
+        })
+        available = False
+
+    missing_env: list[str] = []
+    try:
+        setup = provider.get_setup_schema() or {}
+        env_vars = setup.get("env_vars") if isinstance(setup, dict) else []
+        for item in env_vars if isinstance(env_vars, list) else []:
+            key = item.get("key") if isinstance(item, dict) else item
+            key = str(key or "").strip()
+            if key and not os.getenv(key):
+                missing_env.append(key)
+    except Exception:
+        missing_env = []
+
+    gate = "ready" if available else "auth_required" if missing_env else "provider_unavailable"
+    family = "sora" if provider.name == "openai" and active_model.startswith("sora") else active_model
+    summary = (
+        f"video generation available: {provider.name}/{family or active_model}"
+        if available
+        else f"video generation configured: {provider.name}/{family or active_model}; gate={gate}"
+    )
+    snapshot.update({
+        "available": available,
+        "active_provider": provider.name,
+        "active_model": active_model,
+        "display_name": provider.display_name,
+        "models": models,
+        "capabilities": caps,
+        "missing_env": sorted(set(missing_env)),
+        "gate": gate,
+        "summary": summary,
+    })
+    return snapshot
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------

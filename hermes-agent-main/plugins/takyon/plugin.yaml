@@ -43,3 +43,4 @@ provides_tools:
   - business_set_control
   - business_schedule_ceo_wakeup
   - business_gc
+  - business_upgrade_businesses

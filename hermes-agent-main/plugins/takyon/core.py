@@ -54,6 +54,9 @@ DEFAULT_TAKYON_DIRNAME = "takyon"
 DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-7"
 MAX_READ_CHARS = 64_000
 MAX_WRITE_CHARS = 1_000_000
+CURRENT_BUSINESS_SCHEMA_VERSION = 1
+CURRENT_BUSINESS_CAPABILITY_VERSION = 1
+BUSINESS_UPGRADE_RECEIPT = "receipts/upgrades/takyon-business-upgrade-v1.json"
 NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - You are not allowed to invent backend behavior.
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
@@ -3944,7 +3947,43 @@ def _creative_asset_source_bytes(source: str) -> bytes:
     return path.read_bytes()
 
 
-def _parse_provider_result(raw: str, *, kind: str) -> dict[str, Any]:
+_CREATIVE_ASSET_ERROR_TYPES = {
+    "api_key_missing",
+    "budget_missing",
+    "model_error",
+    "provider_not_registered",
+    "provider_unavailable",
+}
+
+
+def _creative_asset_error_type(message: str) -> str:
+    prefix = str(message or "").split(":", 1)[0].strip()
+    return prefix if prefix in _CREATIVE_ASSET_ERROR_TYPES else "creative_asset_error"
+
+
+def _provider_failure_message(result: dict[str, Any], *, kind: str, expected_provider: str = "") -> str:
+    error_type = str(result.get("error_type") or "provider_error").strip() or "provider_error"
+    provider = str(result.get("provider") or expected_provider or "").strip()
+    model = str(result.get("model") or "").strip()
+    message = str(result.get("error") or f"{kind} generation failed").strip()
+    if error_type in {"provider_not_registered", "no_provider_configured"}:
+        label = "provider_not_registered"
+    elif error_type in {"auth_required", "missing_api_key", "missing_env"}:
+        label = "api_key_missing"
+    elif error_type in {"provider_unavailable"}:
+        label = "provider_unavailable"
+    else:
+        label = "model_error"
+    parts = [f"{label}: {kind} generation failed"]
+    if provider:
+        parts.append(f"provider={provider}")
+    if model:
+        parts.append(f"model={model}")
+    parts.append(message)
+    return "; ".join(parts)
+
+
+def _parse_provider_result(raw: str, *, kind: str, expected_provider: str = "") -> dict[str, Any]:
     try:
         result = json.loads(raw)
     except Exception as exc:
@@ -3952,7 +3991,7 @@ def _parse_provider_result(raw: str, *, kind: str) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise TakyonError(f"{kind} generation returned a non-object result")
     if not result.get("success"):
-        raise TakyonError(str(result.get("error") or f"{kind} generation failed"))
+        raise TakyonError(_provider_failure_message(result, kind=kind, expected_provider=expected_provider))
     asset_value = result.get(kind) or result.get("url") or result.get("path")
     if not asset_value:
         raise TakyonError(f"{kind} generation result did not include {kind}, url, or path")
@@ -4966,7 +5005,7 @@ def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
             raise TakyonError("idempotency_key is required")
         budget_usd = float(args.get("budget_usd") or args.get("estimated_cost_usd") or 0)
         if budget_usd <= 0:
-            raise TakyonError("budget_usd > 0 is required for provider-backed creative generation")
+            raise TakyonError("budget_missing: business_generate_creative_asset requires budget_usd > 0 before provider-backed creative generation")
         asset_id = _file_slug(str(args.get("asset_id") or idempotency_key), "asset")
         rel = _creative_asset_relpath(
             args=args,
@@ -4985,16 +5024,22 @@ def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
         requires_api = [str(item).strip() for item in _as_list(args.get("requires_api")) if str(item).strip()]
         if provider:
             requires_api.append(provider)
-        _require_api_access(
-            {
-                "action": "creative.asset.generate",
-                "business": business,
-                "provider": provider,
-                "requires_api": requires_api,
-                "requires_env": args.get("requires_env") or [],
-            },
-            business_mode=business_mode,
-        )
+        try:
+            _require_api_access(
+                {
+                    "action": "creative.asset.generate",
+                    "business": business,
+                    "provider": provider,
+                    "requires_api": requires_api,
+                    "requires_env": args.get("requires_env") or [],
+                },
+                business_mode=business_mode,
+            )
+        except TakyonError as exc:
+            message = str(exc)
+            if "missing API/env credential" in message:
+                raise TakyonError(f"api_key_missing: {message}") from exc
+            raise
 
         asset_path = store._resolve_business_file(business, rel)
         receipt_path = store._resolve_business_file(business, receipt_rel)
@@ -5065,7 +5110,7 @@ def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
                 }
             )
 
-        provider_result = _parse_provider_result(provider_raw, kind=kind)
+        provider_result = _parse_provider_result(provider_raw, kind=kind, expected_provider=provider)
         _atomic_write_bytes(asset_path, _creative_asset_source_bytes(provider_result["_asset_source"]))
 
         created_at = _now()
@@ -5121,7 +5166,8 @@ def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
             "posted": False,
         })
     except Exception as exc:
-        return tool_error(str(exc), success=False)
+        message = str(exc)
+        return tool_error(message, success=False, error_type=_creative_asset_error_type(message))
 
 
 def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
@@ -5221,6 +5267,241 @@ def handle_business_gc(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation, scope=args.get("scope") or "global")
 
 
+def _business_version(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _detect_legacy_product_site(root: Path) -> str:
+    for rel in ("product/site", "site"):
+        candidate = root / rel
+        if candidate.exists() and candidate.is_dir() and _product_source_files(candidate, limit=1):
+            return rel
+    return ""
+
+
+def _legacy_surface_routes(site_root: Path) -> list[dict[str, str]]:
+    routes: list[dict[str, str]] = []
+    for child in sorted(site_root.glob("*.html"), key=lambda path: path.name.lower())[:20]:
+        if child.name == "index.html":
+            route = "/"
+            label = "Landing"
+        else:
+            route = f"/{child.stem}"
+            label = child.stem.replace("-", " ").replace("_", " ").title()
+        routes.append({"path": route, "name": label, "source": str(child.relative_to(site_root))})
+    return routes or [{"path": "/", "name": "Product surface", "source": "."}]
+
+
+def _legacy_distribution_mappings(root: Path) -> list[dict[str, str]]:
+    distribution = root / "distribution"
+    if not distribution.exists() or not distribution.is_dir():
+        return []
+    mappings: list[dict[str, str]] = []
+    for child in sorted(distribution.rglob("*.md"), key=lambda path: path.as_posix())[:100]:
+        if not child.is_file():
+            continue
+        rel = str(child.relative_to(root))
+        name = child.name.lower()
+        parts = {part.lower() for part in child.parts}
+        if {"creative", "creatives"}.intersection(parts) or any(token in name for token in ("ad", "ugc", "video", "creative")):
+            mapped_as = "local_creative_brief"
+        elif "posts" in parts or any(token in name for token in ("post", "outreach", "launch")):
+            mapped_as = "local_post"
+        else:
+            mapped_as = "distribution_note"
+        mappings.append({"path": rel, "mapped_as": mapped_as})
+    return mappings
+
+
+def _legacy_asset_paths(root: Path) -> list[str]:
+    suffixes = {".gif", ".jpg", ".jpeg", ".mov", ".mp4", ".png", ".webm"}
+    skip_dirs = {".git", ".next", "node_modules", "venv", ".venv"}
+    assets: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in skip_dirs and not name.startswith(".cache")]
+        for filename in sorted(filenames):
+            if len(assets) >= 100:
+                return assets
+            child = Path(dirpath) / filename
+            if child.suffix.lower() not in suffixes:
+                continue
+            if not child.is_file():
+                continue
+            try:
+                rel = str(child.relative_to(root))
+            except ValueError:
+                continue
+            if rel.startswith("receipts/"):
+                continue
+            assets.append(rel)
+    return assets
+
+
+def _plan_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, business: dict[str, Any]) -> dict[str, Any]:
+    slug = str(business.get("slug") or "")
+    root = store._business_root(slug)
+    metadata = business.get("metadata") if isinstance(business.get("metadata"), dict) else {}
+    schema_version = _business_version(metadata.get("takyon_schema_version"))
+    capability_version = _business_version(metadata.get("takyon_capability_version"))
+    product_site = _detect_legacy_product_site(root)
+    surface_row = conn.execute("SELECT business_slug FROM app_surface_contracts WHERE business_slug = ?", (slug,)).fetchone()
+    distribution_mappings = _legacy_distribution_mappings(root)
+    existing_assets = _legacy_asset_paths(root)
+    receipt_exists = (root / BUSINESS_UPGRADE_RECEIPT).exists()
+
+    actions: list[str] = []
+    if schema_version < CURRENT_BUSINESS_SCHEMA_VERSION or capability_version < CURRENT_BUSINESS_CAPABILITY_VERSION:
+        actions.append("set_business_versions")
+    if product_site and surface_row is None:
+        actions.append("record_legacy_product_surface")
+    if distribution_mappings and not receipt_exists:
+        actions.append("map_legacy_distribution_files")
+    if existing_assets and not receipt_exists:
+        actions.append("index_existing_local_assets")
+    if actions and not receipt_exists:
+        actions.append("write_upgrade_receipt")
+
+    seen: set[str] = set()
+    deduped_actions = [action for action in actions if not (action in seen or seen.add(action))]
+    return {
+        "business": slug,
+        "current_schema_version": schema_version,
+        "target_schema_version": CURRENT_BUSINESS_SCHEMA_VERSION,
+        "current_capability_version": capability_version,
+        "target_capability_version": CURRENT_BUSINESS_CAPABILITY_VERSION,
+        "status": "needs_upgrade" if deduped_actions else "current",
+        "actions": deduped_actions,
+        "detected": {
+            "product_site": product_site,
+            "distribution_mappings": distribution_mappings,
+            "existing_local_assets": existing_assets,
+            "upgrade_receipt": BUSINESS_UPGRADE_RECEIPT if receipt_exists else "",
+        },
+    }
+
+
+def _apply_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, plan: dict[str, Any]) -> dict[str, Any]:
+    slug = str(plan["business"])
+    actions = list(plan.get("actions") or [])
+    if not actions:
+        return {**plan, "changed": False}
+
+    root = store._business_root(slug)
+    business = store._ensure_business(conn, slug)
+    metadata = business.get("metadata") if isinstance(business.get("metadata"), dict) else {}
+    now = _now()
+    receipt_rel = BUSINESS_UPGRADE_RECEIPT
+    metadata = {
+        **metadata,
+        "takyon_schema_version": CURRENT_BUSINESS_SCHEMA_VERSION,
+        "takyon_capability_version": CURRENT_BUSINESS_CAPABILITY_VERSION,
+        "takyon_last_upgrade": {
+            "name": "takyon-business-upgrade-v1",
+            "receipt": receipt_rel,
+            "updated_at": now,
+        },
+    }
+    conn.execute(
+        "UPDATE businesses SET metadata_json = ?, updated_at = ? WHERE slug = ?",
+        (_json_dumps(metadata), now, slug),
+    )
+
+    product_site = str((plan.get("detected") or {}).get("product_site") or "")
+    if product_site and "record_legacy_product_surface" in actions:
+        site_root = root / product_site
+        conn.execute(
+            """
+            INSERT INTO app_surface_contracts (
+              business_slug, status, design_brief_path, source_path, runtime_api_base,
+              routes_json, theme_json, constraints_json, notes, metadata_json, created_at, updated_at
+            )
+            VALUES (?, 'legacy_detected', 'product/design-brief.md', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(business_slug) DO NOTHING
+            """,
+            (
+                slug,
+                product_site,
+                f"/api/takyon/apps/{slug}",
+                _json_dumps(_legacy_surface_routes(site_root)),
+                _json_dumps({"source": "legacy product site"}),
+                _json_dumps({"no_hardcoded_product_ui": True, "backend_runtime_only": True}),
+                "Detected by Takyon business upgrade v1 from existing product source. Not a deploy or verification receipt.",
+                _json_dumps({"takyon_upgrade": "takyon-business-upgrade-v1", "legacy_detected": True}),
+                now,
+                now,
+            ),
+        )
+        store._rewrite_app_files(conn, slug)
+
+    receipt = {
+        "schema": "takyon.business_upgrade.v1",
+        "business": slug,
+        "schema_version": CURRENT_BUSINESS_SCHEMA_VERSION,
+        "capability_version": CURRENT_BUSINESS_CAPABILITY_VERSION,
+        "actions": actions,
+        "detected": plan.get("detected") or {},
+        "invented_assets": False,
+        "fake_receipts": False,
+        "created_at": now,
+    }
+    _atomic_write_text(root / receipt_rel, _json_dumps(receipt) + "\n")
+    store._record_event(
+        conn,
+        scope=f"business:{slug}",
+        business_slug=slug,
+        event_type="business.upgrade",
+        payload={"receipt": receipt_rel, "actions": actions, "schema_version": CURRENT_BUSINESS_SCHEMA_VERSION, "capability_version": CURRENT_BUSINESS_CAPABILITY_VERSION},
+    )
+    return {**plan, "changed": True, "receipt": receipt_rel}
+
+
+def upgrade_businesses(
+    *,
+    store: TakyonStore | None = None,
+    businesses: Iterable[str] | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    store = store or _store()
+    requested = [_slugify(str(item)) for item in (businesses or []) if str(item).strip()]
+    with store._connect() as conn:
+        if requested:
+            placeholders = ",".join("?" for _ in requested)
+            rows = conn.execute(f"SELECT * FROM businesses WHERE slug IN ({placeholders}) ORDER BY updated_at DESC", requested).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM businesses ORDER BY updated_at DESC").fetchall()
+        found = {str(row["slug"]) for row in rows}
+        missing = [slug for slug in requested if slug not in found]
+        if missing:
+            raise TakyonError(f"business not found: {', '.join(missing)}")
+        plans = [_plan_business_upgrade(conn, store, store._row_to_dict(row) or {}) for row in rows]
+        if not dry_run:
+            with conn:
+                plans = [_apply_business_upgrade(conn, store, plan) for plan in plans]
+    return {
+        "success": True,
+        "action": "business_upgrade_businesses",
+        "dry_run": bool(dry_run),
+        "schema_version": CURRENT_BUSINESS_SCHEMA_VERSION,
+        "capability_version": CURRENT_BUSINESS_CAPABILITY_VERSION,
+        "businesses": plans,
+    }
+
+
+def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
+    try:
+        dry_run = not bool(args.get("apply") or args.get("confirm"))
+        businesses = args.get("businesses") or args.get("business")
+        if isinstance(businesses, str):
+            businesses = [businesses] if businesses.strip() else []
+        result = upgrade_businesses(businesses=businesses or [], dry_run=dry_run)
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_registry(args: dict, **_: Any) -> str:
     try:
         snapshot = business_registry_snapshot(
@@ -5228,6 +5509,21 @@ def handle_business_registry(args: dict, **_: Any) -> str:
             category=args.get("category"),
             priority_band=args.get("priority_band"),
         )
+        try:
+            from tools.video_generation_tool import get_video_generation_capability_snapshot
+
+            snapshot["runtime_capabilities"] = {
+                "video_generation": get_video_generation_capability_snapshot(),
+            }
+        except Exception as exc:
+            snapshot["runtime_capabilities"] = {
+                "video_generation": {
+                    "available": False,
+                    "gate": "capability_probe_failed",
+                    "error": str(exc),
+                    "summary": f"video generation capability probe failed: {exc}",
+                }
+            }
         return tool_result({"success": True, **snapshot})
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -5723,11 +6019,11 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
 TAKYON_TOOL_DEFINITIONS = [
     {
         "name": "business_registry",
-        "description": "Read the business tool registry and Takyon skill registry by category and priority band.",
+        "description": "Read the business tool registry, Takyon skill registry, and runtime capability snapshot such as video_generation openai/sora availability.",
         "handler": handle_business_registry,
         "schema": _schema(
             "business_registry",
-            "Read the business tool and Takyon skill registry.",
+            "Read the business tool and Takyon skill registry plus runtime capabilities.",
             {
                 "kind": {"type": "string", "description": "all, tools, or skills"},
                 "category": {"type": "string", "description": "Optional category id"},
@@ -6176,5 +6472,21 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Conservative cleanup for old ephemeral events, terminal jobs, and agent-run rows. Dry-run unless confirm=true.",
         "handler": handle_business_gc,
         "schema": _schema("business_gc", "Run conservative Takyon GC.", {"scope": {"type": "string"}, "older_than_days": {"type": "integer"}, "max_delete": {"type": "integer"}, "confirm": {"type": "boolean"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["idempotency_key"]),
+    },
+    {
+        "name": "business_upgrade_businesses",
+        "description": "Dry-run or apply idempotent compatibility migrations for old businesses without inventing generated assets or fake receipts.",
+        "handler": handle_business_upgrade_businesses,
+        "schema": _schema(
+            "business_upgrade_businesses",
+            "Upgrade business compatibility metadata and mirrors.",
+            {
+                "businesses": {"type": "array", "items": {"type": "string"}, "description": "Optional business slugs; omit for all businesses"},
+                "business": _BUSINESS_PROP,
+                "apply": {"type": "boolean", "description": "False/default previews only; true applies migrations and writes receipts"},
+                "confirm": {"type": "boolean", "description": "Alias for apply=true"},
+            },
+            [],
+        ),
     },
 ]

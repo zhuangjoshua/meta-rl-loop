@@ -64,7 +64,7 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "registry",
         "priority_bands": ["p0_control", "p1_ceo", "p2_growth", "p3_learning", "p4_maintenance"],
         "effect": "read_only",
-        "purpose": "Inspect the canonical Takyon skill/tool category and priority-band map.",
+        "purpose": "Inspect the canonical Takyon skill/tool category and priority-band map plus runtime capability snapshots such as video_generation openai/sora availability.",
     },
     {
         "name": "business_list_businesses",
@@ -282,6 +282,17 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "priority_bands": ["p2_growth", "p3_learning"],
         "effect": "guarded_local_effect",
         "purpose": "Generate a provider-backed image or video creative as a local business asset with budget, credential, receipt, and no posting/spend side effect.",
+        "keywords": ["UGC video", "Sora", "creative asset", "local generated asset", "Meta UGC", "image creative", "video creative"],
+        "capabilities": ["local_generated_asset", "ugc_video", "sora_video_via_video_generate", "receipt_backed_generation"],
+        "provider_examples": ["openai/sora-2", "openai/sora-2-pro"],
+        "capability_discovery": "Call business_registry and read runtime_capabilities.video_generation before assuming video generation is unavailable.",
+    },
+    {
+        "name": "business_upgrade_businesses",
+        "category": "maintenance",
+        "priority_bands": ["p4_maintenance"],
+        "effect": "guarded_write",
+        "purpose": "Dry-run or apply idempotent business compatibility migrations, including schema/capability versions, old distribution mappings, and legacy product surface detection without inventing generated assets.",
     },
     {
         "name": "business_claude_agent_task",
@@ -413,6 +424,8 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "priority_bands": ["p2_growth", "p3_learning"],
         "purpose": "Draft ad angles, copy, landing hooks, UGC image/video creative assets, and posting requests.",
         "use_when": "Use for paid-social creative, UGC scripts, shot lists, local generated image/video assets, and ad creative iteration; keep posting/spend as separate gated jobs.",
+        "keywords": ["UGC video", "Sora", "creative asset", "local generated asset", "Meta UGC", "ad video", "paid social"],
+        "capabilities": ["routes_to_business_generate_creative_asset", "local_generated_asset", "ugc_video"],
     },
     {
         "name": "outreach",

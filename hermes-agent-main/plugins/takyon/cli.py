@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .core import TakyonError, TakyonStore, _normalize_work_focus, _slugify, load_takyon_env
+from .core import TakyonError, TakyonStore, _normalize_work_focus, _slugify, load_takyon_env, upgrade_businesses
 from .registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_SKILL_REGISTRY, business_registry_snapshot
 
 
@@ -42,6 +42,7 @@ _CLI_ONLY_COMMANDS = {
     "/goal",
     "init",
     "build",
+    "upgrade",
 }
 
 _COLOR_ENABLED = (
@@ -654,6 +655,37 @@ def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
     if not result["business"]:
         raise SystemExit(usage)
     return result
+
+
+def _parse_upgrade_args(argv: list[str]) -> dict[str, Any]:
+    usage = "usage: takyon upgrade businesses [--dry-run|--apply] [--business <slug> ...]"
+    tokens = list(argv[1:])
+    if not tokens or tokens[0] != "businesses":
+        raise SystemExit(usage)
+    dry_run = True
+    businesses: list[str] = []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--dry-run":
+            dry_run = True
+        elif token in {"--apply", "--confirm"}:
+            dry_run = False
+        elif token == "--business":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            businesses.append(_slugify(tokens[index]))
+        elif token in {"--all"}:
+            businesses = []
+        elif token in {"-h", "--help", "help"}:
+            raise SystemExit(usage)
+        elif token.startswith("--"):
+            raise SystemExit(f"unknown upgrade flag {token!r}\n{usage}")
+        else:
+            businesses.append(_slugify(token))
+        index += 1
+    return {"dry_run": dry_run, "businesses": businesses}
 
 
 def _idempotency_key(prefix: str, *parts: Any, max_length: int = 180) -> str:
@@ -2294,6 +2326,14 @@ def run_takyon_command(
             actor="operator",
         )
 
+    if command == "upgrade":
+        parsed_upgrade = _parse_upgrade_args(argv)
+        return upgrade_businesses(
+            store=store,
+            businesses=parsed_upgrade["businesses"],
+            dry_run=bool(parsed_upgrade["dry_run"]),
+        )
+
     if command == "registry":
         kind = "all"
         category = None
@@ -2310,7 +2350,22 @@ def run_takyon_command(
                 raise SystemExit(
                     f"unknown registry filter {value!r}; use all|tools|skills, a category, or a priority band"
                 )
-        return business_registry_snapshot(kind=kind, category=category, priority_band=priority_band)
+        snapshot = business_registry_snapshot(kind=kind, category=category, priority_band=priority_band)
+        try:
+            from tools.video_generation_tool import get_video_generation_capability_snapshot
+
+            snapshot["runtime_capabilities"] = {
+                "video_generation": get_video_generation_capability_snapshot(),
+            }
+        except Exception as exc:
+            snapshot["runtime_capabilities"] = {
+                "video_generation": {
+                    "available": False,
+                    "gate": "capability_probe_failed",
+                    "error": str(exc),
+                }
+            }
+        return snapshot
 
     if command in {"status"}:
         if len(argv) < 2:
