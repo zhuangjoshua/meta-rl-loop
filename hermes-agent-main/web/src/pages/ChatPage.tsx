@@ -278,6 +278,7 @@ interface Deliverable {
 }
 
 type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
+type CompanyView = "floor" | "files" | "dev";
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
@@ -1374,6 +1375,11 @@ export default function ChatPage() {
   };
 
   const canAct = state === "open" && (!!input.trim() || running);
+  const inBusiness = !!scopeState.business;
+  const scopedHistoricalOutputs =
+    historicalOutputs.business === scopeState.business
+      ? historicalOutputs.items
+      : [];
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-black normal-case text-zinc-100 [font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
@@ -1388,7 +1394,14 @@ export default function ChatPage() {
         />
       )}
 
-      <div className="grid min-h-0 min-w-0 flex-1 bg-black lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div
+        className={cn(
+          "grid min-h-0 min-w-0 flex-1 bg-black",
+          inBusiness
+            ? "lg:grid-cols-[minmax(0,1fr)_minmax(320px,26vw)]"
+            : "lg:grid-cols-[minmax(0,1fr)_380px]",
+        )}
+      >
         <main className="flex min-h-0 min-w-0 flex-col bg-black">
           <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-900 px-4 sm:px-6">
             <div className="flex min-w-0 items-center gap-3">
@@ -1410,7 +1423,7 @@ export default function ChatPage() {
 
             <div className="flex items-center gap-1.5">
               <IconButton
-                label="Open side panel"
+                label={inBusiness ? "Open CEO intercom" : "Open side panel"}
                 onClick={() => setRightOpen(true)}
                 className="lg:hidden"
               >
@@ -1425,27 +1438,43 @@ export default function ChatPage() {
             </div>
           </header>
 
-          <Thread
-            error={error}
-            messages={messages}
-            running={running}
-            scope={scopeState}
-            scrollerRef={scrollerRef}
-          >
-            <Composer
-              canAct={canAct}
-              inputRef={inputRef}
-              isRunning={running}
-              onChange={setInput}
-              onKeyDown={onComposerKeyDown}
-              onSlashApply={applySlashCompletion}
-              onSubmit={onComposerSubmit}
-              slashIndex={slashIndex}
-              slashItems={slashItems}
-              setSlashIndex={setSlashIndex}
-              value={input}
+          {inBusiness ? (
+            <CompanyWorkspace
+              cwd={info.cwd}
+              deliverables={deliverables}
+              historicalOutputs={scopedHistoricalOutputs}
+              onCommand={runTakyonLine}
+              onListFiles={listBusinessFiles}
+              onResolveMedia={resolveBusinessMedia}
+              onResolveSitePreview={resolveBusinessSitePreview}
+              scope={scopeState}
+              sessionId={sessionId}
+              statusItems={statusItems}
+              tools={tools}
             />
-          </Thread>
+          ) : (
+            <Thread
+              error={error}
+              messages={messages}
+              running={running}
+              scope={scopeState}
+              scrollerRef={scrollerRef}
+            >
+              <Composer
+                canAct={canAct}
+                inputRef={inputRef}
+                isRunning={running}
+                onChange={setInput}
+                onKeyDown={onComposerKeyDown}
+                onSlashApply={applySlashCompletion}
+                onSubmit={onComposerSubmit}
+                slashIndex={slashIndex}
+                slashItems={slashItems}
+                setSlashIndex={setSlashIndex}
+                value={input}
+              />
+            </Thread>
+          )}
         </main>
 
         <aside
@@ -1457,27 +1486,56 @@ export default function ChatPage() {
               : "hidden",
           )}
         >
-          <DeliverablesPanel
-            createInTestMode={createInTestMode}
-            cwd={info.cwd}
-            deliverables={deliverables}
-            historicalOutputs={
-              historicalOutputs.business === scopeState.business
-                ? historicalOutputs.items
-                : []
-            }
-            onCommand={runTakyonLine}
-            onCreateInTestModeChange={setCreateInTestMode}
-            onListFiles={listBusinessFiles}
-            onResolveMedia={resolveBusinessMedia}
-            onResolveSitePreview={resolveBusinessSitePreview}
-            onClose={() => setRightOpen(false)}
-            scope={scopeState}
-            sessionId={sessionId}
-            showClose={rightOpen}
-            statusItems={statusItems}
-            tools={tools}
-          />
+          {inBusiness ? (
+            <IntercomPanel
+              onClose={() => setRightOpen(false)}
+              scope={scopeState}
+              sessionId={sessionId}
+              showClose={rightOpen}
+            >
+              <Thread
+                compact
+                error={error}
+                messages={messages}
+                running={running}
+                scope={scopeState}
+                scrollerRef={scrollerRef}
+              >
+                <Composer
+                  canAct={canAct}
+                  compact
+                  inputRef={inputRef}
+                  isRunning={running}
+                  onChange={setInput}
+                  onKeyDown={onComposerKeyDown}
+                  onSlashApply={applySlashCompletion}
+                  onSubmit={onComposerSubmit}
+                  slashIndex={slashIndex}
+                  slashItems={slashItems}
+                  setSlashIndex={setSlashIndex}
+                  value={input}
+                />
+              </Thread>
+            </IntercomPanel>
+          ) : (
+            <DeliverablesPanel
+              createInTestMode={createInTestMode}
+              cwd={info.cwd}
+              deliverables={deliverables}
+              historicalOutputs={scopedHistoricalOutputs}
+              onCommand={runTakyonLine}
+              onCreateInTestModeChange={setCreateInTestMode}
+              onListFiles={listBusinessFiles}
+              onResolveMedia={resolveBusinessMedia}
+              onResolveSitePreview={resolveBusinessSitePreview}
+              onClose={() => setRightOpen(false)}
+              scope={scopeState}
+              sessionId={sessionId}
+              showClose={rightOpen}
+              statusItems={statusItems}
+              tools={tools}
+            />
+          )}
         </aside>
       </div>
 
@@ -1488,6 +1546,7 @@ export default function ChatPage() {
 
 function Thread({
   children,
+  compact = false,
   error,
   messages,
   running,
@@ -1495,6 +1554,7 @@ function Thread({
   scrollerRef,
 }: {
   children: ReactNode;
+  compact?: boolean;
   error: string | null;
   messages: ChatMessage[];
   running: boolean;
@@ -1505,36 +1565,51 @@ function Thread({
     <div className="flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollerRef}
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6"
+        className={cn(
+          "min-h-0 flex-1 overflow-y-auto",
+          compact ? "px-3 py-3" : "px-4 py-6 sm:px-6",
+        )}
       >
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col">
+        <div
+          className={cn(
+            "mx-auto flex min-h-full w-full flex-col",
+            compact ? "max-w-none" : "max-w-3xl",
+          )}
+        >
           {error && <ErrorBanner message={error} />}
           {messages.length === 0 ? (
-            <ThreadWelcome scope={scope} />
+            <ThreadWelcome compact={compact} scope={scope} />
           ) : (
-            <div className="space-y-6 pb-6">
+            <div className={cn(compact ? "space-y-4 pb-4" : "space-y-6 pb-6")}>
               {messages.map((message) => (
-                <Message key={message.id} message={message} />
+                <Message compact={compact} key={message.id} message={message} />
               ))}
               {running && <LoadingIndicator />}
             </div>
           )}
         </div>
       </div>
-      <div className="mx-auto w-full max-w-3xl px-4 pb-4 sm:px-6 sm:pb-6">
+      <div
+        className={cn(
+          "mx-auto w-full",
+          compact ? "max-w-none px-3 pb-3" : "max-w-3xl px-4 pb-4 sm:px-6 sm:pb-6",
+        )}
+      >
         {children}
       </div>
     </div>
   );
 }
 
-function ThreadWelcome({ scope }: { scope: ScopeState }) {
+function ThreadWelcome({ compact = false, scope }: { compact?: boolean; scope: ScopeState }) {
   const inBusiness = !!scope.business;
   return (
-    <div className="flex flex-1 items-center justify-center py-10 text-center">
+    <div className={cn("flex flex-1 items-center justify-center text-center", compact ? "py-5" : "py-10")}>
       <div>
-        <h2 className="text-xl font-medium text-zinc-100">What should Takyon work on?</h2>
-        <p className="mt-2 text-sm text-zinc-500">
+        <h2 className={cn("font-medium text-zinc-100", compact ? "text-sm" : "text-xl")}>
+          What should Takyon work on?
+        </h2>
+        <p className={cn("mt-2 text-zinc-500", compact ? "text-xs" : "text-sm")}>
           {inBusiness
             ? `Operating inside business:${scope.business}.`
             : "Global scope. Create a business or choose one above."}
@@ -1546,6 +1621,7 @@ function ThreadWelcome({ scope }: { scope: ScopeState }) {
 
 function Composer({
   canAct,
+  compact = false,
   inputRef,
   isRunning,
   onChange,
@@ -1558,6 +1634,7 @@ function Composer({
   value,
 }: {
   canAct: boolean;
+  compact?: boolean;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isRunning: boolean;
   onChange: (value: string) => void;
@@ -1581,12 +1658,20 @@ function Composer({
           onHover={setSlashIndex}
         />
       )}
-      <div className="flex items-end gap-2 rounded-3xl border border-zinc-800 bg-zinc-950 px-3 py-2 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] transition-colors focus-within:border-zinc-600">
+      <div
+        className={cn(
+          "flex items-end gap-2 border border-zinc-800 bg-zinc-950 px-3 py-2 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] transition-colors focus-within:border-zinc-600",
+          compact ? "rounded-2xl" : "rounded-3xl",
+        )}
+      >
         <textarea
           ref={inputRef}
           aria-label="Message input"
           autoFocus
-          className="max-h-36 min-h-10 flex-1 resize-none bg-transparent py-2 text-sm leading-6 text-zinc-100 outline-none placeholder:text-zinc-600"
+          className={cn(
+            "flex-1 resize-none bg-transparent py-2 leading-6 text-zinc-100 outline-none placeholder:text-zinc-600",
+            compact ? "max-h-28 min-h-9 text-xs" : "max-h-36 min-h-10 text-sm",
+          )}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
           placeholder={isRunning ? "Add an interjection..." : "Ask Takyon anything or type /"}
@@ -1660,7 +1745,7 @@ function SlashPalette({
   );
 }
 
-function Message({ message }: { message: ChatMessage }) {
+function Message({ compact = false, message }: { compact?: boolean; message: ChatMessage }) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
 
@@ -1676,7 +1761,8 @@ function Message({ message }: { message: ChatMessage }) {
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[86%] break-words text-sm leading-6",
+          "break-words leading-6",
+          compact ? "max-w-[92%] text-xs" : "max-w-[86%] text-sm",
           isUser
             ? "whitespace-pre-wrap rounded-3xl bg-zinc-800 px-4 py-2.5 text-zinc-50"
             : "w-full max-w-none text-zinc-100",
@@ -1718,6 +1804,498 @@ function ErrorBanner({ message }: { message: string }) {
     <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
       <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
       <span className="min-w-0 whitespace-pre-wrap">{message}</span>
+    </div>
+  );
+}
+
+function IntercomPanel({
+  children,
+  onClose,
+  scope,
+  sessionId,
+  showClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+  scope: ScopeState;
+  sessionId: string | null;
+  showClose: boolean;
+}) {
+  return (
+    <div className="flex min-h-0 w-full flex-col bg-black text-zinc-100">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">CEO intercom</div>
+          <div className="mt-0.5 truncate text-xs text-zinc-600">
+            {scopeDetail(scope)}
+            {sessionId ? ` · session ${sessionId}` : ""}
+          </div>
+        </div>
+        {showClose && (
+          <IconButton label="Close CEO intercom" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </IconButton>
+        )}
+      </header>
+      {children}
+    </div>
+  );
+}
+
+function CompanyWorkspace({
+  cwd,
+  deliverables,
+  historicalOutputs,
+  onCommand,
+  onListFiles,
+  onResolveMedia,
+  onResolveSitePreview,
+  scope,
+  sessionId,
+  statusItems,
+  tools,
+}: {
+  cwd?: string;
+  deliverables: Deliverable[];
+  historicalOutputs: Deliverable[];
+  onCommand: (line: string) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  scope: ScopeState;
+  sessionId: string | null;
+  statusItems: string[];
+  tools: ToolEntry[];
+}) {
+  const [view, setView] = useState<CompanyView>("floor");
+  const outputs = useMemo(
+    () => mergeOutputs(deliverables, historicalOutputs),
+    [deliverables, historicalOutputs],
+  );
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            Live company floor
+          </div>
+          <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
+            {scope.current?.name || scope.business}
+          </div>
+        </div>
+        <div className="grid shrink-0 grid-cols-3 gap-1 rounded-full border border-zinc-800 bg-black p-1">
+          <CompanyViewButton active={view === "floor"} label="Floor" onClick={() => setView("floor")} />
+          <CompanyViewButton active={view === "files"} label="Files" onClick={() => setView("files")} />
+          <CompanyViewButton active={view === "dev"} label="Dev" onClick={() => setView("dev")} />
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {view === "floor" && (
+          <CompanyFloor
+            onCommand={onCommand}
+            onResolveMedia={onResolveMedia}
+            onResolveSitePreview={onResolveSitePreview}
+            outputs={outputs}
+            scope={scope}
+            statusItems={statusItems}
+          />
+        )}
+        {view === "files" && (
+          <div className="p-4">
+            <FilesPanel
+              onCommand={onCommand}
+              onListFiles={onListFiles}
+              onResolveMedia={onResolveMedia}
+              scope={scope}
+            />
+          </div>
+        )}
+        {view === "dev" && (
+          <div className="p-4">
+            <DevPanel
+              cwd={cwd}
+              scope={scope}
+              sessionId={sessionId}
+              statusItems={statusItems}
+              tools={tools}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompanyViewButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={cn(
+        "h-8 rounded-full px-3 text-xs font-medium transition-colors",
+        active
+          ? "bg-zinc-100 text-black"
+          : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200",
+      )}
+      onClick={onClick}
+      type="button"
+    >
+      {label}
+    </button>
+  );
+}
+
+function CompanyFloor({
+  onCommand,
+  onResolveMedia,
+  onResolveSitePreview,
+  outputs,
+  scope,
+  statusItems,
+}: {
+  onCommand: (line: string) => void;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  outputs: Deliverable[];
+  scope: ScopeState;
+  statusItems: string[];
+}) {
+  const overview = scope.overview || {};
+  const product = overview.product || {};
+  const artifacts = overview.artifacts || {};
+  const website = artifacts.website || {};
+  const outreach = artifacts.outreach || {};
+  const creativeAssets = artifacts.creative_assets || {};
+  const posts = overview.posts || [];
+  const cron = overview.cron || [];
+  const jobs = overview.jobs || [];
+  const activeCron = cron.filter((job) => job.enabled !== false);
+  const nextWake = activeCron.find((job) => job.next_run)?.next_run;
+  const recentOutputs = outputs.slice(0, 6);
+  const creativeAssetsDir = creativeAssets.path
+    ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
+    : ".";
+
+  return (
+    <div className="grid gap-3 p-4 xl:grid-cols-2">
+      <CompanyCameraPanel camera="CAM 01" title="Product Room">
+        <div className="space-y-3">
+          <div className="rounded-lg border border-zinc-900 bg-black/50 p-3">
+            <div className="text-sm font-medium text-zinc-100">
+              {website.path ? "Website source visible" : "No website source visible"}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-zinc-600">
+              {website.path || product.source_path || "product/site"}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {website.path && (
+              <OpenSitePreviewButton
+                onResolveSitePreview={onResolveSitePreview}
+                path={website.source_path || product.source_path || "product/site"}
+              />
+            )}
+            <PanelActionButton
+              icon={<Folder className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/files ${website.source_path || product.source_path || "product/site"}`)}
+            >
+              Site files
+            </PanelActionButton>
+            <PanelActionButton
+              icon={<FileText className="h-3.5 w-3.5" />}
+              onClick={() => onCommand("/read app/surface.md")}
+            >
+              Surface
+            </PanelActionButton>
+          </div>
+        </div>
+      </CompanyCameraPanel>
+
+      <CompanyCameraPanel camera="CAM 02" title="Deliverables Table">
+        {recentOutputs.length === 0 ? (
+          <ObservationEmpty text="No durable outputs on the table yet." />
+        ) : (
+          <div className="grid gap-2">
+            {recentOutputs.map((item) => (
+              <ObservationOutput
+                item={item}
+                key={item.id}
+                onCommand={onCommand}
+                onResolveMedia={onResolveMedia}
+              />
+            ))}
+          </div>
+        )}
+      </CompanyCameraPanel>
+
+      <CompanyCameraPanel camera="CAM 03" title="Outreach Desk">
+        <div className="space-y-2">
+          {posts.length === 0 ? (
+            <ObservationEmpty
+              text={
+                outreach.path
+                  ? "Local outreach exists. No external response thread yet."
+                  : "No posts or outreach threads recorded yet."
+              }
+            />
+          ) : (
+            posts.slice(0, 4).map((post, index) => (
+              <PostItem
+                key={post.id || `${post.source}-${post.title}-${index}`}
+                onCommand={onCommand}
+                post={post}
+              />
+            ))
+          )}
+          {outreach.path && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              <PanelActionButton
+                icon={<FileText className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/read ${outreach.path}`)}
+              >
+                Latest local post
+              </PanelActionButton>
+              {outreach.receipt && (
+                <PanelActionButton
+                  icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                  onClick={() => onCommand(`/read ${outreach.receipt}`)}
+                >
+                  Receipt
+                </PanelActionButton>
+              )}
+            </div>
+          )}
+        </div>
+      </CompanyCameraPanel>
+
+      <CompanyCameraPanel camera="CAM 04" title="Creative Bench">
+        <div className="space-y-3">
+          <div className="rounded-lg border border-zinc-900 bg-black/50 p-3">
+            <div className="text-sm font-medium text-zinc-100">
+              {creativeAssets.path ? "Generated asset visible" : "No generated image/video asset visible"}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-zinc-600">
+              {creativeAssets.path || "campaigns/.../creatives"}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {creativeAssets.path && (
+              <PanelActionButton
+                icon={<Play className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
+              >
+                Assets
+              </PanelActionButton>
+            )}
+            {creativeAssets.receipt && (
+              <PanelActionButton
+                icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
+              >
+                Receipt
+              </PanelActionButton>
+            )}
+          </div>
+        </div>
+      </CompanyCameraPanel>
+
+      <CompanyCameraPanel camera="CAM 05" title="CEO Signal">
+        <div className="space-y-2">
+          {statusItems.length === 0 ? (
+            <ObservationEmpty text="Quiet feed. The next visible action will appear here." />
+          ) : (
+            statusItems.slice(0, 5).map((item, index) => (
+              <div
+                className="rounded-lg border border-zinc-900 bg-black/50 px-3 py-2 text-xs leading-5 text-zinc-400"
+                key={`${item}-${index}`}
+              >
+                {item}
+              </div>
+            ))
+          )}
+        </div>
+      </CompanyCameraPanel>
+
+      <CompanyCameraPanel camera="CAM 06" title="Night Watch">
+        <div className="space-y-2">
+          <TaskRow
+            detail={nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible."}
+            label="CEO wake loop"
+            status={activeCron.length ? "watching" : "quiet"}
+          />
+          {jobs.slice(0, 3).map((job, index) => (
+            <TaskRow
+              detail={gatedActionDetail(job)}
+              key={job.id || `${job.kind}-${index}`}
+              label={humanizeJobKind(job.kind)}
+              status={job.status || "recorded"}
+            />
+          ))}
+        </div>
+      </CompanyCameraPanel>
+    </div>
+  );
+}
+
+function CompanyCameraPanel({
+  camera,
+  children,
+  title,
+}: {
+  camera: string;
+  children: ReactNode;
+  title: string;
+}) {
+  return (
+    <section className="relative min-h-[260px] overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950/80 p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]">
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.025)_1px,transparent_1px)] bg-[length:100%_7px] opacity-40" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse bg-emerald-300/30" />
+      <div className="relative mb-3 flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-zinc-600">
+            {camera}
+          </div>
+          <div className="mt-0.5 truncate text-sm font-medium text-zinc-100">
+            {title}
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-emerald-300/80">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />
+          rec
+        </div>
+      </div>
+      <div className="relative">{children}</div>
+    </section>
+  );
+}
+
+function OpenSitePreviewButton({
+  onResolveSitePreview,
+  path,
+}: {
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  path?: string;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const openPreview = useCallback(() => {
+    const popup = window.open("about:blank", "_blank");
+    setLoading(true);
+    setError("");
+    void onResolveSitePreview(path)
+      .then((res) => {
+        if (!res.url) throw new Error("No preview URL returned.");
+        if (popup) {
+          popup.opener = null;
+          popup.location.href = res.url;
+        } else {
+          const link = document.createElement("a");
+          link.href = res.url;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.click();
+        }
+      })
+      .catch((err) => {
+        if (popup) popup.close();
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setLoading(false));
+  }, [onResolveSitePreview, path]);
+
+  return (
+    <span className="inline-flex flex-col gap-1">
+      <PanelActionButton
+        icon={<ExternalLink className="h-3.5 w-3.5" />}
+        onClick={openPreview}
+      >
+        {loading ? "Opening..." : "Preview"}
+      </PanelActionButton>
+      {error && <span className="text-xs text-red-400">{error}</span>}
+    </span>
+  );
+}
+
+function ObservationEmpty({ text }: { text: string }) {
+  return (
+    <div className="rounded-lg border border-dashed border-zinc-800 bg-black/30 px-3 py-6 text-center text-xs text-zinc-600">
+      {text}
+    </div>
+  );
+}
+
+function ObservationOutput({
+  item,
+  onCommand,
+  onResolveMedia,
+}: {
+  item: Deliverable;
+  onCommand: (line: string) => void;
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+}) {
+  const mediaKind = mediaKindForPath(item.path) || (item.kind === "image" || item.kind === "video" ? item.kind : undefined);
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-zinc-900 bg-black/50 px-3 py-2">
+      <div className="min-w-0">
+        <div className="truncate text-sm text-zinc-100">{item.title}</div>
+        <div className="mt-0.5 truncate font-mono text-[0.68rem] text-zinc-600">
+          {item.path || item.detail}
+        </div>
+      </div>
+      <div className="shrink-0">
+        {mediaKind && item.path ? (
+          <MediaQuickViewButton onResolveMedia={onResolveMedia} path={item.path} />
+        ) : item.path ? (
+          <PanelActionButton
+            icon={<FileText className="h-3.5 w-3.5" />}
+            onClick={() => onCommand(`/read ${item.path}`)}
+          >
+            Open
+          </PanelActionButton>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MediaQuickViewButton({
+  onResolveMedia,
+  path,
+}: {
+  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+  path: string;
+}) {
+  const [media, setMedia] = useState<BusinessMediaResponse | null>(null);
+  const [error, setError] = useState("");
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <PanelActionButton
+        icon={<Play className="h-3.5 w-3.5" />}
+        onClick={() => {
+          setError("");
+          void onResolveMedia(path).then(setMedia).catch((err) => {
+            setError(err instanceof Error ? err.message : String(err));
+          });
+        }}
+      >
+        View
+      </PanelActionButton>
+      {error && <span className="max-w-40 text-right text-xs text-red-400">{error}</span>}
+      {media?.url && (
+        <div className="w-40 overflow-hidden rounded-lg border border-zinc-800">
+          <MediaPreview media={media} title={path.split("/").pop() || path} />
+        </div>
+      )}
     </div>
   );
 }
