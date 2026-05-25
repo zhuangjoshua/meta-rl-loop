@@ -5049,9 +5049,9 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     elif product_visible:
         ceo_loop = {
             "status": "working",
-            "headline": "Product is visible locally.",
-            "detail": "The workspace has a customer surface that can be previewed while strategy and distribution continue.",
-            "next_action": "Preview the product and keep testing the ICP/channel bet.",
+            "headline": "Product preview is available.",
+            "detail": "A customer-facing surface exists; keep checking whether the ICP and channel bet are right.",
+            "next_action": "Open the preview or continue research.",
         }
     else:
         ceo_loop = {
@@ -5063,7 +5063,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
     status_cards = [
         {
-            "label": "CEO loop",
+            "label": "Current focus",
             "status": ceo_loop["status"],
             "detail": ceo_loop["headline"],
             "tone": status_tone(ceo_loop["status"]),
@@ -5081,7 +5081,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "tone": "done" if product_visible else "waiting",
         },
         {
-            "label": "Wakeups",
+            "label": "Scheduled checks",
             "status": wake_health["status"],
             "detail": wake_health["headline"],
             "tone": status_tone(wake_health["status"]),

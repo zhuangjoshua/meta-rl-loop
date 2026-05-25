@@ -349,28 +349,6 @@ interface Deliverable {
 }
 
 type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
-type CompanyView = "floor" | "tasks" | "files" | "dev";
-type FloorRoomId = "product" | "outputs" | "outreach" | "creative" | "signal" | "watch";
-
-interface FloorRoomAccent {
-  border: string;
-  dot: string;
-  glow: string;
-  line: string;
-  pill: string;
-  text: string;
-}
-
-interface FloorArtifactViewerState {
-  content?: string;
-  detail?: string;
-  error?: string;
-  loading?: boolean;
-  media?: BusinessMediaResponse;
-  path: string;
-  title: string;
-  truncated?: boolean;
-}
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
@@ -388,7 +366,6 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "company-floor-artifact-viewer-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
   { id: "next", label: "Next" },
@@ -401,56 +378,6 @@ const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
-const FLOOR_ROOM_ACCENTS: Record<FloorRoomId, FloorRoomAccent> = {
-  product: {
-    border: "border-cyan-300/30",
-    dot: "bg-cyan-300",
-    glow: "shadow-[0_0_0_1px_rgba(103,232,249,0.12)]",
-    line: "bg-cyan-300/60",
-    pill: "border-cyan-300/25 bg-cyan-300/10 text-cyan-100",
-    text: "text-cyan-200",
-  },
-  outputs: {
-    border: "border-amber-300/30",
-    dot: "bg-amber-300",
-    glow: "shadow-[0_0_0_1px_rgba(252,211,77,0.12)]",
-    line: "bg-amber-300/60",
-    pill: "border-amber-300/25 bg-amber-300/10 text-amber-100",
-    text: "text-amber-200",
-  },
-  outreach: {
-    border: "border-sky-300/30",
-    dot: "bg-sky-300",
-    glow: "shadow-[0_0_0_1px_rgba(125,211,252,0.12)]",
-    line: "bg-sky-300/60",
-    pill: "border-sky-300/25 bg-sky-300/10 text-sky-100",
-    text: "text-sky-200",
-  },
-  creative: {
-    border: "border-fuchsia-300/30",
-    dot: "bg-fuchsia-300",
-    glow: "shadow-[0_0_0_1px_rgba(240,171,252,0.12)]",
-    line: "bg-fuchsia-300/60",
-    pill: "border-fuchsia-300/25 bg-fuchsia-300/10 text-fuchsia-100",
-    text: "text-fuchsia-200",
-  },
-  signal: {
-    border: "border-violet-300/30",
-    dot: "bg-violet-300",
-    glow: "shadow-[0_0_0_1px_rgba(196,181,253,0.12)]",
-    line: "bg-violet-300/60",
-    pill: "border-violet-300/25 bg-violet-300/10 text-violet-100",
-    text: "text-violet-200",
-  },
-  watch: {
-    border: "border-emerald-300/30",
-    dot: "bg-emerald-300",
-    glow: "shadow-[0_0_0_1px_rgba(110,231,183,0.12)]",
-    line: "bg-emerald-300/60",
-    pill: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
-    text: "text-emerald-200",
-  },
-};
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -570,6 +497,24 @@ function taskDetail(task: BusinessOverviewTask | BusinessOverviewJob): string {
   return task.updated_at ? `Updated ${readableDate(task.updated_at)}` : "";
 }
 
+function naturalToolLabel(tool: ToolEntry): string {
+  const text = `${tool.name} ${tool.context || ""} ${tool.summary || ""}`.toLowerCase();
+  if (tool.status === "error") return "Action needs attention";
+  if (/write|patch|edit|file|agent|claude/.test(text)) return "Editing files";
+  if (/build|npm|vite|compile|test|pytest/.test(text)) return "Checking build";
+  if (/preview|site|surface|product/.test(text)) return "Checking product";
+  if (/creative|video|image|ad/.test(text)) return "Creating ad asset";
+  if (/research|icp|channel|competitor|pricing/.test(text)) return "Researching market";
+  if (/cron|wake|schedule/.test(text)) return "Checking schedule";
+  if (/shell|exec|command/.test(text)) return "Running command";
+  return humanizeJobKind(tool.name || "Action");
+}
+
+function toolDetail(tool: ToolEntry): string {
+  const detail = friendlyError(tool.error || tool.summary || tool.preview || tool.context || "");
+  return detail || humanizeStatus(tool.status);
+}
+
 function toneClasses(tone?: string): string {
   const value = (tone || "").toLowerCase();
   if (/blocked|error|fail/.test(value)) return "border-red-400/25 bg-red-400/10 text-red-100";
@@ -615,10 +560,6 @@ function compactPath(path?: string): string {
   const parts = path.split("/");
   if (parts.length <= 2) return path.slice(0, 31) + "...";
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
-}
-
-function isExternalUrl(value?: string): boolean {
-  return /^https?:\/\//i.test(value || "");
 }
 
 function loadCreateInTestModeDefault(): boolean {
@@ -1436,20 +1377,6 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
-  const readBusinessFile = useCallback(
-    async (path: string): Promise<BusinessFileReadResponse> => {
-      if (!sessionId) throw new Error("Chat is still connecting.");
-      const res = await gw.request<BusinessFileReadResponse>(
-        "takyon.file.read",
-        { session_id: sessionId, path },
-        20_000,
-      );
-      setScopeState(normalizeScopeState(res));
-      return res;
-    },
-    [gw, sessionId],
-  );
-
   const resolveBusinessSitePreview = useCallback(
     async (path?: string): Promise<BusinessSitePreviewResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
@@ -1633,16 +1560,12 @@ export default function ChatPage() {
 
           {inBusiness ? (
             <CompanyWorkspace
-              cwd={info.cwd}
               deliverables={deliverables}
               historicalOutputs={scopedHistoricalOutputs}
               onCommand={runTakyonLine}
-              onListFiles={listBusinessFiles}
-              onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
               scope={scopeState}
-              sessionId={sessionId}
               statusItems={statusItems}
               tools={tools}
             />
@@ -2262,33 +2185,24 @@ function IntercomPanel({
 }
 
 function CompanyWorkspace({
-  cwd,
   deliverables,
   historicalOutputs,
   onCommand,
-  onListFiles,
-  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   scope,
-  sessionId,
   statusItems,
   tools,
 }: {
-  cwd?: string;
   deliverables: Deliverable[];
   historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   scope: ScopeState;
-  sessionId: string | null;
   statusItems: string[];
   tools: ToolEntry[];
 }) {
-  const [view, setView] = useState<CompanyView>("floor");
   const outputs = useMemo(
     () => mergeOutputs(deliverables, historicalOutputs),
     [deliverables, historicalOutputs],
@@ -2300,105 +2214,45 @@ function CompanyWorkspace({
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-            Live company floor
+            Company
           </div>
           <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
             {scope.current?.name || scope.business}
           </div>
         </div>
-        <div className="grid shrink-0 grid-cols-4 gap-1 rounded-full border border-zinc-800 bg-black p-1">
-          <CompanyViewButton active={view === "floor"} label="Floor" onClick={() => setView("floor")} />
-          <CompanyViewButton active={view === "tasks"} label="Tasks" onClick={() => setView("tasks")} />
-          <CompanyViewButton active={view === "files"} label="Files" onClick={() => setView("files")} />
-          <CompanyViewButton active={view === "dev"} label="Dev" onClick={() => setView("dev")} />
-        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {view === "floor" && (
-          <CompanyFloor
-            onCommand={onCommand}
-            onReadFile={onReadFile}
-            onResolveMedia={onResolveMedia}
-            onResolveSitePreview={onResolveSitePreview}
-            outputs={outputs}
-            scope={scope}
-            statusItems={statusItems}
-          />
-        )}
-        {view === "files" && (
-          <div className="p-4">
-            <FilesPanel
-              onCommand={onCommand}
-              onListFiles={onListFiles}
-              onReadFile={onReadFile}
-              onResolveMedia={onResolveMedia}
-              scope={scope}
-            />
-          </div>
-        )}
-        {view === "tasks" && (
-          <div className="p-4">
-            <TaskBoard onCommand={onCommand} scope={scope} />
-          </div>
-        )}
-        {view === "dev" && (
-          <div className="p-4">
-            <DevPanel
-              cwd={cwd}
-              scope={scope}
-              sessionId={sessionId}
-              statusItems={statusItems}
-              tools={tools}
-            />
-          </div>
-        )}
+        <CompanyOverview
+          onCommand={onCommand}
+          onResolveMedia={onResolveMedia}
+          onResolveSitePreview={onResolveSitePreview}
+          outputs={outputs}
+          scope={scope}
+          statusItems={statusItems}
+          tools={tools}
+        />
       </div>
     </div>
   );
 }
 
-function CompanyViewButton({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className={cn(
-        "h-8 rounded-full px-3 text-xs font-medium transition-colors",
-        active
-          ? "bg-zinc-100 text-black"
-          : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200",
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      {label}
-    </button>
-  );
-}
-
-function CompanyFloor({
+function CompanyOverview({
   onCommand,
-  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   outputs,
   scope,
   statusItems,
+  tools,
 }: {
   onCommand: (line: string) => void;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   outputs: Deliverable[];
   scope: ScopeState;
   statusItems: string[];
+  tools: ToolEntry[];
 }) {
   const overview = scope.overview || {};
   const product = overview.product || {};
@@ -2415,511 +2269,208 @@ function CompanyFloor({
   const research = overview.research || {};
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-  const recentOutputs = outputs.slice(0, 6);
+  const recentOutputs = outputs.slice(0, 4);
   const visibleJobs = jobs.filter((job) => job.kind || job.status).slice(0, 4);
   const creativeAssetsDir = creativeAssets.path
     ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
     : ".";
   const productPath = website.source_path || product.source_path || "product/site";
   const publicSiteUrl = website.public_url || product.public_url || "";
-  const latestOutput = recentOutputs[0];
+  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
   const openMessages =
     asNumber(overview.conversations?.unresolved_messages) ||
     posts.reduce((total, post) => total + asNumber(post.unresolved_messages), 0);
-  const defaultRoom: FloorRoomId = creativeAssets.path
-    ? "creative"
-    : website.path || product.source_path
-      ? "product"
-      : posts.length || outreach.path
-        ? "outreach"
-        : recentOutputs.length
-          ? "outputs"
-          : statusItems.length
-            ? "signal"
-            : "watch";
-  const [selectedRoom, setSelectedRoom] = useState<FloorRoomId>(defaultRoom);
-  const [viewer, setViewer] = useState<FloorArtifactViewerState | null>(null);
-
-  useEffect(() => {
-    setSelectedRoom(defaultRoom);
-    setViewer(null);
-  }, [defaultRoom, scope.business]);
-
-  const openArtifact = useCallback(
-    (
-      item: { detail?: string; path?: string; title?: string },
-      roomId: FloorRoomId = "outputs",
-    ) => {
-      const path = (item.path || "").trim();
-      if (!path) return;
-      const title = item.title || path.split("/").pop() || path;
-      setSelectedRoom(roomId);
-      setViewer({ detail: item.detail, loading: true, path, title });
-      if (mediaKindForPath(path)) {
-        void onResolveMedia(path)
-          .then((media) => {
-            setViewer({ detail: item.detail, loading: false, media, path: media.path || path, title });
-          })
-          .catch((err) => {
-            setViewer({
-              detail: item.detail,
-              error: err instanceof Error ? err.message : String(err),
-              loading: false,
-              path,
-              title,
-            });
-          });
-        return;
-      }
-      void onReadFile(path)
-        .then((res) => {
-          setViewer({
-            content: res.content || "",
-            detail: item.detail,
-            loading: false,
-            path: res.path || path,
-            title,
-            truncated: Boolean(res.truncated),
-          });
-        })
-        .catch((err) => {
-          setViewer({
-            detail: item.detail,
-            error: err instanceof Error ? err.message : String(err),
-            loading: false,
-            path,
-            title,
-          });
-        });
-    },
-    [onReadFile, onResolveMedia],
-  );
-
-  const rooms: Array<{
-    accent: FloorRoomAccent;
-    id: FloorRoomId;
-    camera: string;
-    detail: string;
-    status: string;
-    title: string;
-    body: ReactNode;
-  }> = [
-    {
-      accent: FLOOR_ROOM_ACCENTS.product,
-      id: "product",
-      camera: "CAM 01",
-      title: "Product Room",
-      status: publicSiteUrl ? "site live" : website.path ? "site visible" : product.source_path ? "source noted" : "quiet",
-      detail: publicSiteUrl || website.path || product.source_path || "product/site",
-      body: (
-        <div className="grid min-h-full gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
-          <div className="flex min-h-[280px] flex-col justify-between rounded-2xl border border-zinc-900 bg-black/50 p-5">
-            <div>
-              <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Customer surface</div>
-              <div className="mt-3 max-w-2xl text-2xl font-semibold leading-tight text-zinc-100">
-                {publicSiteUrl
-                  ? "Website is live."
-                  : website.path
-                    ? "Website source is on the floor."
-                    : "No website is on the floor yet."}
-              </div>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
-                {overview.goal || scope.current?.goal || "The product room shows the customer-facing surface when one exists."}
-              </p>
-            </div>
-            <div className="mt-8 flex flex-wrap gap-2">
-              {publicSiteUrl && (
-                <PanelActionButton
-                  icon={<ExternalLink className="h-3.5 w-3.5" />}
-                  onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
-                >
-                  Open Site
-                </PanelActionButton>
-              )}
-              {website.path && (
-                <OpenSitePreviewButton
-                  onResolveSitePreview={onResolveSitePreview}
-                  path={productPath}
-                />
-              )}
-              <PanelActionButton
-                icon={<Folder className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/files ${productPath}`)}
-              >
-                Site files
-              </PanelActionButton>
-              <PanelActionButton
-                icon={<FileText className="h-3.5 w-3.5" />}
-                onClick={() => openArtifact(
-                  { detail: "App surface contract", path: "app/surface.md", title: "surface.md" },
-                  "product",
-                )}
-              >
-                Surface
-              </PanelActionButton>
-            </div>
-          </div>
-          <div className="grid content-start gap-2">
-            <StageReadout
-              icon={<Gauge className="h-3.5 w-3.5" />}
-              label="State"
-              value={humanizeArtifactStatus(website.status || product.status)}
-              detail={
-                product.publish_blocker ||
-                product.publish_status ||
-                product.verification_status ||
-                `${formatCount(product.routes_count)} routes`
-              }
-            />
-            <StageReadout
-              icon={<Search className="h-3.5 w-3.5" />}
-              label="Research"
-              value={humanizeStatus(research.status)}
-              detail={research.latest_path || research.strategy_path || research.icp_path || "ICP/channel evidence"}
-            />
-            <StageReadout
-              icon={<Users className="h-3.5 w-3.5" />}
-              label="Customers"
-              value={formatCount(overview.metrics?.users)}
-              detail={`${formatCount(overview.metrics?.paid_customers)} paid`}
-            />
-            <StageReadout
-              icon={<Wallet className="h-3.5 w-3.5" />}
-              label="App budget"
-              value={formatMicrousd(overview.budget?.app_remaining_microusd)}
-              detail={overview.budget?.app_status || "budget"}
-            />
-          </div>
-        </div>
-      ),
-    },
-    {
-      accent: FLOOR_ROOM_ACCENTS.outputs,
-      id: "outputs",
-      camera: "CAM 02",
-      title: "Objects On The Table",
-      status: recentOutputs.length ? `${recentOutputs.length} visible` : "empty",
-      detail: latestOutput?.path || latestOutput?.detail || "historical and current-session outputs",
-      body: recentOutputs.length ? (
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
-          <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
-            <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Latest object</div>
-            <div className="mt-3 truncate text-3xl font-semibold text-zinc-100">
-              {latestOutput.title}
-            </div>
-            <div className="mt-2 truncate font-mono text-xs text-zinc-600">
-              {latestOutput.path || latestOutput.detail}
-            </div>
-            <p className="mt-4 max-w-2xl text-sm leading-6 text-zinc-500">
-              {latestOutput.detail}
-            </p>
-            <div className="mt-6">
-              <ObservationOutput
-                item={latestOutput}
-                onOpen={(item) => openArtifact(item, "outputs")}
-                onResolveMedia={onResolveMedia}
-              />
-            </div>
-          </div>
-          <div className="grid content-start gap-2">
-            {recentOutputs.slice(1, 5).map((item) => (
-              <ObservationOutput
-                item={item}
-                key={item.id}
-                onOpen={(item) => openArtifact(item, "outputs")}
-                onResolveMedia={onResolveMedia}
-              />
-            ))}
-          </div>
-        </div>
-      ) : (
-        <ObservationEmpty text="No durable outputs are visible yet." />
-      ),
-    },
-    {
-      accent: FLOOR_ROOM_ACCENTS.outreach,
-      id: "outreach",
-      camera: "CAM 03",
-      title: "Outreach Desk",
-      status: posts.length ? `${posts.length} posts` : outreach.path ? "local post" : "quiet",
-      detail: outreach.path || `${formatCount(openMessages)} replies waiting`,
-      body: (
-        <div className="space-y-3">
-          {posts.length === 0 ? (
-            <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
-              <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Outbound desk</div>
-              <div className="mt-3 text-2xl font-semibold text-zinc-100">
-                {outreach.path ? "A local outreach artifact exists." : "No outreach thread is visible."}
-              </div>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
-                Test posts and local drafts should show here as objects; live posts should link out when they exist.
-              </p>
-            </div>
-          ) : (
-            posts.slice(0, 4).map((post, index) => (
-              <PostItem
-                key={post.id || `${post.source}-${post.title}-${index}`}
-                onCommand={onCommand}
-                post={post}
-              />
-            ))
-          )}
-          {outreach.path && (
-            <div className="flex flex-wrap gap-2">
-              <PanelActionButton
-                icon={<FileText className="h-3.5 w-3.5" />}
-                onClick={() => openArtifact(
-                  { detail: "Local outreach artifact", path: outreach.path, title: outreach.path?.split("/").pop() || "Local post" },
-                  "outreach",
-                )}
-              >
-                Latest local post
-              </PanelActionButton>
-              {outreach.receipt && (
-                <PanelActionButton
-                  icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                  onClick={() => openArtifact(
-                    { detail: "Outreach receipt", path: outreach.receipt, title: outreach.receipt?.split("/").pop() || "Receipt" },
-                    "outreach",
-                  )}
-                >
-                  Receipt
-                </PanelActionButton>
-              )}
-            </div>
-          )}
-        </div>
-      ),
-    },
-    {
-      accent: FLOOR_ROOM_ACCENTS.creative,
-      id: "creative",
-      camera: "CAM 04",
-      title: "Creative Bench",
-      status: creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status || "generated") : "empty",
-      detail: creativeAssets.path || "campaigns/.../creatives",
-      body: (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
-          <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
-            <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Generated media</div>
-            <div className="mt-3 text-2xl font-semibold text-zinc-100">
-              {creativeAssets.path ? "Creative asset is visible." : "No image or video asset is visible."}
-            </div>
-            <div className="mt-2 truncate font-mono text-xs text-zinc-600">
-              {creativeAssets.path || "campaigns/.../creatives"}
-            </div>
-            <div className="mt-6 flex flex-wrap gap-2">
-              {creativeAssets.path && (
-                <PanelActionButton
-                  icon={<Play className="h-3.5 w-3.5" />}
-                  onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
-                >
-                  Assets
-                </PanelActionButton>
-              )}
-              {creativeAssets.receipt && (
-                <PanelActionButton
-                  icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                  onClick={() => openArtifact(
-                    { detail: "Creative asset receipt", path: creativeAssets.receipt, title: creativeAssets.receipt?.split("/").pop() || "Receipt" },
-                    "creative",
-                  )}
-                >
-                  Receipt
-                </PanelActionButton>
-              )}
-            </div>
-          </div>
-          <div className="grid content-start gap-2">
-            <StageReadout
-              icon={<Play className="h-3.5 w-3.5" />}
-              label="Bench"
-              value={creativeAssets.path ? mediaKindForPath(creativeAssets.path) || "asset" : "waiting"}
-              detail={creativeAssets.receipt ? "receipt visible" : "no receipt visible"}
-            />
-            <StageReadout
-              icon={<MessageCircle className="h-3.5 w-3.5" />}
-              label="Posts"
-              value={formatCount(posts.length)}
-              detail={`${formatCount(openMessages)} replies`}
-            />
-          </div>
-        </div>
-      ),
-    },
-    {
-      accent: FLOOR_ROOM_ACCENTS.signal,
-      id: "signal",
-      camera: "CAM 05",
-      title: "CEO Signal",
-      status: statusItems.length ? "active" : "quiet",
-      detail: statusItems[0] || "the next visible action appears here",
-      body: statusItems.length ? (
-        <div className="grid gap-2">
-          {statusItems.slice(0, 6).map((item, index) => (
-            <div
-              className="rounded-xl border border-zinc-900 bg-black/50 px-3 py-2 text-sm leading-6 text-zinc-400"
-              key={`${item}-${index}`}
-            >
-              {item}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <ObservationEmpty text="Quiet feed. The next visible action will appear here." />
-      ),
-    },
-    {
-      accent: FLOOR_ROOM_ACCENTS.watch,
-      id: "watch",
-      camera: "CAM 06",
-      title: "Night Watch",
-      status: activeCron.length ? "watching" : "quiet",
-      detail: overview.wake_health?.headline || (nextWake ? `Next wake ${readableDate(nextWake)}` : "no scheduled CEO wake visible"),
-      body: (
-        <div className="grid gap-2 lg:grid-cols-2">
-          <TaskRow
-            detail={overview.wake_health?.detail || (nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible.")}
-            label="CEO wake loop"
-            status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
-          />
-          {tasks.length === 0 && visibleJobs.length === 0 ? (
-            <ObservationEmpty text="No gated follow-up actions recorded." />
-          ) : tasks.length > 0 ? (
-            tasks.slice(0, 5).map((task, index) => (
-              <TaskRow
-                detail={taskDetail(task)}
-                key={task.id || `${task.source}-${index}`}
-                label={taskLabel(task)}
-                status={humanizeStatus(task.status)}
-                tone={task.tone}
-              />
-            ))
-          ) : (
-            visibleJobs.map((job, index) => (
-              <TaskRow
-                detail={gatedActionDetail(job)}
-                key={job.id || `${job.kind}-${index}`}
-                label={humanizeJobKind(job.kind)}
-                status={humanizeStatus(job.status || "recorded")}
-                tone={job.tone}
-              />
-            ))
-          )}
-        </div>
-      ),
-    },
-  ];
-  const selected = rooms.find((room) => room.id === selectedRoom) || rooms[0];
+  const researchPath = research.latest_path || research.strategy_path || research.icp_path || research.channels_path;
+  const productStatus = publicSiteUrl
+    ? "Live"
+    : website.path
+      ? "Preview ready"
+      : product.publish_blocker
+        ? "Needs attention"
+        : "Not built";
+  const workItems = tasks.length > 0 ? tasks.slice(0, 5) : visibleJobs.slice(0, 5);
+  const latestActivity = [
+    ...(activeTool ? [{ label: naturalToolLabel(activeTool), detail: toolDetail(activeTool), status: humanizeStatus(activeTool.status), tone: activeTool.status }] : []),
+    ...tools
+      .slice()
+      .reverse()
+      .filter((tool) => tool.id !== activeTool?.id)
+      .slice(0, 3)
+      .map((tool) => ({
+        label: naturalToolLabel(tool),
+        detail: toolDetail(tool),
+        status: humanizeStatus(tool.status),
+        tone: tool.status,
+      })),
+    ...statusItems.slice(0, 2).map((item) => ({
+      label: "Live update",
+      detail: item,
+      status: "Working",
+      tone: "active",
+    })),
+  ].slice(0, 5);
 
   return (
-    <div className="flex min-h-full flex-col gap-3 p-4">
-      {ceoLoop && (
-        <CeoLoopBanner ceoLoop={ceoLoop} onCommand={onCommand} />
-      )}
-      {statusCards.length > 0 && (
-        <StatusCardStrip cards={statusCards} />
-      )}
-      <section className={cn(
-        "relative min-h-[430px] overflow-hidden rounded-2xl border bg-zinc-950/70 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]",
-        selected.accent.border,
-        selected.accent.glow,
-      )}>
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.028)_1px,transparent_1px)] bg-[length:100%_8px] opacity-50" />
-        <div className={cn("pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse", selected.accent.line)} />
-        <div className="relative flex min-h-[430px] flex-col p-4 sm:p-5">
-          <div className="mb-4 flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-zinc-600">
-                <span>{selected.camera}</span>
-                <span className="h-1 w-1 rounded-full bg-zinc-700" />
-                <span>now showing</span>
+    <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 p-4">
+      <section className="rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-600">
+              <Sparkles className="h-3.5 w-3.5" />
+              Current focus
+            </div>
+            <div className="mt-2 max-w-3xl text-xl font-semibold leading-7 text-zinc-100">
+              {ceoLoop?.headline || "Takyon is ready for the next company move."}
+            </div>
+            {(ceoLoop?.next_action || ceoLoop?.detail) && (
+              <div className="mt-1 max-w-3xl text-sm leading-6 text-zinc-500">
+                {ceoLoop?.next_action || ceoLoop?.detail}
               </div>
-              <h2 className="mt-2 truncate text-2xl font-semibold text-zinc-100">
-                {selected.title}
-              </h2>
-            </div>
-            <div className={cn("flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.16em]", selected.accent.pill)}>
-              <span className={cn("h-1.5 w-1.5 animate-pulse rounded-full", selected.accent.dot)} />
-              live
-            </div>
-          </div>
-          <div className="min-h-0 flex-1">
-            {viewer ? (
-              <FloorArtifactViewer
-                accent={selected.accent}
-                onClose={() => setViewer(null)}
-                viewer={viewer}
-              />
-            ) : (
-              selected.body
             )}
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <span className={cn("inline-flex h-7 items-center rounded-lg border px-2.5 text-xs", toneClasses(ceoLoop?.status))}>
+              {humanizeStatus(ceoLoop?.status)}
+            </span>
+            <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
+              Wake now
+            </PanelActionButton>
           </div>
         </div>
       </section>
 
-      <div className="overflow-x-auto pb-1">
-        <div className="grid min-w-[780px] grid-cols-6 gap-2">
-          {rooms.map((room) => (
-            <CameraStripButton
-              active={room.id === selectedRoom}
-              camera={room.camera}
-              detail={room.detail}
-              accent={room.accent}
-              key={room.id}
-              onClick={() => {
-                setViewer(null);
-                setSelectedRoom(room.id);
-              }}
-              status={room.status}
-              title={room.title}
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,0.8fr)]">
+        <div className="grid gap-3">
+          <section className="grid gap-3 md:grid-cols-2">
+            <SourceCard
+              action={
+                researchPath ? (
+                  <PanelActionButton icon={<FileText className="h-3.5 w-3.5" />} onClick={() => onCommand(`/read ${researchPath}`)}>
+                    Open
+                  </PanelActionButton>
+                ) : (
+                  <PanelActionButton icon={<Search className="h-3.5 w-3.5" />} onClick={() => onCommand("Research ICP, channels, competitors, pricing, and high-level strategy before product.")}>
+                    Start research
+                  </PanelActionButton>
+                )
+              }
+              detail={researchPath || "ICP, channels, competitors, pricing, and strategy should appear before product by default."}
+              icon={<Search className="h-4 w-4" />}
+              label="Research"
+              status={humanizeStatus(research.status)}
+              tone={research.status === "visible" ? "done" : "waiting"}
             />
-          ))}
+            <SourceCard
+              action={
+                <div className="flex flex-wrap gap-2">
+                  {publicSiteUrl && (
+                    <PanelActionButton icon={<ExternalLink className="h-3.5 w-3.5" />} onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}>
+                      Open site
+                    </PanelActionButton>
+                  )}
+                  {website.path && <OpenSitePreviewButton onResolveSitePreview={onResolveSitePreview} path={productPath} />}
+                  <PanelActionButton icon={<Folder className="h-3.5 w-3.5" />} onClick={() => onCommand(`/files ${productPath}`)}>
+                    Files
+                  </PanelActionButton>
+                </div>
+              }
+              detail={product.publish_blocker || publicSiteUrl || website.path || product.source_path || "No product surface is visible yet."}
+              icon={<Globe2 className="h-4 w-4" />}
+              label="Product"
+              status={productStatus}
+              tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
+            />
+          </section>
+
+          <section className="grid gap-3 md:grid-cols-2">
+            <SourceCard
+              action={
+                <div className="flex flex-wrap gap-2">
+                  <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
+                    List
+                  </PanelActionButton>
+                  <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
+                    Wake now
+                  </PanelActionButton>
+                </div>
+              }
+              detail={overview.wake_health?.detail || (nextWake ? `Next check ${readableDate(nextWake)}` : "No scheduled CEO check is visible.")}
+              icon={<Clock3 className="h-4 w-4" />}
+              label="Scheduled checks"
+              status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
+              tone={overview.wake_health?.status}
+            />
+            <SourceCard
+              action={
+                creativeAssets.path ? (
+                  <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand(`/files ${creativeAssetsDir}`)}>
+                    Open assets
+                  </PanelActionButton>
+                ) : (
+                  <PanelActionButton icon={<Sparkles className="h-3.5 w-3.5" />} onClick={() => onCommand("Make an ad creative asset for this business.")}>
+                    Make ad
+                  </PanelActionButton>
+                )
+              }
+              detail={creativeAssets.path || outreach.path || `${formatCount(posts.length)} posts, ${formatCount(openMessages)} replies`}
+              icon={<Sparkles className="h-4 w-4" />}
+              label="Growth"
+              status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
+              tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
+            />
+          </section>
+
+          <PanelSection icon={<ListChecks className="h-4 w-4" />} title="Tasks">
+            {workItems.length === 0 ? (
+              <EmptyPanelLine text="No visible follow-up work yet." />
+            ) : (
+              <div className="grid gap-2 lg:grid-cols-2">
+                {workItems.map((task, index) => (
+                  <TaskRow
+                    detail={taskDetail(task)}
+                    key={task.id || `${taskLabel(task)}-${index}`}
+                    label={taskLabel(task)}
+                    status={humanizeStatus(task.status)}
+                    tone={task.tone || task.status}
+                  />
+                ))}
+              </div>
+            )}
+          </PanelSection>
+        </div>
+
+        <div className="grid content-start gap-3">
+          {statusCards.length > 0 && <StatusCardStrip cards={statusCards} />}
+          <PanelSection icon={<Activity className="h-4 w-4" />} title="Activity">
+            {latestActivity.length === 0 ? (
+              <EmptyPanelLine text="No live activity yet." />
+            ) : (
+              latestActivity.map((item, index) => (
+                <TaskRow
+                  detail={item.detail}
+                  key={`${item.label}-${index}`}
+                  label={item.label}
+                  status={item.status}
+                  tone={item.tone}
+                />
+              ))
+            )}
+          </PanelSection>
+          {recentOutputs.length > 0 && (
+            <PanelSection icon={<FileText className="h-4 w-4" />} title="Latest outputs">
+              {recentOutputs.map((item) => (
+                <DeliverableItem
+                  item={item}
+                  key={item.id}
+                  onCommand={onCommand}
+                  onResolveMedia={onResolveMedia}
+                />
+              ))}
+            </PanelSection>
+          )}
         </div>
       </div>
     </div>
-  );
-}
-
-function CeoLoopBanner({
-  ceoLoop,
-  onCommand,
-}: {
-  ceoLoop: BusinessOverviewCeoLoop;
-  onCommand: (line: string) => void;
-}) {
-  return (
-    <section className="rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
-            <Sparkles className="h-3.5 w-3.5" />
-            CEO loop
-          </div>
-          <div className="mt-2 text-lg font-semibold leading-7 text-zinc-100">
-            {ceoLoop.headline || "CEO is deciding the next move."}
-          </div>
-          {ceoLoop.detail && (
-            <div className="mt-1 max-w-3xl text-sm leading-6 text-zinc-500">
-              {ceoLoop.detail}
-            </div>
-          )}
-        </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <span className={cn("inline-flex h-7 items-center rounded-lg border px-2.5 text-xs", toneClasses(ceoLoop.status))}>
-            {humanizeStatus(ceoLoop.status)}
-          </span>
-          <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
-            Wake now
-          </PanelActionButton>
-        </div>
-      </div>
-      {ceoLoop.next_action && (
-        <div className="mt-3 rounded-xl border border-zinc-900 bg-black px-3 py-2 text-xs leading-5 text-zinc-500">
-          {ceoLoop.next_action}
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -2952,132 +2503,36 @@ function StatusCardStrip({ cards }: { cards: BusinessOverviewStatusCard[] }) {
   );
 }
 
-function CameraStripButton({
-  active,
-  accent,
-  camera,
-  detail,
-  onClick,
-  status,
-  title,
-}: {
-  active: boolean;
-  accent: FloorRoomAccent;
-  camera: string;
-  detail: string;
-  onClick: () => void;
-  status: string;
-  title: string;
-}) {
-  return (
-    <button
-      className={cn(
-        "relative min-h-32 overflow-hidden rounded-xl border p-3 text-left transition-colors",
-        active
-          ? cn(accent.border, accent.glow, "bg-zinc-900 text-zinc-100")
-          : "border-zinc-900 bg-zinc-950/70 text-zinc-400 hover:border-zinc-800 hover:bg-zinc-900/80 hover:text-zinc-100",
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.025)_1px,transparent_1px)] bg-[length:100%_7px] opacity-40" />
-      {active && <div className={cn("pointer-events-none absolute inset-x-0 top-0 h-px", accent.line)} />}
-      <div className="relative mb-3 flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-zinc-600">
-            {camera}
-          </div>
-          <div className="mt-0.5 truncate text-sm font-medium text-zinc-100">
-            {title}
-          </div>
-        </div>
-        <div className={cn("flex items-center gap-1.5 font-mono text-[0.62rem] uppercase tracking-[0.16em]", accent.text)}>
-          <span className={cn("h-1.5 w-1.5 animate-pulse rounded-full", accent.dot)} />
-          rec
-        </div>
-      </div>
-      <div className="relative mt-6">
-        <div className="truncate text-xs text-zinc-500">{detail}</div>
-        <div className="mt-2 inline-flex rounded-full bg-black/50 px-2 py-0.5 text-[0.65rem] text-zinc-500">
-          {status}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function FloorArtifactViewer({
-  accent,
-  onClose,
-  viewer,
-}: {
-  accent: FloorRoomAccent;
-  onClose: () => void;
-  viewer: FloorArtifactViewerState;
-}) {
-  const isMarkdown = viewer.path.toLowerCase().endsWith(".md");
-  return (
-    <div className="flex min-h-[320px] flex-col overflow-hidden rounded-2xl border border-zinc-900 bg-black/60">
-      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-900 px-4 py-3">
-        <div className="min-w-0">
-          <div className={cn("text-xs uppercase tracking-[0.16em]", accent.text)}>Now showing</div>
-          <div className="mt-1 truncate text-2xl font-semibold text-zinc-100">{viewer.title}</div>
-          <div className="mt-0.5 truncate font-mono text-xs text-zinc-600">{viewer.path}</div>
-        </div>
-        <IconButton label="Close artifact" onClick={onClose}>
-          <X className="h-4 w-4" />
-        </IconButton>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        {viewer.loading ? (
-          <ObservationEmpty text="Opening business artifact..." />
-        ) : viewer.error ? (
-          <ObservationEmpty text={viewer.error} />
-        ) : viewer.media?.url ? (
-          <div className="max-w-4xl">
-            <MediaPreview media={viewer.media} title={viewer.title} />
-          </div>
-        ) : isMarkdown ? (
-          <div className="max-w-4xl rounded-xl border border-zinc-900 bg-zinc-950/80 p-4 [&_.text-foreground]:text-zinc-200 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-zinc-900 [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
-            <Markdown content={viewer.content || ""} />
-          </div>
-        ) : (
-          <pre className="max-h-[min(62vh,680px)] overflow-auto whitespace-pre-wrap rounded-xl border border-zinc-900 bg-zinc-950/80 p-4 font-mono text-xs leading-5 text-zinc-300">
-            {viewer.content || ""}
-          </pre>
-        )}
-        {viewer.truncated && (
-          <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100">
-            Preview truncated. Open the file browser for the full source path.
-          </div>
-        )}
-        {viewer.detail && (
-          <div className="mt-3 text-xs leading-5 text-zinc-600">{viewer.detail}</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function StageReadout({
+function SourceCard({
+  action,
   detail,
   icon,
   label,
-  value,
+  status,
+  tone,
 }: {
+  action?: ReactNode;
   detail?: string;
   icon: ReactNode;
   label: string;
-  value: string;
+  status: string;
+  tone?: string;
 }) {
   return (
-    <div className="rounded-xl border border-zinc-900 bg-black/50 px-3 py-2.5">
-      <div className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-[0.08em] text-zinc-600">
-        {icon}
-        <span className="truncate">{label}</span>
+    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className="mt-0.5 text-zinc-600">{icon}</span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-zinc-100">{label}</div>
+            {detail && <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-zinc-600">{detail}</div>}
+          </div>
+        </div>
+        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
+          {status}
+        </span>
       </div>
-      <div className="mt-2 truncate text-sm font-semibold text-zinc-100">{value}</div>
-      {detail && <div className="mt-0.5 truncate text-[0.68rem] text-zinc-600">{detail}</div>}
+      {action && <div className="mt-3 flex flex-wrap gap-2">{action}</div>}
     </div>
   );
 }
@@ -3127,87 +2582,6 @@ function OpenSitePreviewButton({
       </PanelActionButton>
       {error && <span className="text-xs text-red-400">{error}</span>}
     </span>
-  );
-}
-
-function ObservationEmpty({ text }: { text: string }) {
-  return (
-    <div className="rounded-lg border border-dashed border-zinc-800 bg-black/30 px-3 py-6 text-center text-xs text-zinc-600">
-      {text}
-    </div>
-  );
-}
-
-function ObservationOutput({
-  item,
-  onOpen,
-  onResolveMedia,
-}: {
-  item: Deliverable;
-  onOpen?: (item: Deliverable) => void;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-}) {
-  const mediaKind = mediaKindForPath(item.path) || (item.kind === "image" || item.kind === "video" ? item.kind : undefined);
-  return (
-    <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-zinc-900 bg-black/50 px-3 py-2">
-      <div className="min-w-0">
-        <div className="truncate text-sm text-zinc-100">{item.title}</div>
-        <div className="mt-0.5 truncate font-mono text-[0.68rem] text-zinc-600">
-          {item.path || item.detail}
-        </div>
-      </div>
-      <div className="shrink-0">
-        {item.path && onOpen ? (
-          <PanelActionButton
-            icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />}
-            onClick={() => onOpen(item)}
-          >
-            Open
-          </PanelActionButton>
-        ) : mediaKind && item.path ? (
-          <MediaQuickViewButton onResolveMedia={onResolveMedia} path={item.path} />
-        ) : item.path ? (
-          <PanelActionButton
-            icon={<FileText className="h-3.5 w-3.5" />}
-            onClick={() => window.navigator.clipboard?.writeText(item.path || "")}
-          >
-            Copy path
-          </PanelActionButton>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function MediaQuickViewButton({
-  onResolveMedia,
-  path,
-}: {
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  path: string;
-}) {
-  const [media, setMedia] = useState<BusinessMediaResponse | null>(null);
-  const [error, setError] = useState("");
-  return (
-    <div className="flex flex-col items-end gap-2">
-      <PanelActionButton
-        icon={<Play className="h-3.5 w-3.5" />}
-        onClick={() => {
-          setError("");
-          void onResolveMedia(path).then(setMedia).catch((err) => {
-            setError(err instanceof Error ? err.message : String(err));
-          });
-        }}
-      >
-        View
-      </PanelActionButton>
-      {error && <span className="max-w-40 text-right text-xs text-red-400">{error}</span>}
-      {media?.url && (
-        <div className="w-40 overflow-hidden rounded-lg border border-zinc-800">
-          <MediaPreview media={media} title={path.split("/").pop() || path} />
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -3619,9 +2993,9 @@ function BusinessSnapshot({
 
       <PreviewCard
         icon={<Clock3 className="h-4 w-4" />}
-        title="Wakeups"
+        title="Scheduled checks"
         value={activeCron.length ? `${activeCron.length} active` : "None active"}
-        detail={nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible."}
+        detail={nextWake ? `Next check ${readableDate(nextWake)}` : "No scheduled CEO check is visible."}
       >
         <div className="flex flex-wrap gap-2">
           <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
@@ -3890,28 +3264,6 @@ function PanelActionButton({
   );
 }
 
-function PanelLinkButton({
-  children,
-  href,
-  icon,
-}: {
-  children: ReactNode;
-  href: string;
-  icon: ReactNode;
-}) {
-  return (
-    <a
-      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2.5 text-xs text-zinc-300 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-50"
-      href={href}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {icon}
-      <span>{children}</span>
-    </a>
-  );
-}
-
 function DeliverablesPanel({
   cwd,
   deliverables,
@@ -4056,62 +3408,6 @@ function NextPanel({
   scope: ScopeState;
 }) {
   return <TaskBoard onCommand={onCommand} scope={scope} />;
-}
-
-function PostItem({
-  onCommand,
-  post,
-}: {
-  onCommand: (line: string) => void;
-  post: BusinessOverviewPost;
-}) {
-  const external = isExternalUrl(post.url);
-  const testPost = post.mode === "test" || !external;
-  const artifactPath = post.artifact_path || (!external ? post.url : "");
-  const updated = post.updated_at || post.created_at;
-
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-zinc-100">
-            {post.title || "Post"}
-          </div>
-          <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[0.68rem] text-zinc-600">
-            <span>{post.source || "outreach"}</span>
-            <span>{testPost ? "test/local" : "live"}</span>
-            {updated && <span>{readableDate(updated)}</span>}
-          </div>
-        </div>
-        <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-500">
-          {post.unresolved_messages ? `${post.unresolved_messages} replies` : post.status || "active"}
-        </span>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {external && (
-          <PanelLinkButton href={post.url || ""} icon={<ExternalLink className="h-3.5 w-3.5" />}>
-            Open post
-          </PanelLinkButton>
-        )}
-        {artifactPath && (
-          <PanelActionButton
-            icon={<FileText className="h-3.5 w-3.5" />}
-            onClick={() => onCommand(`/read ${artifactPath}`)}
-          >
-            Local post
-          </PanelActionButton>
-        )}
-        {post.conversation_file && (
-          <PanelActionButton
-            icon={<MessageCircle className="h-3.5 w-3.5" />}
-            onClick={() => onCommand(`/read ${post.conversation_file}`)}
-          >
-            Responses
-          </PanelActionButton>
-        )}
-      </div>
-    </div>
-  );
 }
 
 function FilesPanel({
@@ -4272,10 +3568,10 @@ function TaskBoard({
         )}
       </PanelSection>
 
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Wakeups">
+      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Scheduled checks">
         <TaskRow
-          detail={wakeHealth?.detail || "No scheduled CEO wake signal is visible."}
-          label={wakeHealth?.headline || "CEO wake loop"}
+          detail={wakeHealth?.detail || "No scheduled CEO check is visible."}
+          label={wakeHealth?.headline || "Scheduled CEO check"}
           status={humanizeStatus(wakeHealth?.status)}
           tone={wakeHealth?.status}
         />
@@ -4316,7 +3612,7 @@ function DevPanel({
 
   return (
     <div className="space-y-6">
-      <PanelSection icon={<Code2 className="h-4 w-4" />} title="Codegen">
+      <PanelSection icon={<Code2 className="h-4 w-4" />} title="Build activity">
         <div className="space-y-2">
           {builderItems.length === 0 && visibleTasks.length === 0 ? (
             <TaskRow
@@ -4329,9 +3625,9 @@ function DevPanel({
             <>
               {builderItems.map((tool) => (
                 <TaskRow
-                  detail={tool.preview || tool.summary || tool.context || tool.error}
+                  detail={toolDetail(tool)}
                   key={tool.id}
-                  label={tool.name}
+                  label={naturalToolLabel(tool)}
                   status={humanizeStatus(tool.status)}
                   tone={tool.status}
                 />
@@ -4353,7 +3649,7 @@ function DevPanel({
       <PanelSection icon={<Command className="h-4 w-4" />} title="Build">
         <TaskRow
           detail={scopeDetail(scope)}
-          label={CHAT_UI_REVISION}
+          label="Dashboard build"
           status="ui"
         />
         <TaskRow
@@ -4363,7 +3659,7 @@ function DevPanel({
         />
       </PanelSection>
 
-      <PanelSection icon={<CheckCircle2 className="h-4 w-4" />} title="Tool activity">
+      <PanelSection icon={<CheckCircle2 className="h-4 w-4" />} title="Actions">
         {tools.length === 0 ? (
           <EmptyPanelLine text="No tool calls yet." />
         ) : (
@@ -4540,7 +3836,7 @@ function ToolActivityItem({ tool }: { tool: ToolEntry }) {
   return (
     <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-sm text-zinc-200">{tool.name}</div>
+        <div className="min-w-0 truncate text-sm text-zinc-200">{naturalToolLabel(tool)}</div>
         <span
           className={cn(
             "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
@@ -4549,12 +3845,12 @@ function ToolActivityItem({ tool }: { tool: ToolEntry }) {
             tool.status === "error" && "bg-red-400/10 text-red-200",
           )}
         >
-          {tool.status}
+          {humanizeStatus(tool.status)}
         </span>
       </div>
       {(tool.error || tool.summary || tool.preview || tool.context) && (
         <div className="mt-1 line-clamp-3 text-xs leading-5 text-zinc-500">
-          {tool.error || tool.summary || tool.preview || tool.context}
+          {toolDetail(tool)}
         </div>
       )}
     </div>

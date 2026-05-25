@@ -12,6 +12,7 @@ import shlex
 import shutil
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -546,6 +547,15 @@ def _format_operation_result(item: Any) -> str:
         return f"conversation state for business:{business}{where}"
     if action == "cron.ensure_ceo_wakeup":
         return f"CEO wakeup for business:{business or item.get('business')} scheduled: {item.get('schedule') or item.get('cron_job')}"
+    if action == "cron.trigger_ceo_wakeup":
+        target = business or item.get("business")
+        cron_job = item.get("cron_job") or "unknown"
+        if item.get("triggered"):
+            ran = item.get("tick_ran")
+            ran_text = f"; tick ran {ran} job{'s' if ran != 1 else ''}" if ran is not None else ""
+            return f"CEO wakeup for business:{target} triggered now: {cron_job}{ran_text}"
+        error = item.get("error") or "cron job was not found"
+        return f"CEO wakeup for business:{target} could not trigger: {error}"
     if action == "agent.record":
         return f"agent record for business:{business or item.get('business')}: {item.get('agent_run') or item.get('id')}"
     if action == "maintenance.gc":
@@ -2494,13 +2504,53 @@ def run_takyon_command(
             raise SystemExit("usage: takyon wake <business> [schedule]")
         slug = _slugify(argv[1])
         schedule = " ".join(argv[2:]).strip() or "every 6h"
-        return store.commit(
+        cron_result = store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
-            idempotency_key=_idempotency_key("operator-wake", slug, schedule),
-            reason="operator requested CEO wake/sleep cron",
+            idempotency_key=_idempotency_key("operator-wake", slug, schedule, uuid.uuid4().hex),
+            reason="operator requested immediate CEO wake",
             actor="operator",
         )
+        cron_job = ""
+        for item in cron_result.get("results") or []:
+            if isinstance(item, dict) and item.get("action") == "cron.ensure_ceo_wakeup":
+                cron_job = str(item.get("cron_job") or "")
+                break
+        if not cron_job:
+            from cron.jobs import list_jobs
+
+            name = f"takyon-ceo:{slug}"
+            existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
+            cron_job = str((existing or {}).get("id") or "")
+
+        trigger_result: dict[str, Any] = {
+            "action": "cron.trigger_ceo_wakeup",
+            "business": slug,
+            "cron_job": cron_job,
+            "schedule": schedule,
+            "triggered": False,
+            "tick_ran": 0,
+        }
+        if cron_job:
+            from cron.jobs import trigger_job
+            from cron.scheduler import tick
+
+            triggered = trigger_job(cron_job)
+            trigger_result["triggered"] = bool(triggered)
+            if triggered:
+                trigger_result["tick_ran"] = tick(verbose=False)
+            else:
+                trigger_result["error"] = "scheduled CEO cron job could not be reopened"
+        else:
+            trigger_result["error"] = "no CEO cron job was returned after scheduling"
+
+        return {
+            "success": bool(cron_result.get("success")) and bool(trigger_result.get("triggered")),
+            "results": [
+                *(cron_result.get("results") or []),
+                trigger_result,
+            ],
+        }
 
     if command in {"pause", "resume", "kill"}:
         if len(argv) < 2:

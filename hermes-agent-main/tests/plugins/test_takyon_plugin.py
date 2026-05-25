@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -654,6 +655,53 @@ def test_focus_command_uses_current_shell_business(tmp_path, monkeypatch):
     assert current == "latexflow"
     assert "work focus -> marketing" in output
     assert store.read(scope="business:latexflow", query="summary")["business"]["work_focus"] == "marketing"
+
+
+def test_wake_command_triggers_current_business_cron_immediately(tmp_path, monkeypatch):
+    import cron.jobs as cron_jobs
+    import cron.scheduler as cron_scheduler
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    cron_dir = tmp_path / "cron"
+    monkeypatch.setattr(cron_jobs, "CRON_DIR", cron_dir)
+    monkeypatch.setattr(cron_jobs, "JOBS_FILE", cron_dir / "jobs.json")
+    monkeypatch.setattr(cron_jobs, "OUTPUT_DIR", cron_dir / "output")
+
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-shell-wake",
+    )
+    tick_calls: list[bool] = []
+
+    def fake_tick(*, verbose: bool = True, adapters=None, loop=None) -> int:
+        tick_calls.append(verbose)
+        return 1
+
+    monkeypatch.setattr(cron_scheduler, "tick", fake_tick)
+
+    from plugins.takyon.cli import _handle_shell_line
+
+    output, current = _handle_shell_line(
+        "/wake",
+        current_business="latexflow",
+        store=store,
+        model="",
+        max_turns=1,
+    )
+
+    assert current == "latexflow"
+    assert "scheduled" in output
+    assert "triggered now" in output
+    assert tick_calls == [False]
+
+    jobs = cron_jobs.list_jobs(include_disabled=True)
+    assert [job["name"] for job in jobs] == ["takyon-ceo:latexflow"]
+    next_run_at = datetime.fromisoformat(str(jobs[0]["next_run_at"]))
+    now = datetime.now(next_run_at.tzinfo) if next_run_at.tzinfo else datetime.now()
+    assert next_run_at <= now + timedelta(seconds=2)
 
 
 def test_focus_change_refreshes_existing_ceo_cron_prompt(tmp_path, monkeypatch):

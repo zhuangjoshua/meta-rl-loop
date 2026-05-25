@@ -103,7 +103,15 @@
       ]
     },
     {"name": "memory", "description": "List or record business memory", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
-    {"name": "wake", "description": "Wake Hermes CEO for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
+    {
+      "name": "wake",
+      "description": "Wake Hermes CEO for the current business",
+      "requiresBusiness": true,
+      "priorityBand": "p1_ceo",
+      "palette": "default",
+      "usage": "/wake [schedule]",
+      "summary": "Wake the current business CEO immediately and ensure its recurring wake cadence. Defaults to every 6h."
+    },
     {"name": "run", "description": "Run a CEO instruction for the current business", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "pause", "description": "Pause the current business", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
     {"name": "resume", "description": "Resume the current business", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
