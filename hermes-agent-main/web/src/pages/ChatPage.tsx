@@ -248,6 +248,12 @@ interface BusinessMediaResponse extends ScopeState {
   url?: string;
 }
 
+interface BusinessSitePreviewResponse extends ScopeState {
+  path?: string;
+  size?: number;
+  url?: string;
+}
+
 interface ToolEntry {
   id: string;
   tool_id: string;
@@ -745,6 +751,39 @@ export default function ChatPage() {
     let cancelled = false;
     const cleanup: Array<() => void> = [];
 
+    const refreshScope = () => {
+      const activeSessionId = sessionIdRef.current;
+      if (!activeSessionId) return;
+      void gw
+        .request<ScopeState>(
+          "takyon.scope.get",
+          { session_id: activeSessionId },
+          10_000,
+        )
+        .then((scope) => {
+          if (cancelled) return;
+          const nextScope = normalizeScopeState(scope);
+          setScopeState(nextScope);
+          if (nextScope.auto_switched_business) {
+            setMessages((prev) => [
+              ...prev,
+              makeMessage(
+                "system",
+                `Entered business:${nextScope.auto_switched_business}`,
+              ),
+            ]);
+          } else if (nextScope.auto_scope_warning) {
+            setMessages((prev) => [
+              ...prev,
+              makeMessage("system", nextScope.auto_scope_warning || ""),
+            ]);
+          }
+        })
+        .catch(() => {
+          /* scope refresh is best effort */
+        });
+    };
+
     cleanup.push(gw.onState(setState));
 
     cleanup.push(
@@ -804,38 +843,7 @@ export default function ChatPage() {
           if (ev.payload?.warning) {
             setStatusItems((prev) => [ev.payload!.warning!, ...prev].slice(0, 5));
           }
-          const activeSessionId = sessionIdRef.current;
-          if (activeSessionId) {
-            void gw
-              .request<ScopeState>(
-                "takyon.scope.get",
-                { session_id: activeSessionId },
-                10_000,
-              )
-              .then((scope) => {
-                if (!cancelled) {
-                  const nextScope = normalizeScopeState(scope);
-                  setScopeState(nextScope);
-                  if (nextScope.auto_switched_business) {
-                    setMessages((prev) => [
-                      ...prev,
-                      makeMessage(
-                        "system",
-                        `Entered business:${nextScope.auto_switched_business}`,
-                      ),
-                    ]);
-                  } else if (nextScope.auto_scope_warning) {
-                    setMessages((prev) => [
-                      ...prev,
-                      makeMessage("system", nextScope.auto_scope_warning || ""),
-                    ]);
-                  }
-                }
-              })
-              .catch(() => {
-                /* scope refresh is best effort */
-              });
-          }
+          refreshScope();
         },
       ),
     );
@@ -950,6 +958,7 @@ export default function ChatPage() {
         setDeliverables((prev) =>
           upsertDeliverables(prev, deliverablesFromTool(completedTool)),
         );
+        refreshScope();
       }),
     );
 
@@ -1249,6 +1258,20 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
+  const resolveBusinessSitePreview = useCallback(
+    async (path?: string): Promise<BusinessSitePreviewResponse> => {
+      if (!sessionId) throw new Error("Chat is still connecting.");
+      const res = await gw.request<BusinessSitePreviewResponse>(
+        "takyon.site.preview",
+        { session_id: sessionId, path },
+        20_000,
+      );
+      setScopeState(normalizeScopeState(res));
+      return res;
+    },
+    [gw, sessionId],
+  );
+
   const handleSubmit = useCallback(async () => {
     const text = input.trim();
     if (state !== "open") return;
@@ -1447,6 +1470,7 @@ export default function ChatPage() {
             onCreateInTestModeChange={setCreateInTestMode}
             onListFiles={listBusinessFiles}
             onResolveMedia={resolveBusinessMedia}
+            onResolveSitePreview={resolveBusinessSitePreview}
             onClose={() => setRightOpen(false)}
             scope={scopeState}
             sessionId={sessionId}
@@ -1810,11 +1834,15 @@ function ScopeOption({
 
 function BusinessSnapshot({
   onCommand,
+  onResolveSitePreview,
   scope,
 }: {
   onCommand: (line: string) => void;
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   scope: ScopeState;
 }) {
+  const [previewError, setPreviewError] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
   const overview = scope.overview || {};
   const metrics = overview.metrics || {};
   const product = overview.product || {};
@@ -1822,6 +1850,32 @@ function BusinessSnapshot({
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
   const artifacts = overview.artifacts || {};
+  const website = artifacts.website || {};
+  const previewPath = website.source_path || product.source_path || "product/site";
+  const openSitePreview = useCallback(() => {
+    const popup = window.open("about:blank", "_blank");
+    setPreviewLoading(true);
+    setPreviewError("");
+    void onResolveSitePreview(previewPath)
+      .then((res) => {
+        if (!res.url) throw new Error("No preview URL returned.");
+        if (popup) {
+          popup.opener = null;
+          popup.location.href = res.url;
+        } else {
+          const link = document.createElement("a");
+          link.href = res.url;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          link.click();
+        }
+      })
+      .catch((err) => {
+        if (popup) popup.close();
+        setPreviewError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setPreviewLoading(false));
+  }, [onResolveSitePreview, previewPath]);
 
   if (!scope.business) {
     return (
@@ -1891,7 +1945,6 @@ function BusinessSnapshot({
   const visibleJobs = jobs
     .filter((job) => job.status || job.kind)
     .slice(0, 4);
-  const website = artifacts.website || {};
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
   const creativeAssetsDir = creativeAssets.path
@@ -1994,6 +2047,14 @@ function BusinessSnapshot({
         <div className="flex flex-wrap gap-2">
           {website.path && (
             <PanelActionButton
+              icon={<ExternalLink className="h-3.5 w-3.5" />}
+              onClick={openSitePreview}
+            >
+              {previewLoading ? "Opening..." : "Preview"}
+            </PanelActionButton>
+          )}
+          {website.path && (
+            <PanelActionButton
               icon={<FileText className="h-3.5 w-3.5" />}
               onClick={() => onCommand(`/read ${website.path}`)}
             >
@@ -2007,6 +2068,7 @@ function BusinessSnapshot({
             Source
           </PanelActionButton>
         </div>
+        {previewError && <div className="mt-2 text-xs leading-5 text-red-400">{previewError}</div>}
       </PreviewCard>
 
       <PreviewCard
@@ -2383,6 +2445,7 @@ function DeliverablesPanel({
   onCreateInTestModeChange,
   onListFiles,
   onResolveMedia,
+  onResolveSitePreview,
   onClose,
   scope,
   sessionId,
@@ -2398,6 +2461,7 @@ function DeliverablesPanel({
   onCreateInTestModeChange: (enabled: boolean) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
+  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   onClose: () => void;
   scope: ScopeState;
   sessionId: string | null;
@@ -2447,7 +2511,11 @@ function DeliverablesPanel({
               enabled={createInTestMode}
               onChange={onCreateInTestModeChange}
             />
-            <BusinessSnapshot onCommand={onCommand} scope={scope} />
+            <BusinessSnapshot
+              onCommand={onCommand}
+              onResolveSitePreview={onResolveSitePreview}
+              scope={scope}
+            />
           </>
         )}
 

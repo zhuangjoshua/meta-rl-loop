@@ -3544,7 +3544,7 @@ class TakyonStore:
             message_external_id = str(op.get("external_id") or f"{publish_id}:local-outbound")
             conn.execute(
                 "INSERT INTO conversation_messages (id, business_slug, thread_id, source, external_id, direction, author_label, body, status, received_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'outbound', 'Takyon test mode', ?, 'responded', ?, ?, ?) "
+                "VALUES (?, ?, ?, ?, ?, 'outbound', 'Takyon local publish', ?, 'responded', ?, ?, ?) "
                 "ON CONFLICT(business_slug, source, external_id) DO UPDATE SET body = excluded.body, status = excluded.status, updated_at = excluded.updated_at",
                 (message_id, slug, thread["id"], source, message_external_id, body, now, now, now),
             )

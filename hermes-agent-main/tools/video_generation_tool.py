@@ -258,7 +258,7 @@ def _missing_provider_error(configured: Optional[str]) -> str:
         ))
     msg = (
         "No video generation backend is configured. Run `takyon tools` → "
-        "Video Generation to enable one (xAI, FAL, or Google Veo)."
+        "Video Generation to enable one (OpenAI Sora, xAI, or FAL)."
     )
     return json.dumps(error_response(
         error=msg, error_type="no_provider_configured",

@@ -4959,6 +4959,55 @@ _TAKYON_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TAKYON_MEDIA_SUFFIXES = _TAKYON_VIDEO_SUFFIXES | _TAKYON_IMAGE_SUFFIXES
 _TAKYON_MAX_MEDIA_BYTES = 64 * 1024 * 1024
+_TAKYON_MAX_SITE_PREVIEW_BYTES = 8 * 1024 * 1024
+
+
+def _takyon_site_asset_data_url(index_path: Path, raw_url: str) -> str | None:
+    url = str(raw_url or "").strip()
+    if (
+        not url
+        or url.startswith("#")
+        or url.startswith("data:")
+        or re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I)
+    ):
+        return None
+    clean = url.split("#", 1)[0].split("?", 1)[0]
+    if not clean:
+        return None
+    candidate = (index_path.parent / clean.lstrip("/")).resolve()
+    if not candidate.is_file() or index_path.parent.resolve() not in (candidate, *candidate.parents):
+        return None
+    try:
+        if candidate.stat().st_size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
+            return None
+        mime = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
+        encoded = base64.b64encode(candidate.read_bytes()).decode("ascii")
+        suffix = ""
+        if "#" in url:
+            suffix = "#" + url.split("#", 1)[1]
+        return f"data:{mime};base64,{encoded}{suffix}"
+    except Exception:
+        return None
+
+
+def _takyon_inline_static_site(index_path: Path) -> str:
+    html_text = index_path.read_text(encoding="utf-8", errors="replace")
+
+    def replace_attr(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        url = match.group("url")
+        suffix = match.group("suffix")
+        data_url = _takyon_site_asset_data_url(index_path, url)
+        if not data_url:
+            return match.group(0)
+        return f"{prefix}{data_url}{suffix}"
+
+    return re.sub(
+        r"(?P<prefix>\b(?:src|href)\s*=\s*[\"'])(?P<url>[^\"']+)(?P<suffix>[\"'])",
+        replace_attr,
+        html_text,
+        flags=re.I,
+    )
 
 
 def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40) -> list[dict[str, Any]]:
@@ -5207,6 +5256,55 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5047, str(e))
+
+
+@method("takyon.site.preview")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = str(session.get("takyon_current_business") or "").strip()
+    if not business:
+        return _err(rid, 4004, "business scope required")
+    requested_path = str(params.get("path") or "").strip()
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        store = TakyonStore()
+        if not requested_path:
+            overview = _takyon_business_overview_payload(store, business)
+            artifacts = overview.get("artifacts") if isinstance(overview, dict) else {}
+            website = artifacts.get("website") if isinstance(artifacts, dict) else {}
+            product = overview.get("product") if isinstance(overview, dict) else {}
+            requested_path = (
+                (website or {}).get("path")
+                or (product or {}).get("source_path")
+                or "product/site"
+            )
+        candidate = store._resolve_business_file(business, requested_path)
+        if candidate.is_dir() or not candidate.suffix:
+            candidate = candidate / "index.html"
+        if not candidate.exists() or not candidate.is_file():
+            return _err(rid, 4044, f"site preview not found: {requested_path}")
+        if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
+            return _err(rid, 4004, "site preview requires an HTML file or site directory")
+        size = candidate.stat().st_size
+        if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
+            return _err(rid, 4130, f"site preview is too large: {size} bytes")
+        html_text = _takyon_inline_static_site(candidate)
+        encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
+        rel = str(candidate.relative_to(store._business_root(business)))
+        return _ok(
+            rid,
+            {
+                "path": rel,
+                "size": len(html_text.encode("utf-8")),
+                "url": f"data:text/html;charset=utf-8;base64,{encoded}",
+                **_takyon_scope_payload(session),
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5048, str(e))
 
 
 @method("takyon.outputs.list")

@@ -1,0 +1,7 @@
+name: openai
+version: 1.0.0
+description: "OpenAI Sora video generation backend. Supports text-to-video and image-guided video through the Videos API."
+author: NousResearch
+kind: backend
+requires_env:
+  - OPENAI_API_KEY
