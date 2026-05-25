@@ -155,6 +155,33 @@ def _json_loads(value: str | None, fallback: Any = None) -> Any:
         return fallback
 
 
+def _normalize_outreach_body(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "\\n" in text or "\\r" in text:
+        text = (
+            text
+            .replace("\\r\\n", "\n")
+            .replace("\\n", "\n")
+            .replace("\\r", "\n")
+        )
+    lines = [line.rstrip() for line in text.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _outreach_artifact_markdown(subject: str, body: str) -> str:
+    title = subject.strip() or "Outreach"
+    cleaned_body = _normalize_outreach_body(body)
+    lines = cleaned_body.splitlines()
+    if lines and lines[0].strip().casefold() == title.casefold():
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+        cleaned_body = "\n".join(lines).strip()
+    return f"# {title}\n\n{cleaned_body}\n"
+
+
 def _markdown_scalar(value: Any) -> str:
     if value is None or value == "":
         return "not set"
@@ -3749,7 +3776,7 @@ class TakyonStore:
             business = self._ensure_business(conn, slug)
             if str(business.get("mode") or "live") != "test":
                 raise TakyonError("outreach.local_publish requires business mode 'test'")
-            body = str(op.get("body") or "").strip()
+            body = _normalize_outreach_body(op.get("body"))
             if not body:
                 raise TakyonError("outreach.local_publish body is required")
             channel = _file_slug(str(op.get("channel") or op.get("provider") or "outreach"), "outreach")
@@ -3762,24 +3789,7 @@ class TakyonStore:
             file_stem = f"{created_at[:10]}-{_file_slug(target, 'target')}-{publish_id[:8]}"
             rel = f"outreach/local-published/{channel}/{file_stem}.md"
             receipt_rel = f"receipts/outreach/{publish_id}.json"
-            file_lines = [
-                f"# {subject}",
-                "",
-                f"- Business: {slug}",
-                "- Mode: test",
-                f"- Channel: {channel}",
-                f"- Provider: {provider}",
-                f"- Target: {target}",
-                f"- Local publish id: {publish_id}",
-                f"- Created at: {created_at}",
-                "- External side effects: suppressed",
-                "",
-                "## Body",
-                "",
-                body,
-                "",
-            ]
-            _atomic_write_text(self._business_root(slug) / rel, "\n".join(file_lines).rstrip() + "\n")
+            _atomic_write_text(self._business_root(slug) / rel, _outreach_artifact_markdown(subject, body))
             receipt = {
                 "id": publish_id,
                 "business": slug,

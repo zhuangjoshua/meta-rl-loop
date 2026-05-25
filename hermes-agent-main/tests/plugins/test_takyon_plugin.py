@@ -1224,7 +1224,7 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
                 "channel": "meta",
                 "target": "local-meta-test",
                 "subject": "Try JobTailor",
-                "body": "Paste a job description and see what your resume is missing.",
+                "body": "Try JobTailor\\n\\nPaste a job description and see what your resume is missing.",
                 "idempotency_key": "jobtailor-meta-local-publish",
             }
         )
@@ -1237,9 +1237,16 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
     assert artifact.is_file()
     assert receipt.is_file()
-    assert "External side effects: suppressed" in artifact.read_text(encoding="utf-8")
+    artifact_text = artifact.read_text(encoding="utf-8")
+    assert artifact_text == "# Try JobTailor\n\nPaste a job description and see what your resume is missing.\n"
+    assert "\\n" not in artifact_text
+    assert "External side effects" not in artifact_text
+    assert "Local publish id" not in artifact_text
+    assert "Provider" not in artifact_text
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
     assert receipt_payload["sent"] is False
+    assert receipt_payload["external_side_effects"] == "suppressed"
+    assert receipt_payload["provider"] == "meta"
     assert receipt_payload["artifact_path"] == publish["artifact"]
 
 
