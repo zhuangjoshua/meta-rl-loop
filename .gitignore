@@ -6,14 +6,6 @@
 !**/.env.*
 !**/.envrc
 
-# Runtime secrets for the active Takyon workspace. Keep these local.
-secrets/.env
-secrets/.env.*
-.takyon/.env
-.takyon/.env.*
-.takyon/secrets/.env
-.takyon/secrets/.env.*
-
 # OS/editor noise.
 .DS_Store
 **/.DS_Store
