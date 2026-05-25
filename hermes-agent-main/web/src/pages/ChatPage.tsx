@@ -348,6 +348,13 @@ interface Deliverable {
   at: number;
 }
 
+interface SourceDocTile {
+  detail?: string;
+  label: string;
+  path: string;
+  status?: string;
+}
+
 type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
 
 const STATE_LABEL: Record<ConnectionState, string> = {
@@ -560,6 +567,36 @@ function compactPath(path?: string): string {
   const parts = path.split("/");
   if (parts.length <= 2) return path.slice(0, 31) + "...";
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
+}
+
+function humanLabel(value?: string): string {
+  const text = (value || "").trim();
+  if (!text) return "";
+  const name = text.split("/").pop() || text;
+  const withoutExtension = name.replace(/\.[a-z0-9]+$/i, "");
+  return withoutExtension
+    .replace(/[._-]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function docTile(path?: string, label?: string, status?: string, detail?: string): SourceDocTile | null {
+  const cleanPath = (path || "").trim();
+  if (!cleanPath) return null;
+  return {
+    detail,
+    label: label || humanLabel(cleanPath) || compactPath(cleanPath),
+    path: cleanPath,
+    status,
+  };
+}
+
+function uniqueDocs(items: Array<SourceDocTile | null | undefined>): SourceDocTile[] {
+  const byPath = new Map<string, SourceDocTile>();
+  for (const item of items) {
+    if (!item?.path || byPath.has(item.path)) continue;
+    byPath.set(item.path, item);
+  }
+  return [...byPath.values()];
 }
 
 function loadCreateInTestModeDefault(): boolean {
@@ -1377,6 +1414,20 @@ export default function ChatPage() {
     [gw, sessionId],
   );
 
+  const readBusinessFile = useCallback(
+    async (path: string): Promise<BusinessFileReadResponse> => {
+      if (!sessionId) throw new Error("Chat is still connecting.");
+      const res = await gw.request<BusinessFileReadResponse>(
+        "takyon.file.read",
+        { session_id: sessionId, path },
+        20_000,
+      );
+      setScopeState(normalizeScopeState(res));
+      return res;
+    },
+    [gw, sessionId],
+  );
+
   const resolveBusinessSitePreview = useCallback(
     async (path?: string): Promise<BusinessSitePreviewResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
@@ -1562,7 +1613,7 @@ export default function ChatPage() {
             <CompanyWorkspace
               deliverables={deliverables}
               historicalOutputs={scopedHistoricalOutputs}
-              onCommand={runTakyonLine}
+              onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
               scope={scopeState}
@@ -2187,7 +2238,7 @@ function IntercomPanel({
 function CompanyWorkspace({
   deliverables,
   historicalOutputs,
-  onCommand,
+  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   scope,
@@ -2196,7 +2247,7 @@ function CompanyWorkspace({
 }: {
   deliverables: Deliverable[];
   historicalOutputs: Deliverable[];
-  onCommand: (line: string) => void;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   scope: ScopeState;
@@ -2224,7 +2275,7 @@ function CompanyWorkspace({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <CompanyOverview
-          onCommand={onCommand}
+          onReadFile={onReadFile}
           onResolveMedia={onResolveMedia}
           onResolveSitePreview={onResolveSitePreview}
           outputs={outputs}
@@ -2238,7 +2289,7 @@ function CompanyWorkspace({
 }
 
 function CompanyOverview({
-  onCommand,
+  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   outputs,
@@ -2246,7 +2297,7 @@ function CompanyOverview({
   statusItems,
   tools,
 }: {
-  onCommand: (line: string) => void;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   outputs: Deliverable[];
@@ -2264,23 +2315,55 @@ function CompanyOverview({
   const cron = overview.cron || [];
   const jobs = overview.jobs || [];
   const tasks = overview.tasks || [];
-  const statusCards = overview.status_cards || [];
   const ceoLoop = overview.ceo_loop;
   const research = overview.research || {};
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
   const recentOutputs = outputs.slice(0, 4);
   const visibleJobs = jobs.filter((job) => job.kind || job.status).slice(0, 4);
-  const creativeAssetsDir = creativeAssets.path
-    ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
-    : ".";
-  const productPath = website.source_path || product.source_path || "product/site";
+  const previewPath = website.source_path || product.source_path || "product/site";
   const publicSiteUrl = website.public_url || product.public_url || "";
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const openMessages =
-    asNumber(overview.conversations?.unresolved_messages) ||
-    posts.reduce((total, post) => total + asNumber(post.unresolved_messages), 0);
-  const researchPath = research.latest_path || research.strategy_path || research.icp_path || research.channels_path;
+  const hasProductSurface = Boolean(
+    website.path ||
+    product.source_path ||
+    product.design_brief_path ||
+    product.filesystem_index ||
+    product.publish_status ||
+    product.verification_status,
+  );
+  const outputDocs = recentOutputs
+    .filter((item) => item.path)
+    .map((item) => ({
+      detail: item.detail,
+      label: item.title || compactPath(item.path),
+      path: item.path || "",
+      status: item.kind === "receipt" ? "Receipt" : item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
+    }));
+  const researchDocs = uniqueDocs([
+    docTile(research.latest_path, "Latest research", "Research"),
+    docTile(research.strategy_path, "Strategy", "Research"),
+    docTile(research.icp_path, "ICP", "Research"),
+    docTile(research.channels_path, "Channels", "Research"),
+    ...outputDocs.filter((doc) => /^(brain|research)\//.test(doc.path)),
+  ]);
+  const productDocs = uniqueDocs([
+    docTile(website.path, "Website", "Product"),
+    docTile(product.design_brief_path, "Design brief", "Product"),
+    docTile(product.filesystem_index, "App index", "Runtime"),
+    hasProductSurface ? docTile("app/surface.md", "Surface", "Runtime") : null,
+    docTile(product.verification_receipt, "Verification", "Receipt"),
+    docTile(product.publish_receipt_path || website.publish_receipt_path, "Publish receipt", "Receipt"),
+    ...outputDocs.filter((doc) => /^(app|product)\//.test(doc.path)),
+  ]);
+  const growthDocs = uniqueDocs([
+    docTile(outreach.path, "Outreach", "Growth"),
+    docTile(outreach.receipt, "Outreach receipt", "Receipt"),
+    docTile(creativeAssets.path, "Creative asset", "Growth"),
+    docTile(creativeAssets.receipt, "Creative receipt", "Receipt"),
+    ...posts.map((post) => docTile(post.artifact_path || post.conversation_file, post.title || "Post", post.status)),
+    ...outputDocs.filter((doc) => /^(campaigns|distribution|outreach)\//.test(doc.path)),
+  ]);
   const productStatus = publicSiteUrl
     ? "Live"
     : website.path
@@ -2309,212 +2392,223 @@ function CompanyOverview({
       tone: "active",
     })),
   ].slice(0, 5);
+  const taskRows = [
+    ...(ceoLoop
+      ? [{
+          detail: ceoLoop.next_action || ceoLoop.detail,
+          id: "ceo-loop",
+          label: ceoLoop.headline || "CEO",
+          status: humanizeStatus(ceoLoop.status),
+          tone: ceoLoop.status,
+        }]
+      : []),
+    ...workItems.map((item, index) => ({
+      detail: taskDetail(item),
+      id: item.id || `${taskLabel(item)}-${index}`,
+      label: taskLabel(item),
+      status: humanizeStatus(item.status),
+      tone: item.tone || item.status,
+    })),
+  ].slice(0, 6);
+  const scheduleRows = activeCron.slice(0, 3).map((job, index) => ({
+    detail: job.next_run ? `Next ${readableDate(job.next_run)}` : job.schedule || "",
+    id: job.id || `${job.name || "schedule"}-${index}`,
+    label: humanLabel(job.name?.replace(/^takyon-ceo:/, "")) || "CEO check",
+    status: humanizeStatus(job.state || "scheduled"),
+    tone: job.state || "waiting",
+  }));
+  const [viewer, setViewer] = useState<{
+    content?: string;
+    error?: string;
+    loading?: boolean;
+    media?: BusinessMediaResponse;
+    path: string;
+    title: string;
+    truncated?: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    setViewer(null);
+  }, [scope.business]);
+
+  const openDocument = useCallback(
+    (doc: { label?: string; path?: string }) => {
+      const path = (doc.path || "").trim();
+      if (!path) return;
+      const title = doc.label || compactPath(path);
+      setViewer({ loading: true, path, title });
+      if (mediaKindForPath(path)) {
+        void onResolveMedia(path)
+          .then((media) => setViewer({ loading: false, media, path: media.path || path, title }))
+          .catch((err) => setViewer({
+            error: friendlyError(err instanceof Error ? err.message : String(err)),
+            loading: false,
+            path,
+            title,
+          }));
+        return;
+      }
+      void onReadFile(path)
+        .then((res) => setViewer({
+          content: res.content || "",
+          loading: false,
+          path: res.path || path,
+          title,
+          truncated: Boolean(res.truncated),
+        }))
+        .catch((err) => setViewer({
+          error: friendlyError(err instanceof Error ? err.message : String(err)),
+          loading: false,
+          path,
+          title,
+        }));
+    },
+    [onReadFile, onResolveMedia],
+  );
+  const showAside = Boolean(viewer || latestActivity.length > 0);
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 p-4">
-      <section className="rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-600">
-              <Sparkles className="h-3.5 w-3.5" />
-              Current focus
-            </div>
-            <div className="mt-2 max-w-3xl text-xl font-semibold leading-7 text-zinc-100">
-              {ceoLoop?.headline || "Takyon is ready for the next company move."}
-            </div>
-            {(ceoLoop?.next_action || ceoLoop?.detail) && (
-              <div className="mt-1 max-w-3xl text-sm leading-6 text-zinc-500">
-                {ceoLoop?.next_action || ceoLoop?.detail}
+    <div
+      className={cn(
+        "mx-auto grid w-full max-w-7xl gap-3 p-4",
+        showAside && "xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]",
+      )}
+    >
+      <div className="grid content-start gap-3">
+        <section className="grid gap-3 md:grid-cols-2">
+          <SourceCard
+            docs={researchDocs}
+            empty="No research file yet."
+            icon={<Search className="h-4 w-4" />}
+            label="Research"
+            onOpenDoc={openDocument}
+            status={humanizeStatus(research.status)}
+            tone={research.status === "visible" ? "done" : "waiting"}
+          />
+          <SourceCard
+            action={
+              <div className="flex flex-wrap gap-2">
+                {publicSiteUrl && (
+                  <PanelActionButton icon={<ExternalLink className="h-3.5 w-3.5" />} onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}>
+                    Open site
+                  </PanelActionButton>
+                )}
+                {website.path && <OpenSitePreviewButton onResolveSitePreview={onResolveSitePreview} path={previewPath} />}
               </div>
-            )}
-          </div>
-          <div className="flex shrink-0 flex-wrap gap-2">
-            <span className={cn("inline-flex h-7 items-center rounded-lg border px-2.5 text-xs", toneClasses(ceoLoop?.status))}>
-              {humanizeStatus(ceoLoop?.status)}
-            </span>
-            <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
-              Wake now
-            </PanelActionButton>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(340px,0.8fr)]">
-        <div className="grid gap-3">
-          <section className="grid gap-3 md:grid-cols-2">
-            <SourceCard
-              action={
-                researchPath ? (
-                  <PanelActionButton icon={<FileText className="h-3.5 w-3.5" />} onClick={() => onCommand(`/read ${researchPath}`)}>
-                    Open
-                  </PanelActionButton>
-                ) : (
-                  <PanelActionButton icon={<Search className="h-3.5 w-3.5" />} onClick={() => onCommand("Research ICP, channels, competitors, pricing, and high-level strategy before product.")}>
-                    Start research
-                  </PanelActionButton>
-                )
-              }
-              detail={researchPath || "ICP, channels, competitors, pricing, and strategy should appear before product by default."}
-              icon={<Search className="h-4 w-4" />}
-              label="Research"
-              status={humanizeStatus(research.status)}
-              tone={research.status === "visible" ? "done" : "waiting"}
-            />
-            <SourceCard
-              action={
-                <div className="flex flex-wrap gap-2">
-                  {publicSiteUrl && (
-                    <PanelActionButton icon={<ExternalLink className="h-3.5 w-3.5" />} onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}>
-                      Open site
-                    </PanelActionButton>
-                  )}
-                  {website.path && <OpenSitePreviewButton onResolveSitePreview={onResolveSitePreview} path={productPath} />}
-                  <PanelActionButton icon={<Folder className="h-3.5 w-3.5" />} onClick={() => onCommand(`/files ${productPath}`)}>
-                    Files
-                  </PanelActionButton>
-                </div>
-              }
-              detail={product.publish_blocker || publicSiteUrl || website.path || product.source_path || "No product surface is visible yet."}
-              icon={<Globe2 className="h-4 w-4" />}
-              label="Product"
-              status={productStatus}
-              tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
-            />
-          </section>
-
-          <section className="grid gap-3 md:grid-cols-2">
-            <SourceCard
-              action={
-                <div className="flex flex-wrap gap-2">
-                  <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
-                    List
-                  </PanelActionButton>
-                  <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
-                    Wake now
-                  </PanelActionButton>
-                </div>
-              }
-              detail={overview.wake_health?.detail || (nextWake ? `Next check ${readableDate(nextWake)}` : "No scheduled CEO check is visible.")}
-              icon={<Clock3 className="h-4 w-4" />}
-              label="Scheduled checks"
-              status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
-              tone={overview.wake_health?.status}
-            />
-            <SourceCard
-              action={
-                creativeAssets.path ? (
-                  <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand(`/files ${creativeAssetsDir}`)}>
-                    Open assets
-                  </PanelActionButton>
-                ) : (
-                  <PanelActionButton icon={<Sparkles className="h-3.5 w-3.5" />} onClick={() => onCommand("Make an ad creative asset for this business.")}>
-                    Make ad
-                  </PanelActionButton>
-                )
-              }
-              detail={creativeAssets.path || outreach.path || `${formatCount(posts.length)} posts, ${formatCount(openMessages)} replies`}
-              icon={<Sparkles className="h-4 w-4" />}
-              label="Growth"
-              status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
-              tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
-            />
-          </section>
-
-          <PanelSection icon={<ListChecks className="h-4 w-4" />} title="Tasks">
-            {workItems.length === 0 ? (
-              <EmptyPanelLine text="No visible follow-up work yet." />
-            ) : (
-              <div className="grid gap-2 lg:grid-cols-2">
-                {workItems.map((task, index) => (
+            }
+            docs={productDocs}
+            empty="No product file yet."
+            icon={<Globe2 className="h-4 w-4" />}
+            label="Product"
+            onOpenDoc={openDocument}
+            status={productStatus}
+            tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
+          />
+          <SourceCard
+            docs={growthDocs}
+            empty={posts.length ? `${formatCount(posts.length)} posts` : "No growth file yet."}
+            icon={<Sparkles className="h-4 w-4" />}
+            label="Growth"
+            onOpenDoc={openDocument}
+            status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
+            tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
+          />
+          <SourceCard
+            empty={nextWake ? `Next ${readableDate(nextWake)}` : "No check scheduled."}
+            icon={<Clock3 className="h-4 w-4" />}
+            label="Schedule"
+            status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
+            tone={overview.wake_health?.status}
+          >
+            {scheduleRows.length > 0 && (
+              <div className="grid gap-1.5">
+                {scheduleRows.map((item) => (
                   <TaskRow
-                    detail={taskDetail(task)}
-                    key={task.id || `${taskLabel(task)}-${index}`}
-                    label={taskLabel(task)}
-                    status={humanizeStatus(task.status)}
-                    tone={task.tone || task.status}
+                    detail={item.detail}
+                    key={item.id}
+                    label={item.label}
+                    status={item.status}
+                    tone={item.tone}
                   />
                 ))}
               </div>
             )}
-          </PanelSection>
-        </div>
+          </SourceCard>
+        </section>
 
-        <div className="grid content-start gap-3">
-          {statusCards.length > 0 && <StatusCardStrip cards={statusCards} />}
-          <PanelSection icon={<Activity className="h-4 w-4" />} title="Activity">
-            {latestActivity.length === 0 ? (
-              <EmptyPanelLine text="No live activity yet." />
-            ) : (
-              latestActivity.map((item, index) => (
+        {taskRows.length > 0 && (
+          <section>
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
+              <ListChecks className="h-4 w-4" />
+              Tasks
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {taskRows.map((item) => (
                 <TaskRow
                   detail={item.detail}
-                  key={`${item.label}-${index}`}
+                  key={item.id}
                   label={item.label}
                   status={item.status}
                   tone={item.tone}
                 />
-              ))
-            )}
-          </PanelSection>
-          {recentOutputs.length > 0 && (
-            <PanelSection icon={<FileText className="h-4 w-4" />} title="Latest outputs">
-              {recentOutputs.map((item) => (
-                <DeliverableItem
-                  item={item}
-                  key={item.id}
-                  onCommand={onCommand}
-                  onResolveMedia={onResolveMedia}
-                />
               ))}
-            </PanelSection>
+            </div>
+          </section>
+        )}
+      </div>
+
+      {showAside && (
+        <div className="grid content-start gap-3">
+          {viewer && (
+            <InlineDocumentViewer
+              onClose={() => setViewer(null)}
+              viewer={viewer}
+            />
+          )}
+
+          {latestActivity.length > 0 && (
+            <section>
+              <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
+                <Activity className="h-4 w-4" />
+                Activity
+              </div>
+              <div className="grid gap-2">
+                {latestActivity.map((item, index) => (
+                  <TaskRow
+                    detail={item.detail}
+                    key={`${item.label}-${index}`}
+                    label={item.label}
+                    status={item.status}
+                    tone={item.tone}
+                  />
+                ))}
+              </div>
+            </section>
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-function StatusCardStrip({ cards }: { cards: BusinessOverviewStatusCard[] }) {
-  return (
-    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-      {cards.slice(0, 4).map((card, index) => (
-        <div
-          className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5"
-          key={`${card.label}-${index}`}
-        >
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-zinc-100">
-                {card.label || "Status"}
-              </div>
-              {card.detail && (
-                <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
-                  {card.detail}
-                </div>
-              )}
-            </div>
-            <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(card.tone || card.status))}>
-              {humanizeStatus(card.status)}
-            </span>
-          </div>
-        </div>
-      ))}
+      )}
     </div>
   );
 }
 
 function SourceCard({
   action,
-  detail,
+  children,
+  docs = [],
+  empty,
   icon,
   label,
+  onOpenDoc,
   status,
   tone,
 }: {
   action?: ReactNode;
-  detail?: string;
+  children?: ReactNode;
+  docs?: SourceDocTile[];
+  empty?: string;
   icon: ReactNode;
   label: string;
+  onOpenDoc?: (doc: SourceDocTile) => void;
   status: string;
   tone?: string;
 }) {
@@ -2525,15 +2619,124 @@ function SourceCard({
           <span className="mt-0.5 text-zinc-600">{icon}</span>
           <div className="min-w-0">
             <div className="text-sm font-medium text-zinc-100">{label}</div>
-            {detail && <div className="mt-0.5 line-clamp-2 text-xs leading-5 text-zinc-600">{detail}</div>}
           </div>
         </div>
         <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
           {status}
         </span>
       </div>
+      {docs.length > 0 ? (
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {docs.slice(0, 4).map((doc) => (
+            <DocumentTileButton doc={doc} key={doc.path} onOpenDoc={onOpenDoc} />
+          ))}
+        </div>
+      ) : empty ? (
+        <div className="mt-3 rounded-lg border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
+          {empty}
+        </div>
+      ) : null}
+      {children && <div className="mt-3">{children}</div>}
       {action && <div className="mt-3 flex flex-wrap gap-2">{action}</div>}
     </div>
+  );
+}
+
+function DocumentTileButton({
+  doc,
+  onOpenDoc,
+}: {
+  doc: SourceDocTile;
+  onOpenDoc?: (doc: SourceDocTile) => void;
+}) {
+  const mediaKind = mediaKindForPath(doc.path);
+  return (
+    <button
+      className="flex min-h-24 min-w-0 flex-col justify-between rounded-xl border border-zinc-900 bg-black px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900"
+      onClick={() => onOpenDoc?.(doc)}
+      title={doc.path}
+      type="button"
+    >
+      <span className="flex items-start justify-between gap-2">
+        <span className="line-clamp-2 text-sm font-medium leading-5 text-zinc-100">
+          {doc.label}
+        </span>
+        {mediaKind === "video" ? (
+          <Play className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+        ) : mediaKind === "image" ? (
+          <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+        ) : (
+          <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+        )}
+      </span>
+      <span className="mt-2 min-w-0">
+        <span className="block truncate font-mono text-[0.68rem] text-zinc-600">
+          {compactPath(doc.path)}
+        </span>
+        {doc.status && (
+          <span className="mt-1 inline-flex rounded-full border border-zinc-800 px-1.5 py-0.5 text-[0.62rem] text-zinc-500">
+            {humanizeStatus(doc.status)}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+function InlineDocumentViewer({
+  onClose,
+  viewer,
+}: {
+  onClose: () => void;
+  viewer: {
+    content?: string;
+    error?: string;
+    loading?: boolean;
+    media?: BusinessMediaResponse;
+    path: string;
+    title: string;
+    truncated?: boolean;
+  };
+}) {
+  const isMarkdown = /\.md$/i.test(viewer.path);
+  return (
+    <section className="overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950">
+      <div className="flex items-start justify-between gap-3 border-b border-zinc-900 px-3 py-2.5">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-zinc-100">{viewer.title}</div>
+          <div className="mt-0.5 truncate font-mono text-[0.68rem] text-zinc-600">{viewer.path}</div>
+        </div>
+        <IconButton label="Close document" onClick={onClose}>
+          <X className="h-4 w-4" />
+        </IconButton>
+      </div>
+      {viewer.loading ? (
+        <div className="p-3">
+          <EmptyPanelLine text="Opening..." />
+        </div>
+      ) : viewer.error ? (
+        <div className="p-3">
+          <EmptyPanelLine text={viewer.error} />
+        </div>
+      ) : viewer.media ? (
+        <div className="p-3">
+          <MediaPreview media={viewer.media} title={viewer.title} />
+        </div>
+      ) : isMarkdown ? (
+        <div className="max-h-[60vh] overflow-auto px-3 py-3 text-sm leading-6 text-zinc-300 [&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-black [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
+          <Markdown content={viewer.content || ""} />
+        </div>
+      ) : (
+        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.75rem] leading-5 text-zinc-300">
+          {viewer.content || ""}
+        </pre>
+      )}
+      {viewer.truncated && (
+        <div className="border-t border-zinc-900 px-3 py-2 text-xs text-amber-200">
+          Preview truncated.
+        </div>
+      )}
+    </section>
   );
 }
 
