@@ -279,6 +279,7 @@ interface Deliverable {
 
 type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
 type CompanyView = "floor" | "files" | "dev";
+type FloorRoomId = "product" | "outputs" | "outreach" | "creative" | "signal" | "watch";
 
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
@@ -296,7 +297,7 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const CHAT_UI_REVISION = "chat-artifact-completion-2026-05-24";
+const CHAT_UI_REVISION = "company-floor-stage-2026-05-24";
 const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
   { id: "home", label: "Home" },
   { id: "next", label: "Next" },
@@ -1981,51 +1982,131 @@ function CompanyFloor({
   const activeCron = cron.filter((job) => job.enabled !== false);
   const nextWake = activeCron.find((job) => job.next_run)?.next_run;
   const recentOutputs = outputs.slice(0, 6);
+  const visibleJobs = jobs.filter((job) => job.kind || job.status).slice(0, 4);
   const creativeAssetsDir = creativeAssets.path
     ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
     : ".";
+  const productPath = website.source_path || product.source_path || "product/site";
+  const latestOutput = recentOutputs[0];
+  const openMessages =
+    asNumber(overview.conversations?.unresolved_messages) ||
+    posts.reduce((total, post) => total + asNumber(post.unresolved_messages), 0);
+  const defaultRoom: FloorRoomId = creativeAssets.path
+    ? "creative"
+    : website.path || product.source_path
+      ? "product"
+      : posts.length || outreach.path
+        ? "outreach"
+        : recentOutputs.length
+          ? "outputs"
+          : statusItems.length
+            ? "signal"
+            : "watch";
+  const [selectedRoom, setSelectedRoom] = useState<FloorRoomId>(defaultRoom);
 
-  return (
-    <div className="grid gap-3 p-4 xl:grid-cols-2">
-      <CompanyCameraPanel camera="CAM 01" title="Product Room">
-        <div className="space-y-3">
-          <div className="rounded-lg border border-zinc-900 bg-black/50 p-3">
-            <div className="text-sm font-medium text-zinc-100">
-              {website.path ? "Website source visible" : "No website source visible"}
+  useEffect(() => {
+    setSelectedRoom(defaultRoom);
+  }, [defaultRoom, scope.business]);
+
+  const rooms: Array<{
+    id: FloorRoomId;
+    camera: string;
+    detail: string;
+    status: string;
+    title: string;
+    body: ReactNode;
+  }> = [
+    {
+      id: "product",
+      camera: "CAM 01",
+      title: "Product Room",
+      status: website.path ? "site visible" : product.source_path ? "source noted" : "quiet",
+      detail: website.path || product.source_path || "product/site",
+      body: (
+        <div className="grid min-h-full gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
+          <div className="flex min-h-[280px] flex-col justify-between rounded-2xl border border-zinc-900 bg-black/50 p-5">
+            <div>
+              <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Customer surface</div>
+              <div className="mt-3 max-w-2xl text-2xl font-semibold leading-tight text-zinc-100">
+                {website.path ? "Website source is on the floor." : "No website is on the floor yet."}
+              </div>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
+                {overview.goal || scope.current?.goal || "The product room shows the customer-facing surface when one exists."}
+              </p>
             </div>
-            <div className="mt-1 truncate font-mono text-xs text-zinc-600">
-              {website.path || product.source_path || "product/site"}
+            <div className="mt-8 flex flex-wrap gap-2">
+              {website.path && (
+                <OpenSitePreviewButton
+                  onResolveSitePreview={onResolveSitePreview}
+                  path={productPath}
+                />
+              )}
+              <PanelActionButton
+                icon={<Folder className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/files ${productPath}`)}
+              >
+                Site files
+              </PanelActionButton>
+              <PanelActionButton
+                icon={<FileText className="h-3.5 w-3.5" />}
+                onClick={() => onCommand("/read app/surface.md")}
+              >
+                Surface
+              </PanelActionButton>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {website.path && (
-              <OpenSitePreviewButton
-                onResolveSitePreview={onResolveSitePreview}
-                path={website.source_path || product.source_path || "product/site"}
-              />
-            )}
-            <PanelActionButton
-              icon={<Folder className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/files ${website.source_path || product.source_path || "product/site"}`)}
-            >
-              Site files
-            </PanelActionButton>
-            <PanelActionButton
-              icon={<FileText className="h-3.5 w-3.5" />}
-              onClick={() => onCommand("/read app/surface.md")}
-            >
-              Surface
-            </PanelActionButton>
+          <div className="grid content-start gap-2">
+            <StageReadout
+              icon={<Gauge className="h-3.5 w-3.5" />}
+              label="State"
+              value={humanizeArtifactStatus(website.status || product.status)}
+              detail={product.verification_status || `${formatCount(product.routes_count)} routes`}
+            />
+            <StageReadout
+              icon={<Users className="h-3.5 w-3.5" />}
+              label="Customers"
+              value={formatCount(overview.metrics?.users)}
+              detail={`${formatCount(overview.metrics?.paid_customers)} paid`}
+            />
+            <StageReadout
+              icon={<Wallet className="h-3.5 w-3.5" />}
+              label="App budget"
+              value={formatMicrousd(overview.budget?.app_remaining_microusd)}
+              detail={overview.budget?.app_status || "budget"}
+            />
           </div>
         </div>
-      </CompanyCameraPanel>
-
-      <CompanyCameraPanel camera="CAM 02" title="Deliverables Table">
-        {recentOutputs.length === 0 ? (
-          <ObservationEmpty text="No durable outputs on the table yet." />
-        ) : (
-          <div className="grid gap-2">
-            {recentOutputs.map((item) => (
+      ),
+    },
+    {
+      id: "outputs",
+      camera: "CAM 02",
+      title: "Objects On The Table",
+      status: recentOutputs.length ? `${recentOutputs.length} visible` : "empty",
+      detail: latestOutput?.path || latestOutput?.detail || "historical and current-session outputs",
+      body: recentOutputs.length ? (
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
+            <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Latest object</div>
+            <div className="mt-3 truncate text-3xl font-semibold text-zinc-100">
+              {latestOutput.title}
+            </div>
+            <div className="mt-2 truncate font-mono text-xs text-zinc-600">
+              {latestOutput.path || latestOutput.detail}
+            </div>
+            <p className="mt-4 max-w-2xl text-sm leading-6 text-zinc-500">
+              {latestOutput.detail}
+            </p>
+            <div className="mt-6">
+              <ObservationOutput
+                item={latestOutput}
+                onCommand={onCommand}
+                onResolveMedia={onResolveMedia}
+              />
+            </div>
+          </div>
+          <div className="grid content-start gap-2">
+            {recentOutputs.slice(1, 5).map((item) => (
               <ObservationOutput
                 item={item}
                 key={item.id}
@@ -2034,19 +2115,29 @@ function CompanyFloor({
               />
             ))}
           </div>
-        )}
-      </CompanyCameraPanel>
-
-      <CompanyCameraPanel camera="CAM 03" title="Outreach Desk">
-        <div className="space-y-2">
+        </div>
+      ) : (
+        <ObservationEmpty text="No durable outputs are visible yet." />
+      ),
+    },
+    {
+      id: "outreach",
+      camera: "CAM 03",
+      title: "Outreach Desk",
+      status: posts.length ? `${posts.length} posts` : outreach.path ? "local post" : "quiet",
+      detail: outreach.path || `${formatCount(openMessages)} replies waiting`,
+      body: (
+        <div className="space-y-3">
           {posts.length === 0 ? (
-            <ObservationEmpty
-              text={
-                outreach.path
-                  ? "Local outreach exists. No external response thread yet."
-                  : "No posts or outreach threads recorded yet."
-              }
-            />
+            <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
+              <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Outbound desk</div>
+              <div className="mt-3 text-2xl font-semibold text-zinc-100">
+                {outreach.path ? "A local outreach artifact exists." : "No outreach thread is visible."}
+              </div>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-zinc-500">
+                Test posts and local drafts should show here as objects; live posts should link out when they exist.
+              </p>
+            </div>
           ) : (
             posts.slice(0, 4).map((post, index) => (
               <PostItem
@@ -2057,7 +2148,7 @@ function CompanyFloor({
             ))
           )}
           {outreach.path && (
-            <div className="flex flex-wrap gap-2 pt-1">
+            <div className="flex flex-wrap gap-2">
               <PanelActionButton
                 icon={<FileText className="h-3.5 w-3.5" />}
                 onClick={() => onCommand(`/read ${outreach.path}`)}
@@ -2075,90 +2166,185 @@ function CompanyFloor({
             </div>
           )}
         </div>
-      </CompanyCameraPanel>
-
-      <CompanyCameraPanel camera="CAM 04" title="Creative Bench">
-        <div className="space-y-3">
-          <div className="rounded-lg border border-zinc-900 bg-black/50 p-3">
-            <div className="text-sm font-medium text-zinc-100">
-              {creativeAssets.path ? "Generated asset visible" : "No generated image/video asset visible"}
+      ),
+    },
+    {
+      id: "creative",
+      camera: "CAM 04",
+      title: "Creative Bench",
+      status: creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status || "generated") : "empty",
+      detail: creativeAssets.path || "campaigns/.../creatives",
+      body: (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
+          <div className="rounded-2xl border border-zinc-900 bg-black/50 p-5">
+            <div className="text-xs uppercase tracking-[0.16em] text-zinc-600">Generated media</div>
+            <div className="mt-3 text-2xl font-semibold text-zinc-100">
+              {creativeAssets.path ? "Creative asset is visible." : "No image or video asset is visible."}
             </div>
-            <div className="mt-1 truncate font-mono text-xs text-zinc-600">
+            <div className="mt-2 truncate font-mono text-xs text-zinc-600">
               {creativeAssets.path || "campaigns/.../creatives"}
             </div>
+            <div className="mt-6 flex flex-wrap gap-2">
+              {creativeAssets.path && (
+                <PanelActionButton
+                  icon={<Play className="h-3.5 w-3.5" />}
+                  onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
+                >
+                  Assets
+                </PanelActionButton>
+              )}
+              {creativeAssets.receipt && (
+                <PanelActionButton
+                  icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+                  onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
+                >
+                  Receipt
+                </PanelActionButton>
+              )}
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {creativeAssets.path && (
-              <PanelActionButton
-                icon={<Play className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
-              >
-                Assets
-              </PanelActionButton>
-            )}
-            {creativeAssets.receipt && (
-              <PanelActionButton
-                icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
-              >
-                Receipt
-              </PanelActionButton>
-            )}
+          <div className="grid content-start gap-2">
+            <StageReadout
+              icon={<Play className="h-3.5 w-3.5" />}
+              label="Bench"
+              value={creativeAssets.path ? mediaKindForPath(creativeAssets.path) || "asset" : "waiting"}
+              detail={creativeAssets.receipt ? "receipt visible" : "no receipt visible"}
+            />
+            <StageReadout
+              icon={<MessageCircle className="h-3.5 w-3.5" />}
+              label="Posts"
+              value={formatCount(posts.length)}
+              detail={`${formatCount(openMessages)} replies`}
+            />
           </div>
         </div>
-      </CompanyCameraPanel>
-
-      <CompanyCameraPanel camera="CAM 05" title="CEO Signal">
-        <div className="space-y-2">
-          {statusItems.length === 0 ? (
-            <ObservationEmpty text="Quiet feed. The next visible action will appear here." />
-          ) : (
-            statusItems.slice(0, 5).map((item, index) => (
-              <div
-                className="rounded-lg border border-zinc-900 bg-black/50 px-3 py-2 text-xs leading-5 text-zinc-400"
-                key={`${item}-${index}`}
-              >
-                {item}
-              </div>
-            ))
-          )}
+      ),
+    },
+    {
+      id: "signal",
+      camera: "CAM 05",
+      title: "CEO Signal",
+      status: statusItems.length ? "active" : "quiet",
+      detail: statusItems[0] || "the next visible action appears here",
+      body: statusItems.length ? (
+        <div className="grid gap-2">
+          {statusItems.slice(0, 6).map((item, index) => (
+            <div
+              className="rounded-xl border border-zinc-900 bg-black/50 px-3 py-2 text-sm leading-6 text-zinc-400"
+              key={`${item}-${index}`}
+            >
+              {item}
+            </div>
+          ))}
         </div>
-      </CompanyCameraPanel>
-
-      <CompanyCameraPanel camera="CAM 06" title="Night Watch">
-        <div className="space-y-2">
+      ) : (
+        <ObservationEmpty text="Quiet feed. The next visible action will appear here." />
+      ),
+    },
+    {
+      id: "watch",
+      camera: "CAM 06",
+      title: "Night Watch",
+      status: activeCron.length ? "watching" : "quiet",
+      detail: nextWake ? `Next wake ${readableDate(nextWake)}` : "no scheduled CEO wake visible",
+      body: (
+        <div className="grid gap-2 lg:grid-cols-2">
           <TaskRow
             detail={nextWake ? `Next wake ${readableDate(nextWake)}` : "No scheduled CEO wake is visible."}
             label="CEO wake loop"
             status={activeCron.length ? "watching" : "quiet"}
           />
-          {jobs.slice(0, 3).map((job, index) => (
-            <TaskRow
-              detail={gatedActionDetail(job)}
-              key={job.id || `${job.kind}-${index}`}
-              label={humanizeJobKind(job.kind)}
-              status={job.status || "recorded"}
+          {visibleJobs.length === 0 ? (
+            <ObservationEmpty text="No gated follow-up actions recorded." />
+          ) : (
+            visibleJobs.map((job, index) => (
+              <TaskRow
+                detail={gatedActionDetail(job)}
+                key={job.id || `${job.kind}-${index}`}
+                label={humanizeJobKind(job.kind)}
+                status={job.status || "recorded"}
+              />
+            ))
+          )}
+        </div>
+      ),
+    },
+  ];
+  const selected = rooms.find((room) => room.id === selectedRoom) || rooms[0];
+
+  return (
+    <div className="flex min-h-full flex-col gap-3 p-4">
+      <section className="relative min-h-[430px] overflow-hidden rounded-2xl border border-zinc-900 bg-zinc-950/70 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]">
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.028)_1px,transparent_1px)] bg-[length:100%_8px] opacity-50" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse bg-emerald-300/30" />
+        <div className="relative flex min-h-[430px] flex-col p-4 sm:p-5">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-zinc-600">
+                <span>{selected.camera}</span>
+                <span className="h-1 w-1 rounded-full bg-zinc-700" />
+                <span>now showing</span>
+              </div>
+              <h2 className="mt-2 truncate text-2xl font-semibold text-zinc-100">
+                {selected.title}
+              </h2>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-300/20 bg-emerald-300/5 px-2.5 py-1 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-emerald-300/80">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" />
+              live
+            </div>
+          </div>
+          <div className="min-h-0 flex-1">{selected.body}</div>
+        </div>
+      </section>
+
+      <div className="overflow-x-auto pb-1">
+        <div className="grid min-w-[780px] grid-cols-6 gap-2">
+          {rooms.map((room) => (
+            <CameraStripButton
+              active={room.id === selectedRoom}
+              camera={room.camera}
+              detail={room.detail}
+              key={room.id}
+              onClick={() => setSelectedRoom(room.id)}
+              status={room.status}
+              title={room.title}
             />
           ))}
         </div>
-      </CompanyCameraPanel>
+      </div>
     </div>
   );
 }
 
-function CompanyCameraPanel({
+function CameraStripButton({
+  active,
   camera,
-  children,
+  detail,
+  onClick,
+  status,
   title,
 }: {
+  active: boolean;
   camera: string;
-  children: ReactNode;
+  detail: string;
+  onClick: () => void;
+  status: string;
   title: string;
 }) {
   return (
-    <section className="relative min-h-[260px] overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950/80 p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.02)]">
+    <button
+      className={cn(
+        "relative min-h-32 overflow-hidden rounded-xl border p-3 text-left transition-colors",
+        active
+          ? "border-emerald-300/30 bg-zinc-900 text-zinc-100"
+          : "border-zinc-900 bg-zinc-950/70 text-zinc-400 hover:border-zinc-800 hover:bg-zinc-900/80 hover:text-zinc-100",
+      )}
+      onClick={onClick}
+      type="button"
+    >
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.025)_1px,transparent_1px)] bg-[length:100%_7px] opacity-40" />
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px animate-pulse bg-emerald-300/30" />
+      {active && <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-emerald-300/60" />}
       <div className="relative mb-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[0.65rem] uppercase tracking-[0.18em] text-zinc-600">
@@ -2173,8 +2359,36 @@ function CompanyCameraPanel({
           rec
         </div>
       </div>
-      <div className="relative">{children}</div>
-    </section>
+      <div className="relative mt-6">
+        <div className="truncate text-xs text-zinc-500">{detail}</div>
+        <div className="mt-2 inline-flex rounded-full bg-black/50 px-2 py-0.5 text-[0.65rem] text-zinc-500">
+          {status}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function StageReadout({
+  detail,
+  icon,
+  label,
+  value,
+}: {
+  detail?: string;
+  icon: ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-900 bg-black/50 px-3 py-2.5">
+      <div className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-[0.08em] text-zinc-600">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-2 truncate text-sm font-semibold text-zinc-100">{value}</div>
+      {detail && <div className="mt-0.5 truncate text-[0.68rem] text-zinc-600">{detail}</div>}
+    </div>
   );
 }
 
