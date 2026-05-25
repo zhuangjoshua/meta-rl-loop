@@ -2288,8 +2288,7 @@ function CompanyWorkspace({
     <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4 py-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-zinc-500">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+          <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">
             Company
           </div>
           <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
@@ -2364,9 +2363,13 @@ function CompanyOverview({
     ...outputDocs.filter((doc) => /^(brain|research)\//.test(doc.path)),
   ]);
   const productDocs = uniqueDocs([
-    docTile(website.path, "Website", "Product"),
     docTile(product.design_brief_path, "Design brief", "Product"),
-    ...outputDocs.filter((doc) => /^product\//.test(doc.path) && doc.status !== "Receipt"),
+    ...outputDocs.filter(
+      (doc) =>
+        /^product\//.test(doc.path) &&
+        doc.status !== "Receipt" &&
+        /\.md$/i.test(doc.path),
+    ),
   ]);
   const growthDocs = uniqueDocs([
     docTile(outreach.path, "Outreach", "Growth"),
@@ -2471,83 +2474,57 @@ function CompanyOverview({
     },
     [onReadFile, onResolveMedia],
   );
+  const hasViewer = Boolean(viewer);
   const showAside = Boolean(viewer || latestActivity.length > 0);
 
-  return (
-    <div
-      className={cn(
-        "mx-auto grid w-full max-w-7xl gap-3 p-4",
-        showAside && "xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]",
-      )}
-    >
-      <div className="grid content-start gap-3">
-        <section className="grid gap-3 md:grid-cols-2">
-          <SourceCard
-            docs={researchDocs}
-            empty="No research file yet."
-            icon={<Search className="h-4 w-4" />}
-            label="Research"
-            onOpenDoc={openDocument}
-            status={humanizeStatus(research.status)}
-            tone={research.status === "visible" ? "done" : "waiting"}
-          />
-          <SourceCard
-            docs={productDocs}
-            empty={publicSiteUrl || website.path ? undefined : "No product file yet."}
-            icon={<Globe2 className="h-4 w-4" />}
-            label="Product"
-            onOpenDoc={openDocument}
-            primary={
-              <ProductPreviewHero
-                onResolveSitePreview={onResolveSitePreview}
-                previewPath={previewPath}
-                publicSiteUrl={publicSiteUrl}
-                websitePath={website.path}
-              />
-            }
-            status={productStatus}
-            tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
-          />
-          <SourceCard
-            docs={growthDocs}
-            empty={posts.length ? `${formatCount(posts.length)} posts` : "No growth file yet."}
-            icon={<Sparkles className="h-4 w-4" />}
-            label="Growth"
-            onOpenDoc={openDocument}
-            status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
-            tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
-          />
-          <SourceCard
-            empty={nextWake ? `Next ${readableDate(nextWake)}` : "No check scheduled."}
-            icon={<Clock3 className="h-4 w-4" />}
-            label="Schedule"
-            status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
-            tone={overview.wake_health?.status}
-          >
-            {scheduleRows.length > 0 && (
-              <div className="grid gap-1.5">
-                {scheduleRows.map((item) => (
-                  <TaskRow
-                    detail={item.detail}
-                    key={item.id}
-                    label={item.label}
-                    status={item.status}
-                    tone={item.tone}
-                  />
-                ))}
-              </div>
-            )}
-          </SourceCard>
-        </section>
-
-        {taskRows.length > 0 && (
-          <section>
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
-              <ListChecks className="h-4 w-4" />
-              Tasks
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {taskRows.map((item) => (
+  const workspaceColumn = (
+    <div className="grid content-start gap-3">
+      <section className={cn("grid gap-3", !hasViewer && "md:grid-cols-2")}>
+        <SourceCard
+          docs={researchDocs}
+          empty="No research file yet."
+          icon={<Search className="h-4 w-4" />}
+          label="Research"
+          onOpenDoc={openDocument}
+          status={humanizeStatus(research.status)}
+          tone={research.status === "visible" ? "done" : "waiting"}
+        />
+        <SourceCard
+          docs={productDocs}
+          empty={publicSiteUrl || website.path ? undefined : "No product file yet."}
+          icon={<Globe2 className="h-4 w-4" />}
+          label="Product"
+          onOpenDoc={openDocument}
+          primary={
+            <ProductPreviewHero
+              onResolveSitePreview={onResolveSitePreview}
+              previewPath={previewPath}
+              publicSiteUrl={publicSiteUrl}
+              websitePath={website.path}
+            />
+          }
+          status={productStatus}
+          tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
+        />
+        <SourceCard
+          docs={growthDocs}
+          empty={posts.length ? `${formatCount(posts.length)} posts` : "No growth file yet."}
+          icon={<Sparkles className="h-4 w-4" />}
+          label="Growth"
+          onOpenDoc={openDocument}
+          status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
+          tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
+        />
+        <SourceCard
+          empty={nextWake ? `Next ${readableDate(nextWake)}` : "No check scheduled."}
+          icon={<Clock3 className="h-4 w-4" />}
+          label="Schedule"
+          status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
+          tone={overview.wake_health?.status}
+        >
+          {scheduleRows.length > 0 && (
+            <div className="grid gap-1.5">
+              {scheduleRows.map((item) => (
                 <TaskRow
                   detail={item.detail}
                   key={item.id}
@@ -2557,39 +2534,82 @@ function CompanyOverview({
                 />
               ))}
             </div>
-          </section>
-        )}
+          )}
+        </SourceCard>
+      </section>
+
+      {taskRows.length > 0 && (
+        <section>
+          <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
+            <ListChecks className="h-4 w-4" />
+            Tasks
+          </div>
+          <div className={cn("grid gap-2", !hasViewer && "md:grid-cols-2")}>
+            {taskRows.map((item) => (
+              <TaskRow
+                detail={item.detail}
+                key={item.id}
+                label={item.label}
+                status={item.status}
+                tone={item.tone}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+
+  const activityBlock = latestActivity.length > 0 && (
+    <section>
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
+        <Activity className="h-4 w-4" />
+        Activity
       </div>
+      <div className="grid gap-2">
+        {latestActivity.map((item, index) => (
+          <TaskRow
+            detail={item.detail}
+            key={`${item.label}-${index}`}
+            label={item.label}
+            status={item.status}
+            tone={item.tone}
+          />
+        ))}
+      </div>
+    </section>
+  );
+
+  if (hasViewer && viewer) {
+    return (
+      <div className="mx-auto grid w-full max-w-7xl gap-3 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
+        <div className="grid content-start gap-3">
+          <InlineDocumentViewer
+            onClose={() => setViewer(null)}
+            onOpenDoc={openDocument}
+            viewer={viewer}
+          />
+        </div>
+        <div className="grid content-start gap-3">
+          {workspaceColumn}
+          {activityBlock}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "mx-auto grid w-full max-w-7xl gap-3 p-4",
+        showAside && "xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]",
+      )}
+    >
+      {workspaceColumn}
 
       {showAside && (
         <div className="grid content-start gap-3">
-          {viewer && (
-            <InlineDocumentViewer
-              onClose={() => setViewer(null)}
-              onOpenDoc={openDocument}
-              viewer={viewer}
-            />
-          )}
-
-          {latestActivity.length > 0 && (
-            <section>
-              <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
-                <Activity className="h-4 w-4" />
-                Activity
-              </div>
-              <div className="grid gap-2">
-                {latestActivity.map((item, index) => (
-                  <TaskRow
-                    detail={item.detail}
-                    key={`${item.label}-${index}`}
-                    label={item.label}
-                    status={item.status}
-                    tone={item.tone}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
+          {activityBlock}
         </div>
       )}
     </div>
@@ -2761,11 +2781,11 @@ function InlineDocumentViewer({
           <MediaPreview media={viewer.media} title={viewer.title} />
         </div>
       ) : isMarkdown ? (
-        <div className="max-h-[60vh] overflow-auto px-3 py-3 text-sm leading-6 text-zinc-300 [&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-black [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
+        <div className="max-h-[calc(100vh-180px)] overflow-auto px-3 py-3 text-sm leading-6 text-zinc-300 [&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-black [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
           <Markdown content={viewer.content || ""} onLinkClick={handleLinkClick} />
         </div>
       ) : (
-        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.75rem] leading-5 text-zinc-300">
+        <pre className="max-h-[calc(100vh-180px)] overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.75rem] leading-5 text-zinc-300">
           {viewer.content || ""}
         </pre>
       )}
@@ -2867,11 +2887,11 @@ function ProductPreviewHero({
           type="button"
         >
           <ExternalLink className="h-4 w-4" />
-          View live site
+          Open website
         </button>
         {websitePath && (
           <OpenSitePreviewButton
-            label="Open local preview"
+            label="Open local copy"
             onResolveSitePreview={onResolveSitePreview}
             path={previewPath}
           />
@@ -2882,7 +2902,7 @@ function ProductPreviewHero({
   if (websitePath) {
     return (
       <OpenSitePreviewButton
-        label="Preview product"
+        label="Open website"
         onResolveSitePreview={onResolveSitePreview}
         path={previewPath}
         variant="hero"
@@ -2891,7 +2911,7 @@ function ProductPreviewHero({
   }
   return (
     <div className="rounded-xl border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
-      No product surface built yet.
+      No website built yet.
     </div>
   );
 }
