@@ -1,0 +1,657 @@
+.takyon-map {
+  height: 100%;
+  min-height: 0;
+  color: var(--color-foreground);
+}
+
+.takyon-map * {
+  box-sizing: border-box;
+}
+
+.takyon-map-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-background, var(--background-base)) 92%, var(--color-primary) 8%);
+}
+
+.takyon-map-header h1,
+.takyon-map-inspector h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.takyon-map-kicker {
+  margin-bottom: 3px;
+  color: var(--color-muted-foreground);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.takyon-map-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--color-muted-foreground);
+  font-size: 0.78rem;
+}
+
+.takyon-map-header-meta span {
+  max-width: min(42vw, 560px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takyon-map-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 420px;
+  height: calc(100% - 61px);
+  min-height: 0;
+}
+
+.takyon-map-sidebar,
+.takyon-map-inspector {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-card) 74%, transparent);
+}
+
+.takyon-map-inspector {
+  border-right: 0;
+  border-left: 1px solid var(--color-border);
+  padding: 14px;
+}
+
+.takyon-map-search {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-background, var(--background-base)) 94%, var(--color-primary) 6%);
+}
+
+.takyon-map-input,
+.takyon-map-select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-background, var(--background-base)) 88%, var(--color-primary) 12%);
+  color: var(--color-foreground);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.takyon-map-select {
+  padding: 0 9px;
+}
+
+.takyon-map-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+
+.takyon-map-summary-grid div {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 9px;
+  background: color-mix(in srgb, var(--color-card) 88%, transparent);
+}
+
+.takyon-map-summary-grid strong {
+  display: block;
+  font-size: 1.1rem;
+  line-height: 1.1;
+}
+
+.takyon-map-summary-grid span,
+.takyon-map-muted {
+  color: var(--color-muted-foreground);
+  font-size: 0.78rem;
+}
+
+.takyon-map-warnings {
+  margin: 0 12px 12px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-warning) 9%, transparent);
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-foreground));
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.takyon-map-node-list {
+  display: grid;
+  gap: 2px;
+  padding: 0 8px 12px;
+}
+
+.takyon-map-list-row,
+.takyon-map-source-row,
+.takyon-map-edge-row {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.takyon-map-list-row {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+}
+
+.takyon-map-list-row:hover,
+.takyon-map-list-row.is-active,
+.takyon-map-source-row:hover,
+.takyon-map-edge-row:hover {
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.takyon-map-list-row span,
+.takyon-map-source-row span:first-child,
+.takyon-map-edge-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takyon-map-list-row small,
+.takyon-map-edge-row small,
+.takyon-map-source-kind {
+  color: var(--color-muted-foreground);
+  font-size: 0.72rem;
+}
+
+.takyon-map-graph-shell {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background:
+    linear-gradient(color-mix(in srgb, var(--color-border) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--color-border) 55%, transparent) 1px, transparent 1px),
+    color-mix(in srgb, var(--color-background, var(--background-base)) 96%, var(--color-primary) 4%);
+  background-size: 24px 24px;
+}
+
+.takyon-map-graph {
+  position: relative;
+}
+
+.takyon-map-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.takyon-map-lane-bg {
+  fill: color-mix(in srgb, var(--color-card) 42%, transparent);
+  stroke: color-mix(in srgb, var(--color-border) 70%, transparent);
+}
+
+.takyon-map-lane-title {
+  fill: var(--color-muted-foreground);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.takyon-map-edge {
+  fill: none;
+  stroke: color-mix(in srgb, var(--color-primary) 52%, transparent);
+  stroke-width: 1.7;
+}
+
+.takyon-map-edge.is-reference {
+  stroke: color-mix(in srgb, var(--color-success) 55%, transparent);
+  stroke-dasharray: 4 5;
+}
+
+.takyon-map-arrow {
+  fill: color-mix(in srgb, var(--color-primary) 66%, transparent);
+}
+
+.takyon-map-edge-label {
+  fill: var(--color-muted-foreground);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: color-mix(in srgb, var(--color-background, var(--background-base)) 88%, transparent);
+  stroke-width: 4px;
+}
+
+.takyon-map-node {
+  position: absolute;
+  width: 210px;
+  height: 72px;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 3px;
+  border: 1px solid color-mix(in srgb, var(--node-accent, var(--color-primary)) 50%, var(--color-border));
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--color-card) 92%, var(--node-accent, var(--color-primary)) 8%);
+  color: var(--color-foreground);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.takyon-map-node:hover,
+.takyon-map-node.is-selected {
+  border-color: var(--node-accent, var(--color-primary));
+  transform: translateY(-1px);
+}
+
+.takyon-map-node.is-selected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-accent, var(--color-primary)) 35%, transparent), 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.takyon-map-node.is-dimmed {
+  opacity: 0.22;
+}
+
+.takyon-map-node.kind-entrypoint,
+.takyon-map-node.kind-config,
+.takyon-map-node.kind-control-command,
+.takyon-map-node.kind-harness-command {
+  --node-accent: #f8c86b;
+}
+
+.takyon-map-node.kind-prompt-wrapper,
+.takyon-map-node.kind-runtime {
+  --node-accent: #78d1ff;
+}
+
+.takyon-map-node.kind-skill,
+.takyon-map-node.kind-skill-orphan {
+  --node-accent: #9bdc88;
+}
+
+.takyon-map-node.kind-registry,
+.takyon-map-node.kind-tool,
+.takyon-map-node.kind-tool-category {
+  --node-accent: #d7a7ff;
+}
+
+.takyon-map-node.kind-wakeup,
+.takyon-map-node.kind-cron-job,
+.takyon-map-node.kind-state {
+  --node-accent: #ff9b91;
+}
+
+.takyon-map-node-kind {
+  color: var(--node-accent, var(--color-muted-foreground));
+  font-size: 0.68rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.takyon-map-node-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+  line-height: 1.1;
+  font-weight: 650;
+}
+
+.takyon-map-node-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-muted-foreground);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.takyon-map-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.takyon-map-node-summary {
+  margin: 0 0 10px;
+  color: color-mix(in srgb, var(--color-foreground) 82%, var(--color-muted-foreground));
+  font-size: 0.86rem;
+  line-height: 1.42;
+}
+
+.takyon-map-badge,
+.takyon-map-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--color-primary) 9%, transparent);
+  color: var(--color-foreground);
+  font-size: 0.72rem;
+}
+
+.takyon-map-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.takyon-map-source-card,
+.takyon-map-snippet-card,
+.takyon-map-edge-stack,
+.takyon-map-editor-wrap,
+.takyon-map-metadata {
+  margin-top: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-card) 84%, transparent);
+}
+
+.takyon-map-source-card {
+  padding: 10px;
+}
+
+.takyon-map-source-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--theme-font-mono);
+  font-size: 0.78rem;
+}
+
+.takyon-map-source-meta {
+  margin-top: 4px;
+  color: var(--color-muted-foreground);
+  font-size: 0.73rem;
+}
+
+.takyon-map-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.takyon-map-snippet-card {
+  overflow: hidden;
+}
+
+.takyon-map-snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 40px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.takyon-map-snippet-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.takyon-map-snippet-title strong {
+  font-size: 0.78rem;
+  line-height: 1.1;
+}
+
+.takyon-map-snippet-title span {
+  color: var(--color-muted-foreground);
+  font-size: 0.72rem;
+}
+
+.takyon-map-snippet {
+  display: block;
+  max-height: min(46vh, 520px);
+  margin: 0;
+  overflow: auto;
+  padding: 10px 0;
+  background: color-mix(in srgb, var(--color-background, var(--background-base)) 94%, #000 6%);
+  color: var(--color-foreground);
+  font-family: var(--theme-font-mono);
+  font-size: 12px;
+  line-height: 18px;
+  tab-size: 2;
+}
+
+.takyon-map-snippet-line {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 0 12px 0 0;
+  white-space: pre-wrap;
+}
+
+.takyon-map-snippet-line:hover {
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+.takyon-map-snippet-number {
+  color: var(--color-muted-foreground);
+  text-align: right;
+  user-select: none;
+}
+
+.takyon-map-snippet code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.takyon-map-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 42%, var(--color-border));
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  color: var(--color-foreground);
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.takyon-map-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+}
+
+.takyon-map-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.takyon-map-edge-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+}
+
+.takyon-map-edge-column {
+  min-width: 0;
+  padding: 10px;
+}
+
+.takyon-map-edge-column + .takyon-map-edge-column {
+  border-left: 1px solid var(--color-border);
+}
+
+.takyon-map-edge-column h3 {
+  margin: 0 0 8px;
+  color: var(--color-muted-foreground);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.takyon-map-edge-row {
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+}
+
+.takyon-map-editor-wrap {
+  overflow: hidden;
+}
+
+.takyon-map-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.76rem;
+}
+
+.takyon-map-editor-toolbar > span:first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--theme-font-mono);
+}
+
+.takyon-map-save-message {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-warning);
+}
+
+.takyon-map-save-message.is-ok {
+  color: var(--color-success);
+}
+
+.takyon-map-editor {
+  display: block;
+  width: 100%;
+  height: min(48vh, 520px);
+  min-height: 260px;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  padding: 12px;
+  background: color-mix(in srgb, var(--color-background, var(--background-base)) 92%, #000 8%);
+  color: var(--color-foreground);
+  font-family: var(--theme-font-mono);
+  font-size: 12px;
+  line-height: 18px;
+  tab-size: 2;
+}
+
+.takyon-map-editor[readonly] {
+  color: color-mix(in srgb, var(--color-foreground) 72%, var(--color-muted-foreground));
+}
+
+.takyon-map-metadata {
+  padding: 10px;
+}
+
+.takyon-map-metadata summary {
+  cursor: pointer;
+  color: var(--color-muted-foreground);
+  font-size: 0.8rem;
+}
+
+.takyon-map-metadata pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 10px 0 0;
+  background: transparent !important;
+  color: inherit;
+  font-size: 11px;
+}
+
+.takyon-map-empty {
+  padding: 18px;
+}
+
+.takyon-map-empty-title {
+  margin-bottom: 6px;
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.takyon-map-source-list {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+}
+
+.takyon-map-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px 8px;
+}
+
+.takyon-map-error,
+.takyon-map-error-page pre {
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-destructive) 50%, transparent);
+  background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+  color: color-mix(in srgb, var(--color-destructive) 72%, var(--color-foreground));
+  font-size: 0.78rem;
+}
+
+.takyon-map-loading,
+.takyon-map-error-page {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+@media (max-width: 1180px) {
+  .takyon-map-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .takyon-map-inspector {
+    grid-column: 1 / -1;
+    max-height: 52vh;
+    border-left: 0;
+    border-top: 1px solid var(--color-border);
+  }
+}
