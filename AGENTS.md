@@ -23,6 +23,12 @@ The current Takyon VPS target is `159.65.217.13` (`argon-alpha-14`). Use the loc
 
 The planned public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo; keep it pointed at Vercel until the VPS dashboard is healthy, then cut the `app` record over to `159.65.217.13`.
 
+When the operator asks to push or deploy Takyon, keep the three rails distinct:
+
+1. Git push uses the outer workspace repo at `/Users/Zygote/Downloads/takyon`, not the nested `hermes-agent-main` git metadata. Stage only the intended hunks, commit in the outer repo, and push `origin main` unless the operator asked for a branch.
+2. VPS deploy updates the active runtime. The VPS runtime is `/opt/takyon/hermes-agent-main` and may not be a git checkout, so deploy changed runtime files with `rsync`/`ssh` using `~/.ssh/takyon_argon_alpha14`, then compile touched Python files and restart `takyon-dashboard.service`. Verify with `systemctl is-active takyon-dashboard.service` and source checks on the VPS.
+3. Vercel deploy is the `app` project frontdoor only. It is not the canonical Takyon runtime and successful Vercel deploys do not prove prompt, skill, registry, or backend changes reached the VPS. Do not run `vercel deploy` from the workspace root; that uploads the wrong artifact. Use `vercel redeploy` against the current known-good `app` frontdoor production deployment, or deploy an equivalent tiny frontdoor artifact, then verify `vercel inspect app.fourmanifold.com` is Ready and aliased. Treat Vercel alias state separately from DNS: `app.fourmanifold.com` may still resolve to the VPS and return Caddy/uvicorn headers even when Vercel has a Ready alias.
+
 ## User Terms
 
 Do not conflate Takyon users with product subusers.
