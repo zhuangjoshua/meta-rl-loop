@@ -30,6 +30,8 @@ When the operator asks to push or deploy Takyon, keep the three rails distinct:
 3. VPS Caddy config is tracked at `deploy/argon-alpha-14/Caddyfile`; apply it with `deploy/argon-alpha-14/apply-caddyfile.sh`. This is the repeatable source for `app.fourmanifold.com` and shared `slug.fourmanifold.com` product routing. Do not hand-add new per-business Caddy blocks for normal businesses.
 4. Vercel deploy is the `app` project frontdoor only. It is not the canonical Takyon runtime and successful Vercel deploys do not prove prompt, skill, registry, or backend changes reached the VPS. Do not run `vercel deploy` from the workspace root; that uploads the wrong artifact. Use `vercel redeploy` against the current known-good `app` frontdoor production deployment, or deploy an equivalent tiny frontdoor artifact, then verify `vercel inspect app.fourmanifold.com` is Ready and aliased. Treat Vercel alias state separately from DNS: `app.fourmanifold.com` may still resolve to the VPS and return Caddy/uvicorn headers even when Vercel has a Ready alias.
 
+The desired deployment end state is git-push driven: pushing `main` should trigger the Vercel frontdoor update and the VPS runtime update automatically from tracked source. Until that CI/CD path exists, is tracked, and has passed an end-to-end deploy check, do not assume a Git push updated production. Keep doing the explicit rails above and report which rails were actually run.
+
 ## User Terms
 
 Do not conflate Takyon users with product subusers.
