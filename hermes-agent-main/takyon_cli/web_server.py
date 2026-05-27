@@ -436,6 +436,8 @@ def _session_from_cookie_header(
 def _auth0_public_path(path: str) -> bool:
     if path.startswith("/auth/"):
         return True
+    if path == "/api/product-tls/ask":
+        return True
     if path in {"/favicon.ico", "/robots.txt"}:
         return True
     return path.startswith((

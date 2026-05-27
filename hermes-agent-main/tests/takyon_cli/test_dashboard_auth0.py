@@ -68,6 +68,24 @@ def test_app_host_protects_public_status_endpoint_when_auth0_applies(auth0_env):
     assert resp.json()["detail"] == "Auth0 login required"
 
 
+def test_product_tls_ask_bypasses_auth0_for_caddy(auth0_env, tmp_path, monkeypatch):
+    from plugins.takyon.core import TakyonStore
+
+    monkeypatch.setattr(auth0_env, "get_takyon_home", lambda: tmp_path)
+    TakyonStore(tmp_path).commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        idempotency_key="auth0-tls-ask-business",
+        reason="test",
+        actor="test",
+    )
+    client = _client(auth0_env)
+
+    resp = client.get("/api/product-tls/ask?domain=latexflow.fourmanifold.com")
+
+    assert resp.status_code == 200
+
+
 def test_auth0_login_redirect_uses_current_app_base_url(auth0_env):
     client = _client(auth0_env)
 
