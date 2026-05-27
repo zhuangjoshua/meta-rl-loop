@@ -1854,6 +1854,12 @@ class AIAgent:
         """Update the last-activity timestamp and description (thread-safe)."""
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
+        cb = getattr(self, "activity_callback", None)
+        if cb is not None and desc:
+            try:
+                cb(desc)
+            except Exception:
+                pass
 
     def _capture_rate_limits(self, http_response: Any) -> None:
         """Parse x-ratelimit-* headers from an HTTP response and cache the state.

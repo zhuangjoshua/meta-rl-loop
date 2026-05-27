@@ -366,8 +366,8 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
   open: "ready",
-  closed: "closed",
-  error: "error",
+  closed: "reconnecting",
+  error: "connection issue",
 };
 
 const EMPTY_SCOPE_STATE: ScopeState = {
@@ -1191,6 +1191,7 @@ export default function ChatPage() {
     gw.connect()
       .then(async () => {
         if (cancelled) return;
+        setError(null);
         const hydrateScope = async (nextSessionId: string) => {
           const scope = !resumeParam && initialBusinessParam
             ? await gw.request<ScopeState>(
@@ -1264,10 +1265,14 @@ export default function ChatPage() {
     }
 
     if (state !== "closed" && state !== "error") return;
-    if (reconnectAttemptsRef.current >= 3) return;
 
     reconnectAttemptsRef.current += 1;
-    const delayMs = 500 * reconnectAttemptsRef.current;
+    const delayMs = Math.min(8_000, 500 * reconnectAttemptsRef.current);
+    if (state === "closed") {
+      setError("Intercom disconnected; reconnecting. Dashboard activity is preserved in business state.");
+    } else if (gw.lastCloseMessage) {
+      setError(gw.lastCloseMessage);
+    }
     const timer = window.setTimeout(() => setVersion((v) => v + 1), delayMs);
     return () => window.clearTimeout(timer);
   }, [gw, state]);
@@ -1291,6 +1296,31 @@ export default function ChatPage() {
       });
     return () => {
       cancelled = true;
+    };
+  }, [gw, scopeState.business, sessionId, state]);
+
+  useEffect(() => {
+    if (state !== "open" || !sessionId || !scopeState.business) return;
+    let cancelled = false;
+    const refresh = () => {
+      void gw
+        .request<ScopeState>(
+          "takyon.scope.get",
+          { session_id: sessionId },
+          10_000,
+        )
+        .then((scope) => {
+          if (!cancelled) setScopeState(normalizeScopeState(scope));
+        })
+        .catch(() => {
+          /* scope polling is best effort */
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
     };
   }, [gw, scopeState.business, sessionId, state]);
 
@@ -1841,6 +1871,7 @@ export default function ChatPage() {
                 <Composer
                   canAct={canAct}
                   compact
+                  disabled={state !== "open" || !sessionId}
                   inputRef={inputRef}
                   isRunning={running}
                   onChange={setInput}
@@ -2160,6 +2191,7 @@ function ThreadWelcome({ compact = false, scope }: { compact?: boolean; scope: S
 function Composer({
   canAct,
   compact = false,
+  disabled = false,
   inputRef,
   isRunning,
   onChange,
@@ -2173,6 +2205,7 @@ function Composer({
 }: {
   canAct: boolean;
   compact?: boolean;
+  disabled?: boolean;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isRunning: boolean;
   onChange: (value: string) => void;
@@ -2212,7 +2245,14 @@ function Composer({
           )}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={isRunning ? "Add an interjection..." : "Ask Takyon anything or type /"}
+          disabled={disabled}
+          placeholder={
+            disabled
+              ? "Backend disconnected - reconnect to create or wake"
+              : isRunning
+                ? "Add an interjection..."
+                : "Ask Takyon anything or type /"
+          }
           rows={1}
           value={value}
         />
@@ -2599,7 +2639,7 @@ function CompanyOverview({
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
   const tasks = overview.tasks || [];
-  const previewPath = website.source_path || product.source_path || "product/site";
+  const previewPath = website.path || website.source_path || product.source_path || "product/site";
   const sourcePath = website.source_path || product.source_path || "";
   const publicSiteUrl = website.public_url || product.public_url || "";
   const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
@@ -2649,22 +2689,7 @@ function CompanyOverview({
     creativeAssets.path && creativeAssets.receipt ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
     ...outputDocs.filter((doc) => doc.status !== "Receipt"),
   ]);
-  const localWebsite = !publicSiteUrl && (website.path || sourcePath);
   const deliverableRows = [
-    publicSiteUrl && {
-      detail: publicSiteUrl,
-      id: "public-url",
-      label: "Public URL",
-      status: "Live",
-      tone: "done",
-    },
-    localWebsite && {
-      detail: localWebsite,
-      id: "local-website",
-      label: "Website preview",
-      status: "Local",
-      tone: "done",
-    },
     outreach.path && outreach.receipt && {
       detail: outreach.path,
       id: "outreach",
@@ -2719,13 +2744,6 @@ function CompanyOverview({
         tone: "done",
       })),
   ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
-  const productStatus = publicSiteUrl || product.publish_status === "published" || website.publish_status === "published"
-    ? "Live"
-    : localWebsite
-      ? "Preview"
-      : deliverableRows.length
-        ? "Done"
-        : "Done only";
   const latestActivity = [
     ...(activeTool ? [{ label: naturalToolLabel(activeTool), detail: toolDetail(activeTool), status: humanizeStatus(activeTool.status), tone: activeTool.status }] : []),
     ...tools
@@ -2739,19 +2757,19 @@ function CompanyOverview({
         status: humanizeStatus(tool.status),
         tone: tool.status,
       })),
-    ...statusItems.slice(0, 2).map((item) => ({
+    ...statusItems.slice(0, 3).map((item) => ({
       label: "Live update",
       detail: item,
       status: "Working",
       tone: "active",
     })),
-    ...tasks.filter(isActionableTask).slice(0, 2).map((task) => ({
+    ...tasks.filter(isActionableTask).slice(0, 6).map((task) => ({
       label: taskLabel(task),
       detail: taskDetail(task),
       status: humanizeStatus(task.status),
       tone: task.tone || task.status,
     })),
-  ].slice(0, 5);
+  ].slice(0, 9);
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -2808,22 +2826,27 @@ function CompanyOverview({
       <section className="grid gap-3">
         <SourceCard
           docs={deliverableDocs}
-          empty={deliverableRows.length > 0 ? undefined : "No proof-backed deliverables yet."}
+          empty={
+            deliverableRows.length > 0
+              ? undefined
+              : sourcePath
+                ? "Product source exists, but no public or previewable website was recorded."
+                : "No proof-backed deliverables yet."
+          }
           icon={<FileText className="h-4 w-4" />}
           label="Deliverables"
           onOpenDoc={openDocument}
           primary={
-            publicSiteUrl || sourcePath || website.path ? (
+            publicSiteUrl || website.path ? (
               <ProductPreviewHero
                 onResolveSitePreview={onResolveSitePreview}
                 previewPath={previewPath}
                 publicSiteUrl={publicSiteUrl}
-                sourcePath={sourcePath}
                 websitePath={website.path}
               />
             ) : undefined
           }
-          status={productStatus}
+          status=""
           tone={deliverableRows.length > 0 ? "done" : "neutral"}
         >
           {deliverableRows.length > 0 && (
@@ -2833,6 +2856,11 @@ function CompanyOverview({
                   detail={item.detail}
                   key={item.id}
                   label={item.label}
+                  onClick={
+                    item.detail
+                      ? () => openDocument({ label: item.label, path: item.detail })
+                      : undefined
+                  }
                   status={item.status}
                   tone={item.tone}
                 />
@@ -2844,15 +2872,10 @@ function CompanyOverview({
     </div>
   );
 
-  const activityBlock = (latestActivity.length > 0 || evidenceRows.length > 0) && (
-    <details className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
-        <Activity className="h-4 w-4" />
-        Activity / Debug
-      </summary>
+  const activityContents = (
       <div className="mt-3 grid gap-2">
         {latestActivity.map((item, index) => (
-          <TaskRow
+          <ActivityTraceRow
             detail={item.detail}
             key={`${item.label}-${index}`}
             label={item.label}
@@ -2870,12 +2893,35 @@ function CompanyOverview({
             detail={item.detail}
             key={item.id}
             label={item.label}
+            onClick={
+              item.id !== "source" && item.detail
+                ? () => openDocument({ label: item.label, path: item.detail })
+                : undefined
+            }
             status={item.status}
             tone={item.tone}
           />
         ))}
       </div>
+  );
+  const activityBlock = (latestActivity.length > 0 || evidenceRows.length > 0) && (
+    latestActivity.length > 0 ? (
+      <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
+        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
+          <Activity className="h-4 w-4" />
+          Activity
+        </div>
+        {activityContents}
+      </section>
+    ) : (
+      <details className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
+          <Activity className="h-4 w-4" />
+          Activity / Debug
+        </summary>
+        {activityContents}
     </details>
+    )
   );
 
   if (hasViewer && viewer) {
@@ -2934,7 +2980,7 @@ function SourceCard({
   label: string;
   onOpenDoc?: (doc: SourceDocTile) => void;
   primary?: ReactNode;
-  status: string;
+  status?: string;
   tone?: string;
 }) {
   return (
@@ -2946,9 +2992,11 @@ function SourceCard({
             <div className="text-sm font-medium text-zinc-100">{label}</div>
           </div>
         </div>
-        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
-          {status}
-        </span>
+        {status && (
+          <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
+            {status}
+          </span>
+        )}
       </div>
       {primary && <div className="mt-3">{primary}</div>}
       {docs.length > 0 ? (
@@ -3234,18 +3282,14 @@ function OpenSitePreviewButton({
 }
 
 function ProductPreviewHero({
-  blocker,
   onResolveSitePreview,
   previewPath,
   publicSiteUrl,
-  sourcePath,
   websitePath,
 }: {
-  blocker?: string;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   previewPath?: string;
   publicSiteUrl?: string;
-  sourcePath?: string;
   websitePath?: string;
 }) {
   if (publicSiteUrl) {
@@ -3277,15 +3321,6 @@ function ProductPreviewHero({
         path={previewPath}
         variant="hero"
       />
-    );
-  }
-  if (sourcePath) {
-    return (
-      <div className="rounded-xl border border-zinc-900 bg-black px-3 py-3">
-        <div className="text-sm font-medium text-zinc-200">Built locally</div>
-        <div className="mt-1 truncate font-mono text-xs text-zinc-600">{sourcePath}</div>
-        {blocker && <div className="mt-2 text-xs leading-5 text-amber-300">{blocker}</div>}
-      </div>
     );
   }
   return (
@@ -4365,6 +4400,55 @@ function DevPanel({
 function TaskRow({
   detail,
   label,
+  onClick,
+  status,
+  tone,
+}: {
+  detail?: string;
+  label: string;
+  onClick?: () => void;
+  status: string;
+  tone?: string;
+}) {
+  const content = (
+    <>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-sm text-zinc-200">{label}</div>
+        <span className="inline-flex shrink-0 items-center gap-1">
+          {onClick && <ExternalLink className="h-3.5 w-3.5 text-zinc-600" />}
+          <span className={cn("rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
+            {status}
+          </span>
+        </span>
+      </div>
+      {detail && (
+        <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
+          {detail}
+        </div>
+      )}
+    </>
+  );
+  const className = cn(
+    "w-full rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2",
+    onClick && "text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900",
+  );
+  if (onClick) {
+    return (
+      <button className={className} onClick={onClick} title={detail || label} type="button">
+        {content}
+      </button>
+    );
+  }
+  return (
+    <div className={className}>
+      {content}
+    </div>
+  );
+}
+
+function ActivityTraceRow({
+  detail,
+  label,
   status,
   tone,
 }: {
@@ -4373,19 +4457,21 @@ function TaskRow({
   status: string;
   tone?: string;
 }) {
+  const line = detail || label;
+  const active = /active|running|working/i.test(`${tone || ""} ${status || ""}`);
   return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-sm text-zinc-200">{label}</div>
-        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
-          {status}
-        </span>
-      </div>
-      {detail && (
-        <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
-          {detail}
+    <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
+      <div className="flex min-w-0 items-start gap-2">
+        <span
+          className={cn(
+            "mt-2 h-1.5 w-1.5 shrink-0 rounded-full",
+            active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
+          )}
+        />
+        <div className="min-w-0 break-words text-sm leading-6 text-zinc-300">
+          {line}
         </div>
-      )}
+      </div>
     </div>
   );
 }

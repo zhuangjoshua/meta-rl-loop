@@ -3,12 +3,12 @@
   "label": "Agent Map",
   "description": "Source-of-truth graph for Takyon prompts, wakeups, skills, registry metadata, and editable source files.",
   "icon": "Route",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "tab": {
     "path": "/agent-map",
     "position": "after:skills"
   },
-  "entry": "dist/index.js?v=0.1.2",
-  "css": "dist/style.css?v=0.1.2",
+  "entry": "dist/index.js?v=0.1.3",
+  "css": "dist/style.css?v=0.1.3",
   "api": "plugin_api.py"
 }

@@ -173,6 +173,9 @@ _pool = concurrent.futures.ThreadPoolExecutor(
 )
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
 
+_TAKYON_BACKGROUND_RUNS: dict[str, dict[str, Any]] = {}
+_TAKYON_BACKGROUND_RUNS_LOCK = threading.Lock()
+
 # Reserve real stdout for JSON-RPC only; redirect Python's stdout to stderr
 # so stray print() from libraries/tools becomes harmless gateway.stderr instead
 # of corrupting the JSON protocol.
@@ -4874,6 +4877,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         )
 
     agent_runs: list[dict[str, Any]] = []
+    runtime_events: list[dict[str, Any]] = []
     conn = None
     try:
         conn = store._connect()
@@ -4901,8 +4905,46 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                     "tone": status_tone(run.get("status")),
                 }
             )
+        event_rows = conn.execute(
+            "SELECT * FROM events WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%' ORDER BY created_at DESC LIMIT ?",
+            (slug, 12),
+        ).fetchall()
+        seen_runtime_details: set[str] = set()
+        for row in event_rows:
+            event = as_dict(store._row_to_dict(row))
+            payload = as_dict(event.get("payload"))
+            status = brief_text(payload.get("status") or event.get("event_type")).replace("dashboard.run.", "")
+            if status == "heartbeat":
+                continue
+            detail = brief_text(payload.get("line") or payload.get("detail"))
+            if detail in seen_runtime_details:
+                continue
+            seen_runtime_details.add(detail)
+            label = "CEO live trace"
+            lower_detail = detail.lower()
+            if lower_detail.startswith("agent ->"):
+                label = "Agent"
+            elif "preparing tool ->" in lower_detail:
+                label = "Preparing tool"
+            elif "tool started ->" in lower_detail:
+                label = "Tool started"
+            elif "tool completed ->" in lower_detail:
+                label = "Tool completed"
+            elif lower_detail.startswith("product verification"):
+                label = "Product verification"
+            runtime_events.append(
+                {
+                    "id": brief_text(event.get("id")),
+                    "status": "running" if status in {"started", "output", "heartbeat"} else status,
+                    "updated_at": brief_text(event.get("created_at")),
+                    "label": label,
+                    "detail": detail or brief_text(payload.get("command")) or "Runtime event recorded.",
+                    "tone": status_tone("running" if status in {"started", "output", "heartbeat"} else status),
+                }
+            )
     except Exception:
         agent_runs = []
+        runtime_events = []
     finally:
         if conn is not None:
             conn.close()
@@ -4991,6 +5033,16 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         }
 
     task_cards: list[dict[str, Any]] = []
+    for event in runtime_events[:6]:
+        task_cards.append({
+            "id": f"runtime:{event.get('id')}",
+            "source": "runtime",
+            "label": event.get("label") or "CEO live trace",
+            "status": event.get("status") or "recorded",
+            "detail": event.get("detail") or "",
+            "tone": event.get("tone") or status_tone(event.get("status")),
+            "updated_at": event.get("updated_at") or "",
+        })
     for job in jobs[:8]:
         task_cards.append({
             "id": f"job:{job.get('id')}",
@@ -5452,9 +5504,19 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
     return None
 
 
-def _takyon_pending_scope_overview(kind: str, business: str, status: str, detail: str = "") -> dict[str, Any]:
+def _takyon_pending_scope_overview(
+    kind: str,
+    business: str,
+    status: str,
+    detail: str = "",
+    started_at: float = 0,
+) -> dict[str, Any]:
     label = "CEO bootstrap" if kind == "create" else "CEO wake"
     status_text = "running" if status == "running" else status
+    visible_detail = detail or "Takyon is running this outside the dashboard process."
+    if status_text == "running" and started_at:
+        elapsed = max(0, int(time.time() - started_at))
+        visible_detail = f"{visible_detail} · running {elapsed}s"
     return {
         "tasks": [
             {
@@ -5462,16 +5524,85 @@ def _takyon_pending_scope_overview(kind: str, business: str, status: str, detail
                 "source": "runtime",
                 "label": label,
                 "status": status_text,
-                "detail": detail or "Takyon is running this outside the dashboard process.",
+                "detail": visible_detail,
                 "tone": "active" if status == "running" else ("blocked" if status == "error" else "done"),
             }
         ],
         "ceo_loop": {
             "status": "working" if status == "running" else status_text,
             "headline": f"{label} is {status_text}.",
-            "detail": detail or "Refresh after a moment to see receipts, blockers, and deliverables.",
+            "detail": visible_detail,
         },
     }
+
+
+def _takyon_record_runtime_event(
+    business: str,
+    *,
+    kind: str,
+    status: str,
+    detail: str = "",
+    line: str = "",
+    command: str = "",
+) -> None:
+    slug = str(business or "").strip()
+    if not slug:
+        return
+    payload = {
+        "kind": kind,
+        "status": status,
+        "detail": detail,
+        "line": line,
+        "command": command,
+        "recorded_at": datetime.utcnow().isoformat() + "Z",
+    }
+    try:
+        from plugins.takyon.cli import TakyonStore
+
+        store = TakyonStore()
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}/runtime",
+                business_slug=slug,
+                event_type=f"dashboard.run.{status}",
+                payload=payload,
+            )
+    except Exception as exc:
+        logger.debug("failed to record Takyon runtime event for %s: %s", slug, exc)
+
+
+def _takyon_clean_runtime_line(line: str) -> str:
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(line or "")).strip()
+    text = re.sub(r"^(?:->|→)\s*", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:360]
+
+
+def _takyon_set_background_run(business: str, run: dict[str, Any]) -> None:
+    slug = str(business or "").strip()
+    if not slug:
+        return
+    with _TAKYON_BACKGROUND_RUNS_LOCK:
+        _TAKYON_BACKGROUND_RUNS[slug] = {**run, "business": slug}
+
+
+def _takyon_get_background_run(business: str) -> dict[str, Any] | None:
+    slug = str(business or "").strip()
+    if not slug:
+        return None
+    with _TAKYON_BACKGROUND_RUNS_LOCK:
+        run = _TAKYON_BACKGROUND_RUNS.get(slug)
+        if not isinstance(run, dict):
+            return None
+        started_at = float(run.get("started_at") or 0)
+        finished_at = float(run.get("finished_at") or 0)
+        if finished_at and finished_at < time.time() - 7200:
+            _TAKYON_BACKGROUND_RUNS.pop(slug, None)
+            return None
+        if not finished_at and started_at and started_at < time.time() - 7200:
+            return None
+        return dict(run)
 
 
 def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
@@ -5491,6 +5622,8 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
             for item in businesses
         )
         pending = (session or {}).get("takyon_background_run") if isinstance(session, dict) else None
+        if (not isinstance(pending, dict) or str(pending.get("business") or "").strip() != current_business) and current_business:
+            pending = _takyon_get_background_run(current_business)
         pending_business = str((pending or {}).get("business") or "").strip() if isinstance(pending, dict) else ""
         pending_recent = bool(
             pending_business
@@ -5511,6 +5644,7 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
                 current_business,
                 str(pending.get("status") or "running"),
                 str(pending.get("detail") or ""),
+                float(pending.get("started_at") or 0),
             )
         elif current_business and not exists:
             current_business = ""
@@ -5533,6 +5667,7 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
                         current_business,
                         pending_status,
                         str(pending.get("detail") or ""),
+                        float(pending.get("started_at") or 0),
                     )
                     overview = {
                         **overview,
@@ -5588,7 +5723,7 @@ def _(rid, params: dict) -> dict:
             isinstance(item, dict) and str(item.get("slug") or "") == slug
             for item in (businesses if isinstance(businesses, list) else [])
         )
-        if not exists:
+        if not exists and not _takyon_get_background_run(slug):
             return _err(rid, 4041, f"business:{slug} does not exist")
         session["takyon_current_business"] = slug
         return _ok(rid, _takyon_scope_payload(session))
@@ -5802,6 +5937,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
+    sid = str(params.get("session_id") or "")
     line = str(params.get("line") or "").strip()
     if not line:
         return _err(rid, 4004, "empty command")
@@ -5827,24 +5963,44 @@ def _(rid, params: dict) -> dict:
                 session["takyon_pending_business_create"] = True
                 session["takyon_pending_business_create_at"] = time.time()
                 session["takyon_current_business"] = target_business
-            session["takyon_background_run"] = {
+            background_run = {
                 "kind": detached_kind,
                 "business": target_business,
                 "status": "running",
                 "started_at": time.time(),
-                "detail": "Running outside the dashboard process.",
+                "detail": f"Running {detached_line}",
             }
+            session["takyon_background_run"] = background_run
+            _takyon_set_background_run(target_business, background_run)
+            if sid:
+                _emit(
+                    "status.update",
+                    sid,
+                    {
+                        "kind": "takyon",
+                        "text": f"Started {detached_line} for business:{target_business}.",
+                    },
+                )
 
             def run_detached() -> None:
                 output = ""
+                output_lines: list[str] = []
+                command_text = detached_line
+                started_at = float(session.get("takyon_background_run", {}).get("started_at") or time.time())
+                _takyon_record_runtime_event(
+                    target_business,
+                    kind=detached_kind,
+                    status="started",
+                    detail=f"Started {detached_line}",
+                    command=command_text,
+                )
                 try:
                     raw = detached_line.strip().lstrip("/")
-                    proc = subprocess.run(
+                    proc = subprocess.Popen(
                         [
                             sys.executable,
                             "-c",
                             "from plugins.takyon.cli import main; main()",
-                            "--json",
                             *shlex.split(raw),
                         ],
                         cwd=str(Path(__file__).resolve().parents[1]),
@@ -5852,12 +6008,93 @@ def _(rid, params: dict) -> dict:
                         text=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        timeout=int(os.getenv("TAKYON_BACKGROUND_TIMEOUT_S", "3600") or 3600),
+                        bufsize=1,
                     )
-                    output = (proc.stdout or "").strip()
-                    status = "done" if proc.returncode == 0 else "error"
-                    detail = "Completed." if proc.returncode == 0 else f"Exited {proc.returncode}."
-                    if proc.returncode != 0 and output:
+                    line_queue: queue.Queue[str | None] = queue.Queue()
+
+                    def read_stdout() -> None:
+                        try:
+                            assert proc.stdout is not None
+                            for raw_line in proc.stdout:
+                                line_queue.put(raw_line)
+                        finally:
+                            line_queue.put(None)
+
+                    threading.Thread(
+                        target=read_stdout,
+                        name=f"takyon-{detached_kind}-{target_business or 'global'}-stdout",
+                        daemon=True,
+                    ).start()
+                    timeout_seconds = int(os.getenv("TAKYON_BACKGROUND_TIMEOUT_S", "3600") or 3600)
+                    deadline = time.time() + timeout_seconds
+                    stdout_done = False
+                    heartbeat_seconds = max(2, int(os.getenv("TAKYON_BACKGROUND_HEARTBEAT_S", "5") or 5))
+                    last_heartbeat = 0.0
+                    last_output_event = started_at
+                    while not stdout_done or proc.poll() is None:
+                        if time.time() > deadline:
+                            proc.kill()
+                            raise TimeoutError(f"background {detached_kind} exceeded {timeout_seconds}s")
+                        try:
+                            item = line_queue.get(timeout=2.0)
+                        except queue.Empty:
+                            if time.time() - last_heartbeat >= heartbeat_seconds:
+                                elapsed = max(0, int(time.time() - started_at))
+                                heartbeat = f"Running {detached_line} · {elapsed}s"
+                                if time.time() - last_output_event >= 20:
+                                    _takyon_record_runtime_event(
+                                        target_business,
+                                        kind=detached_kind,
+                                        status="heartbeat",
+                                        detail=heartbeat,
+                                        command=command_text,
+                                    )
+                                if sid:
+                                    _emit(
+                                        "status.update",
+                                        sid,
+                                        {"kind": "takyon", "text": heartbeat},
+                                    )
+                                last_heartbeat = time.time()
+                            continue
+                        if item is None:
+                            stdout_done = True
+                            continue
+                        output_lines.append(item.rstrip("\n"))
+                        clean_line = _takyon_clean_runtime_line(item)
+                        if not clean_line:
+                            continue
+                        last_output_event = time.time()
+                        background_run = {
+                            "kind": detached_kind,
+                            "business": target_business,
+                            "status": "running",
+                            "started_at": started_at,
+                            "detail": clean_line,
+                        }
+                        session["takyon_background_run"] = background_run
+                        _takyon_set_background_run(target_business, background_run)
+                        _takyon_record_runtime_event(
+                            target_business,
+                            kind=detached_kind,
+                            status="output",
+                            detail=clean_line,
+                            line=clean_line,
+                            command=command_text,
+                        )
+                        if sid:
+                            _emit(
+                                "status.update",
+                                sid,
+                                {"kind": "takyon", "text": clean_line},
+                            )
+                    returncode = proc.wait(timeout=5)
+                    output = "\n".join(output_lines).strip()
+                    status = "done" if returncode == 0 else "error"
+                    detail = "Completed." if returncode == 0 else f"Exited {returncode}."
+                    if returncode != 0 and output:
+                        detail = output.splitlines()[-1][:240]
+                    elif output:
                         detail = output.splitlines()[-1][:240]
                     next_business = target_business
                 except Exception as exc:
@@ -5865,8 +6102,24 @@ def _(rid, params: dict) -> dict:
                     status = "error"
                     detail = str(exc)
                     next_business = target_business or current_business
+                _takyon_record_runtime_event(
+                    next_business or target_business or "",
+                    kind=detached_kind,
+                    status="completed" if status == "done" else "failed",
+                    detail=detail,
+                    command=command_text,
+                )
+                if sid:
+                    _emit(
+                        "status.update",
+                        sid,
+                        {
+                            "kind": "takyon",
+                            "text": f"{detached_kind.capitalize()} for business:{next_business or target_business} {status}. {detail}",
+                        },
+                    )
                 session["takyon_current_business"] = next_business or ""
-                session["takyon_background_run"] = {
+                background_result = {
                     "kind": detached_kind,
                     "business": next_business or target_business or "",
                     "status": status,
@@ -5874,6 +6127,8 @@ def _(rid, params: dict) -> dict:
                     "finished_at": time.time(),
                     "detail": detail,
                 }
+                session["takyon_background_run"] = background_result
+                _takyon_set_background_run(next_business or target_business or "", background_result)
                 if isinstance(history, list):
                     _record_shell_turn(history, detached_line, output)
 

@@ -67,11 +67,27 @@ export class GatewayClient {
   private reqId = 0;
   private pending = new Map<string, Pending>();
   private listeners = new Map<string, Set<(ev: GatewayEvent) => void>>();
+  private closingSockets = new WeakSet<WebSocket>();
   private _state: ConnectionState = "idle";
   private stateListeners = new Set<(s: ConnectionState) => void>();
+  private _lastCloseCode: number | null = null;
+  private _lastCloseReason = "";
+  private _lastCloseMessage = "";
 
   get state(): ConnectionState {
     return this._state;
+  }
+
+  get lastCloseCode(): number | null {
+    return this._lastCloseCode;
+  }
+
+  get lastCloseReason(): string {
+    return this._lastCloseReason;
+  }
+
+  get lastCloseMessage(): string {
+    return this._lastCloseMessage;
   }
 
   private setState(s: ConnectionState) {
@@ -118,6 +134,9 @@ export class GatewayClient {
     }
 
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    this._lastCloseCode = null;
+    this._lastCloseReason = "";
+    this._lastCloseMessage = "";
     const ws = new WebSocket(
       `${scheme}//${location.host}${TAKYON_BASE_PATH}/api/ws?token=${encodeURIComponent(resolved)}`,
     );
@@ -135,30 +154,62 @@ export class GatewayClient {
       }
     });
 
-    ws.addEventListener("close", () => {
-      this.setState("closed");
-      this.rejectAllPending(new Error("WebSocket closed"));
+    ws.addEventListener("close", (ev) => {
+      const intentional = this.closingSockets.has(ws);
+      if (intentional) this.closingSockets.delete(ws);
+      const current = this.ws === ws;
+      if (current) this.ws = null;
+      if (intentional || !current) return;
+      this._lastCloseCode = ev.code || null;
+      this._lastCloseReason = ev.reason || "";
+      this._lastCloseMessage = this.describeClose(ev);
+      this.setState(ev.code === 4401 ? "error" : "closed");
+      this.rejectAllPending(new Error(this._lastCloseMessage));
     });
 
     await new Promise<void>((resolve, reject) => {
-      const onOpen = () => {
+      let settled = false;
+      const cleanup = () => {
+        ws.removeEventListener("open", onOpen);
         ws.removeEventListener("error", onError);
+        ws.removeEventListener("close", onCloseBeforeOpen);
+      };
+      const onOpen = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.setState("open");
         resolve();
       };
       const onError = () => {
-        ws.removeEventListener("open", onOpen);
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.setState("error");
         reject(new Error("WebSocket connection failed"));
       };
+      const onCloseBeforeOpen = (ev: CloseEvent) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(this.describeClose(ev)));
+      };
       ws.addEventListener("open", onOpen, { once: true });
       ws.addEventListener("error", onError, { once: true });
+      ws.addEventListener("close", onCloseBeforeOpen, { once: true });
     });
   }
 
   close() {
-    this.ws?.close();
+    const ws = this.ws;
+    if (!ws) return;
+    this.closingSockets.add(ws);
     this.ws = null;
+    this.rejectAllPending(new Error("Intercom reconnecting"));
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(1000, "client_close");
+    }
+    this.setState("idle");
   }
 
   private dispatch(msg: Record<string, unknown>) {
@@ -190,6 +241,13 @@ export class GatewayClient {
       p.reject(err);
     }
     this.pending.clear();
+  }
+
+  private describeClose(ev: CloseEvent): string {
+    const suffix = ev.reason ? `: ${ev.reason}` : ev.code ? ` (${ev.code})` : "";
+    if (ev.code === 4401) return `Intercom unauthorized${suffix}`;
+    if (ev.code === 4403) return `Intercom forbidden${suffix}`;
+    return `Intercom disconnected${suffix}`;
   }
 
   /** Send a JSON-RPC request. Rejects on error response or timeout. */

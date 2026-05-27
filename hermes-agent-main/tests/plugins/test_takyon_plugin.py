@@ -10,11 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from plugins.takyon import core as takyon_core
 from plugins.takyon.core import (
     TAKYON_TOOL_DEFINITIONS,
     TakyonError,
     TakyonStore,
     _API_ENV_ALIASES,
+    _canonicalize_business_product_links,
+    _product_publish_target,
     _scan_for_pretend_product_state,
     _verify_product_surface_path,
     handle_business_check_runtime_capabilities,
@@ -24,6 +27,7 @@ from plugins.takyon.core import (
     handle_business_publish_outreach,
     handle_business_registry,
     handle_business_request_app_magic_link,
+    handle_business_claude_agent_task,
     handle_business_set_work_focus,
     handle_business_upsert_business,
     handle_business_verify_product_surface,
@@ -77,10 +81,13 @@ def test_plugin_registers_skill_pack():
         "conversation-response",
         "conversion-review",
         "distribution-campaign",
+        "experimentation",
         "failure-recovery",
         "market-research",
         "outreach",
         "pricing-strategy",
+        "sales-pipeline",
+        "skill-safety-review",
     }
     assert ctx.commands == ["takyon"]
     assert set(ctx.slash_commands) == {"takyon"}
@@ -101,6 +108,41 @@ def test_registry_covers_tools_and_skills():
             assert item["category"] in TAKYON_CATEGORIES
             assert item["priority_bands"]
             assert set(item["priority_bands"]).issubset(TAKYON_PRIORITY_BANDS)
+
+
+def test_bootstrap_prompt_requires_phase_one_outreach_batch():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    assert "campaigns/phase-1-outreach/" in prompt
+    assert "3 evidence-backed lanes" in prompt
+    assert "6 total" in prompt
+    assert "business_publish_outreach" in prompt
+    assert "not a forever recurring funnel" in prompt
+
+
+def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
+    prompt = TakyonStore(tmp_path)._ceo_cron_prompt("demo")
+
+    assert "Advance the outreach lifecycle" in prompt
+    assert "campaigns/phase-1-outreach/" in prompt
+    assert "if Phase 1 is incomplete" in prompt
+    assert "if complete but unreviewed" in prompt
+
+
+def test_registry_exposes_phase_one_outreach_metadata():
+    skills = {skill["name"]: skill for skill in TAKYON_REGISTRY["skills"]}
+
+    distribution = skills["distribution-campaign"]
+    outreach = skills["outreach"]
+
+    assert "phase-one outreach" in distribution["use_when"]
+    assert "multi_lane_outreach_batch" in distribution["capabilities"]
+    assert "phase-one outreach" in distribution["keywords"]
+    assert "phase-one outreach touches" in outreach["use_when"]
+    assert "business_publish_outreach" in outreach["capabilities"]
+    assert "test_mode_local_receipts" in outreach["capabilities"]
 
 
 def test_registry_tool_filters_by_category_and_priority():
@@ -125,6 +167,10 @@ def test_runtime_capability_check_reports_requested_commands():
     assert result["capabilities"]["python"]["available"] is True
     assert result["capabilities"]["definitely_missing_takyon_test_binary"]["available"] is False
     assert "definitely_missing_takyon_test_binary" in result["missing_capabilities"]
+
+
+def test_product_publish_target_defaults_to_business_subdomain():
+    assert _product_publish_target("latexflow") == "https://latexflow.fourmanifold.com/"
 
 
 def test_takyon_slash_runs_local_registry_command():
@@ -255,7 +301,7 @@ def test_app_plan_normalizes_interval_and_records_validation_warnings(tmp_path):
     _commit(
         store,
         "business:latexflow",
-        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
         "init",
     )
 
@@ -290,7 +336,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     _commit(
         store,
         "business:latexflow",
-        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
         "init",
     )
 
@@ -306,6 +352,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     site = tmp_path / "businesses" / "latexflow" / "product" / "site"
     site.mkdir(parents=True)
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    (site / "index.html").chmod(0o600)
     verification = json.loads(
         handle_business_verify_product_surface(
             {
@@ -319,13 +366,122 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
 
     assert verification["success"] is True
     assert verification["verification"]["status"] == "passed"
+    assert verification["verification"]["inventory"]["status"] == "collected"
+    assert verification["verification"]["inventory"]["routes"] == ["/"]
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
     assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert app["product_inventory"]["routes"] == ["/"]
+    assert app["product_surface"]["local_continuable_work"] == []
     assert (tmp_path / "published-sites" / "latexflow" / "index.html").exists()
     assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
     assert app["surface_contract"]["routes"] == ["/"]
+    pulse = store.calculate_pulse("latexflow")
+    assert pulse["current_state"]["product_surface"]["inventory_status"] == "collected"
+    assert pulse["summary"]["local_continuable_product_work"] == 0
+
+
+def test_shared_renderer_surface_publishes_without_product_source_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9127/site")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
+        "init-shared-renderer",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "draft",
+                "publish_policy": "shared_renderer",
+                "routes": ["/"],
+                "metadata": {
+                    "headline": "Write LaTeX without tickets",
+                    "shared_product_blocks": [
+                        {
+                            "type": "waitlist",
+                            "label": "Early access",
+                            "status": "available",
+                            "description": "Collect workflow feedback.",
+                        }
+                    ],
+                },
+            }
+        ],
+        "surface-shared-renderer",
+    )
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "install": False,
+                "idempotency_key": "verify-shared-renderer",
+            }
+        )
+    )
+
+    assert verification["success"] is True
+    receipt = verification["verification"]
+    assert receipt["status"] == "passed"
+    assert receipt["kind"] == "shared_renderer"
+    assert receipt["done_gate_status"] == "passed"
+    assert receipt["publish"]["deploy_kind"] == "shared_renderer"
+    assert receipt["publish"]["public_url"] == "http://127.0.0.1:9127/site/latexflow/"
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_policy"] == "shared_renderer"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == "http://127.0.0.1:9127/site/latexflow/"
+    assert app["product_surface"]["has_source_files"] is False
+    assert app["product_surface"]["local_continuable_work"] == []
+    pulse = store.calculate_pulse("latexflow")
+    assert pulse["summary"]["local_continuable_product_work"] == 0
+
+
+def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
+    monkeypatch.setenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "1")
+    (tmp_path / "Caddyfile").write_text("app.fourmanifold.com {\n    reverse_proxy 127.0.0.1:9119\n}\n", encoding="utf-8")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-static-site-caddy",
+            }
+        )
+    )["verification"]
+
+    caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
+    assert verification["done_gate_status"] == "passed"
+    assert verification["publish"]["status"] == "published"
+    assert verification["publish"]["caddyfile"] == str(tmp_path / "Caddyfile")
+    assert "latexflow.fourmanifold.com" in caddyfile
+    assert f"root * {tmp_path / 'published-sites' / 'latexflow'}" in caddyfile
+    assert "file_server" in caddyfile
+    assert ((tmp_path / "published-sites" / "latexflow" / "index.html").stat().st_mode & 0o777) == 0o644
 
 
 def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypatch):
@@ -355,6 +511,51 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     assert verification["success"] is True
     assert verification["verification"]["status"] == "failed"
     assert "duplicate workspace prefix" in verification["verification"]["error"]
+
+
+def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the product surface under product/site.",
+                "idempotency_key": "workspace-contract",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = captured["payload"]["instruction"]
+    assert result["success"] is True
+    assert "current working directory is already the requested business workspace: product/site" in instruction
+    assert "not `product/site/index.html`" in instruction
+    assert (tmp_path / "businesses" / "latexflow" / "product" / "site" / "index.html").exists()
+    assert not (tmp_path / "businesses" / "latexflow" / "product" / "site" / "product" / "site").exists()
 
 
 def test_product_verification_records_publish_blocker_when_hosting_root_missing(tmp_path, monkeypatch):
@@ -391,6 +592,67 @@ def test_product_verification_records_publish_blocker_when_hosting_root_missing(
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "publish_blocked"
     assert app["surface_contract"]["publish_status"] == "blocked"
+
+
+def test_product_inventory_is_nonfatal_for_unreadable_source_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    business_root = tmp_path / "businesses" / "latexflow"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    (site / "bad.js").write_bytes(b"\xff\xfe\x00")
+
+    verification = _verify_product_surface_path(business_root, "product/site", install=False)
+
+    assert verification["status"] == "passed"
+    assert verification["inventory"]["status"] == "collected"
+    assert verification["inventory"]["files_skipped"] >= 1
+
+
+def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "latexflow"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / ".next").mkdir()
+    (site / ".next" / "BUILD_ID").write_text("build-1\n", encoding="utf-8")
+    (site / "out").mkdir()
+    (site / "out" / "index.html").write_text("<h1>Static export also exists</h1>\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "latexflow-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "1")
+    monkeypatch.setenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "1")
+    monkeypatch.setenv("TAKYON_PRODUCT_SYSTEMD_DIR", str(tmp_path / "systemd"))
+    monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="latexflow",
+        source_path="product/site",
+        publish_target="https://latexflow.fourmanifold.com/",
+    )
+
+    assert result["status"] == "published"
+    assert result["deploy_kind"] == "next_systemd_caddy"
+    assert result["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert result["publish_source_path"] == "product/site"
+    service = tmp_path / "systemd" / "takyon-product-latexflow.service"
+    assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
+    assert "latexflow.fourmanifold.com" in (tmp_path / "Caddyfile").read_text(encoding="utf-8")
 
 
 def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, monkeypatch):
@@ -693,7 +955,7 @@ def test_wake_command_triggers_current_business_cron_immediately(tmp_path, monke
     )
 
     assert current == "latexflow"
-    assert "scheduled" in output
+    assert "recurring wake schedule" in output
     assert "triggered now" in output
     assert tick_calls == [False]
 
@@ -1248,6 +1510,69 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     assert receipt_payload["external_side_effects"] == "suppressed"
     assert receipt_payload["provider"] == "meta"
     assert receipt_payload["artifact_path"] == publish["artifact"]
+
+
+def test_business_publish_outreach_canonicalizes_product_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.upsert",
+                "business": "latexflow",
+                "name": "LatexFlow",
+                "mode": "test",
+            },
+        ],
+        "init-latexflow-outreach",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "draft",
+                "source_path": "product/site",
+                "publish_target": "https://latexflow.fourmanifold.com/",
+            },
+        ],
+        "surface-latexflow-outreach",
+    )
+
+    preview, replacements = _canonicalize_business_product_links(
+        "https://latexflow.io (coming soon)",
+        business="latexflow",
+        canonical_url="https://latexflow.fourmanifold.com/",
+    )
+    assert preview == "https://latexflow.fourmanifold.com/ (coming soon)"
+    assert replacements == [{"from": "https://latexflow.io", "to": "https://latexflow.fourmanifold.com/"}]
+
+    result = json.loads(
+        handle_business_publish_outreach(
+            {
+                "business": "latexflow",
+                "channel": "reddit",
+                "target": "r/latex",
+                "subject": "Try LatexFlow",
+                "body": "Git sync and magic links.\n\nhttps://latexflow.io (coming soon)",
+                "idempotency_key": "latexflow-canonical-outreach",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    artifact = tmp_path / "businesses" / "latexflow" / publish["artifact"]
+    receipt = tmp_path / "businesses" / "latexflow" / publish["receipt"]
+    assert "https://latexflow.fourmanifold.com/ (coming soon)" in artifact.read_text(encoding="utf-8")
+    assert "latexflow.io" not in artifact.read_text(encoding="utf-8")
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["metadata"]["canonical_product_url"] == "https://latexflow.fourmanifold.com/"
+    assert receipt_payload["metadata"]["canonicalized_product_links"]
 
 
 def test_business_publish_outreach_records_intended_destination(tmp_path, monkeypatch):

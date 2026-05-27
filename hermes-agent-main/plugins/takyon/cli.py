@@ -546,16 +546,16 @@ def _format_operation_result(item: Any) -> str:
         where = f" -> {_business_artifact_path(business, path)}" if path else ""
         return f"conversation state for business:{business}{where}"
     if action == "cron.ensure_ceo_wakeup":
-        return f"CEO wakeup for business:{business or item.get('business')} scheduled: {item.get('schedule') or item.get('cron_job')}"
+        return f"recurring wake schedule for business:{business or item.get('business')}: {item.get('schedule') or item.get('cron_job')}"
     if action == "cron.trigger_ceo_wakeup":
         target = business or item.get("business")
         cron_job = item.get("cron_job") or "unknown"
         if item.get("triggered"):
             ran = item.get("tick_ran")
             ran_text = f"; tick ran {ran} job{'s' if ran != 1 else ''}" if ran is not None else ""
-            return f"CEO wakeup for business:{target} triggered now: {cron_job}{ran_text}"
+            return f"CEO wake for business:{target} triggered now: {cron_job}{ran_text}"
         error = item.get("error") or "cron job was not found"
-        return f"CEO wakeup for business:{target} could not trigger: {error}"
+        return f"CEO wake for business:{target} could not trigger: {error}"
     if action == "agent.record":
         return f"agent record for business:{business or item.get('business')}: {item.get('agent_run') or item.get('id')}"
     if action == "maintenance.gc":
@@ -755,7 +755,12 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed,",
         "what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.",
         "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in the business brain.",
-        "Distribution is required thinking, not forced outreach.",
+        "Distribution is required action during bootstrap. After research and the smallest credible offer/product surface,",
+        "create or continue campaigns/phase-1-outreach/ and run a Phase 1 outreach batch through",
+        "takyon:distribution-campaign and takyon:outreach. Phase 1 is a bootstrap/open-campaign completion contract,",
+        "not a forever recurring funnel: normally use at least 3 evidence-backed lanes and 6 total",
+        "business_publish_outreach intents, unless a named safety, scope, budget, or operator blocker prevents even",
+        "local/mock outreach.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
         "takyon:conversation-response / business_conversation_agent_task path to compress it before deciding.",
         "Call business_calculate_pulse and use the registry pulse skill to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
@@ -770,8 +775,11 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Skip product/source/publication only when current evidence, safety, scope, budget, credentials, or runtime gates make",
         "building the wrong move; record that exact reason as a blocker or business-brain hypothesis.",
         "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution assets,",
-        "guarded jobs or suppressed local receipts, and the next CEO wake when they are the justified move. If something is blocked, record the blocker and continue with local/test",
-        "artifacts that do not require that provider.",
+        "guarded jobs or suppressed local receipts, and the next CEO wake when they are the justified move. Do not stop after",
+        "research, source files, or a blocked website publish while Phase 1 outreach is absent or incomplete. If a Phase 1",
+        "campaign already exists, continue it instead of restarting it. A blocked public URL does not block outreach; use",
+        "the business publish_target or a truthful discovery/mock message and name the product blocker.",
+        "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider.",
         "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace videos, local outreach publication, websites, checkout, deploys, or provider-backed work with Markdown summaries.",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
@@ -786,8 +794,10 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
             "Test mode rules: product and website build/publication/deploy are allowed when they are the business-owned",
             "product surface and the normal path, budget, credential, and receipt/job gates pass. Product deploy is Vercel-gated.",
             "Do not send outreach, post to social/forums, buy ads, charge customers, or send marketing emails externally.",
-            "If the chosen distribution tactic has an external side effect, suppress or stub it locally with a concrete receipt,",
-            "or queue guarded external work with credential gates.",
+            "For each Phase 1 outreach touch, call business_publish_outreach. If a forum/social channel or provider posting",
+            "is unavailable, use local suppressed/mock publication with the intended channel/destination when known. Successful",
+            "test-mode touches must create outreach/local-published/, receipts/outreach/, and conversation mirrors; otherwise",
+            "record the exact blocker.",
         ])
     return "\n".join(lines)
 
@@ -1397,7 +1407,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 lines.append(f"business:{business} work focus -> {item.get('work_focus') or 'all'}")
         elif action == "cron.ensure_ceo_wakeup":
             if business:
-                lines.append(f"CEO wake -> business:{business} {item.get('schedule') or item.get('cron_job')}")
+                lines.append(f"wake schedule -> business:{business} {item.get('schedule') or item.get('cron_job')}")
         elif action == "ledger.allocate":
             if business:
                 lines.append(f"budget ledger -> business:{business} {item.get('ledger_entry') or ''}".rstrip())
@@ -1416,6 +1426,8 @@ class _ShellProgress:
         self.enabled = bool(enabled and config["enabled"])
         self.max_lines = int(config["max_lines"])
         self.fd: int | None = os.dup(1) if self.enabled else None
+        self._last_activity = ""
+        self._last_tool_generating = ""
 
     def close(self) -> None:
         if self.fd is not None:
@@ -1430,6 +1442,33 @@ class _ShellProgress:
             os.write(self.fd, text.encode("utf-8", errors="replace"))
         except OSError:
             self.close()
+
+    def tool_generating(self, name: str) -> None:
+        if not name:
+            return
+        if name == self._last_tool_generating:
+            return
+        self._last_tool_generating = name
+        self.emit(f"preparing tool -> {name}")
+
+    def activity(self, desc: str) -> None:
+        text = str(desc or "").strip()
+        if not text or text == self._last_activity:
+            return
+        self._last_activity = text
+        self.emit(f"agent -> {text}")
+
+    def tool_progress(self, event_type: str, name: str | None = None, preview: str | None = None, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        if not name:
+            return
+        if event_type == "tool.started":
+            self._last_tool_generating = ""
+            suffix = f" · {preview}" if preview else ""
+            self.emit(f"tool started -> {name}{suffix}")
+        elif event_type == "tool.completed":
+            duration = kwargs.get("duration")
+            suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
+            self.emit(f"tool completed -> {name}{suffix}")
 
     def tool_completed(self, _tool_id: str, name: str, args: dict[str, Any], result: Any) -> None:
         if self.fd is None:
@@ -2229,8 +2268,11 @@ def _run_agent(
             skip_context_files=True,
             platform="takyon",
             quiet_mode=not show_agent_activity,
+            tool_progress_callback=progress.tool_progress if progress.enabled else None,
+            tool_gen_callback=progress.tool_generating if progress.enabled else None,
             tool_complete_callback=progress.tool_completed if progress.enabled else None,
         )
+        agent.activity_callback = progress.activity if progress.enabled else None
         agent.suppress_status_output = not show_agent_activity
         return agent.run_conversation(prompt, stream_callback=None if show_agent_activity else (lambda _delta: None))
 

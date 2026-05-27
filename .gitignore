@@ -77,3 +77,7 @@ pnpm-debug.log*
 *.pem
 privvy*
 result
+.vercel
+.codex-reference-images/
+takyon-vps
+takyon-vps.pub

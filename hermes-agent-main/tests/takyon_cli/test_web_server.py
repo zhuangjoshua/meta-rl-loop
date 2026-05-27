@@ -2,6 +2,7 @@
 
 import os
 import json
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -95,6 +96,86 @@ class TestRedactKey:
 # ---------------------------------------------------------------------------
 # web_server tests (FastAPI endpoints)
 # ---------------------------------------------------------------------------
+
+
+def test_dashboard_session_token_persists_in_takyon_home(tmp_path, monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.delenv("TAKYON_DASHBOARD_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("TAKYON_DASHBOARD_SESSION_TOKEN_FILE", raising=False)
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    token = web_server._load_or_create_session_token()
+    token_file = tmp_path / "dashboard_session_token"
+
+    assert token_file.read_text(encoding="utf-8").strip() == token
+    assert web_server._load_or_create_session_token() == token
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    token_file = tmp_path / "dashboard_session_token"
+    token_file.write_text("file-token-that-is-long-enough-1234567890\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_DASHBOARD_SESSION_TOKEN", "env-token-that-is-long-enough-1234567890")
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    assert web_server._load_or_create_session_token() == "env-token-that-is-long-enough-1234567890"
+
+
+def test_shared_product_renderer_serves_business_subdomain(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    store = TakyonStore(tmp_path)
+    store.commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
+        idempotency_key="shared-renderer-business",
+        reason="test",
+        actor="test",
+    )
+    store.commit(
+        scope="business:latexflow",
+        operations=[
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "draft",
+                "publish_policy": "shared_renderer",
+                "metadata": {
+                    "headline": "Write LaTeX without tickets",
+                    "shared_product_blocks": [
+                        {"type": "waitlist", "label": "Early access", "status": "available"}
+                    ],
+                },
+            },
+        ],
+        idempotency_key="shared-renderer-web",
+        reason="test",
+        actor="test",
+    )
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        local_response = client.get("/site/latexflow/", headers={"Host": "localhost:9119"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "Write LaTeX without tickets" in response.text
+    assert "Shared Takyon product surface" in response.text
+    assert "Early access" in response.text
+    assert local_response.status_code == 200
+    assert "Write LaTeX without tickets" in local_response.text
 
 
 class TestWebServerEndpoints:

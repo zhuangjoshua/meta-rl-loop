@@ -52,7 +52,7 @@
 
 .takyon-map-layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 420px;
+  grid-template-columns: 240px minmax(0, 1fr) 380px;
   height: calc(100% - 61px);
   min-height: 0;
 }
@@ -221,13 +221,17 @@
 
 .takyon-map-edge {
   fill: none;
-  stroke: color-mix(in srgb, var(--color-primary) 52%, transparent);
-  stroke-width: 1.7;
+  stroke: color-mix(in srgb, var(--color-primary) 34%, transparent);
+  stroke-width: 1.35;
 }
 
 .takyon-map-edge.is-reference {
-  stroke: color-mix(in srgb, var(--color-success) 55%, transparent);
+  stroke: color-mix(in srgb, var(--color-success) 35%, transparent);
   stroke-dasharray: 4 5;
+}
+
+.takyon-map-edge.is-aggregate {
+  stroke-width: 2;
 }
 
 .takyon-map-arrow {
@@ -235,6 +239,7 @@
 }
 
 .takyon-map-edge-label {
+  display: none;
   fill: var(--color-muted-foreground);
   font-size: 10px;
   paint-order: stroke;
@@ -304,6 +309,12 @@
   --node-accent: #ff9b91;
 }
 
+.takyon-map-node.kind-group {
+  --node-accent: #f0d98a;
+  border-style: dashed;
+  background: color-mix(in srgb, var(--color-card) 86%, var(--node-accent) 14%);
+}
+
 .takyon-map-node-kind {
   color: var(--node-accent, var(--color-muted-foreground));
   font-size: 0.68rem;
@@ -330,6 +341,17 @@
   line-height: 1.2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+.takyon-map-node-count {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  color: color-mix(in srgb, var(--node-accent, var(--color-primary)) 82%, var(--color-foreground));
+  font-size: 0.62rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .takyon-map-inspector-head {
@@ -370,6 +392,7 @@
 .takyon-map-source-card,
 .takyon-map-snippet-card,
 .takyon-map-edge-stack,
+.takyon-map-group-card,
 .takyon-map-editor-wrap,
 .takyon-map-metadata {
   margin-top: 12px;
@@ -527,6 +550,59 @@
   display: grid;
   gap: 2px;
   padding: 6px;
+}
+
+.takyon-map-edge-row.is-static {
+  cursor: default;
+}
+
+.takyon-map-group-card {
+  padding: 10px;
+}
+
+.takyon-map-group-card h3 {
+  margin: 0 0 8px;
+  color: var(--color-muted-foreground);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.takyon-map-group-members {
+  display: grid;
+  gap: 4px;
+}
+
+.takyon-map-group-member {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.takyon-map-group-member:hover {
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.takyon-map-group-member span,
+.takyon-map-group-member small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takyon-map-group-member small {
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
 }
 
 .takyon-map-editor-wrap {

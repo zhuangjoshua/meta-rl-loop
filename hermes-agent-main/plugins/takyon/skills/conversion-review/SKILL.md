@@ -13,6 +13,7 @@ Use this skill when there is traffic but weak signups, purchases, replies, or re
 - Identify the most likely conversion bottleneck.
 - Write proposed copy, offer, onboarding, pricing, or site changes into a workspace or brain file.
 - Record guarded site, checkout, analytics, or deployment work requests with `business_enqueue_job`.
-- Record the hypothesis, success metric, and review timing.
+- Use canonical traffic/funnel tools when they exist in `business_registry`; otherwise mark visitor, conversion, CAC, and attribution gaps explicitly instead of inventing metrics.
+- When the review creates a measurable bet, use `takyon:experimentation` if available to record the hypothesis, success metric, guardrails, and review timing.
 
 If metrics are unavailable, state the uncertainty and create a plan to get better evidence.

@@ -85,10 +85,64 @@ app = FastAPI(title="Takyon Agent", version=__version__)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
-# Generated fresh on every server start — dies when the process exits.
 # Injected into the SPA HTML so only the legitimate web UI can use it.
+# Persisted under TAKYON_HOME so dashboard restarts do not strand open tabs
+# with a stale WebSocket/API token.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = secrets.token_urlsafe(32)
+_SESSION_TOKEN_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN"
+_SESSION_TOKEN_FILE_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN_FILE"
+_SESSION_TOKEN_FILE_NAME = "dashboard_session_token"
+
+
+def _valid_session_token(value: str) -> bool:
+    token = value.strip()
+    return len(token) >= 32 and not any(ch.isspace() for ch in token)
+
+
+def _dashboard_session_token_path() -> Path:
+    override = os.getenv(_SESSION_TOKEN_FILE_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return get_takyon_home() / _SESSION_TOKEN_FILE_NAME
+
+
+def _write_dashboard_session_token(path: Path, token: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{token}\n")
+    finally:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+
+def _load_or_create_session_token() -> str:
+    env_token = os.getenv(_SESSION_TOKEN_ENV, "").strip()
+    if _valid_session_token(env_token):
+        return env_token
+
+    token_path = _dashboard_session_token_path()
+    try:
+        existing = token_path.read_text(encoding="utf-8").strip()
+        if _valid_session_token(existing):
+            return existing
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log.warning("Could not read dashboard session token file %s: %s", token_path, exc)
+
+    token = secrets.token_urlsafe(32)
+    try:
+        _write_dashboard_session_token(token_path, token)
+    except OSError as exc:
+        _log.warning("Could not persist dashboard session token file %s: %s", token_path, exc)
+    return token
+
+
+_SESSION_TOKEN = _load_or_create_session_token()
 _SESSION_HEADER_NAME = "X-Takyon-Session-Token"
 
 _AUTH0_SESSION_COOKIE = "takyon_dashboard_auth"
@@ -573,6 +627,8 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     #   localhost:9119
     #   127.0.0.1:9119
     host_only = _host_without_port(host_header)
+    if _business_slug_from_product_host(host_only):
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -641,6 +697,8 @@ async def auth_middleware(request: Request, call_next):
 @app.middleware("http")
 async def auth0_middleware(request: Request, call_next):
     """Optional Auth0 gate for the public dashboard host."""
+    if _business_slug_from_product_host(_host_without_port(request.headers.get("host", ""))):
+        return await call_next(request)
     try:
         cfg = _auth0_config()
     except Auth0ConfigError as exc:
@@ -3913,6 +3971,223 @@ def _ws_auth0_session_is_allowed(ws: "WebSocket") -> bool:
         return True
     return _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None
 
+
+def _ws_auth0_reject_reason(ws: "WebSocket") -> str:
+    """Return the exact Auth0 rejection reason, or empty when allowed."""
+    try:
+        cfg = _auth0_config()
+    except Auth0ConfigError as exc:
+        return f"auth0_config_error:{str(exc).splitlines()[0][:80]}"
+    if not cfg or not _auth0_required_for_host(ws.headers):
+        return ""
+    if _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None:
+        return ""
+    return "auth0_cookie_missing"
+
+
+async def _ws_reject(ws: "WebSocket", endpoint: str, code: int, reason: str) -> None:
+    """Close a rejected dashboard WebSocket with enough server-side forensics."""
+    client = ws.client.host if ws.client else ""
+    host = ws.headers.get("host", "")
+    origin = ws.headers.get("origin", "")
+    xff = ws.headers.get("x-forwarded-for", "")
+    xf_proto = ws.headers.get("x-forwarded-proto", "")
+    _log.warning(
+        "dashboard websocket rejected endpoint=%s reason=%s code=%s host=%r origin=%r client=%r x_forwarded_for=%r x_forwarded_proto=%r",
+        endpoint,
+        reason,
+        code,
+        host,
+        origin,
+        client,
+        xff,
+        xf_proto,
+    )
+    await ws.close(code=code, reason=reason[:120])
+
+
+def _dashboard_product_site_root() -> Path:
+    raw = (
+        os.getenv("TAKYON_PRODUCT_SITE_ROOT", "").strip()
+        or os.getenv("PUBLIC_COMPANY_SITE_ROOT", "").strip()
+        or os.getenv("TAKYON_STATIC_SITE_ROOT", "").strip()
+    )
+    return Path(raw).expanduser().resolve() if raw else get_takyon_home() / "product-sites"
+
+
+def _company_base_domain() -> str:
+    return (
+        os.getenv("PUBLIC_COMPANY_BASE_DOMAIN", "").strip().lower()
+        or os.getenv("TAKYON_COMPANY_BASE_DOMAIN", "").strip().lower()
+        or "fourmanifold.com"
+    ).strip(".")
+
+
+def _business_slug_from_product_host(host: str) -> str:
+    host = (host or "").strip().lower().strip(".")
+    base = _company_base_domain()
+    if not host or not base or not host.endswith(f".{base}"):
+        return ""
+    slug = host[: -(len(base) + 1)]
+    if slug in {"app", "www", "admin", "dashboard"}:
+        return ""
+    try:
+        return _safe_product_slug(slug)
+    except HTTPException:
+        return ""
+
+
+def _configure_local_product_publish(host: str, port: int) -> None:
+    """Give local dashboard runs an honest local product URL without prod deploy."""
+    local_hosts = {"127.0.0.1", "localhost", "::1"}
+    if host not in local_hosts:
+        return
+    if _configured_public_host():
+        return
+    root = _dashboard_product_site_root()
+    os.environ.setdefault("TAKYON_PRODUCT_SITE_ROOT", str(root))
+    os.environ.setdefault("TAKYON_PRODUCT_CADDYFILE", str(root / "Caddyfile"))
+    os.environ.setdefault("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "1")
+    os.environ.setdefault("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "1")
+    display_host = "127.0.0.1" if host in {"::1", "localhost"} else host
+    os.environ.setdefault("TAKYON_PRODUCT_LOCAL_BASE_URL", f"http://{display_host}:{port}/site")
+
+
+def _safe_product_slug(value: str) -> str:
+    slug = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,78}[a-z0-9]", slug) and not re.fullmatch(r"[a-z0-9]", slug):
+        raise HTTPException(status_code=404, detail="product site not found")
+    return slug
+
+
+def _surface_blocks(surface: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    raw = (
+        metadata.get("shared_product_blocks")
+        or metadata.get("product_blocks")
+        or metadata.get("blocks")
+        or []
+    )
+    if isinstance(raw, dict):
+        raw = [raw]
+    blocks = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    if blocks:
+        return blocks[:12]
+    return [
+        {"type": "waitlist", "label": "Early access", "status": "available", "description": "Collect interest and workflow feedback."},
+        {"type": "signup", "label": "Signup/login", "status": "blocked", "description": "Use Hermes app-runtime auth when enabled."},
+        {"type": "checkout", "label": "Checkout", "status": "blocked", "description": "Use Stripe checkout only when configured."},
+    ]
+
+
+def _shared_product_status(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"available", "active", "live", "ready", "done", "published"}:
+        return "Available"
+    if raw in {"blocked", "missing", "unavailable", "not_wired", "not-wired"}:
+        return "Blocked"
+    if raw in {"planned", "next", "coming_soon", "building", "building_next"}:
+        return "Building next"
+    return "Recorded" if raw else "Planned"
+
+
+def _render_shared_product_surface(business: str) -> HTMLResponse:
+    slug = _safe_product_slug(business)
+    try:
+        from plugins.takyon.core import TakyonStore  # Imported lazily so dashboard startup stays light.
+
+        data = TakyonStore(get_takyon_home()).read(scope=f"business:{slug}", query="summary", include=["app"], limit=20)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"product site not found: {slug}") from exc
+    business_row = data.get("business") if isinstance(data.get("business"), dict) else {}
+    app_data = data.get("app") if isinstance(data.get("app"), dict) else {}
+    surface = app_data.get("surface_contract") if isinstance(app_data.get("surface_contract"), dict) else {}
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    name = str(business_row.get("name") or slug).strip()
+    goal = str(business_row.get("goal") or metadata.get("subheadline") or metadata.get("description") or "").strip()
+    headline = str(metadata.get("headline") or name).strip()
+    publish_status = str(surface.get("publish_status") or surface.get("status") or "early access").strip()
+    public_url = str(surface.get("public_url") or surface.get("publish_target") or f"https://{slug}.{_company_base_domain()}/").strip()
+    blocks = _surface_blocks(surface)
+    block_cards = []
+    for block in blocks:
+        label = html.escape(str(block.get("label") or block.get("type") or "Product block"))
+        status = html.escape(_shared_product_status(block.get("status")))
+        description = html.escape(str(block.get("description") or block.get("reason") or ""))
+        block_cards.append(
+            f"<article class='block'><div><h2>{label}</h2>{f'<p>{description}</p>' if description else ''}</div><span>{status}</span></article>"
+        )
+    body = "\n".join(block_cards)
+    escaped_name = html.escape(name)
+    escaped_headline = html.escape(headline)
+    escaped_goal = html.escape(goal or "A focused early product surface for this business.")
+    escaped_status = html.escape(_shared_product_status(publish_status))
+    escaped_url = html.escape(public_url)
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{escaped_name}</title>
+  <style>
+    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #08090b; color: #f4f4f5; }}
+    body {{ margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #17212b 0, transparent 32rem), #08090b; }}
+    main {{ width: min(1040px, calc(100vw - 40px)); margin: 0 auto; padding: 72px 0; }}
+    header {{ display: grid; gap: 18px; padding: 36px 0 42px; border-bottom: 1px solid #26272b; }}
+    .eyebrow {{ color: #a1a1aa; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }}
+    h1 {{ margin: 0; max-width: 820px; font-size: clamp(44px, 7vw, 88px); line-height: .94; letter-spacing: 0; }}
+    p {{ margin: 0; color: #c4c4cc; font-size: 18px; line-height: 1.65; max-width: 720px; }}
+    .status {{ display: inline-flex; width: fit-content; align-items: center; gap: 8px; border: 1px solid #2b5547; background: #0d251d; color: #b7f7db; border-radius: 999px; padding: 8px 12px; font-size: 14px; }}
+    .status::before {{ content: ""; width: 8px; height: 8px; border-radius: 50%; background: #34d399; }}
+    .blocks {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 28px; }}
+    .block {{ min-height: 132px; display: flex; flex-direction: column; justify-content: space-between; gap: 18px; border: 1px solid #27272a; border-radius: 8px; padding: 18px; background: rgba(12, 13, 16, .82); }}
+    .block h2 {{ margin: 0 0 8px; font-size: 20px; letter-spacing: 0; }}
+    .block p {{ font-size: 14px; color: #a1a1aa; line-height: 1.5; }}
+    .block span {{ width: fit-content; border: 1px solid #3f3f46; border-radius: 999px; padding: 5px 9px; color: #d4d4d8; font-size: 12px; }}
+    footer {{ margin-top: 36px; color: #71717a; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">{escaped_name}</div>
+      <h1>{escaped_headline}</h1>
+      <p>{escaped_goal}</p>
+      <div class="status">{escaped_status}</div>
+    </header>
+    <section class="blocks" aria-label="Product surface">
+      {body}
+    </section>
+    <footer>Shared Takyon product surface · {escaped_url}</footer>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+
+async def _serve_product_site_file(business: str, full_path: str = "") -> Response:
+    slug = _safe_product_slug(business)
+    root = _dashboard_product_site_root().resolve()
+    rel = full_path.strip("/") or "index.html"
+    target = (root / slug / rel).resolve()
+    if target.is_dir():
+        target = target / "index.html"
+    if root in (target, *target.parents) and target.is_file():
+        return FileResponse(target)
+    if rel in {"index.html", ""}:
+        return _render_shared_product_surface(slug)
+    raise HTTPException(status_code=404, detail="product site not found")
+
+
+@app.get("/site/{business}")
+async def product_site_index(business: str):
+    return await _serve_product_site_file(business)
+
+
+@app.get("/site/{business}/{full_path:path}")
+async def product_site_file(business: str, full_path: str):
+    return await _serve_product_site_file(business, full_path)
+
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
 # the chat tab generates on mount; entries auto-evict when the last subscriber
@@ -4129,20 +4404,24 @@ async def pty_ws(ws: WebSocket) -> None:
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/ws", 4403, "embedded_chat_disabled")
         return
 
     token = ws.query_params.get("token", "")
+    if not token:
+        await _ws_reject(ws, "/api/ws", 4401, "missing_token")
+        return
     if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+        await _ws_reject(ws, "/api/ws", 4401, "bad_token")
         return
 
-    if not _ws_auth0_session_is_allowed(ws):
-        await ws.close(code=4401)
+    auth0_reason = _ws_auth0_reject_reason(ws)
+    if auth0_reason:
+        await _ws_reject(ws, "/api/ws", 4401, auth0_reason)
         return
 
     if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/ws", 4403, "client_host_rejected")
         return
 
     from tui_gateway.ws import handle_ws
@@ -4165,25 +4444,29 @@ async def gateway_ws(ws: WebSocket) -> None:
 @app.websocket("/api/pub")
 async def pub_ws(ws: WebSocket) -> None:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/pub", 4403, "embedded_chat_disabled")
         return
 
     token = ws.query_params.get("token", "")
+    if not token:
+        await _ws_reject(ws, "/api/pub", 4401, "missing_token")
+        return
     if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+        await _ws_reject(ws, "/api/pub", 4401, "bad_token")
         return
 
-    if not _ws_auth0_session_is_allowed(ws):
-        await ws.close(code=4401)
+    auth0_reason = _ws_auth0_reject_reason(ws)
+    if auth0_reason:
+        await _ws_reject(ws, "/api/pub", 4401, auth0_reason)
         return
 
     if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/pub", 4403, "client_host_rejected")
         return
 
     channel = _channel_or_close_code(ws)
     if not channel:
-        await ws.close(code=4400)
+        await _ws_reject(ws, "/api/pub", 4400, "missing_or_bad_channel")
         return
 
     await ws.accept()
@@ -4198,25 +4481,29 @@ async def pub_ws(ws: WebSocket) -> None:
 @app.websocket("/api/events")
 async def events_ws(ws: WebSocket) -> None:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/events", 4403, "embedded_chat_disabled")
         return
 
     token = ws.query_params.get("token", "")
+    if not token:
+        await _ws_reject(ws, "/api/events", 4401, "missing_token")
+        return
     if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+        await _ws_reject(ws, "/api/events", 4401, "bad_token")
         return
 
-    if not _ws_auth0_session_is_allowed(ws):
-        await ws.close(code=4401)
+    auth0_reason = _ws_auth0_reject_reason(ws)
+    if auth0_reason:
+        await _ws_reject(ws, "/api/events", 4401, auth0_reason)
         return
 
     if not _ws_client_is_allowed(ws):
-        await ws.close(code=4403)
+        await _ws_reject(ws, "/api/events", 4403, "client_host_rejected")
         return
 
     channel = _channel_or_close_code(ws)
     if not channel:
-        await ws.close(code=4400)
+        await _ws_reject(ws, "/api/events", 4400, "missing_or_bad_channel")
         return
 
     await ws.accept()
@@ -4282,7 +4569,12 @@ def mount_spa(application: FastAPI):
     """
     if not WEB_DIST.exists():
         @application.get("/{full_path:path}")
-        async def no_frontend(full_path: str):
+        async def no_frontend(full_path: str, request: Request):
+            product_business = _business_slug_from_product_host(
+                _host_without_port(request.headers.get("host", ""))
+            )
+            if product_business:
+                return _render_shared_product_surface(product_business)
             return JSONResponse(
                 {"error": "Frontend not built. Run: cd web && npm run build"},
                 status_code=404,
@@ -4346,6 +4638,11 @@ def mount_spa(application: FastAPI):
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
+        product_business = _business_slug_from_product_host(
+            _host_without_port(request.headers.get("host", ""))
+        )
+        if product_business:
+            return _render_shared_product_surface(product_business)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
@@ -5168,6 +5465,7 @@ def start_server(
     # PTY child uses to publish events to the dashboard sidebar.
     app.state.bound_host = host
     app.state.bound_port = port
+    _configure_local_product_publish(host, port)
 
     if open_browser:
         import webbrowser

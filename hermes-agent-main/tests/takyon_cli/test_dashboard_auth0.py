@@ -1,0 +1,177 @@
+"""Tests for the optional Auth0 dashboard gate."""
+
+from __future__ import annotations
+
+import urllib.parse
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+HOST = "app.fourmanifold.com"
+
+
+@pytest.fixture
+def auth0_env(monkeypatch):
+    from takyon_cli import web_server as ws
+
+    monkeypatch.setenv("AUTH0_DOMAIN", "fourmanifold.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("AUTH0_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
+    monkeypatch.setenv("APP_BASE_URL", f"https://{HOST}")
+    monkeypatch.setenv("ARGON_BETA_ALLOWED_EMAIL_DOMAINS", "fourmanifold.com")
+    ws.app.state.bound_host = "127.0.0.1"
+    try:
+        yield ws
+    finally:
+        if hasattr(ws.app.state, "bound_host"):
+            del ws.app.state.bound_host
+        ws._AUTH0_JWKS_CLIENTS.clear()
+
+
+def _client(ws) -> TestClient:
+    return TestClient(ws.app, base_url=f"https://{HOST}")
+
+
+def _state_from_login(resp) -> str:
+    location = resp.headers["location"]
+    parsed = urllib.parse.urlparse(location)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "fourmanifold.auth0.com"
+    return urllib.parse.parse_qs(parsed.query)["state"][0]
+
+
+def test_public_app_host_redirects_spa_to_auth0_login(auth0_env):
+    client = _client(auth0_env)
+
+    resp = client.get("/", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/auth/login?")
+
+
+def test_localhost_dashboard_is_not_forced_through_auth0(auth0_env):
+    client = TestClient(auth0_env.app, base_url="http://localhost:9119")
+
+    resp = client.get("/api/status")
+
+    assert resp.status_code == 200
+
+
+def test_app_host_protects_public_status_endpoint_when_auth0_applies(auth0_env):
+    client = _client(auth0_env)
+
+    resp = client.get("/api/status")
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Auth0 login required"
+
+
+def test_auth0_login_redirect_uses_current_app_base_url(auth0_env):
+    client = _client(auth0_env)
+
+    resp = client.get("/auth/login?return_to=/chat", follow_redirects=False)
+
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    parsed = urllib.parse.urlparse(location)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert parsed.netloc == "fourmanifold.auth0.com"
+    assert query["client_id"] == ["client-id"]
+    assert query["redirect_uri"] == [f"https://{HOST}/auth/callback"]
+    assert query["scope"] == ["openid profile email"]
+    assert "takyon_auth0_state" in resp.headers["set-cookie"]
+    assert "takyon_auth0_nonce" in resp.headers["set-cookie"]
+
+
+def test_auth0_callback_sets_dashboard_session_for_fourmanifold_email(
+    auth0_env,
+    monkeypatch,
+):
+    client = _client(auth0_env)
+    login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
+    state = _state_from_login(login)
+
+    async def fake_exchange(cfg, *, code, redirect_uri):
+        assert code == "ok"
+        assert redirect_uri == f"https://{HOST}/auth/callback"
+        return {"id_token": "id-token"}
+
+    def fake_verify(cfg, *, id_token, expected_nonce):
+        assert id_token == "id-token"
+        assert expected_nonce
+        return {
+            "sub": "auth0|1",
+            "email": "operator@fourmanifold.com",
+            "email_verified": True,
+            "name": "Operator",
+        }
+
+    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+
+    resp = client.get(
+        f"/auth/callback?code=ok&state={urllib.parse.quote(state)}",
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/chat"
+    assert "takyon_dashboard_auth" in resp.headers["set-cookie"]
+
+    status = client.get("/api/status")
+    assert status.status_code == 200
+
+
+def test_auth0_callback_rejects_non_fourmanifold_email(auth0_env, monkeypatch):
+    client = _client(auth0_env)
+    login = client.get("/auth/login", follow_redirects=False)
+    state = _state_from_login(login)
+
+    async def fake_exchange(cfg, *, code, redirect_uri):
+        return {"id_token": "id-token"}
+
+    def fake_verify(cfg, *, id_token, expected_nonce):
+        return {
+            "sub": "auth0|2",
+            "email": "someone@example.com",
+            "email_verified": True,
+        }
+
+    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+
+    resp = client.get(f"/auth/callback?code=ok&state={state}")
+
+    assert resp.status_code == 403
+    assert "not allowed" in resp.text
+
+
+def test_auth0_callback_rejects_unverified_email(auth0_env, monkeypatch):
+    client = _client(auth0_env)
+    login = client.get("/auth/login", follow_redirects=False)
+    state = _state_from_login(login)
+
+    async def fake_exchange(cfg, *, code, redirect_uri):
+        return {"id_token": "id-token"}
+
+    def fake_verify(cfg, *, id_token, expected_nonce):
+        return {
+            "sub": "auth0|3",
+            "email": "operator@fourmanifold.com",
+            "email_verified": False,
+        }
+
+    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+
+    resp = client.get(f"/auth/callback?code=ok&state={state}")
+
+    assert resp.status_code == 403
+    assert "not verified" in resp.text
+
+
+def test_configured_public_host_is_accepted_for_reverse_proxy(auth0_env):
+    assert auth0_env._is_accepted_host(HOST, "127.0.0.1")
+    assert not auth0_env._is_accepted_host("evil.example", "127.0.0.1")

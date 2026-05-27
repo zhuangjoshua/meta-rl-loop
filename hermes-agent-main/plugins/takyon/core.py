@@ -65,6 +65,12 @@ NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - If a runtime endpoint or provider path is unavailable in this workspace, show a visible DEBUG/blocked state that says the feature is not wired yet.
 - Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
 """
+WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
+- The current working directory is already the requested business workspace: {workspace}.
+- Write files relative to the current working directory.
+- Do not recreate the workspace path inside itself. If the workspace is `product/site`, write `index.html`, `app/page.tsx`, or `package.json`, not `product/site/index.html` or `product/site/app/page.tsx`.
+- If an instruction mentions the workspace path, interpret it as the current working directory unless it explicitly asks for a different business-relative path.
+"""
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
@@ -74,6 +80,9 @@ _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
 _DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_verify"
 _DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
 _DEFAULT_PRODUCT_DONE_GATE = "business_verify_product_surface:verified_and_published_or_exact_blocker"
+_SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
+_PRODUCT_SERVICE_PORT_MIN = 9200
+_PRODUCT_SERVICE_PORT_MAX = 9799
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -565,6 +574,115 @@ def _ensure_javascript_runtime(*, package_manager: bool = False) -> dict[str, An
         }
 
 
+def _node_package_dir(root: Path, package: str) -> Path:
+    return root / "node_modules" / Path(*package.split("/"))
+
+
+def _missing_repo_node_packages(root: Path, packages: Iterable[str]) -> list[str]:
+    return [package for package in packages if not _node_package_dir(root, package).exists()]
+
+
+def _ensure_repo_node_dependencies(packages: Iterable[str]) -> dict[str, Any]:
+    """Ensure repo-level Node packages needed by Takyon runtime helpers exist."""
+    root = _repo_root()
+    package_list = [str(package).strip() for package in packages if str(package).strip()]
+    package_json = root / "package.json"
+    if not package_json.exists():
+        return {
+            "success": False,
+            "installed": False,
+            "root": str(root),
+            "missing_packages": package_list,
+            "error": f"repo package.json missing: {package_json}",
+        }
+
+    before_missing = _missing_repo_node_packages(root, package_list)
+    if not before_missing:
+        return {
+            "success": True,
+            "installed": False,
+            "root": str(root),
+            "missing_packages": [],
+            "capabilities": _runtime_capabilities(("node", "npm", "npx")),
+        }
+
+    if not _allow_runtime_installs():
+        return {
+            "success": False,
+            "installed": False,
+            "root": str(root),
+            "missing_packages": before_missing,
+            "capabilities": _runtime_capabilities(("node", "npm", "npx")),
+            "error": "runtime installs are disabled by config",
+        }
+
+    npm = _resolve_runtime_executable("npm")
+    ensure_runtime: dict[str, Any] | None = None
+    if not npm:
+        ensure_runtime = _ensure_javascript_runtime(package_manager=True)
+        npm = _resolve_runtime_executable("npm")
+    if not npm:
+        return {
+            "success": False,
+            "installed": False,
+            "root": str(root),
+            "missing_packages": before_missing,
+            "ensure_runtime": ensure_runtime,
+            "capabilities": _runtime_capabilities(("node", "npm", "npx")),
+            "error": "npm is unavailable, so repo Node dependencies cannot be installed",
+        }
+
+    lockfile = root / "package-lock.json"
+    commands: list[list[str]] = []
+    if lockfile.exists():
+        commands.append([npm, "ci", "--prefer-offline", "--no-audit"])
+    commands.append([npm, "install", "--prefer-offline", "--no-audit"])
+
+    started = _now()
+    attempts: list[dict[str, Any]] = []
+    for command in commands:
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(root),
+                text=True,
+                capture_output=True,
+                timeout=420,
+                env=_runtime_env(),
+            )
+            attempts.append({
+                "command": " ".join(shlex.quote(part) for part in command),
+                "returncode": proc.returncode,
+                "stdout": _truncate_text(proc.stdout or "", 4000),
+                "stderr": _truncate_text(proc.stderr or "", 4000),
+            })
+            if proc.returncode == 0:
+                break
+        except subprocess.TimeoutExpired as exc:
+            attempts.append({
+                "command": " ".join(shlex.quote(part) for part in command),
+                "returncode": None,
+                "stdout": _truncate_text(exc.stdout or "", 4000),
+                "stderr": _truncate_text(exc.stderr or "", 4000),
+                "error": "npm dependency install timed out",
+            })
+            break
+
+    after_missing = _missing_repo_node_packages(root, package_list)
+    return {
+        "success": not after_missing,
+        "installed": bool(before_missing and not after_missing),
+        "root": str(root),
+        "missing_packages": after_missing,
+        "started_at": started,
+        "completed_at": _now(),
+        "attempts": attempts,
+        "ensure_runtime": ensure_runtime,
+        "capabilities": _runtime_capabilities(("node", "npm", "npx")),
+        "error": None if not after_missing else "repo Node dependency install did not provide required packages",
+    }
+
+
 def _model_from_config(*keys: str) -> str:
     """Read a model setting from config.yaml, the shared model source of truth."""
     path = get_takyon_home() / "config.yaml"
@@ -675,6 +793,25 @@ _PRODUCT_SOURCE_SKIP_DIRS = {
     "node_modules",
     "references",
 }
+_PRODUCT_INVENTORY_TEXT_EXTENSIONS = _PRODUCT_SOURCE_EXTENSIONS | {".css", ".json", ".md", ".txt", ".yml", ".yaml"}
+_PRODUCT_INVENTORY_MAX_FILES = 120
+_PRODUCT_INVENTORY_MAX_BYTES = 96 * 1024
+_PRODUCT_INVENTORY_MAX_MARKERS = 40
+_PRODUCT_INVENTORY_MAX_SNIPPETS = 24
+_PRODUCT_INVENTORY_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("todo", re.compile(r"\bTODO\b|\bFIXME\b", re.IGNORECASE)),
+    ("stub_or_mock", re.compile(r"\b(?:stub|mock|fixture|placeholder)\b", re.IGNORECASE)),
+    ("demo_or_test_state", re.compile(r"\b(?:demo|test mode|fake|sample data)\b", re.IGNORECASE)),
+    ("browser_storage", re.compile(r"\b(?:localStorage|sessionStorage)\b", re.IGNORECASE)),
+    ("blocked_or_unwired", re.compile(r"\b(?:not yet wired|not wired|blocked|unavailable|coming soon)\b", re.IGNORECASE)),
+    ("auth_or_session", re.compile(r"\b(?:auth|login|sign in|magic[- ]?link|session)\b", re.IGNORECASE)),
+    ("billing_or_checkout", re.compile(r"\b(?:stripe|checkout|billing|subscription|pricing)\b", re.IGNORECASE)),
+    ("provider_or_compile", re.compile(r"\b(?:compile|pdf|git sync|provider|api key|env var)\b", re.IGNORECASE)),
+)
+_PRODUCT_CLAIM_SNIPPET_PATTERN = re.compile(
+    r"(\$[0-9]|/month|/mo\b|\b(?:free|pro|team|unlimited|included|live|available|yes|pricing|checkout|auth|login|magic[- ]?link|compile|pdf|git sync)\b)",
+    re.IGNORECASE,
+)
 _PRETEND_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "browser-local auth/session/account state",
@@ -777,6 +914,178 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
     return findings
 
 
+def _route_from_source_path(rel: str) -> tuple[str, str] | None:
+    parts = rel.split("/")
+    name = parts[-1] if parts else rel
+    suffix = Path(name).suffix.lower()
+    if len(parts) >= 3 and parts[0] == "app" and parts[1] == "api" and name.startswith("route."):
+        route = "/" + "/".join(parts[:-1])
+        return "api_route", route
+    if len(parts) >= 2 and parts[0] == "pages" and parts[1] == "api":
+        stem_parts = parts[2:]
+        if stem_parts:
+            stem_parts[-1] = Path(stem_parts[-1]).stem
+        return "api_route", "/" + "/".join(["api", *[part for part in stem_parts if part != "index"]])
+    if len(parts) >= 2 and parts[0] == "app" and name.startswith("page."):
+        route_parts = [part for part in parts[1:-1] if not part.startswith("(")]
+        return "route", "/" + "/".join(route_parts) if route_parts else "/"
+    if len(parts) >= 2 and parts[0] == "pages" and suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        route_parts = parts[1:]
+        route_parts[-1] = Path(route_parts[-1]).stem
+        route_parts = [part for part in route_parts if part != "index"]
+        return "route", "/" + "/".join(route_parts) if route_parts else "/"
+    if suffix == ".html":
+        route_parts = parts[:]
+        route_parts[-1] = Path(route_parts[-1]).stem
+        route_parts = [part for part in route_parts if part != "index"]
+        return "route", "/" + "/".join(route_parts) if route_parts else "/"
+    return None
+
+
+def _bounded_product_inventory(business_root: Path, source_path: str, *, surface: dict[str, Any] | None = None) -> dict[str, Any]:
+    source_rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    root = (business_root / source_rel).resolve()
+    inventory: dict[str, Any] = {
+        "status": "missing",
+        "source_path": source_rel,
+        "generated_at": _now(),
+        "routes": [],
+        "api_routes": [],
+        "package": {},
+        "risk_markers": [],
+        "claim_snippets": [],
+        "pretend_findings": [],
+        "files_scanned": 0,
+        "files_skipped": 0,
+        "public_url": "",
+        "publish_receipt_path": "",
+        "scanner_error": "",
+    }
+    if isinstance(surface, dict):
+        inventory["public_url"] = str(surface.get("public_url") or "")
+        inventory["publish_receipt_path"] = str(surface.get("publish_receipt_path") or "")
+    if business_root.resolve() not in (root, *root.parents):
+        inventory.update({"status": "unavailable", "scanner_error": "source path escaped business root"})
+        return inventory
+    if not root.exists() or not root.is_dir():
+        return inventory
+
+    routes: set[str] = set()
+    api_routes: set[str] = set()
+    risk_markers: list[dict[str, Any]] = []
+    claim_snippets: list[dict[str, Any]] = []
+    files_scanned = 0
+    files_skipped = 0
+    partial = False
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or _product_source_is_skipped(path):
+            continue
+        if files_scanned >= _PRODUCT_INVENTORY_MAX_FILES:
+            partial = True
+            files_skipped += 1
+            continue
+        rel = path.relative_to(root).as_posix()
+        route = _route_from_source_path(rel)
+        if route:
+            kind, value = route
+            if kind == "api_route":
+                api_routes.add(value)
+            else:
+                routes.add(value)
+        if path.name == "package.json":
+            try:
+                package_data = json.loads(path.read_text(encoding="utf-8")[:_PRODUCT_INVENTORY_MAX_BYTES])
+                scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+                deps = {
+                    **(package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}),
+                    **(package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}),
+                }
+                inventory["package"] = {
+                    "name": str(package_data.get("name") or ""),
+                    "package_manager": str(package_data.get("packageManager") or ""),
+                    "scripts": sorted(str(key) for key in scripts.keys())[:20],
+                    "frameworks": [name for name in ("next", "react", "vite", "vue", "svelte") if name in deps],
+                }
+            except Exception as exc:
+                risk_markers.append({"path": rel, "issue": "package_unreadable", "snippet": _truncate_text(str(exc), 160)})
+            files_scanned += 1
+            continue
+        if path.suffix.lower() not in _PRODUCT_INVENTORY_TEXT_EXTENSIONS:
+            files_skipped += 1
+            continue
+        try:
+            if path.stat().st_size > _PRODUCT_INVENTORY_MAX_BYTES:
+                files_skipped += 1
+                partial = True
+                continue
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            files_skipped += 1
+            continue
+        except Exception as exc:
+            risk_markers.append({"path": rel, "issue": "file_unreadable", "snippet": _truncate_text(str(exc), 160)})
+            files_skipped += 1
+            continue
+        files_scanned += 1
+        for number, line in enumerate(text.splitlines(), start=1):
+            if len(risk_markers) < _PRODUCT_INVENTORY_MAX_MARKERS:
+                for label, pattern in _PRODUCT_INVENTORY_MARKERS:
+                    if pattern.search(line):
+                        risk_markers.append({
+                            "path": rel,
+                            "line": number,
+                            "issue": label,
+                            "snippet": line.strip()[:220],
+                        })
+                        break
+            if len(claim_snippets) < _PRODUCT_INVENTORY_MAX_SNIPPETS and _PRODUCT_CLAIM_SNIPPET_PATTERN.search(line):
+                clean = line.strip()
+                if clean:
+                    claim_snippets.append({"path": rel, "line": number, "snippet": clean[:220]})
+            if len(risk_markers) >= _PRODUCT_INVENTORY_MAX_MARKERS and len(claim_snippets) >= _PRODUCT_INVENTORY_MAX_SNIPPETS:
+                break
+
+    try:
+        inventory["pretend_findings"] = _scan_for_pretend_product_state(root, limit=12)
+    except Exception as exc:
+        risk_markers.append({"path": source_rel, "issue": "pretend_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
+
+    inventory.update({
+        "status": "partial" if partial else "collected",
+        "routes": sorted(routes),
+        "api_routes": sorted(api_routes),
+        "risk_markers": risk_markers,
+        "claim_snippets": claim_snippets,
+        "files_scanned": files_scanned,
+        "files_skipped": files_skipped,
+    })
+    return inventory
+
+
+def _product_inventory(business_root: Path, source_path: str, *, surface: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        return _bounded_product_inventory(business_root, source_path, surface=surface)
+    except Exception as exc:
+        source_text = str(source_path or "product/site")
+        return {
+            "status": "unavailable",
+            "source_path": source_text,
+            "generated_at": _now(),
+            "routes": [],
+            "api_routes": [],
+            "package": {},
+            "risk_markers": [],
+            "claim_snippets": [],
+            "pretend_findings": [],
+            "files_scanned": 0,
+            "files_skipped": 0,
+            "public_url": str((surface or {}).get("public_url") or "") if isinstance(surface, dict) else "",
+            "publish_receipt_path": str((surface or {}).get("publish_receipt_path") or "") if isinstance(surface, dict) else "",
+            "scanner_error": _truncate_text(str(exc), 500),
+        }
+
+
 def _product_source_files(root: Path, *, limit: int = 200) -> list[str]:
     files: list[str] = []
     if not root.exists() or not root.is_dir():
@@ -799,6 +1108,55 @@ def _detect_nested_workspace_prefix(root: Path, source_path: str) -> str | None:
     if nested.exists() and _product_source_files(nested, limit=1):
         return rel.as_posix()
     return None
+
+
+def _repair_nested_workspace_prefix(workspace_path: Path, workspace: str) -> dict[str, Any]:
+    """Move files up when a worker writes product/site inside product/site."""
+    rel = _safe_relpath(workspace or ".", field="workspace")
+    rel_text = rel.as_posix()
+    if rel_text in {".", ""}:
+        return {"repaired": False}
+    nested = workspace_path / rel
+    if not nested.is_dir() or not _product_source_files(nested, limit=1):
+        return {"repaired": False}
+    root_files = [
+        item for item in _product_source_files(workspace_path, limit=20)
+        if item != rel_text and not item.startswith(f"{rel_text}/")
+    ]
+    if root_files:
+        return {
+            "repaired": False,
+            "blocked": True,
+            "reason": "workspace root already contains source files outside duplicate prefix",
+            "root_files": root_files[:10],
+            "nested_source_path": f"{rel_text}/{rel_text}",
+        }
+    moved: list[str] = []
+    for child in sorted(nested.iterdir(), key=lambda item: item.name):
+        destination = workspace_path / child.name
+        if destination.exists():
+            return {
+                "repaired": False,
+                "blocked": True,
+                "reason": f"destination already exists: {child.name}",
+                "moved": moved,
+                "nested_source_path": f"{rel_text}/{rel_text}",
+            }
+        shutil.move(str(child), str(destination))
+        moved.append(child.name)
+    cursor = nested
+    while cursor != workspace_path and cursor.is_dir():
+        try:
+            cursor.rmdir()
+        except OSError:
+            break
+        cursor = cursor.parent
+    return {
+        "repaired": True,
+        "moved": moved,
+        "nested_source_path": f"{rel_text}/{rel_text}",
+        "source_path": rel_text,
+    }
 
 
 def _run_verification_command(
@@ -884,6 +1242,12 @@ def _javascript_install_command(manager: dict[str, Any]) -> list[str]:
     return [*base, "install"]
 
 
+def _javascript_install_env() -> dict[str, str]:
+    env = _runtime_env({"NODE_ENV": "development", "NPM_CONFIG_PRODUCTION": "false"})
+    env.pop("npm_config_production", None)
+    return env
+
+
 def _javascript_run_script_command(manager: dict[str, Any], script: str, *, root: Path) -> list[str] | None:
     base = list(manager.get("command") or [])
     name = str(manager.get("name") or "npm")
@@ -930,6 +1294,7 @@ def _verify_product_surface_path(
         "status": "unverified",
         "checks": [],
         "warnings": [],
+        "inventory": _product_inventory(business_root, source_rel),
         "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv")),
     }
     if business_root.resolve() not in (root, *root.parents):
@@ -999,7 +1364,12 @@ def _verify_product_surface_path(
         return result
     if install:
         if package_manager.get("available"):
-            install_check = _run_verification_command(_javascript_install_command(package_manager), cwd=root, timeout_seconds=timeout_seconds)
+            install_check = _run_verification_command(
+                _javascript_install_command(package_manager),
+                cwd=root,
+                timeout_seconds=timeout_seconds,
+                env=_javascript_install_env(),
+            )
             result["checks"].append(install_check)
             if install_check["status"] != "passed":
                 result.update({"status": "failed", "error": "dependency install failed"})
@@ -1209,6 +1579,10 @@ def _product_publish_target(slug: str, explicit: Any = None) -> str:
     return urllib.parse.urlunparse((parsed.scheme, host, path, "", "", ""))
 
 
+def _is_shared_renderer_publish_policy(value: Any) -> bool:
+    return str(value or "").strip().lower() in _SHARED_RENDERER_PUBLISH_POLICIES
+
+
 def _product_publish_root() -> Path | None:
     load_takyon_env()
     raw = (
@@ -1217,6 +1591,14 @@ def _product_publish_root() -> Path | None:
         or os.getenv("TAKYON_STATIC_SITE_ROOT", "").strip()
     )
     return Path(raw).expanduser().resolve() if raw else None
+
+
+def _product_local_public_url(slug: str) -> str:
+    load_takyon_env()
+    raw = os.getenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "").strip()
+    if not raw:
+        return ""
+    return f"{raw.rstrip('/')}/{_slugify(slug)}/"
 
 
 def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
@@ -1231,6 +1613,445 @@ def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]
         if candidate.is_dir() and (candidate / "index.html").is_file():
             return candidate.resolve(), label
     return None, ""
+
+
+def _product_service_name(slug: str) -> str:
+    return f"takyon-product-{_slugify(slug)}"
+
+
+def _product_service_systemd_dir() -> Path:
+    raw = os.getenv("TAKYON_PRODUCT_SYSTEMD_DIR", "").strip()
+    return Path(raw).expanduser().resolve() if raw else Path("/etc/systemd/system")
+
+
+def _product_service_caddyfile() -> Path:
+    raw = os.getenv("TAKYON_PRODUCT_CADDYFILE", "").strip()
+    return Path(raw).expanduser().resolve() if raw else Path("/etc/caddy/Caddyfile")
+
+
+def _product_deploy_dry_run() -> bool:
+    return str(os.getenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _product_public_probe_enabled() -> bool:
+    return str(os.getenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "")).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _read_product_package(source_root: Path) -> tuple[dict[str, Any] | None, str]:
+    package_json = source_root / "package.json"
+    if not package_json.exists():
+        return None, "package.json is missing"
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"package.json is not valid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, "package.json must be an object"
+    return data, ""
+
+
+def _product_next_service_metadata(source_root: Path) -> tuple[dict[str, Any] | None, str]:
+    package_data, error = _read_product_package(source_root)
+    if package_data is None:
+        return None, error
+    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+    dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}
+    dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}
+    deps = {**dependencies, **dev_dependencies}
+    looks_next = (
+        "next" in deps
+        or (source_root / ".next").is_dir()
+        or any((source_root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
+    )
+    if not looks_next:
+        return None, "product source is not a Next.js app and no static publish directory exists"
+    if "start" not in scripts:
+        return None, "Next.js product source has no package.json start script for production serving"
+    if not (source_root / ".next").exists():
+        return None, "Next.js build output .next is missing after verification"
+    manager_name = _javascript_package_manager_name(source_root, package_data)
+    manager = _javascript_package_manager_command(manager_name)
+    start_command = _javascript_run_script_command(manager, "start", root=source_root)
+    if not start_command:
+        return None, f"no available runtime command for {manager_name} start script"
+    return {
+        "kind": "next_systemd_caddy",
+        "package_manager": manager_name,
+        "start_command": [*start_command, "--", "-H", "127.0.0.1", "-p"],
+    }, ""
+
+
+def _extract_reverse_proxy_ports(text: str) -> set[int]:
+    ports: set[int] = set()
+    for match in re.finditer(r"\b127\.0\.0\.1:(\d{2,5})\b", text):
+        try:
+            ports.add(int(match.group(1)))
+        except ValueError:
+            continue
+    return ports
+
+
+def _existing_product_service_port(slug: str, *, systemd_dir: Path | None = None, caddyfile: Path | None = None) -> int | None:
+    service_file = (systemd_dir or _product_service_systemd_dir()) / f"{_product_service_name(slug)}.service"
+    if service_file.exists():
+        try:
+            text = service_file.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        match = re.search(r"\bPORT=(\d{2,5})\b|\s-p\s+(\d{2,5})\b", text)
+        if match:
+            return int(next(group for group in match.groups() if group))
+    host = urllib.parse.urlparse(_product_publish_target(slug)).netloc
+    caddy_path = caddyfile or _product_service_caddyfile()
+    if caddy_path.exists():
+        try:
+            text = caddy_path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{(?P<body>.*?)^\}}\s*")
+        match = pattern.search(text)
+        if match:
+            ports = _extract_reverse_proxy_ports(match.group("body"))
+            if ports:
+                return sorted(ports)[0]
+    return None
+
+
+def _product_service_port(slug: str, *, systemd_dir: Path | None = None, caddyfile: Path | None = None) -> int:
+    business = _slugify(slug)
+    env_key = f"TAKYON_PRODUCT_PORT_{re.sub(r'[^A-Z0-9]', '_', business.upper())}"
+    configured = os.getenv(env_key, "").strip() or os.getenv("TAKYON_PRODUCT_PORT", "").strip()
+    if configured:
+        port = int(configured)
+        if not (_PRODUCT_SERVICE_PORT_MIN <= port <= 65535):
+            raise TakyonError(f"{env_key} must be a TCP port >= {_PRODUCT_SERVICE_PORT_MIN}")
+        return port
+    existing = _existing_product_service_port(business, systemd_dir=systemd_dir, caddyfile=caddyfile)
+    if existing:
+        return existing
+    caddy_path = caddyfile or _product_service_caddyfile()
+    used: set[int] = set()
+    if caddy_path.exists():
+        try:
+            used.update(_extract_reverse_proxy_ports(caddy_path.read_text(encoding="utf-8")))
+        except OSError:
+            pass
+    service_dir = systemd_dir or _product_service_systemd_dir()
+    if service_dir.exists():
+        for service_file in service_dir.glob("takyon-product-*.service"):
+            if service_file.name == f"{_product_service_name(business)}.service":
+                continue
+            try:
+                used.update(_extract_reverse_proxy_ports(service_file.read_text(encoding="utf-8")))
+            except OSError:
+                continue
+    spread = _PRODUCT_SERVICE_PORT_MAX - _PRODUCT_SERVICE_PORT_MIN + 1
+    start = _PRODUCT_SERVICE_PORT_MIN + (int(hashlib.sha256(business.encode("utf-8")).hexdigest()[:8], 16) % spread)
+    for offset in range(spread):
+        port = _PRODUCT_SERVICE_PORT_MIN + ((start - _PRODUCT_SERVICE_PORT_MIN + offset) % spread)
+        if port not in used:
+            return port
+    raise TakyonError("no free Takyon product service port is available")
+
+
+def _run_product_admin_command(command: list[str], *, timeout_seconds: int = 30) -> tuple[bool, str]:
+    if _product_deploy_dry_run():
+        return True, ""
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=_runtime_env(),
+        )
+    except Exception as exc:
+        return False, str(exc)
+    output = "\n".join(part for part in (proc.stdout.strip(), proc.stderr.strip()) if part)
+    return proc.returncode == 0, _truncate_text(output, 4000)
+
+
+def _write_product_service_file(*, slug: str, source_root: Path, port: int, metadata: dict[str, Any]) -> tuple[Path | None, str]:
+    systemd_dir = _product_service_systemd_dir()
+    service_name = _product_service_name(slug)
+    if not _product_deploy_dry_run():
+        systemctl = shutil.which("systemctl")
+        if not systemctl:
+            return None, "systemctl is unavailable; cannot install product service"
+        if not systemd_dir.exists():
+            return None, f"systemd unit directory does not exist: {systemd_dir}"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    start_command = [*list(metadata.get("start_command") or []), str(port)]
+    if not start_command:
+        return None, "missing product service start command"
+    path_value = _runtime_env().get("PATH", os.getenv("PATH", ""))
+    command_line = shlex.join(start_command)
+    unit = "\n".join(
+        [
+            "[Unit]",
+            f"Description=Takyon Product - {_slugify(slug)}",
+            "After=network.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"WorkingDirectory={source_root}",
+            "Environment=NODE_ENV=production",
+            f"Environment=PORT={port}",
+            "Environment=HOSTNAME=127.0.0.1",
+            f"Environment=PATH={path_value}",
+            f"ExecStart=/bin/bash -lc {shlex.quote('exec ' + command_line)}",
+            "Restart=always",
+            "RestartSec=3",
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ]
+    )
+    service_file = systemd_dir / f"{service_name}.service"
+    service_file.write_text(unit, encoding="utf-8")
+    if _product_deploy_dry_run():
+        return service_file, ""
+    systemctl = shutil.which("systemctl") or "systemctl"
+    for command in (
+        [systemctl, "daemon-reload"],
+        [systemctl, "enable", "--now", service_name],
+        [systemctl, "restart", service_name],
+    ):
+        ok, output = _run_product_admin_command(command, timeout_seconds=60)
+        if not ok:
+            return service_file, f"{' '.join(command)} failed: {output}"
+    ok, output = _run_product_admin_command([systemctl, "is-active", service_name], timeout_seconds=20)
+    if not ok:
+        return service_file, f"{service_name} is not active: {output}"
+    return service_file, ""
+
+
+def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) -> tuple[Path | None, str]:
+    caddyfile = _product_service_caddyfile()
+    host = urllib.parse.urlparse(publish_target).netloc
+    if not host:
+        return None, "publish target has no host"
+    if not _product_deploy_dry_run():
+        if not caddyfile.exists():
+            return None, f"Caddyfile does not exist: {caddyfile}"
+        if not shutil.which("caddy"):
+            return None, "caddy is unavailable; cannot validate product route"
+    caddyfile.parent.mkdir(parents=True, exist_ok=True)
+    existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
+    block = f"{host} {{\n    reverse_proxy 127.0.0.1:{port}\n}}\n"
+    pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
+    if pattern.search(existing):
+        updated = pattern.sub(block + "\n", existing).rstrip() + "\n"
+    else:
+        updated = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
+    if updated != existing:
+        if caddyfile.exists():
+            backup = caddyfile.with_name(f"{caddyfile.name}.takyon-backup")
+            backup.write_text(existing, encoding="utf-8")
+        caddyfile.write_text(updated, encoding="utf-8")
+    if _product_deploy_dry_run():
+        return caddyfile, ""
+    caddy = shutil.which("caddy") or "caddy"
+    ok, output = _run_product_admin_command([caddy, "validate", "--config", str(caddyfile)], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"caddy validate failed: {output}"
+    systemctl = shutil.which("systemctl") or "systemctl"
+    ok, output = _run_product_admin_command([systemctl, "reload", "caddy"], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"systemctl reload caddy failed: {output}"
+    return caddyfile, ""
+
+
+def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static_root: Path) -> tuple[Path | None, str]:
+    caddyfile = _product_service_caddyfile()
+    host = urllib.parse.urlparse(publish_target).netloc
+    if not host:
+        return None, "publish target has no host"
+    if not _product_deploy_dry_run():
+        if not caddyfile.exists():
+            return None, ""
+        if not shutil.which("caddy"):
+            return None, "caddy is unavailable; cannot validate product static route"
+    caddyfile.parent.mkdir(parents=True, exist_ok=True)
+    existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
+    block = (
+        f"{host} {{\n"
+        f"    root * {static_root}\n"
+        "    try_files {path} {path}/ /index.html\n"
+        "    file_server\n"
+        "}\n"
+    )
+    pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
+    if pattern.search(existing):
+        updated = pattern.sub(block + "\n", existing).rstrip() + "\n"
+    else:
+        updated = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
+    if updated != existing:
+        if caddyfile.exists():
+            backup = caddyfile.with_name(f"{caddyfile.name}.takyon-backup")
+            backup.write_text(existing, encoding="utf-8")
+        caddyfile.write_text(updated, encoding="utf-8")
+    if _product_deploy_dry_run():
+        return caddyfile, ""
+    caddy = shutil.which("caddy") or "caddy"
+    ok, output = _run_product_admin_command([caddy, "validate", "--config", str(caddyfile)], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"caddy validate failed: {output}"
+    systemctl = shutil.which("systemctl") or "systemctl"
+    ok, output = _run_product_admin_command([systemctl, "reload", "caddy"], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"systemctl reload caddy failed: {output}"
+    return caddyfile, ""
+
+
+def _make_static_publish_tree_readable(root: Path) -> None:
+    for path in [root, *root.rglob("*")]:
+        try:
+            if path.is_dir():
+                path.chmod(0o755)
+            elif path.is_file():
+                path.chmod(0o644)
+        except OSError:
+            continue
+
+
+def _probe_product_public_url(url: str) -> tuple[bool, str]:
+    if _product_deploy_dry_run() or not _product_public_probe_enabled():
+        return True, ""
+    last_error = ""
+    for attempt in range(3):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Takyon product publish verifier"})
+            with urllib.request.urlopen(request, timeout=12) as response:
+                status = int(getattr(response, "status", 0) or 0)
+                if 200 <= status < 500:
+                    return True, ""
+                last_error = f"HTTP {status}"
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt < 2:
+            time.sleep(2)
+    return False, f"public URL probe failed for {url}: {last_error}"
+
+
+def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "blocked",
+        "publish_target": publish_target,
+        "public_url": "",
+        "published_at": "",
+        "publish_root": "",
+        "publish_source_path": "",
+        "blocker": "",
+        "deploy_kind": "next_systemd_caddy",
+        "service_name": _product_service_name(slug),
+    }
+    metadata, blocker = _product_next_service_metadata(source_root)
+    if metadata is None:
+        result["blocker"] = (
+            "product surface verified, but no static publish directory with index.html exists; "
+            f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
+        )
+        return result
+    try:
+        port = _product_service_port(slug)
+    except Exception as exc:
+        result["blocker"] = str(exc)
+        return result
+    service_file, blocker = _write_product_service_file(slug=slug, source_root=source_root, port=port, metadata=metadata)
+    result.update({"port": port, "service_file": str(service_file or "")})
+    if blocker:
+        result["blocker"] = blocker
+        return result
+    caddyfile, blocker = _ensure_product_caddy_route(slug=slug, publish_target=publish_target, port=port)
+    result["caddyfile"] = str(caddyfile or "")
+    if blocker:
+        result["blocker"] = blocker
+        return result
+    ok, blocker = _probe_product_public_url(publish_target)
+    if not ok:
+        result["blocker"] = blocker
+        return result
+    result.update(
+        {
+            "status": "published",
+            "public_url": publish_target,
+            "published_at": _now(),
+            "publish_root": str(source_root),
+            "publish_source_path": str(source_root.name),
+            "blocker": "",
+        }
+    )
+    if _product_deploy_dry_run():
+        result["dry_run"] = True
+    return result
+
+
+def _verify_shared_renderer_surface(*, business_root: Path, slug: str, source_path: str, surface: dict[str, Any]) -> dict[str, Any]:
+    rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    source_root = (business_root / rel).resolve()
+    has_source = business_root.resolve() in (source_root, *source_root.parents) and source_root.exists() and source_root.is_dir()
+    inventory = _product_inventory(business_root, rel, surface=surface) if has_source else {
+        "status": "shared_renderer",
+        "routes": surface.get("routes") if isinstance(surface.get("routes"), list) else [],
+        "api_routes": [],
+        "claim_snippets": [],
+        "risk_markers": [],
+        "pretend_findings": [],
+        "source_path": rel,
+    }
+    return {
+        "status": "passed",
+        "kind": "shared_renderer",
+        "source_path": rel,
+        "checks": [],
+        "warnings": [] if has_source else ["shared renderer publish does not require per-business source files"],
+        "inventory": inventory,
+    }
+
+
+def _publish_shared_renderer_surface(*, slug: str, publish_target: str) -> dict[str, Any]:
+    local_url = _product_local_public_url(slug)
+    public_url = local_url or publish_target
+    return {
+        "status": "published",
+        "publish_target": publish_target,
+        "public_url": public_url,
+        "local_url": local_url,
+        "published_at": _now(),
+        "publish_root": "shared_renderer",
+        "publish_source_path": "app/surface.md",
+        "publish_mode": "shared_renderer",
+        "deploy_kind": "shared_renderer",
+        "blocker": "",
+    }
+
+
+def _canonical_product_url(store: "TakyonStore", conn: sqlite3.Connection, business: str) -> str:
+    surface = store._app_surface_contract(conn, business)
+    return str(surface.get("public_url") or surface.get("publish_target") or _product_publish_target(business)).strip()
+
+
+def _canonicalize_business_product_links(body: str, *, business: str, canonical_url: str) -> tuple[str, list[dict[str, str]]]:
+    canonical = canonical_url.strip() or _product_publish_target(business)
+    canonical_base = canonical.rstrip("/")
+    replacements: list[dict[str, str]] = []
+    business_re = re.escape(_slugify(business))
+    pattern = re.compile(
+        rf"(?<![\w.-])(?P<url>(?:https?://)?(?:www\.)?{business_re}\.(?:io|com|co|app|dev)(?P<path>/[^\s)\]]*)?)",
+        re.IGNORECASE,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        old = match.group("url")
+        path = match.group("path") or ""
+        new = canonical if not path or canonical.endswith(path) else f"{canonical_base}{path}"
+        if old != new:
+            replacements.append({"from": old, "to": new})
+        return new
+
+    return pattern.sub(replace, body), replacements
 
 
 def _publish_product_surface_path(
@@ -1249,14 +2070,6 @@ def _publish_product_surface_path(
         "publish_source_path": "",
         "blocker": "",
     }
-    publish_root = _product_publish_root()
-    if publish_root is None:
-        result["blocker"] = (
-            "product surface verified, but no static hosting root is configured; "
-            "set TAKYON_PRODUCT_SITE_ROOT to the directory served for business subdomains"
-        )
-        return result
-
     rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
     source_root = (business_root / rel).resolve()
     if business_root.resolve() not in (source_root, *source_root.parents):
@@ -1264,9 +2077,30 @@ def _publish_product_surface_path(
         return result
     publish_source, publish_source_label = _product_static_publish_source(source_root)
     if publish_source is None:
+        service_result = _publish_next_product_service(
+            source_root=source_root,
+            slug=slug,
+            publish_target=publish_target,
+        )
+        if service_result.get("publish_source_path") == source_root.name:
+            service_result["publish_source_path"] = rel
+        return service_result
+
+    publish_root = _product_publish_root()
+    if publish_root is None:
+        service_result = _publish_next_product_service(
+            source_root=source_root,
+            slug=slug,
+            publish_target=publish_target,
+        )
+        if service_result.get("publish_source_path") == source_root.name:
+            service_result["publish_source_path"] = rel
+        if service_result.get("status") == "published":
+            return service_result
         result["blocker"] = (
-            "product surface verified, but no static publish directory with index.html exists; "
-            "provide source/index.html, dist/index.html, out/index.html, or configure a deploy rail"
+            "product surface verified with static output, but no static hosting root is configured; "
+            "set TAKYON_PRODUCT_SITE_ROOT to the directory served for business subdomains, "
+            f"or fix the service deploy rail: {service_result.get('blocker') or 'unknown service deploy blocker'}"
         )
         return result
 
@@ -1287,13 +2121,27 @@ def _publish_product_surface_path(
         }
 
     shutil.copytree(publish_source, target_dir, ignore=ignore)
+    _make_static_publish_tree_readable(target_dir)
+    caddyfile, blocker = _ensure_product_static_caddy_route(slug=slug, publish_target=publish_target, static_root=target_dir)
+    result["caddyfile"] = str(caddyfile or "")
+    if blocker:
+        result["blocker"] = blocker
+        return result
+    if caddyfile:
+        ok, blocker = _probe_product_public_url(publish_target)
+        if not ok:
+            result["blocker"] = blocker
+            return result
+    local_url = _product_local_public_url(slug)
     result.update(
         {
             "status": "published",
-            "public_url": publish_target,
+            "public_url": local_url or publish_target,
+            "local_url": local_url,
             "published_at": _now(),
             "publish_root": str(target_dir),
             "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
+            "publish_mode": "local_static" if local_url else "public_static",
             "blocker": "",
         }
     )
@@ -2126,18 +2974,88 @@ class TakyonStore:
                 return {**payload, "event_created_at": event.get("created_at")}
         return None
 
+    def _product_surface_evidence(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
+        surface = surface if isinstance(surface, dict) else self._app_surface_contract(conn, slug)
+        source_path = str(surface.get("source_path") or "").strip()
+        latest = self._latest_surface_verification(conn, slug, source_path) if source_path else None
+        inventory = latest.get("inventory") if isinstance((latest or {}).get("inventory"), dict) else {}
+        if not inventory and source_path:
+            inventory = _product_inventory(self._business_root(slug), source_path, surface=surface)
+        elif isinstance(inventory, dict):
+            inventory = {
+                **inventory,
+                "public_url": str(surface.get("public_url") or inventory.get("public_url") or ""),
+                "publish_receipt_path": str(surface.get("publish_receipt_path") or inventory.get("publish_receipt_path") or ""),
+            }
+        root = self._business_root(slug) / source_path if source_path else None
+        has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
+        shared_renderer = _is_shared_renderer_publish_policy(surface.get("publish_policy"))
+        local_work: list[str] = []
+        if shared_renderer:
+            if not latest:
+                local_work.append("shared renderer surface has not been verified")
+            elif latest.get("status") not in {"passed"}:
+                local_work.append(f"shared renderer verification is {latest.get('status') or 'unknown'}")
+            elif latest.get("done_gate_status") not in {"passed"}:
+                local_work.append(latest.get("blocker") or "shared renderer surface is not published")
+        elif not source_path:
+            local_work.append("missing product source path")
+        elif not has_source_files:
+            local_work.append("missing product source files")
+        elif not latest:
+            local_work.append("product source has not been verified")
+        else:
+            if latest.get("status") not in {"passed"}:
+                local_work.append(f"product verification is {latest.get('status') or 'unknown'}")
+            if latest.get("done_gate_status") not in {"passed"}:
+                local_work.append(latest.get("blocker") or "product is verified only when published or an exact blocker is recorded")
+        risk_issues = {
+            str(item.get("issue") or "")
+            for item in (inventory.get("risk_markers") or [])
+            if isinstance(item, dict)
+        }
+        pretend_count = len(inventory.get("pretend_findings") or []) if isinstance(inventory, dict) else 0
+        if pretend_count:
+            local_work.append("product source has pretend-state findings")
+        elif risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
+            local_work.append("product source has advisory stub/demo/unwired markers")
+        return {
+            "surface_status": str(surface.get("status") or "missing"),
+            "publish_status": str(surface.get("publish_status") or ""),
+            "public_url": str(surface.get("public_url") or ""),
+            "source_path": source_path,
+            "has_source_files": has_source_files,
+            "latest_verification": latest or {},
+            "inventory": inventory or {},
+            "local_continuable_work": local_work[:8],
+        }
+
     def _surface_status_for_upsert(
         self,
         conn: sqlite3.Connection,
         slug: str,
         requested_status: str,
         source_path: str | None,
+        publish_policy: str,
         metadata: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         status = str(requested_status or "draft").strip().lower()
         if status != "active":
             return status, metadata
         validation: dict[str, Any] = {"requested_status": "active"}
+        if _is_shared_renderer_publish_policy(publish_policy):
+            rows = conn.execute(
+                "SELECT * FROM events WHERE business_slug = ? AND event_type = 'product.surface.verify' ORDER BY created_at DESC LIMIT 25",
+                (slug,),
+            ).fetchall()
+            for row in rows:
+                event = self._row_to_dict(row) or {}
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                publish = payload.get("publish") if isinstance(payload.get("publish"), dict) else {}
+                if publish.get("deploy_kind") == "shared_renderer" and payload.get("done_gate_status") == "passed":
+                    return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": payload.get("receipt_path"), "publish_policy": publish_policy}}
+            validation.update({"status": "unverified", "reason": "no passing shared renderer product.surface.verify receipt", "publish_policy": publish_policy})
+            return "unverified", {**metadata, "takyon_surface_validation": validation}
         if not source_path:
             validation.update({"status": "unverified", "reason": "missing source_path"})
             return "unverified", {**metadata, "takyon_surface_validation": validation}
@@ -2170,6 +3088,8 @@ class TakyonStore:
         root = self._business_root(slug) / "app"
         budget = self._ensure_app_budget(conn, slug)
         surface = self._app_surface_contract(conn, slug)
+        surface_evidence = self._product_surface_evidence(conn, slug, surface)
+        inventory = surface_evidence.get("inventory") if isinstance(surface_evidence.get("inventory"), dict) else {}
         plans = [
             self._row_to_dict(row)
             for row in conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? ORDER BY price_cents ASC, plan_key ASC", (slug,)).fetchall()
@@ -2256,6 +3176,34 @@ class TakyonStore:
         if validation:
             surface_lines.extend(["", "## Verification", ""])
             surface_lines.extend(_markdown_kv_lines(validation, empty="unverified"))
+        if inventory:
+            surface_lines.extend(["", "## Product Inventory", ""])
+            surface_lines.extend([
+                f"- Status: {inventory.get('status') or 'unknown'}",
+                f"- Routes: {', '.join(inventory.get('routes') or []) or 'none found'}",
+                f"- API routes: {', '.join(inventory.get('api_routes') or []) or 'none found'}",
+                f"- Risk markers: {len(inventory.get('risk_markers') or [])}",
+                f"- Claim snippets: {len(inventory.get('claim_snippets') or [])}",
+                f"- Pretend-state findings: {len(inventory.get('pretend_findings') or [])}",
+            ])
+            local_work = surface_evidence.get("local_continuable_work") or []
+            if local_work:
+                surface_lines.extend(["", "### Local Continuable Work", ""])
+                surface_lines.extend(f"- {_markdown_scalar(item)}" for item in local_work[:8])
+            risk_markers = [item for item in (inventory.get("risk_markers") or []) if isinstance(item, dict)]
+            if risk_markers:
+                surface_lines.extend(["", "### Advisory Markers", ""])
+                for item in risk_markers[:6]:
+                    surface_lines.append(
+                        f"- {item.get('path')}:{item.get('line') or '?'} {item.get('issue')}: {_markdown_scalar(item.get('snippet'))}"
+                    )
+            claim_snippets = [item for item in (inventory.get("claim_snippets") or []) if isinstance(item, dict)]
+            if claim_snippets:
+                surface_lines.extend(["", "### Public Claim Snippets", ""])
+                for item in claim_snippets[:6]:
+                    surface_lines.append(
+                        f"- {item.get('path')}:{item.get('line') or '?'} {_markdown_scalar(item.get('snippet'))}"
+                    )
         _atomic_write_text(root / "surface.md", "\n".join(surface_lines).rstrip() + "\n")
 
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
@@ -2310,6 +3258,8 @@ class TakyonStore:
 
     def _app_summary(self, conn: sqlite3.Connection, slug: str, limit: int) -> dict[str, Any]:
         budget = self._ensure_app_budget(conn, slug)
+        surface = self._app_surface_contract(conn, slug)
+        surface_evidence = self._product_surface_evidence(conn, slug, surface)
         usage = conn.execute(
             "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS actual, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COUNT(*) AS count FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
             (slug, budget["current_period_start"]),
@@ -2320,7 +3270,9 @@ class TakyonStore:
         ).fetchone()
         return {
             "budget": budget,
-            "surface_contract": self._app_surface_contract(conn, slug),
+            "surface_contract": surface,
+            "product_surface": surface_evidence,
+            "product_inventory": surface_evidence.get("inventory") or {},
             "usage_this_period": {
                 "events": int(usage["count"] or 0),
                 "estimated_cost_microusd": int(usage["estimated"] or 0),
@@ -2603,6 +3555,7 @@ class TakyonStore:
                 "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS actual, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
                 (slug, app_budget["current_period_start"]),
             )
+            product_evidence = self._product_surface_evidence(conn, slug)
             current_jobs = one(
                 "SELECT SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued FROM jobs WHERE business_slug = ?",
                 (slug,),
@@ -2622,6 +3575,7 @@ class TakyonStore:
                 "inbound_messages": int(lifetime["sales_signal"]["inbound_messages"]),
                 "unresolved_inbound": int(lifetime["sales_signal"]["unresolved_inbound"]),
                 "queued_jobs": int(current_jobs["queued"] or 0),
+                "local_continuable_product_work": len(product_evidence.get("local_continuable_work") or []),
             }
             previous_summary = (previous_pulse or {}).get("summary") if isinstance(previous_pulse, dict) else {}
             comparable_keys = ("users", "paid_customers", "mrr_cents", "arr_cents", "revenue_cents", "checkout_intents", "usage_events", "actual_cost_microusd", "inbound_messages", "unresolved_inbound")
@@ -2683,6 +3637,20 @@ class TakyonStore:
                     "active_paid_customers": int(active_entitlements["paid_customers"] or 0),
                     "mrr_cents": summary["mrr_cents"],
                     "arr_cents": summary["arr_cents"],
+                    "product_surface": {
+                        "status": product_evidence.get("surface_status"),
+                        "publish_status": product_evidence.get("publish_status"),
+                        "public_url": product_evidence.get("public_url"),
+                        "source_path": product_evidence.get("source_path"),
+                        "has_source_files": product_evidence.get("has_source_files"),
+                        "latest_verification_status": (product_evidence.get("latest_verification") or {}).get("status"),
+                        "done_gate_status": (product_evidence.get("latest_verification") or {}).get("done_gate_status"),
+                        "inventory_status": (product_evidence.get("inventory") or {}).get("status"),
+                        "risk_marker_count": len((product_evidence.get("inventory") or {}).get("risk_markers") or []),
+                        "claim_snippet_count": len((product_evidence.get("inventory") or {}).get("claim_snippets") or []),
+                        "pretend_finding_count": len((product_evidence.get("inventory") or {}).get("pretend_findings") or []),
+                        "local_continuable_work": product_evidence.get("local_continuable_work") or [],
+                    },
                 },
                 "missing_metrics": [
                     "visitors",
@@ -3364,7 +4332,7 @@ class TakyonStore:
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
-            status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, metadata)
+            status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
             now = _now()
             conn.execute(
                 """
@@ -4134,6 +5102,7 @@ class TakyonStore:
     def _ceo_cron_prompt(self, slug: str) -> str:
         return (
             f"CEO wakeup for business:{slug}.\n"
+            "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn; use business state and pulse evidence to distinguish a first scheduled check from a later follow-up.\n"
             "Start with business_calculate_pulse, then use takyon:business-pulse to write brain/pulse.md and record "
             "a business.pulse.snapshot event. Use concrete business_* tools to read state, update business memory, "
             "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
@@ -4146,6 +5115,7 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, verification, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
+            "Advance the outreach lifecycle: if no outreach campaign exists, start campaigns/phase-1-outreach/; if Phase 1 is incomplete, continue missing lanes/touches/receipts; if complete but unreviewed, review receipts, conversation mirrors, blockers, replies, and elapsed time; if replies exist, route follow-up through sales/conversation response; if no replies after review, choose the next distribution campaign or changed offer. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -4565,6 +5535,11 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
                 ensure_results.append({"ecosystem": ecosystem, **_ensure_javascript_runtime(package_manager=False)})
             elif ecosystem in {"javascript-package-manager", "package-manager", "package_manager", "node-package-manager"}:
                 ensure_results.append({"ecosystem": ecosystem, **_ensure_javascript_runtime(package_manager=True)})
+            elif ecosystem in {"repo-node-dependencies", "node-dependencies", "claude-agent-sdk"}:
+                ensure_results.append({
+                    "ecosystem": ecosystem,
+                    **_ensure_repo_node_dependencies(("@anthropic-ai/claude-agent-sdk",)),
+                })
             elif ecosystem in {"python", "py"}:
                 ensure_results.append({
                     "ecosystem": ecosystem,
@@ -4763,21 +5738,34 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         if not source_path:
             source_path = str(surface.get("source_path") or "product/site")
         publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
+        publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
         install = bool(args.get("install", True))
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=180, minimum=15, maximum=900)
-        verification = _verify_product_surface_path(
-            store._business_root(business),
-            source_path,
-            install=install,
-            timeout_seconds=timeout_seconds,
-        )
-        if verification.get("status") == "passed":
-            publish = _publish_product_surface_path(
+        shared_renderer = _is_shared_renderer_publish_policy(publish_policy)
+        if shared_renderer:
+            verification = _verify_shared_renderer_surface(
                 business_root=store._business_root(business),
                 slug=business,
-                source_path=str(verification.get("source_path") or source_path),
-                publish_target=publish_target,
+                source_path=source_path,
+                surface=surface,
             )
+        else:
+            verification = _verify_product_surface_path(
+                store._business_root(business),
+                source_path,
+                install=install,
+                timeout_seconds=timeout_seconds,
+            )
+        if verification.get("status") == "passed":
+            if shared_renderer:
+                publish = _publish_shared_renderer_surface(slug=business, publish_target=publish_target)
+            else:
+                publish = _publish_product_surface_path(
+                    business_root=store._business_root(business),
+                    slug=business,
+                    source_path=str(verification.get("source_path") or source_path),
+                    publish_target=publish_target,
+                )
         else:
             publish = {
                 "status": "blocked",
@@ -4791,11 +5779,20 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         receipt_id = uuid.uuid4().hex
         receipt_path = f"receipts/product-surface/{receipt_id}.json"
         done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
+        inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
+        if not inventory:
+            inventory = _product_inventory(store._business_root(business), str(verification.get("source_path") or source_path), surface=surface)
+        inventory = {
+            **inventory,
+            "public_url": publish.get("public_url") or inventory.get("public_url") or "",
+            "publish_receipt_path": receipt_path,
+        }
         verification = {
             **verification,
             "business": business,
             "receipt_path": receipt_path,
             "publish": publish,
+            "inventory": inventory,
             "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
             "done_gate_status": done_gate_status,
             "blocker": "" if done_gate_status == "passed" else (publish.get("blocker") or verification.get("error") or "product surface is not published"),
@@ -4815,8 +5812,10 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                     "source_path": verification.get("source_path"),
                     "status": verification.get("status"),
                     "kind": verification.get("kind"),
+                    "publish_policy": publish_policy,
                     "error": verification.get("error"),
                     "warnings": verification.get("warnings") or [],
+                    "inventory": inventory,
                     "receipt_path": receipt_path,
                     "publish": publish,
                     "done_gate_status": done_gate_status,
@@ -4838,7 +5837,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                     "theme": surface.get("theme") or {"source": "business design brief"},
                     "constraints": surface.get("constraints") or {},
                     "publish_target": publish_target,
-                    "publish_policy": surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
+                    "publish_policy": publish_policy,
                     "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
                     "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
                     "notes": surface.get("notes") or "",
@@ -5351,23 +6350,37 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
         business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
         if not business:
             raise TakyonError("business is required")
-        body = str(args.get("body") or args.get("content") or "").strip()
+        body = _normalize_outreach_body(args.get("body") or args.get("content"))
         if not body:
             raise TakyonError("body is required")
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
             business_mode = str(business_row.get("mode") or "live")
+            canonical_product_url = _canonical_product_url(store, conn, business)
+
+        body, canonical_replacements = _canonicalize_business_product_links(
+            body,
+            business=business,
+            canonical_url=canonical_product_url,
+        )
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        metadata = {
+            **metadata,
+            "canonical_product_url": canonical_product_url,
+        }
+        if canonical_replacements:
+            metadata["canonicalized_product_links"] = canonical_replacements
 
         canonical_args = dict(args)
         canonical_args["business"] = business
         canonical_args["body"] = body
+        canonical_args["metadata"] = metadata
         if business_mode == "test":
             return handle_business_publish_test_outreach(canonical_args)
 
         channel = str(args.get("channel") or args.get("provider") or "outreach").strip()
         provider = str(args.get("provider") or channel).strip()
         target = args.get("target") or args.get("recipient")
-        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
         destination_url = _outreach_destination_url(
             channel=channel,
             provider=provider,
@@ -5990,6 +7003,29 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if business_root not in (workspace_path, *workspace_path.parents):
             raise TakyonError("workspace escaped business root")
 
+        node = _resolve_runtime_executable("node")
+        if not node:
+            ensure_runtime = _ensure_javascript_runtime(package_manager=True)
+            node = _resolve_runtime_executable("node")
+        else:
+            ensure_runtime = {"success": True, "installed": False, "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun"))}
+        if not node:
+            raise TakyonError(
+                "javascript runtime unavailable for Claude Agent SDK tasks: "
+                f"{ensure_runtime.get('error') or 'node is missing'}"
+            )
+        script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
+        if not script.exists():
+            raise TakyonError(f"Claude Agent SDK helper missing: {script}")
+
+        dependency_state = _ensure_repo_node_dependencies(("@anthropic-ai/claude-agent-sdk",))
+        if not dependency_state.get("success"):
+            missing = ", ".join(dependency_state.get("missing_packages") or ["@anthropic-ai/claude-agent-sdk"])
+            raise TakyonError(
+                "Claude Agent SDK dependencies unavailable before worker launch: "
+                f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
+            )
+
         budget_usd = _clamp_float(args.get("budget_usd"), default=2.0, minimum=0.05, maximum=25.0)
         budget = store.commit(
             scope=f"business:{business}",
@@ -6010,21 +7046,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
 
-        node = _resolve_runtime_executable("node")
-        if not node:
-            ensure_runtime = _ensure_javascript_runtime(package_manager=False)
-            node = _resolve_runtime_executable("node")
-        else:
-            ensure_runtime = {"success": True, "installed": False, "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun"))}
-        if not node:
-            raise TakyonError(
-                "javascript runtime unavailable for Claude Agent SDK tasks: "
-                f"{ensure_runtime.get('error') or 'node is missing'}"
-            )
-        script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
-        if not script.exists():
-            raise TakyonError(f"Claude Agent SDK helper missing: {script}")
-
         max_turns = _clamp_int(args.get("max_turns"), default=12, minimum=1, maximum=40)
         timeout_ms = _clamp_int(args.get("timeout_ms"), default=300_000, minimum=30_000, maximum=1_800_000)
         model = str(
@@ -6033,7 +7054,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or _model_from_config("claude_agent_default", "deep_work_default")
             or DEFAULT_CLAUDE_AGENT_MODEL
         ).strip()
-        worker_instruction = instruction.rstrip() + "\n\n" + NO_PRETEND_PRODUCT_CONTRACT
+        workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_raw)
+        worker_instruction = instruction.rstrip() + "\n\n" + workspace_contract + "\n\n" + NO_PRETEND_PRODUCT_CONTRACT
         payload = {
             "business": business,
             "workspace": workspace_raw,
@@ -6064,6 +7086,16 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if proc.returncode != 0:
             sdk_result.setdefault("success", False)
             sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+        if sdk_result.get("success"):
+            prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_raw)
+            if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
+                sdk_result["workspace_prefix_repair"] = prefix_repair
+            if prefix_repair.get("blocked"):
+                sdk_result["success"] = False
+                sdk_result["error"] = (
+                    "Claude Agent SDK output blocked because source files were written under a "
+                    f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
+                )
         pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
         if pretend_findings:
             sdk_result["success"] = False
@@ -6135,6 +7167,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "summary": sdk_result.get("summary") or "",
                     "error": sdk_result.get("error") or None,
                     "pretend_product_findings": pretend_findings,
+                    "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
                     "verification": verification,
                 },
             }
@@ -6635,7 +7668,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify"},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Use shared_renderer for Polsia-style wildcard/shared product pages without per-business deploy."},
                 "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
                 "done_gate": {"type": "string", "description": "Defaults to verified and published, or exact blocker"},
                 "notes": {"type": "string"},
@@ -6649,11 +7682,11 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_verify_product_surface",
-        "description": "Verify that a business product/website source path exists/builds, publish it when possible, and record a receipt or exact blocker.",
+        "description": "Verify that a business product/website source path exists/builds, publish static output or a supported Next.js service when possible, and record a receipt, exact blocker, and nonfatal source inventory evidence.",
         "handler": handle_business_verify_product_surface,
         "schema": _schema(
             "business_verify_product_surface",
-            "Verify product surface source/build, publish, and write a receipt.",
+            "Verify product surface source/build, publish static output or supported Next.js service, and write a receipt with nonfatal inventory evidence.",
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
@@ -6730,7 +7763,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_publish_outreach",
-        "description": "Publish outreach through one mode-aware intent: test mode creates a local suppressed receipt and conversation mirror; live mode records a gated provider publish job.",
+        "description": "Publish outreach through one mode-aware intent using the canonical product URL: test mode creates a local suppressed receipt and conversation mirror; live mode records a gated provider publish job.",
         "handler": handle_business_publish_outreach,
         "schema": _schema(
             "business_publish_outreach",

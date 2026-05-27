@@ -64,6 +64,185 @@
     return source.relative_path || shortPath(source.path);
   }
 
+  const GROUPABLE_KINDS = new Set([
+    "skill",
+    "skill-orphan",
+    "tool-category",
+    "harness-command",
+    "control-command",
+    "cron-job",
+  ]);
+
+  function pluralizeKind(kind, count) {
+    const label = String(kind || "node").replace(/-/g, " ");
+    if (count === 1) return label;
+    if (label.endsWith("category")) return label.slice(0, -1) + "ies";
+    return label + "s";
+  }
+
+  function hashText(value) {
+    let hash = 5381;
+    for (let index = 0; index < value.length; index += 1) {
+      hash = ((hash << 5) + hash) ^ value.charCodeAt(index);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function normalizeEdgeLabel(label) {
+    return String(label || "").toLowerCase().replace(/\b\d+\b/g, "#").trim();
+  }
+
+  function memberSearchText(node) {
+    return [
+      node.id,
+      node.label,
+      node.kind,
+      node.lane,
+      node.description,
+      (node.tags || []).join(" "),
+      shortPath(node.source_path),
+    ].join(" ").toLowerCase();
+  }
+
+  function edgeEndpointSignature(id, nodesById) {
+    const node = nodesById[id];
+    if (!node) return "missing";
+    return [node.lane || "", node.kind || ""].join(":");
+  }
+
+  function groupingSignature(node, graph, nodesById) {
+    if (!GROUPABLE_KINDS.has(node.kind)) return "";
+    if (node.lane === "ceo") return "";
+    const incoming = [];
+    const outgoing = [];
+    for (const edge of graph.edges || []) {
+      if (edge.target === node.id) {
+        incoming.push([
+          "in",
+          normalizeEdgeLabel(edge.label),
+          edge.kind || "",
+          edgeEndpointSignature(edge.source, nodesById),
+        ].join(":"));
+      }
+      if (edge.source === node.id) {
+        outgoing.push([
+          "out",
+          normalizeEdgeLabel(edge.label),
+          edge.kind || "",
+          edgeEndpointSignature(edge.target, nodesById),
+        ].join(":"));
+      }
+    }
+    const incomingShape = Array.from(new Set(incoming)).sort();
+    const outgoingShape = Array.from(new Set(outgoing)).sort();
+    return [
+      node.lane || "",
+      node.kind || "",
+      incomingShape.join("|"),
+      outgoingShape.join("|"),
+    ].join("::");
+  }
+
+  function buildDisplayGraph(graph, expandedGroups) {
+    const nodesById = {};
+    for (const node of graph.nodes || []) nodesById[node.id] = node;
+
+    const buckets = {};
+    for (const node of graph.nodes || []) {
+      const signature = groupingSignature(node, graph, nodesById);
+      if (!signature) continue;
+      (buckets[signature] || (buckets[signature] = [])).push(node);
+    }
+
+    const collapsedByNode = {};
+    const groupById = {};
+    for (const signature of Object.keys(buckets)) {
+      const members = buckets[signature];
+      if (members.length < 2) continue;
+      const groupId = "group:" + hashText(signature);
+      if (expandedGroups[groupId]) continue;
+      const first = members[0];
+      const preview = members.slice(0, 4).map(function (node) { return nodeTitle(node); }).join(", ");
+      const groupNode = {
+        id: groupId,
+        label: members.length + " " + pluralizeKind(first.kind, members.length),
+        kind: "group",
+        lane: first.lane,
+        description: "Same input/output pattern: " + preview + (members.length > 4 ? ", ..." : ""),
+        source_path: null,
+        tags: ["grouped", first.kind, first.lane],
+        metadata: {
+          group: true,
+          signature: signature,
+          member_count: members.length,
+          member_kind: first.kind,
+          members: members.map(function (node) {
+            return {
+              id: node.id,
+              label: node.label,
+              kind: node.kind,
+              lane: node.lane,
+              description: node.description,
+              source_path: node.source_path,
+              tags: node.tags || [],
+            };
+          }),
+        },
+        _searchText: members.map(memberSearchText).join(" "),
+      };
+      groupById[groupId] = groupNode;
+      for (const member of members) collapsedByNode[member.id] = groupId;
+    }
+
+    const displayNodes = [];
+    const pushedGroups = new Set();
+    for (const node of graph.nodes || []) {
+      const groupId = collapsedByNode[node.id];
+      if (!groupId) {
+        displayNodes.push(node);
+        continue;
+      }
+      if (!pushedGroups.has(groupId)) {
+        displayNodes.push(groupById[groupId]);
+        pushedGroups.add(groupId);
+      }
+    }
+
+    const edgeMap = {};
+    for (const edge of graph.edges || []) {
+      const source = collapsedByNode[edge.source] || edge.source;
+      const target = collapsedByNode[edge.target] || edge.target;
+      if (source === target) continue;
+      const key = [source, target, edge.label || "", edge.kind || ""].join("\u0000");
+      if (!edgeMap[key]) {
+        edgeMap[key] = Object.assign({}, edge, {
+          source: source,
+          target: target,
+          count: 0,
+          member_edges: [],
+        });
+      }
+      edgeMap[key].count += 1;
+      edgeMap[key].member_edges.push(edge);
+    }
+
+    const displayEdges = Object.values(edgeMap).map(function (edge) {
+      if (edge.count > 1) {
+        return Object.assign({}, edge, { label: edge.label + " x" + edge.count, aggregate: true });
+      }
+      return edge;
+    });
+
+    return Object.assign({}, graph, {
+      nodes: displayNodes,
+      edges: displayEdges,
+      source_nodes: graph.nodes || [],
+      source_edges: graph.edges || [],
+      groups: groupById,
+      collapsedByNode: collapsedByNode,
+    });
+  }
+
   function useGraph() {
     const [graph, setGraph] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -119,17 +298,10 @@
     const filteredIds = useMemo(function () {
       const ids = new Set();
       for (const node of graph.nodes) {
-        const text = [
-          node.id,
-          node.label,
-          node.kind,
-          node.lane,
-          node.description,
-          (node.tags || []).join(" "),
-          shortPath(node.source_path),
-        ].join(" ").toLowerCase();
+        const text = (node._searchText || memberSearchText(node)).toLowerCase();
         const matchesQuery = !lower || text.includes(lower);
-        const matchesKind = !kindFilter || node.kind === kindFilter || node.lane === kindFilter;
+        const groupKind = node.metadata && node.metadata.group ? node.metadata.member_kind : "";
+        const matchesKind = !kindFilter || node.kind === kindFilter || node.lane === kindFilter || groupKind === kindFilter;
         if (matchesQuery && matchesKind) ids.add(node.id);
       }
       return ids;
@@ -194,7 +366,7 @@
             return h("g", { key: edge.source + edge.target + edge.label + index },
               h("path", {
                 d: d,
-                className: cx("takyon-map-edge", edge.kind === "reference" && "is-reference"),
+                className: cx("takyon-map-edge", edge.kind === "reference" && "is-reference", edge.aggregate && "is-aggregate"),
                 markerEnd: "url(#takyon-map-arrow)",
               }),
               h("text", {
@@ -222,7 +394,8 @@
           },
             h("span", { className: "takyon-map-node-kind" }, node.kind),
             h("span", { className: "takyon-map-node-label" }, nodeTitle(node)),
-            h("span", { className: "takyon-map-node-desc" }, node.description || shortPath(node.source_path))
+            h("span", { className: "takyon-map-node-desc" }, node.description || shortPath(node.source_path)),
+            node.metadata && node.metadata.group && h("span", { className: "takyon-map-node-count" }, "expandable")
           );
         })
       )
@@ -230,7 +403,7 @@
   }
 
   function Inspector(props) {
-    const { graph, selectedNode, setSelectedId, refresh } = props;
+    const { graph, sourceGraph, selectedNode, setSelectedId, refresh, expandedGroups, setExpandedGroups } = props;
     const [source, setSource] = useState(null);
     const [draft, setDraft] = useState("");
     const [loadingSource, setLoadingSource] = useState(false);
@@ -242,18 +415,18 @@
 
     const sourcesByPath = useMemo(function () {
       const map = {};
-      for (const item of graph.sources || []) map[item.path] = item;
+      for (const item of sourceGraph.sources || []) map[item.path] = item;
       return map;
-    }, [graph.sources]);
+    }, [sourceGraph.sources]);
 
     const sourceMeta = selectedNode && selectedNode.source_path ? sourcesByPath[selectedNode.source_path] : null;
-    const incoming = selectedNode ? graph.edges.filter(function (edge) { return edge.target === selectedNode.id; }) : [];
-    const outgoing = selectedNode ? graph.edges.filter(function (edge) { return edge.source === selectedNode.id; }) : [];
+    const incoming = selectedNode ? sourceGraph.edges.filter(function (edge) { return edge.target === selectedNode.id; }) : [];
+    const outgoing = selectedNode ? sourceGraph.edges.filter(function (edge) { return edge.source === selectedNode.id; }) : [];
     const nodesById = useMemo(function () {
       const map = {};
-      for (const node of graph.nodes) map[node.id] = node;
+      for (const node of sourceGraph.nodes) map[node.id] = node;
       return map;
-    }, [graph.nodes]);
+    }, [sourceGraph.nodes]);
 
     const sourceExcerpt = useMemo(function () {
       if (!source || !source.content || !selectedNode) return null;
@@ -346,13 +519,13 @@
           h("div", { className: "takyon-map-empty-title" }, "Select a node"),
           h("div", { className: "takyon-map-muted" }, "The graph is generated from the files listed below."),
           h("div", { className: "takyon-map-source-list" },
-            (graph.sources || []).slice(0, 80).map(function (item) {
+            (sourceGraph.sources || []).slice(0, 80).map(function (item) {
               return h("button", {
                 type: "button",
                 key: item.path,
                 className: "takyon-map-source-row",
                 onClick: function () {
-                  const node = graph.nodes.find(function (candidate) {
+                  const node = sourceGraph.nodes.find(function (candidate) {
                     return candidate.source_path === item.path;
                   });
                   if (node) setSelectedId(node.id);
@@ -363,6 +536,100 @@
               );
             })
           )
+        )
+      );
+    }
+
+    if (selectedNode.metadata && selectedNode.metadata.group) {
+      const members = selectedNode.metadata.members || [];
+      const incomingGroups = {};
+      const outgoingGroups = {};
+      for (const member of members) {
+        for (const edge of sourceGraph.edges || []) {
+          if (edge.target === member.id) {
+            const source = nodesById[edge.source];
+            const key = [edge.label, source ? source.kind : "node", source ? source.lane : ""].join("|");
+            incomingGroups[key] = incomingGroups[key] || { label: edge.label, count: 0 };
+            incomingGroups[key].count += 1;
+          }
+          if (edge.source === member.id) {
+            const target = nodesById[edge.target];
+            const key = [edge.label, target ? target.kind : "node", target ? target.lane : ""].join("|");
+            outgoingGroups[key] = outgoingGroups[key] || { label: edge.label, count: 0 };
+            outgoingGroups[key].count += 1;
+          }
+        }
+      }
+      const incomingSummary = Object.values(incomingGroups);
+      const outgoingSummary = Object.values(outgoingGroups);
+
+      return h("aside", { className: "takyon-map-inspector", ref: inspectorRef },
+        h("div", { className: "takyon-map-inspector-head" },
+          h("div", null,
+            h("div", { className: "takyon-map-kicker" }, "Grouped " + selectedNode.metadata.member_kind),
+            h("h2", null, selectedNode.label)
+          ),
+          h(Badge, { className: "takyon-map-badge" }, selectedNode.lane)
+        ),
+        h("p", { className: "takyon-map-node-summary" },
+          "Collapsed because these nodes share the same source-of-truth input/output pattern."
+        ),
+        h("div", { className: "takyon-map-actions" },
+          h(MapButton, {
+            type: "button",
+            onClick: function () {
+              setExpandedGroups(function (prev) {
+                return Object.assign({}, prev, { [selectedNode.id]: true });
+              });
+              if (members[0]) setSelectedId(members[0].id);
+            },
+          }, "Expand group")
+        ),
+        h("div", { className: "takyon-map-edge-stack" },
+          h("div", { className: "takyon-map-edge-column" },
+            h("h3", null, "Inputs"),
+            incomingSummary.length ? incomingSummary.map(function (item, index) {
+              return h("div", { key: "in" + index, className: "takyon-map-edge-row is-static" },
+                h("span", null, item.label),
+                h("small", null, item.count + " edges")
+              );
+            }) : h("div", { className: "takyon-map-muted" }, "None")
+          ),
+          h("div", { className: "takyon-map-edge-column" },
+            h("h3", null, "Outputs"),
+            outgoingSummary.length ? outgoingSummary.map(function (item, index) {
+              return h("div", { key: "out" + index, className: "takyon-map-edge-row is-static" },
+                h("span", null, item.label),
+                h("small", null, item.count + " edges")
+              );
+            }) : h("div", { className: "takyon-map-muted" }, "None")
+          )
+        ),
+        h("section", { className: "takyon-map-group-card" },
+          h("h3", null, "Members"),
+          h("div", { className: "takyon-map-group-members" },
+            members.map(function (member) {
+              const sourceText = member.source_path ? shortPath(member.source_path) : "";
+              return h("button", {
+                key: member.id,
+                type: "button",
+                className: "takyon-map-group-member",
+                onClick: function () {
+                  setExpandedGroups(function (prev) {
+                    return Object.assign({}, prev, { [selectedNode.id]: true });
+                  });
+                  setSelectedId(member.id);
+                },
+              },
+                h("span", null, member.label || member.id),
+                h("small", null, sourceText || member.kind)
+              );
+            })
+          )
+        ),
+        h("details", { className: "takyon-map-metadata" },
+          h("summary", null, "Source graph metadata"),
+          h("pre", null, JSON.stringify(selectedNode.metadata, null, 2))
         )
       );
     }
@@ -475,20 +742,22 @@
   }
 
   function Sidebar(props) {
-    const { graph, selectedId, setSelectedId, query, setQuery, kindFilter, setKindFilter } = props;
+    const { graph, sourceGraph, selectedId, setSelectedId, query, setQuery, kindFilter, setKindFilter } = props;
     const kinds = useMemo(function () {
       const seen = new Set();
       for (const node of graph.nodes) {
         seen.add(node.kind);
+        if (node.metadata && node.metadata.group && node.metadata.member_kind) seen.add(node.metadata.member_kind);
         seen.add(node.lane);
       }
       return Array.from(seen).sort();
     }, [graph.nodes]);
     const lower = query.trim().toLowerCase();
     const nodes = graph.nodes.filter(function (node) {
-      const text = [node.label, node.kind, node.lane, node.description, shortPath(node.source_path)].join(" ").toLowerCase();
+      const text = (node._searchText || memberSearchText(node)).toLowerCase();
       const queryMatch = !lower || text.includes(lower);
-      const kindMatch = !kindFilter || node.kind === kindFilter || node.lane === kindFilter;
+      const groupKind = node.metadata && node.metadata.group ? node.metadata.member_kind : "";
+      const kindMatch = !kindFilter || node.kind === kindFilter || node.lane === kindFilter || groupKind === kindFilter;
       return queryMatch && kindMatch;
     });
 
@@ -512,10 +781,10 @@
         )
       ),
       h("div", { className: "takyon-map-summary-grid" },
-        h("div", null, h("strong", null, graph.summary.nodes), h("span", null, "Nodes")),
-        h("div", null, h("strong", null, graph.summary.edges), h("span", null, "Edges")),
-        h("div", null, h("strong", null, graph.summary.skills_registered), h("span", null, "Skills")),
-        h("div", null, h("strong", null, graph.summary.tools), h("span", null, "Tools"))
+        h("div", null, h("strong", null, graph.nodes.length), h("span", null, "Visible")),
+        h("div", null, h("strong", null, sourceGraph.summary.nodes), h("span", null, "Source nodes")),
+        h("div", null, h("strong", null, Object.keys(graph.groups || {}).length), h("span", null, "Groups")),
+        h("div", null, h("strong", null, sourceGraph.summary.edges), h("span", null, "Source edges"))
       ),
       graph.warnings && graph.warnings.length > 0 && h("div", { className: "takyon-map-warnings" },
         graph.warnings.slice(0, 5).map(function (warning, index) {
@@ -531,7 +800,7 @@
             onClick: function () { setSelectedId(node.id); },
           },
             h("span", null, node.label),
-            h("small", null, node.kind)
+            h("small", null, node.kind === "group" ? "group · " + (node.metadata.member_kind || "nodes") : node.kind)
           );
         })
       )
@@ -543,12 +812,11 @@
     const [selectedId, setSelectedId] = useState("");
     const [query, setQuery] = useState("");
     const [kindFilter, setKindFilter] = useState("");
+    const [expandedGroups, setExpandedGroups] = useState({});
 
     useEffect(function () {
       if (graph && !selectedId) setSelectedId("skill:takyon:ceo");
     }, [graph, selectedId]);
-
-    const selectedNode = graph ? graph.nodes.find(function (node) { return node.id === selectedId; }) || null : null;
 
     if (loading) {
       return h("div", { className: "takyon-map takyon-map-loading" }, "Loading agent map");
@@ -562,6 +830,12 @@
     }
     if (!graph) return null;
 
+    const displayGraph = buildDisplayGraph(graph, expandedGroups);
+    const expandedCount = Object.keys(expandedGroups).filter(function (key) { return expandedGroups[key]; }).length;
+    const selectedNode = displayGraph.nodes.find(function (node) { return node.id === selectedId; })
+      || graph.nodes.find(function (node) { return node.id === selectedId; })
+      || null;
+
     return h("div", { className: "takyon-map" },
       h("header", { className: "takyon-map-header" },
         h("div", null,
@@ -570,12 +844,18 @@
         ),
         h("div", { className: "takyon-map-header-meta" },
           h("span", null, shortPath(graph.generated_from.registry)),
+          expandedCount > 0 && h(MapButton, {
+            type: "button",
+            size: "xs",
+            onClick: function () { setExpandedGroups({}); },
+          }, "Collapse groups"),
           h(MapButton, { type: "button", size: "xs", onClick: refresh }, "Refresh")
         )
       ),
       h("main", { className: "takyon-map-layout" },
         h(Sidebar, {
-          graph: graph,
+          graph: displayGraph,
+          sourceGraph: graph,
           selectedId: selectedId,
           setSelectedId: setSelectedId,
           query: query,
@@ -584,17 +864,20 @@
           setKindFilter: setKindFilter,
         }),
         h(GraphView, {
-          graph: graph,
+          graph: displayGraph,
           selectedId: selectedId,
           setSelectedId: setSelectedId,
           query: query,
           kindFilter: kindFilter,
         }),
         h(Inspector, {
-          graph: graph,
+          graph: displayGraph,
+          sourceGraph: graph,
           selectedNode: selectedNode,
           setSelectedId: setSelectedId,
           refresh: refresh,
+          expandedGroups: expandedGroups,
+          setExpandedGroups: setExpandedGroups,
         })
       )
     );
