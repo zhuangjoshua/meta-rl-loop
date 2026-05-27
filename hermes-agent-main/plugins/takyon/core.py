@@ -77,7 +77,7 @@ _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
-_DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_verify"
+_DEFAULT_PRODUCT_PUBLISH_POLICY = "shared_renderer"
 _DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
 _DEFAULT_PRODUCT_DONE_GATE = "business_verify_product_surface:verified_and_published_or_exact_blocker"
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
@@ -2442,7 +2442,7 @@ class TakyonStore:
               theme_json TEXT,
               constraints_json TEXT,
               publish_target TEXT,
-              publish_policy TEXT NOT NULL DEFAULT 'publish_after_verify',
+              publish_policy TEXT NOT NULL DEFAULT 'shared_renderer',
               mode_behavior TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface',
               done_gate TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker',
               public_url TEXT,
@@ -2640,7 +2640,7 @@ class TakyonStore:
         surface_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_surface_contracts)").fetchall()}
         surface_additions = {
             "publish_target": "TEXT",
-            "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_verify'",
+            "publish_policy": "TEXT NOT NULL DEFAULT 'shared_renderer'",
             "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
             "done_gate": "TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker'",
             "public_url": "TEXT",
@@ -5740,7 +5740,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
         publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
         install = bool(args.get("install", True))
-        timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=180, minimum=15, maximum=900)
+        timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=60, minimum=15, maximum=900)
         shared_renderer = _is_shared_renderer_publish_policy(publish_policy)
         if shared_renderer:
             verification = _verify_shared_renderer_surface(
@@ -7115,7 +7115,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 business_root,
                 workspace_raw,
                 install=bool(args.get("install", True)),
-                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=180, minimum=15, maximum=900),
+                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=60, minimum=15, maximum=900),
             )
             receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_raw}".encode("utf-8")).hexdigest()[:32]
             verification = {
@@ -7668,7 +7668,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Use shared_renderer for Polsia-style wildcard/shared product pages without per-business deploy."},
+                "publish_policy": {"type": "string", "description": "Defaults to shared_renderer for Polsia-style wildcard/shared product pages without per-business deploy. Use publish_after_verify only for explicit custom/static source publishing."},
                 "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
                 "done_gate": {"type": "string", "description": "Defaults to verified and published, or exact blocker"},
                 "notes": {"type": "string"},
@@ -7682,17 +7682,18 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_verify_product_surface",
-        "description": "Verify that a business product/website source path exists/builds, publish static output or a supported Next.js service when possible, and record a receipt, exact blocker, and nonfatal source inventory evidence.",
+        "description": "Verify and publish a business product surface. Defaults to shared_renderer; use publish_after_verify only for explicit custom/static source publishing.",
         "handler": handle_business_verify_product_surface,
         "schema": _schema(
             "business_verify_product_surface",
-            "Verify product surface source/build, publish static output or supported Next.js service, and write a receipt with nonfatal inventory evidence.",
+            "Verify product surface source/build when requested, publish shared/static output or supported custom service, and write a receipt with nonfatal inventory evidence.",
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
+                "publish_policy": {"type": "string", "description": "Defaults to shared_renderer. Use publish_after_verify for explicit static/custom source publishing after choosing that path in the app surface contract."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
-                "timeout_seconds": {"type": "integer", "description": "Per command timeout; default 180"},
+                "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 60"},
                 "activate_on_success": {"type": "boolean", "description": "Update app surface status after verification; active only when publication succeeds; default true"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
@@ -7838,7 +7839,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
                 "verify_surface": {"type": "boolean", "description": "Verify product/website source after edits and write a receipt; product/* workspaces default to verification"},
                 "install": {"type": "boolean", "description": "Run package install before build during verification; default true"},
-                "verification_timeout_seconds": {"type": "integer", "description": "Per verification command timeout; default 180"},
+                "verification_timeout_seconds": {"type": "integer", "description": "Per verification command timeout; default 60"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

@@ -226,6 +226,15 @@ interface BusinessArtifactSummary {
   publish_receipt_path?: string;
   count?: number;
   published_count?: number;
+  items?: BusinessArtifactItem[];
+  receipts?: string[];
+}
+
+interface BusinessArtifactItem {
+  status?: string;
+  path?: string;
+  receipt?: string;
+  updated_at?: number;
 }
 
 interface BusinessOverviewPost {
@@ -2639,6 +2648,25 @@ function CompanyOverview({
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
   const tasks = overview.tasks || [];
+  const outreachItems = (Array.isArray(outreach.items) ? outreach.items : [])
+    .filter((item) => (item.path || "").trim());
+  const outreachRowsSource = outreachItems.length > 0
+    ? outreachItems
+    : outreach.path
+      ? [{
+          path: outreach.path,
+          receipt: outreach.receipt,
+          status: outreach.status,
+          updated_at: outreach.updated_at,
+        }]
+      : [];
+  const outreachReceiptPaths = Array.from(new Set([
+    ...(Array.isArray(outreach.receipts) ? outreach.receipts : []),
+    ...outreachRowsSource.map((item) => item.receipt || ""),
+    outreach.receipt || "",
+  ]
+    .map((path) => normalizeBusinessPath(path))
+    .filter(Boolean)));
   const previewPath = website.path || website.source_path || product.source_path || "product/site";
   const sourcePath = website.source_path || product.source_path || "";
   const publicSiteUrl = website.public_url || product.public_url || "";
@@ -2648,8 +2676,8 @@ function CompanyOverview({
       sourcePath,
       website.path,
       publishReceipt,
-      outreach.path,
-      outreach.receipt,
+      ...outreachRowsSource.flatMap((item) => [item.path, item.receipt]),
+      ...outreachReceiptPaths,
       creativeAssets.path,
       creativeAssets.receipt,
     ]
@@ -2685,18 +2713,17 @@ function CompanyOverview({
       status: item.kind === "receipt" ? "Receipt" : item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
     }));
   const deliverableDocs = uniqueDocs([
-    outreach.path && outreach.receipt ? docTile(outreach.path, "Outreach", "Published") : null,
     creativeAssets.path && creativeAssets.receipt ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
     ...outputDocs.filter((doc) => doc.status !== "Receipt"),
   ]);
   const deliverableRows = [
-    outreach.path && outreach.receipt && {
-      detail: outreach.path,
-      id: "outreach",
-      label: "Outreach",
-      status: humanizeArtifactStatus(outreach.status),
+    ...outreachRowsSource.map((item, index) => ({
+      detail: item.path,
+      id: `outreach-${index}-${item.path}`,
+      label: outreachLabelForPath(item.path || ""),
+      status: humanizeArtifactStatus(item.status || outreach.status),
       tone: "done",
-    },
+    })),
     creativeAssets.path && creativeAssets.receipt && {
       detail: creativeAssets.receipt,
       id: "creative",
@@ -2720,13 +2747,13 @@ function CompanyOverview({
       status: "Receipt",
       tone: "done",
     },
-    outreach.receipt && {
-      detail: outreach.receipt,
-      id: "outreach-receipt",
+    ...outreachReceiptPaths.map((path, index) => ({
+      detail: path,
+      id: `outreach-receipt-${index}-${path}`,
       label: "Outreach receipt",
       status: "Receipt",
       tone: "done",
-    },
+    })),
     creativeAssets.receipt && {
       detail: creativeAssets.receipt,
       id: "creative-receipt",
@@ -3080,6 +3107,13 @@ function prettyChannel(channel: string): string {
   return key
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function outreachLabelForPath(path: string): string {
+  const destination = parseOutreachDestination(path);
+  if (!destination) return "Outreach";
+  const channel = prettyChannel(destination.channel);
+  return destination.target ? `${channel} · ${destination.target}` : channel;
 }
 
 function parseOutreachDestination(path: string): {

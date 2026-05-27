@@ -1,0 +1,97 @@
+name: Deploy Takyon
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: takyon-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TAKYON_REMOTE_RUNTIME: /opt/takyon/hermes-agent-main
+      TAKYON_SMOKE_HOST: https://app.fourmanifold.com/
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: hermes-agent-main/web/package-lock.json
+
+      - name: Build dashboard UI
+        run: npm ci && npm run build
+        working-directory: hermes-agent-main/web
+
+      - name: Compile Python runtime
+        run: |
+          python -m compileall -q \
+            hermes-agent-main/plugins/takyon \
+            hermes-agent-main/takyon_cli \
+            hermes-agent-main/tui_gateway
+
+      - name: Detect tracked Caddy changes
+        id: changes
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "caddy=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BEFORE="${{ github.event.before }}"
+          if [[ -z "$BEFORE" || "$BEFORE" =~ ^0+$ ]]; then
+            BEFORE="$(git rev-list --max-parents=0 HEAD)"
+          fi
+          if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qx 'deploy/argon-alpha-14/Caddyfile'; then
+            echo "caddy=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "caddy=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare VPS SSH key
+        shell: bash
+        env:
+          TAKYON_VPS_HOST: ${{ secrets.TAKYON_VPS_HOST }}
+          TAKYON_VPS_USER: ${{ secrets.TAKYON_VPS_USER }}
+          TAKYON_VPS_SSH_KEY: ${{ secrets.TAKYON_VPS_SSH_KEY }}
+        run: |
+          test -n "$TAKYON_VPS_HOST"
+          test -n "$TAKYON_VPS_SSH_KEY"
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$TAKYON_VPS_SSH_KEY" > "$HOME/.ssh/takyon_argon_alpha14"
+          chmod 600 "$HOME/.ssh/takyon_argon_alpha14"
+          ssh-keyscan -H "$TAKYON_VPS_HOST" >> "$HOME/.ssh/known_hosts"
+          echo "TAKYON_VPS_HOST=${TAKYON_VPS_USER:-root}@$TAKYON_VPS_HOST" >> "$GITHUB_ENV"
+          echo "TAKYON_VPS_KEY=$HOME/.ssh/takyon_argon_alpha14" >> "$GITHUB_ENV"
+
+      - name: Redeploy Vercel frontdoor
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [[ -z "${VERCEL_TOKEN:-}" ]]; then
+            echo "VERCEL_TOKEN is not configured; skipping Vercel redeploy."
+            exit 0
+          fi
+          npx --yes vercel@latest redeploy app.fourmanifold.com --target production --token "$VERCEL_TOKEN"
+          npx --yes vercel@latest inspect app.fourmanifold.com --token "$VERCEL_TOKEN"
+
+      - name: Deploy runtime to VPS
+        env:
+          TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.caddy }}
+          TAKYON_RUN_WEB_BUILD: "0"
+        run: deploy/argon-alpha-14/deploy-runtime.sh

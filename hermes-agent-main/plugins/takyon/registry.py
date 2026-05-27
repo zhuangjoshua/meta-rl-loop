@@ -191,7 +191,7 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "product",
         "priority_bands": ["p1_ceo", "p2_growth", "p4_maintenance"],
         "effect": "durable_write",
-        "purpose": "Verify a product/website source path, publish static output or a supported service app to the business subdomain when possible, and record a receipt, exact blocker, and nonfatal source inventory evidence without deciding strategy.",
+        "purpose": "Verify and publish a product/website surface. Defaults to the shared renderer for fast per-business pages; explicit static/custom source publishing must be chosen through the app surface contract and writes receipts/blockers without deciding strategy.",
     },
     {
         "name": "business_upsert_app_plan",

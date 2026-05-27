@@ -4979,6 +4979,26 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         except Exception:
             return None
 
+    def all_under(rel_root: str, suffixes: set[str] | None = None) -> list[dict[str, Any]]:
+        try:
+            root = store._business_root(slug) / rel_root
+            if not root.is_dir():
+                return []
+            matches = [
+                path for path in root.rglob("*")
+                if path.is_file() and (suffixes is None or path.suffix.lower() in suffixes)
+            ]
+            matches.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            return [
+                {
+                    "path": str(path.relative_to(store._business_root(slug))),
+                    "updated_at": int(path.stat().st_mtime * 1000),
+                }
+                for path in matches
+            ]
+        except Exception:
+            return []
+
     source_root = source_path.strip().strip("/")
     website_candidates = [
         f"{source_root}/index.html" if source_root else "",
@@ -4990,9 +5010,41 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         and str(job.get("status") or "").lower() not in {"done", "complete", "completed", "success"}
         for job in jobs
     )
-    outreach_latest = latest_under("outreach/local-published", {".md", ".txt"})
-    outreach_receipt = latest_under("receipts/outreach", {".json"})
+    outreach_published = all_under("outreach/local-published", {".md", ".txt"})
+    outreach_receipts = all_under("receipts/outreach", {".json"})
+    outreach_latest = outreach_published[0] if outreach_published else None
+    outreach_receipt = outreach_receipts[0] if outreach_receipts else None
     outreach_draft = file_card("distribution/outreach-drafts.md") or latest_under("outreach", {".md", ".txt"})
+    receipt_by_stem = {
+        Path(str(receipt.get("path") or "")).stem.lower(): receipt
+        for receipt in outreach_receipts
+        if receipt.get("path")
+    }
+    outreach_items = []
+    for item in outreach_published:
+        item_path = str(item.get("path") or "")
+        item_stem = Path(item_path).stem.lower()
+        item_hash_match = re.search(r"-([0-9a-f]{6,64})$", item_stem)
+        item_hash = item_hash_match.group(1) if item_hash_match else ""
+        matched_receipt = None
+        if item_hash:
+            matched_receipt = next(
+                (receipt for stem, receipt in receipt_by_stem.items() if stem.startswith(item_hash)),
+                None,
+            )
+        outreach_items.append({
+            "path": item_path,
+            "updated_at": item.get("updated_at"),
+            "receipt": (matched_receipt or {}).get("path", ""),
+            "status": "published_local",
+        })
+    if not outreach_items and outreach_draft:
+        outreach_items.append({
+            "path": outreach_draft.get("path", ""),
+            "updated_at": outreach_draft.get("updated_at"),
+            "receipt": "",
+            "status": "draft_only",
+        })
     creative_latest = latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES) or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
     creative_receipt = latest_under("receipts/creative-assets", {".json"})
     research_latest = latest_under("research", {".md", ".txt"}) or latest_under("brain", {".md", ".txt"})
@@ -5230,7 +5282,9 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "path": (outreach_latest or outreach_draft or {}).get("path", ""),
                 "receipt": (outreach_receipt or {}).get("path", ""),
                 "updated_at": (outreach_latest or outreach_draft or {}).get("updated_at"),
-                "published_count": (outreach_latest or {}).get("count", 0),
+                "published_count": len(outreach_published),
+                "items": outreach_items,
+                "receipts": [str(receipt.get("path") or "") for receipt in outreach_receipts if receipt.get("path")],
             },
             "creative_assets": {
                 "status": "generated" if creative_latest and creative_receipt else ("asset_without_receipt" if creative_latest else "missing"),
