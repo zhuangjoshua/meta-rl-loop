@@ -112,6 +112,11 @@ interface BusinessOverviewProduct {
   routes_count?: number;
   verification_status?: string;
   verification_receipt?: string;
+  inventory_status?: string;
+  risk_marker_count?: number;
+  claim_snippet_count?: number;
+  pretend_finding_count?: number;
+  local_continuable_work?: string[];
   filesystem_index?: string;
   notes?: string;
 }
@@ -485,9 +490,9 @@ function humanizeStatus(status?: string): string {
   if (!value) return "Recorded";
   if (/blocked|fail|error|overdue|attention|missing/.test(value)) return "Needs attention";
   if (/recover/.test(value)) return "Recovering";
-  if (/queued|pending|waiting|scheduled|needed/.test(value)) return "Waiting";
+  if (/queued|pending|waiting|scheduled|needed/.test(value)) return "Not started";
   if (/running|active|watch|working|research_first/.test(value)) return "Working";
-  if (/done|complete|success|passed|visible|previewable/.test(value)) return "Ready";
+  if (/done|complete|success|passed|visible|previewable/.test(value)) return "Done";
   if (value === "quiet") return "Quiet";
   return humanizeJobKind(value);
 }
@@ -597,6 +602,16 @@ function uniqueDocs(items: Array<SourceDocTile | null | undefined>): SourceDocTi
     byPath.set(item.path, item);
   }
   return [...byPath.values()];
+}
+
+function normalizeBusinessPath(path?: string): string {
+  return (path || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+function pathIsUnder(path: string, root?: string): boolean {
+  const cleanPath = normalizeBusinessPath(path);
+  const cleanRoot = normalizeBusinessPath(root);
+  return Boolean(cleanPath && cleanRoot && (cleanPath === cleanRoot || cleanPath.startsWith(`${cleanRoot}/`)));
 }
 
 const STATE_STATUSES = new Set([
@@ -854,6 +869,8 @@ function isSlashCommandPrefix(value: string): boolean {
   return value.startsWith("/") && !/\s/.test(value.slice(1));
 }
 
+const WS_AUTH_RELOAD_KEY = "takyon.dashboard.wsAuthReloaded";
+
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
@@ -868,6 +885,7 @@ export default function ChatPage() {
   }, [version]);
 
   const [state, setState] = useState<ConnectionState>("idle");
+  const reconnectAttemptsRef = useRef(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [info, setInfo] = useState<SessionInfo>({});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -879,6 +897,7 @@ export default function ChatPage() {
   }>({ business: "", items: [] });
   const [statusItems, setStatusItems] = useState<string[]>([]);
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
+  const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1066,19 +1085,30 @@ export default function ChatPage() {
           const p = ev.payload;
           if (!p?.tool_id) return;
           const toolId = p.tool_id;
-          setTools((prev) =>
-            [
+          const startedTool: ToolEntry = {
+            id: `tool-${toolId}-${Date.now()}`,
+            tool_id: toolId,
+            name: p.name || "tool",
+            context: p.context,
+            status: "running" as const,
+            startedAt: Date.now(),
+          };
+          setTools((prev) => [...prev, startedTool].slice(-30));
+          const label = naturalToolLabel(startedTool);
+          const ctx = (p.context || "").trim();
+          setMessages((prev) => {
+            const id = `toolmsg-${toolId}`;
+            if (prev.some((m) => m.id === id)) return prev;
+            return [
               ...prev,
               {
-                id: `tool-${toolId}-${Date.now()}`,
-                tool_id: toolId,
-                name: p.name || "tool",
-                context: p.context,
-                status: "running" as const,
-                startedAt: Date.now(),
+                id,
+                role: "system",
+                content: ctx ? `▶ ${label} · ${ctx}` : `▶ ${label}`,
+                status: "streaming",
               },
-            ].slice(-30),
-          );
+            ];
+          });
         },
       ),
     );
@@ -1135,6 +1165,21 @@ export default function ChatPage() {
                 }
               : tool,
           );
+        });
+        const label = naturalToolLabel(completedTool);
+        const tail = (p.error || p.summary || "").trim();
+        const icon = p.error ? "✗" : "✓";
+        setMessages((prev) => {
+          const id = `toolmsg-${p.tool_id}`;
+          const content = tail ? `${icon} ${label} · ${tail}` : `${icon} ${label}`;
+          const status: ChatMessage["status"] = p.error ? "error" : "complete";
+          const existing = prev.findIndex((m) => m.id === id);
+          if (existing === -1) {
+            return [...prev, { id, role: "system", content, status }];
+          }
+          const next = [...prev];
+          next[existing] = { ...next[existing], content, status };
+          return next;
         });
         setDeliverables((prev) =>
           upsertDeliverables(prev, deliverablesFromTool(completedTool)),
@@ -1202,6 +1247,30 @@ export default function ChatPage() {
       gw.close();
     };
   }, [gw, initialBusinessParam, resumeParam]);
+
+  useEffect(() => {
+    if (state === "open") {
+      reconnectAttemptsRef.current = 0;
+      sessionStorage.removeItem(WS_AUTH_RELOAD_KEY);
+      return;
+    }
+
+    if (state === "error" && gw.lastCloseCode === 4401) {
+      if (sessionStorage.getItem(WS_AUTH_RELOAD_KEY) !== "1") {
+        sessionStorage.setItem(WS_AUTH_RELOAD_KEY, "1");
+        window.location.reload();
+      }
+      return;
+    }
+
+    if (state !== "closed" && state !== "error") return;
+    if (reconnectAttemptsRef.current >= 3) return;
+
+    reconnectAttemptsRef.current += 1;
+    const delayMs = 500 * reconnectAttemptsRef.current;
+    const timer = window.setTimeout(() => setVersion((v) => v + 1), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [gw, state]);
 
   useEffect(() => {
     if (state !== "open" || !sessionId || !scopeState.business) return;
@@ -1299,6 +1368,81 @@ export default function ChatPage() {
     [appendSystem, gw, sessionId],
   );
 
+  const enterPendingBusiness = useCallback(
+    (business: string, mode: "test" | "live", goal?: string) => {
+      const slug = normalizeBusinessLookup(business);
+      if (!slug) return;
+      setPendingBusinessSlug(slug);
+      setScopeState((prev) => {
+        const existing = prev.businesses.find(
+          (item) => normalizeBusinessLookup(item.slug || item.name || "") === slug,
+        );
+        const current: BusinessSummary = existing || {
+          slug,
+          name: slug,
+          goal,
+          mode,
+          status: "creating",
+          state: "working",
+          reason: "Create requested from dashboard",
+        };
+        const businesses = existing
+          ? prev.businesses
+          : [current, ...prev.businesses];
+        return normalizeScopeState({
+          ...prev,
+          business: slug,
+          current,
+          businesses,
+        });
+      });
+      const params = new URLSearchParams(searchParams);
+      params.set("business", slug);
+      setSearchParams(params, { replace: true });
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [searchParams, setSearchParams],
+  );
+
+  useEffect(() => {
+    if (state !== "open" || !sessionId || !pendingBusinessSlug) return;
+    let cancelled = false;
+    let attempts = 0;
+    let timer: number | undefined;
+
+    const confirmScope = async () => {
+      attempts += 1;
+      try {
+        const res = await gw.request<ScopeState>(
+          "takyon.scope.set",
+          { session_id: sessionId, business: pendingBusinessSlug },
+          10_000,
+        );
+        if (cancelled) return;
+        const nextScope = normalizeScopeState(res);
+        if (nextScope.business === pendingBusinessSlug) {
+          setScopeState(nextScope);
+          setPendingBusinessSlug(null);
+          return;
+        }
+      } catch {
+        /* create may still be registering the business; keep the optimistic page */
+      }
+
+      if (!cancelled && attempts < 120) {
+        timer = window.setTimeout(confirmScope, 1500);
+      } else if (!cancelled) {
+        setPendingBusinessSlug(null);
+      }
+    };
+
+    void confirmScope();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [gw, pendingBusinessSlug, sessionId, state]);
+
   const applySlashCompletion = useCallback((item: SlashCompletionItem) => {
     const next = `${item.text} `;
     setInput(next);
@@ -1382,13 +1526,20 @@ export default function ChatPage() {
       const res = await gw.request<TakyonShellResponse>(
         "takyon.shell.exec",
         { session_id: sessionId, line: effectiveText },
-        180_000,
+        600_000,
       );
-      setScopeState(normalizeScopeState(res));
+      const nextScope = normalizeScopeState(res);
+      setScopeState(nextScope);
+      if (/^\s*\/?(?:create|build|init)(?:\s|$)/i.test(effectiveText) && nextScope.business) {
+        setPendingBusinessSlug(nextScope.business);
+        const params = new URLSearchParams(searchParams);
+        params.set("business", nextScope.business);
+        setSearchParams(params, { replace: true });
+      }
       const output = cleanText(res.output || "").trim();
       if (output) appendSystem(output);
     },
-    [appendSystem, createInTestMode, gw, sessionId],
+    [appendSystem, createInTestMode, gw, searchParams, sessionId, setSearchParams],
   );
 
   const runTakyonLine = useCallback(
@@ -1638,6 +1789,7 @@ export default function ChatPage() {
             <CompanyWorkspace
               deliverables={deliverables}
               historicalOutputs={scopedHistoricalOutputs}
+              onCommand={runTakyonLine}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -1649,6 +1801,7 @@ export default function ChatPage() {
             <GlobalLaunchpad
               error={error}
               onCreate={runTakyonLine}
+              onEnterPendingBusiness={enterPendingBusiness}
               onSelectBusiness={setTakyonScope}
               running={running}
               scope={scopeState}
@@ -1729,6 +1882,7 @@ export default function ChatPage() {
 function GlobalLaunchpad({
   error,
   onCreate,
+  onEnterPendingBusiness,
   onSelectBusiness,
   running,
   scope,
@@ -1737,7 +1891,8 @@ function GlobalLaunchpad({
   tools,
 }: {
   error: string | null;
-  onCreate: (line: string) => void;
+  onCreate: (line: string) => Promise<void>;
+  onEnterPendingBusiness: (business: string, mode: "test" | "live", goal?: string) => void;
   onSelectBusiness: (business: string) => Promise<void>;
   running: boolean;
   scope: ScopeState;
@@ -1771,7 +1926,8 @@ function GlobalLaunchpad({
     }
     parts.push(slug);
     if (goal.trim()) parts.push(quoteTakyonArg(goal));
-    onCreate(parts.join(" "));
+    onEnterPendingBusiness(slug, mode, goal.trim());
+    void onCreate(parts.join(" "));
   };
 
   return (
@@ -2263,6 +2419,7 @@ function IntercomPanel({
 function CompanyWorkspace({
   deliverables,
   historicalOutputs,
+  onCommand,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
@@ -2272,6 +2429,7 @@ function CompanyWorkspace({
 }: {
   deliverables: Deliverable[];
   historicalOutputs: Deliverable[];
+  onCommand: (line: string) => void;
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
@@ -2286,16 +2444,12 @@ function CompanyWorkspace({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">
-            Company
-          </div>
-          <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
-            {scope.current?.name || scope.business}
-          </div>
-        </div>
-      </div>
+      <CompanyStatusHero
+        onCommand={onCommand}
+        scope={scope}
+        statusItems={statusItems}
+        tools={tools}
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <CompanyOverview
@@ -2310,6 +2464,115 @@ function CompanyWorkspace({
       </div>
     </div>
   );
+}
+
+function CompanyStatusHero({
+  onCommand,
+  scope,
+  statusItems,
+  tools,
+}: {
+  onCommand: (line: string) => void;
+  scope: ScopeState;
+  statusItems: string[];
+  tools: ToolEntry[];
+}) {
+  const overview = scope.overview || {};
+  const cron = (overview.cron || []).filter((job) => job.enabled !== false);
+  const activeTask = (overview.tasks || []).find((task) =>
+    /running|working|active|creating/i.test(`${task.status || ""} ${task.tone || ""}`),
+  );
+  const nextWake = cron.find((job) => job.next_run)?.next_run;
+  const activeTool = tools.slice().reverse().find((t) => t.status === "running");
+  const lastCompleted = tools
+    .slice()
+    .reverse()
+    .find((t) => t.status === "done" || t.status === "error");
+  const liveStatus = statusItems[0];
+
+  let headline: string;
+  let tone: "active" | "idle" | "sleep";
+  if (activeTool) {
+    headline = `Working — ${naturalToolLabel(activeTool)}`;
+    tone = "active";
+  } else if (activeTask) {
+    headline = taskLabel(activeTask);
+    tone = "active";
+  } else if (liveStatus) {
+    headline = liveStatus;
+    tone = "active";
+  } else if (nextWake) {
+    headline = `CEO sleeps until ${readableDate(nextWake)}`;
+    tone = "sleep";
+  } else {
+    headline = "CEO is idle";
+    tone = "idle";
+  }
+
+  const sub = activeTool
+    ? toolDetail(activeTool)
+    : activeTask
+      ? taskDetail(activeTask)
+    : lastCompleted
+      ? `Last: ${naturalToolLabel(lastCompleted)}${
+          lastCompleted.completedAt
+            ? ` · ${relativeTime(lastCompleted.completedAt)}`
+            : ""
+        }`
+      : "No tool calls yet this session.";
+
+  return (
+    <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-900 px-4 py-3">
+      <div className="min-w-0">
+        <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">
+          Company
+        </div>
+        <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
+          {scope.current?.name || scope.business}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5",
+              tone === "active" && "border-sky-300/30 bg-sky-300/10 text-sky-100",
+              tone === "sleep" && "border-zinc-700 bg-zinc-900 text-zinc-300",
+              tone === "idle" && "border-amber-300/30 bg-amber-300/10 text-amber-100",
+            )}
+          >
+            {tone === "active" && (
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />
+            )}
+            {headline}
+          </span>
+          <span className="truncate text-zinc-500">{sub}</span>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <button
+          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-900 transition-colors hover:bg-white disabled:opacity-60"
+          disabled={Boolean(activeTool || activeTask)}
+          onClick={() => onCommand("/wake")}
+          type="button"
+        >
+          <Play className="h-3.5 w-3.5" />
+          Wake CEO
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function relativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 0) return "just now";
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
 
 function CompanyOverview({
@@ -2335,19 +2598,45 @@ function CompanyOverview({
   const website = artifacts.website || {};
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
-  const posts = overview.posts || [];
-  const cron = overview.cron || [];
-  const jobs = overview.jobs || [];
   const tasks = overview.tasks || [];
-  const research = overview.research || {};
-  const activeCron = cron.filter((job) => job.enabled !== false);
-  const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-  const recentOutputs = outputs.slice(0, 4);
-  const visibleJobs = jobs.filter((job) => job.kind || job.status).slice(0, 4);
   const previewPath = website.source_path || product.source_path || "product/site";
+  const sourcePath = website.source_path || product.source_path || "";
   const publicSiteUrl = website.public_url || product.public_url || "";
+  const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
+  const canonicalDocPaths = new Set(
+    [
+      sourcePath,
+      website.path,
+      publishReceipt,
+      outreach.path,
+      outreach.receipt,
+      creativeAssets.path,
+      creativeAssets.receipt,
+    ]
+      .map((path) => normalizeBusinessPath(path))
+      .filter(Boolean),
+  );
+  const proofOutputs = outputs
+    .filter((item) => {
+      const path = item.path || "";
+      return (
+        item.kind === "receipt" ||
+        item.kind === "image" ||
+        item.kind === "video" ||
+        path.startsWith("outreach/local-published/") ||
+        path.startsWith("receipts/")
+      );
+    })
+    .filter((item) => {
+      const path = normalizeBusinessPath(item.path);
+      if (!path || canonicalDocPaths.has(path)) return false;
+      if (publishReceipt && path.startsWith("receipts/product-surface/")) return false;
+      if (pathIsUnder(path, sourcePath || website.path) && item.kind !== "image" && item.kind !== "video") return false;
+      return true;
+    })
+    .slice(0, 6);
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const outputDocs = recentOutputs
+  const outputDocs = proofOutputs
     .filter((item) => item.path)
     .map((item) => ({
       detail: item.detail,
@@ -2355,41 +2644,88 @@ function CompanyOverview({
       path: item.path || "",
       status: item.kind === "receipt" ? "Receipt" : item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
     }));
-  const researchDocs = uniqueDocs([
-    docTile(research.latest_path, "Latest research", "Research"),
-    docTile(research.strategy_path, "Strategy", "Research"),
-    docTile(research.icp_path, "ICP", "Research"),
-    docTile(research.channels_path, "Channels", "Research"),
-    ...outputDocs.filter((doc) => /^(brain|research)\//.test(doc.path)),
+  const deliverableDocs = uniqueDocs([
+    outreach.path && outreach.receipt ? docTile(outreach.path, "Outreach", "Published") : null,
+    creativeAssets.path && creativeAssets.receipt ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
+    ...outputDocs.filter((doc) => doc.status !== "Receipt"),
   ]);
-  const productDocs = uniqueDocs([
-    docTile(product.design_brief_path, "Design brief", "Product"),
-    ...outputDocs.filter(
-      (doc) =>
-        /^product\//.test(doc.path) &&
-        doc.status !== "Receipt" &&
-        /\.md$/i.test(doc.path),
-    ),
-  ]);
-  const growthDocs = uniqueDocs([
-    docTile(outreach.path, "Outreach", "Growth"),
-    docTile(creativeAssets.path, "Creative asset", "Growth"),
-    ...posts.map((post) => docTile(post.artifact_path || post.conversation_file, post.title || "Post", post.status)),
-    ...outputDocs.filter((doc) => /^(campaigns|distribution|outreach)\//.test(doc.path) && doc.status !== "Receipt"),
-  ]);
-  const productStatus = publicSiteUrl
+  const localWebsite = !publicSiteUrl && (website.path || sourcePath);
+  const deliverableRows = [
+    publicSiteUrl && {
+      detail: publicSiteUrl,
+      id: "public-url",
+      label: "Public URL",
+      status: "Live",
+      tone: "done",
+    },
+    localWebsite && {
+      detail: localWebsite,
+      id: "local-website",
+      label: "Website preview",
+      status: "Local",
+      tone: "done",
+    },
+    outreach.path && outreach.receipt && {
+      detail: outreach.path,
+      id: "outreach",
+      label: "Outreach",
+      status: humanizeArtifactStatus(outreach.status),
+      tone: "done",
+    },
+    creativeAssets.path && creativeAssets.receipt && {
+      detail: creativeAssets.receipt,
+      id: "creative",
+      label: "Creative asset",
+      status: humanizeArtifactStatus(creativeAssets.status),
+      tone: "done",
+    },
+  ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
+  const evidenceRows = [
+    (sourcePath || website.path) && {
+      detail: sourcePath || website.path,
+      id: "source",
+      label: "Product source",
+      status: "Source",
+      tone: "done",
+    },
+    publishReceipt && {
+      detail: publishReceipt,
+      id: "publish",
+      label: "Deploy receipt",
+      status: "Receipt",
+      tone: "done",
+    },
+    outreach.receipt && {
+      detail: outreach.receipt,
+      id: "outreach-receipt",
+      label: "Outreach receipt",
+      status: "Receipt",
+      tone: "done",
+    },
+    creativeAssets.receipt && {
+      detail: creativeAssets.receipt,
+      id: "creative-receipt",
+      label: "Creative receipt",
+      status: "Receipt",
+      tone: "done",
+    },
+    ...outputDocs
+      .filter((doc) => doc.status === "Receipt")
+      .map((doc, index) => ({
+        detail: doc.path,
+        id: `receipt-${index}-${doc.path}`,
+        label: doc.label,
+        status: doc.status,
+        tone: "done",
+      })),
+  ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
+  const productStatus = publicSiteUrl || product.publish_status === "published" || website.publish_status === "published"
     ? "Live"
-    : website.path
-      ? "Preview ready"
-      : product.publish_blocker
-        ? "Needs attention"
-        : "Not built";
-  const actionableTasks = tasks.filter(isActionableTask);
-  const actionableJobs = visibleJobs.filter(isActionableTask);
-  const workItems =
-    actionableTasks.length > 0
-      ? actionableTasks.slice(0, 5)
-      : actionableJobs.slice(0, 5);
+    : localWebsite
+      ? "Preview"
+      : deliverableRows.length
+        ? "Done"
+        : "Done only";
   const latestActivity = [
     ...(activeTool ? [{ label: naturalToolLabel(activeTool), detail: toolDetail(activeTool), status: humanizeStatus(activeTool.status), tone: activeTool.status }] : []),
     ...tools
@@ -2409,23 +2745,13 @@ function CompanyOverview({
       status: "Working",
       tone: "active",
     })),
+    ...tasks.filter(isActionableTask).slice(0, 2).map((task) => ({
+      label: taskLabel(task),
+      detail: taskDetail(task),
+      status: humanizeStatus(task.status),
+      tone: task.tone || task.status,
+    })),
   ].slice(0, 5);
-  const taskRows = workItems
-    .map((item, index) => ({
-      detail: taskDetail(item),
-      id: item.id || `${taskLabel(item)}-${index}`,
-      label: taskLabel(item),
-      status: humanizeStatus(item.status),
-      tone: item.tone || item.status,
-    }))
-    .slice(0, 6);
-  const scheduleRows = activeCron.slice(0, 3).map((job, index) => ({
-    detail: job.next_run ? `Next ${readableDate(job.next_run)}` : job.schedule || "",
-    id: job.id || `${job.name || "schedule"}-${index}`,
-    label: humanLabel(job.name?.replace(/^takyon-ceo:/, "")) || "CEO check",
-    status: humanizeStatus(job.state || "scheduled"),
-    tone: job.state || "waiting",
-  }));
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -2475,56 +2801,34 @@ function CompanyOverview({
     [onReadFile, onResolveMedia],
   );
   const hasViewer = Boolean(viewer);
-  const showAside = Boolean(viewer || latestActivity.length > 0);
+  const showAside = Boolean(viewer || latestActivity.length > 0 || evidenceRows.length > 0);
 
   const workspaceColumn = (
     <div className="grid content-start gap-3">
-      <section className={cn("grid gap-3", !hasViewer && "md:grid-cols-2")}>
+      <section className="grid gap-3">
         <SourceCard
-          docs={researchDocs}
-          empty="No research file yet."
-          icon={<Search className="h-4 w-4" />}
-          label="Research"
-          onOpenDoc={openDocument}
-          status={humanizeStatus(research.status)}
-          tone={research.status === "visible" ? "done" : "waiting"}
-        />
-        <SourceCard
-          docs={productDocs}
-          empty={publicSiteUrl || website.path ? undefined : "No product file yet."}
-          icon={<Globe2 className="h-4 w-4" />}
-          label="Product"
+          docs={deliverableDocs}
+          empty={deliverableRows.length > 0 ? undefined : "No proof-backed deliverables yet."}
+          icon={<FileText className="h-4 w-4" />}
+          label="Deliverables"
           onOpenDoc={openDocument}
           primary={
-            <ProductPreviewHero
-              onResolveSitePreview={onResolveSitePreview}
-              previewPath={previewPath}
-              publicSiteUrl={publicSiteUrl}
-              websitePath={website.path}
-            />
+            publicSiteUrl || sourcePath || website.path ? (
+              <ProductPreviewHero
+                onResolveSitePreview={onResolveSitePreview}
+                previewPath={previewPath}
+                publicSiteUrl={publicSiteUrl}
+                sourcePath={sourcePath}
+                websitePath={website.path}
+              />
+            ) : undefined
           }
           status={productStatus}
-          tone={product.publish_blocker ? "blocked" : publicSiteUrl || website.path ? "done" : "waiting"}
-        />
-        <SourceCard
-          docs={growthDocs}
-          empty={posts.length ? `${formatCount(posts.length)} posts` : "No growth file yet."}
-          icon={<Sparkles className="h-4 w-4" />}
-          label="Growth"
-          onOpenDoc={openDocument}
-          status={creativeAssets.path ? humanizeArtifactStatus(creativeAssets.status) : outreach.path ? humanizeArtifactStatus(outreach.status) : "Waiting"}
-          tone={creativeAssets.path || outreach.path ? "done" : "waiting"}
-        />
-        <SourceCard
-          empty={nextWake ? `Next ${readableDate(nextWake)}` : "No check scheduled."}
-          icon={<Clock3 className="h-4 w-4" />}
-          label="Schedule"
-          status={humanizeStatus(overview.wake_health?.status || (activeCron.length ? "watching" : "quiet"))}
-          tone={overview.wake_health?.status}
+          tone={deliverableRows.length > 0 ? "done" : "neutral"}
         >
-          {scheduleRows.length > 0 && (
+          {deliverableRows.length > 0 && (
             <div className="grid gap-1.5">
-              {scheduleRows.map((item) => (
+              {deliverableRows.map((item) => (
                 <TaskRow
                   detail={item.detail}
                   key={item.id}
@@ -2537,36 +2841,16 @@ function CompanyOverview({
           )}
         </SourceCard>
       </section>
-
-      {taskRows.length > 0 && (
-        <section>
-          <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
-            <ListChecks className="h-4 w-4" />
-            Tasks
-          </div>
-          <div className={cn("grid gap-2", !hasViewer && "md:grid-cols-2")}>
-            {taskRows.map((item) => (
-              <TaskRow
-                detail={item.detail}
-                key={item.id}
-                label={item.label}
-                status={item.status}
-                tone={item.tone}
-              />
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   );
 
-  const activityBlock = latestActivity.length > 0 && (
-    <section>
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
+  const activityBlock = (latestActivity.length > 0 || evidenceRows.length > 0) && (
+    <details className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
         <Activity className="h-4 w-4" />
-        Activity
-      </div>
-      <div className="grid gap-2">
+        Activity / Debug
+      </summary>
+      <div className="mt-3 grid gap-2">
         {latestActivity.map((item, index) => (
           <TaskRow
             detail={item.detail}
@@ -2576,8 +2860,22 @@ function CompanyOverview({
             tone={item.tone}
           />
         ))}
+        {evidenceRows.length > 0 && (
+          <div className="pt-2 text-[0.65rem] uppercase tracking-[0.16em] text-zinc-600">
+            Evidence
+          </div>
+        )}
+        {evidenceRows.map((item) => (
+          <TaskRow
+            detail={item.detail}
+            key={item.id}
+            label={item.label}
+            status={item.status}
+            tone={item.tone}
+          />
+        ))}
       </div>
-    </section>
+    </details>
   );
 
   if (hasViewer && viewer) {
@@ -2711,6 +3009,49 @@ function DocumentTileButton({
   );
 }
 
+const CHANNEL_DISPLAY: Record<string, string> = {
+  show_hn: "Show HN",
+  hn: "Hacker News",
+  hacker_news: "Hacker News",
+  reddit: "Reddit",
+  email: "Email",
+  twitter: "X (Twitter)",
+  x: "X (Twitter)",
+  linkedin: "LinkedIn",
+  bluesky: "Bluesky",
+  threads: "Threads",
+  slack: "Slack",
+  discord: "Discord",
+};
+
+function prettyChannel(channel: string): string {
+  const key = channel.toLowerCase();
+  if (CHANNEL_DISPLAY[key]) return CHANNEL_DISPLAY[key];
+  const redditMatch = key.match(/^reddit[_-](.+)$/);
+  if (redditMatch) return `Reddit r/${redditMatch[1]}`;
+  return key
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function parseOutreachDestination(path: string): {
+  channel: string;
+  target?: string;
+  status: "local" | "published";
+} | null {
+  const match = path.match(
+    /^outreach\/(local-published|published)\/([^/]+)\/(.+?)\.md$/i,
+  );
+  if (!match) return null;
+  const status = match[1].toLowerCase() === "published" ? "published" : "local";
+  const channel = match[2];
+  const filename = match[3];
+  let target: string | undefined;
+  const fileMatch = filename.match(/^\d{4}-\d{2}-\d{2}-(.+)-[0-9a-f]{6,}$/i);
+  if (fileMatch) target = fileMatch[1];
+  return { channel, status, target };
+}
+
 function resolveSiblingPath(basePath: string, href: string): string {
   const cleanHref = href.split(/[?#]/)[0];
   if (!cleanHref) return basePath;
@@ -2745,6 +3086,7 @@ function InlineDocumentViewer({
   };
 }) {
   const isMarkdown = /\.md$/i.test(viewer.path);
+  const outreachDest = parseOutreachDestination(viewer.path);
   const handleLinkClick = useCallback(
     (href: string) => {
       if (/^(https?:|mailto:|tel:)/i.test(href)) return false;
@@ -2768,6 +3110,30 @@ function InlineDocumentViewer({
           <X className="h-4 w-4" />
         </IconButton>
       </div>
+      {outreachDest && (
+        <div
+          className={cn(
+            "border-b px-3 py-2 text-xs",
+            outreachDest.status === "published"
+              ? "border-emerald-400/20 bg-emerald-400/5 text-emerald-100"
+              : "border-amber-300/20 bg-amber-300/5 text-amber-100",
+          )}
+        >
+          <span className="font-medium">
+            {outreachDest.status === "published" ? "Published to" : "Would publish to"}
+            {" "}
+            {prettyChannel(outreachDest.channel)}
+          </span>
+          {outreachDest.target && (
+            <span className="ml-1 font-mono text-[0.7rem] opacity-80">
+              → {outreachDest.target}
+            </span>
+          )}
+          {outreachDest.status === "local" && (
+            <span className="ml-2 opacity-70">Test mode — draft only, not sent.</span>
+          )}
+        </div>
+      )}
       {viewer.loading ? (
         <div className="p-3">
           <EmptyPanelLine text="Opening..." />
@@ -2868,14 +3234,18 @@ function OpenSitePreviewButton({
 }
 
 function ProductPreviewHero({
+  blocker,
   onResolveSitePreview,
   previewPath,
   publicSiteUrl,
+  sourcePath,
   websitePath,
 }: {
+  blocker?: string;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   previewPath?: string;
   publicSiteUrl?: string;
+  sourcePath?: string;
   websitePath?: string;
 }) {
   if (publicSiteUrl) {
@@ -2909,9 +3279,18 @@ function ProductPreviewHero({
       />
     );
   }
+  if (sourcePath) {
+    return (
+      <div className="rounded-xl border border-zinc-900 bg-black px-3 py-3">
+        <div className="text-sm font-medium text-zinc-200">Built locally</div>
+        <div className="mt-1 truncate font-mono text-xs text-zinc-600">{sourcePath}</div>
+        {blocker && <div className="mt-2 text-xs leading-5 text-amber-300">{blocker}</div>}
+      </div>
+    );
+  }
   return (
     <div className="rounded-xl border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
-      No website built yet.
+      No product source or public URL recorded.
     </div>
   );
 }
@@ -3041,11 +3420,12 @@ function BusinessSnapshot({
   const metrics = overview.metrics || {};
   const product = overview.product || {};
   const budget = overview.budget || {};
-  const cron = overview.cron || [];
-  const jobs = overview.jobs || [];
   const artifacts = overview.artifacts || {};
   const website = artifacts.website || {};
-  const previewPath = website.source_path || product.source_path || "product/site";
+  const sourcePath = website.source_path || product.source_path || "";
+  const publicSiteUrl = website.public_url || product.public_url || "";
+  const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
+  const previewPath = sourcePath || "product/site";
   const openSitePreview = useCallback(() => {
     const popup = window.open("about:blank", "_blank");
     setPreviewLoading(true);
@@ -3129,16 +3509,16 @@ function BusinessSnapshot({
     );
   }
 
-  const productStatus = product.status || "missing";
-  const hasSurface = product.source_path || product.design_brief_path || product.filesystem_index;
+  const productStatus = publicSiteUrl
+    ? "live"
+    : sourcePath || website.path
+      ? "built_local"
+      : publishReceipt
+        ? "receipt"
+        : "No deliverables";
   const openMessages =
     asNumber(metrics.unresolved_inbound) ||
     asNumber(overview.conversations?.unresolved_messages);
-  const activeCron = cron.filter((job) => job.enabled !== false);
-  const nextWake = activeCron.find((job) => job.next_run)?.next_run;
-  const visibleJobs = jobs
-    .filter((job) => job.status || job.kind)
-    .slice(0, 4);
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
   const creativeAssetsDir = creativeAssets.path
@@ -3196,28 +3576,33 @@ function BusinessSnapshot({
       </div>
 
       <PreviewCard
-        icon={<Gauge className="h-4 w-4" />}
-        title="Product surface"
+        icon={<FileText className="h-4 w-4" />}
+        title="Deliverables"
         value={productStatus}
         detail={
-          hasSurface
-            ? product.source_path || product.design_brief_path || product.filesystem_index
-            : "No product surface contract recorded yet."
+          publicSiteUrl ||
+          sourcePath ||
+          publishReceipt ||
+          "No proof-backed deliverable recorded yet."
         }
       >
         <div className="flex flex-wrap gap-2">
-          <PanelActionButton
-            icon={<FileText className="h-3.5 w-3.5" />}
-            onClick={() => onCommand("/read app/surface.md")}
-          >
-            Surface
-          </PanelActionButton>
-          <PanelActionButton
-            icon={<Folder className="h-3.5 w-3.5" />}
-            onClick={() => onCommand(product.source_path ? `/files ${product.source_path}` : "/files app")}
-          >
-            Files
-          </PanelActionButton>
+          {sourcePath && (
+            <PanelActionButton
+              icon={<Folder className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/files ${sourcePath}`)}
+            >
+              Source
+            </PanelActionButton>
+          )}
+          {publishReceipt && (
+            <PanelActionButton
+              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+              onClick={() => onCommand(`/read ${publishReceipt}`)}
+            >
+              Receipt
+            </PanelActionButton>
+          )}
         </div>
         {(product.verification_status || product.routes_count !== undefined) && (
           <div className="mt-2 text-xs leading-5 text-zinc-600">
@@ -3228,139 +3613,95 @@ function BusinessSnapshot({
         )}
       </PreviewCard>
 
-      <PreviewCard
-        icon={<Globe2 className="h-4 w-4" />}
-        title="Website"
-        value={
-          website.deploy_status === "pending"
-            ? "Deploy pending"
-            : humanizeArtifactStatus(website.status)
-        }
-        detail={website.path || "No website source visible yet."}
-      >
-        <div className="flex flex-wrap gap-2">
-          {website.path && (
-            <PanelActionButton
-              icon={<ExternalLink className="h-3.5 w-3.5" />}
-              onClick={openSitePreview}
-            >
-              {previewLoading ? "Opening..." : "Preview"}
-            </PanelActionButton>
-          )}
-          {website.path && (
-            <PanelActionButton
-              icon={<FileText className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${website.path}`)}
-            >
-              Index
-            </PanelActionButton>
-          )}
-          <PanelActionButton
-            icon={<Folder className="h-3.5 w-3.5" />}
-            onClick={() => onCommand(`/files ${website.source_path || "product/site"}`)}
-          >
-            Source
-          </PanelActionButton>
-        </div>
-        {previewError && <div className="mt-2 text-xs leading-5 text-red-400">{previewError}</div>}
-      </PreviewCard>
+      {(publicSiteUrl || sourcePath || website.path) && (
+        <PreviewCard
+          icon={<Globe2 className="h-4 w-4" />}
+          title="Website"
+          value={publicSiteUrl ? "Live" : humanizeArtifactStatus(website.status)}
+          detail={publicSiteUrl || sourcePath || website.path}
+        >
+          <div className="flex flex-wrap gap-2">
+            {publicSiteUrl && (
+              <PanelActionButton
+                icon={<ExternalLink className="h-3.5 w-3.5" />}
+                onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
+              >
+                Open
+              </PanelActionButton>
+            )}
+            {website.path && (
+              <PanelActionButton
+                icon={<ExternalLink className="h-3.5 w-3.5" />}
+                onClick={openSitePreview}
+              >
+                {previewLoading ? "Opening..." : "Preview"}
+              </PanelActionButton>
+            )}
+            {website.path && (
+              <PanelActionButton
+                icon={<FileText className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/read ${website.path}`)}
+              >
+                Index
+              </PanelActionButton>
+            )}
+            {sourcePath && (
+              <PanelActionButton
+                icon={<Folder className="h-3.5 w-3.5" />}
+                onClick={() => onCommand(`/files ${sourcePath}`)}
+              >
+                Source
+              </PanelActionButton>
+            )}
+          </div>
+          {previewError && <div className="mt-2 text-xs leading-5 text-red-400">{previewError}</div>}
+        </PreviewCard>
+      )}
 
-      <PreviewCard
-        icon={<MessageCircle className="h-4 w-4" />}
-        title="Outreach"
-        value={humanizeArtifactStatus(outreach.status)}
-        detail={
-          outreach.path ||
-          (outreach.status === "draft_only"
-            ? "Draft exists, but no local publish receipt."
-            : "No local outreach publication visible yet.")
-        }
-      >
-        <div className="flex flex-wrap gap-2">
-          {outreach.path && (
+      {outreach.path && outreach.receipt && (
+        <PreviewCard
+          icon={<MessageCircle className="h-4 w-4" />}
+          title="Outreach"
+          value={humanizeArtifactStatus(outreach.status)}
+          detail={outreach.path}
+        >
+          <div className="flex flex-wrap gap-2">
             <PanelActionButton
               icon={<FileText className="h-3.5 w-3.5" />}
               onClick={() => onCommand(`/read ${outreach.path}`)}
             >
-              {outreach.status === "draft_only" ? "Draft" : "Post"}
+              Post
             </PanelActionButton>
-          )}
-          {outreach.receipt && (
             <PanelActionButton
               icon={<CheckCircle2 className="h-3.5 w-3.5" />}
               onClick={() => onCommand(`/read ${outreach.receipt}`)}
             >
               Receipt
             </PanelActionButton>
-          )}
-        </div>
-      </PreviewCard>
+          </div>
+        </PreviewCard>
+      )}
 
-      <PreviewCard
-        icon={<Play className="h-4 w-4" />}
-        title="Creative assets"
-        value={humanizeArtifactStatus(creativeAssets.status)}
-        detail={creativeAssets.path || "No generated image/video asset visible yet."}
-      >
-        <div className="flex flex-wrap gap-2">
-          {creativeAssets.path && (
+      {creativeAssets.path && creativeAssets.receipt && (
+        <PreviewCard
+          icon={<Play className="h-4 w-4" />}
+          title="Creative assets"
+          value={humanizeArtifactStatus(creativeAssets.status)}
+          detail={creativeAssets.path}
+        >
+          <div className="flex flex-wrap gap-2">
             <PanelActionButton
               icon={<Play className="h-3.5 w-3.5" />}
               onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
             >
               Files
             </PanelActionButton>
-          )}
-          {creativeAssets.receipt && (
             <PanelActionButton
               icon={<CheckCircle2 className="h-3.5 w-3.5" />}
               onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
             >
               Receipt
             </PanelActionButton>
-          )}
-        </div>
-      </PreviewCard>
-
-      <PreviewCard
-        icon={<Clock3 className="h-4 w-4" />}
-        title="Scheduled checks"
-        value={activeCron.length ? `${activeCron.length} active` : "None active"}
-        detail={nextWake ? `Next check ${readableDate(nextWake)}` : "No scheduled CEO check is visible."}
-      >
-        <div className="flex flex-wrap gap-2">
-          <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
-            List
-          </PanelActionButton>
-          <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
-            Wake now
-          </PanelActionButton>
-        </div>
-      </PreviewCard>
-
-      {visibleJobs.length > 0 && (
-        <PreviewCard
-          icon={<Activity className="h-4 w-4" />}
-          title="Recent work"
-          value={`${visibleJobs.length} jobs`}
-          detail={`${formatCount(metrics.queued_jobs)} queued`}
-        >
-          <div className="space-y-1.5">
-            {visibleJobs.map((job, index) => (
-              <div
-                className="rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5"
-                key={job.id || `${job.kind}-${index}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 truncate text-xs text-zinc-400">
-                    {job.kind || "job"}
-                  </div>
-                  <span className="shrink-0 text-[0.65rem] text-zinc-600">
-                    {job.status || "recorded"}
-                  </span>
-                </div>
-              </div>
-            ))}
           </div>
         </PreviewCard>
       )}

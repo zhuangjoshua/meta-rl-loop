@@ -9,6 +9,7 @@ import mimetypes
 import os
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -4740,6 +4741,8 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     business = as_dict(summary.get("business"))
     app = as_dict(summary.get("app"))
     surface = as_dict(app.get("surface_contract") or app.get("surface"))
+    product_surface_evidence = as_dict(app.get("product_surface"))
+    product_inventory = as_dict(app.get("product_inventory"))
     metadata = as_dict(surface.get("metadata"))
     validation = as_dict(metadata.get("takyon_surface_validation"))
     verification = as_dict(validation.get("latest_verification"))
@@ -5108,6 +5111,11 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "routes_count": len(routes),
             "verification_status": brief_text(validation.get("status") or verification.get("status")),
             "verification_receipt": brief_text(validation.get("receipt") or verification.get("receipt_path")),
+            "inventory_status": brief_text(product_inventory.get("status")),
+            "risk_marker_count": len(as_list(product_inventory.get("risk_markers"))),
+            "claim_snippet_count": len(as_list(product_inventory.get("claim_snippets"))),
+            "pretend_finding_count": len(as_list(product_inventory.get("pretend_findings"))),
+            "local_continuable_work": as_list(product_surface_evidence.get("local_continuable_work"))[:8],
             "filesystem_index": brief_text(app.get("filesystem_index") or "app/index.md"),
             "notes": brief_text(surface.get("notes")),
         },
@@ -5356,6 +5364,116 @@ def _takyon_session(params: dict) -> dict | None:
     return _sessions.get(str(params.get("session_id") or ""))
 
 
+_TAKYON_CREATE_VALUE_FLAGS = {"--budget", "--schedule"}
+
+
+def _takyon_create_business_arg_index(tokens: list[str]) -> int | None:
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _TAKYON_CREATE_VALUE_FLAGS:
+            index += 2
+            continue
+        if any(token.startswith(f"{flag}=") for flag in _TAKYON_CREATE_VALUE_FLAGS):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _takyon_unique_business_slug(store: Any, base_slug: str) -> str:
+    try:
+        data = store.read(scope="global", query="list_businesses", limit=500)
+        existing = {
+            str(item.get("slug") or "")
+            for item in (data.get("businesses") if isinstance(data, dict) else []) or []
+            if isinstance(item, dict)
+        }
+    except Exception:
+        existing = set()
+    if base_slug not in existing:
+        return base_slug
+    stem = re.sub(r"-+", "-", base_slug).strip("-") or "business"
+    timestamp = time.strftime("%m%d%H%M%S", time.localtime())
+    candidate = f"{stem}-{timestamp}"
+    if candidate not in existing:
+        return candidate
+    suffix = 2
+    while True:
+        candidate = f"{stem}-{timestamp}-{suffix}"
+        if candidate not in existing:
+            return candidate
+        suffix += 1
+
+
+def _takyon_detached_shell_target(line: str, current_business: str | None) -> tuple[str, str, str] | None:
+    raw = str(line or "").strip().lstrip("/")
+    if not raw:
+        return None
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+
+    command = tokens[0].lower()
+    if command == "wake":
+        business = str(current_business or "").strip()
+        return ("wake", business, "/" + shlex.join(["wake", business, *tokens[1:]])) if business else None
+
+    if command in {"create", "build", "init"}:
+        try:
+            from plugins.takyon.cli import TakyonStore, _parse_business_start_args
+
+            # Match the interactive shell path, which normalizes create/build/init
+            # through the canonical /create parser before running the business start.
+            slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto, _budget = _parse_business_start_args(
+                ["create", *tokens[1:]],
+                usage='usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+                auto_default=True,
+            )
+        except Exception:
+            return None
+        if auto_start and not no_auto and slug:
+            target_slug = str(slug)
+            if not str(current_business or "").strip():
+                target_slug = _takyon_unique_business_slug(TakyonStore(), target_slug)
+                business_index = _takyon_create_business_arg_index(tokens)
+                if business_index is not None:
+                    tokens = [*tokens]
+                    tokens[business_index] = target_slug
+            tokens = ["create", *tokens[1:]]
+            return ("create", target_slug, "/" + shlex.join(tokens))
+
+    return None
+
+
+def _takyon_pending_scope_overview(kind: str, business: str, status: str, detail: str = "") -> dict[str, Any]:
+    label = "CEO bootstrap" if kind == "create" else "CEO wake"
+    status_text = "running" if status == "running" else status
+    return {
+        "tasks": [
+            {
+                "id": f"runtime:{kind}:{business}",
+                "source": "runtime",
+                "label": label,
+                "status": status_text,
+                "detail": detail or "Takyon is running this outside the dashboard process.",
+                "tone": "active" if status == "running" else ("blocked" if status == "error" else "done"),
+            }
+        ],
+        "ceo_loop": {
+            "status": "working" if status == "running" else status_text,
+            "headline": f"{label} is {status_text}.",
+            "detail": detail or "Refresh after a moment to see receipts, blockers, and deliverables.",
+        },
+    }
+
+
 def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
     try:
         from plugins.takyon.cli import TakyonStore, _slugify
@@ -5372,16 +5490,58 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
             isinstance(item, dict) and str(item.get("slug") or "") == current_business
             for item in businesses
         )
-        if current_business and not exists:
+        pending = (session or {}).get("takyon_background_run") if isinstance(session, dict) else None
+        pending_business = str((pending or {}).get("business") or "").strip() if isinstance(pending, dict) else ""
+        pending_recent = bool(
+            pending_business
+            and pending_business == current_business
+            and float((pending or {}).get("started_at") or 0) > time.time() - 7200
+        )
+        if current_business and not exists and pending_recent:
+            current = {
+                "slug": current_business,
+                "name": current_business,
+                "status": "creating" if pending.get("kind") == "create" else "working",
+                "state": "working",
+                "reason": "Takyon is running in the background.",
+            }
+            businesses = [current, *businesses]
+            overview = _takyon_pending_scope_overview(
+                str(pending.get("kind") or "run"),
+                current_business,
+                str(pending.get("status") or "running"),
+                str(pending.get("detail") or ""),
+            )
+        elif current_business and not exists:
             current_business = ""
             if session is not None:
                 session["takyon_current_business"] = ""
-        current = _takyon_business_payload(store, current_business) if current_business else None
-        overview = (
-            _takyon_business_overview_payload(store, current_business)
-            if current_business
-            else {}
-        )
+            current = None
+            overview = {}
+        else:
+            current = _takyon_business_payload(store, current_business) if current_business else None
+            overview = (
+                _takyon_business_overview_payload(store, current_business)
+                if current_business
+                else {}
+            )
+            if current_business and pending_recent and isinstance(overview, dict):
+                pending_status = str(pending.get("status") or "")
+                if pending_status == "running":
+                    pending_overview = _takyon_pending_scope_overview(
+                        str(pending.get("kind") or "run"),
+                        current_business,
+                        pending_status,
+                        str(pending.get("detail") or ""),
+                    )
+                    overview = {
+                        **overview,
+                        "tasks": [
+                            *(pending_overview.get("tasks") or []),
+                            *((overview.get("tasks") if isinstance(overview.get("tasks"), list) else []) or []),
+                        ],
+                        "ceo_loop": pending_overview.get("ceo_loop") or overview.get("ceo_loop"),
+                    }
         return {
             "scope": f"business:{current_business}" if current_business else "global",
             "business": current_business,
@@ -5654,9 +5814,94 @@ def _(rid, params: dict) -> dict:
         )
 
         history = session.setdefault("takyon_shell_history", [])
+        current_business = str(session.get("takyon_current_business") or "") or None
+        detached_target = _takyon_detached_shell_target(line, current_business)
+        if detached_target:
+            detached_kind, target_business, detached_line = detached_target
+            if detached_kind == "create" and target_business:
+                try:
+                    data = TakyonStore().read(scope="global", query="list_businesses", limit=200)
+                    session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
+                except Exception:
+                    session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
+                session["takyon_pending_business_create"] = True
+                session["takyon_pending_business_create_at"] = time.time()
+                session["takyon_current_business"] = target_business
+            session["takyon_background_run"] = {
+                "kind": detached_kind,
+                "business": target_business,
+                "status": "running",
+                "started_at": time.time(),
+                "detail": "Running outside the dashboard process.",
+            }
+
+            def run_detached() -> None:
+                output = ""
+                try:
+                    raw = detached_line.strip().lstrip("/")
+                    proc = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            "from plugins.takyon.cli import main; main()",
+                            "--json",
+                            *shlex.split(raw),
+                        ],
+                        cwd=str(Path(__file__).resolve().parents[1]),
+                        env=os.environ.copy(),
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=int(os.getenv("TAKYON_BACKGROUND_TIMEOUT_S", "3600") or 3600),
+                    )
+                    output = (proc.stdout or "").strip()
+                    status = "done" if proc.returncode == 0 else "error"
+                    detail = "Completed." if proc.returncode == 0 else f"Exited {proc.returncode}."
+                    if proc.returncode != 0 and output:
+                        detail = output.splitlines()[-1][:240]
+                    next_business = target_business
+                except Exception as exc:
+                    output = f"Takyon background {detached_kind} failed: {exc}"
+                    status = "error"
+                    detail = str(exc)
+                    next_business = target_business or current_business
+                session["takyon_current_business"] = next_business or ""
+                session["takyon_background_run"] = {
+                    "kind": detached_kind,
+                    "business": next_business or target_business or "",
+                    "status": status,
+                    "started_at": session.get("takyon_background_run", {}).get("started_at", time.time()),
+                    "finished_at": time.time(),
+                    "detail": detail,
+                }
+                if isinstance(history, list):
+                    _record_shell_turn(history, detached_line, output)
+
+            threading.Thread(
+                target=run_detached,
+                name=f"takyon-{detached_kind}-{target_business or current_business or 'global'}",
+                daemon=True,
+            ).start()
+            if detached_kind == "create":
+                message = (
+                    f"Create started for business:{target_business}. The CEO bootstrap is running in the background; "
+                    "open the business after a moment to see receipts, blockers, and deliverables."
+                )
+            else:
+                message = (
+                    f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
+                    "to see receipts, blockers, and deliverables."
+                )
+            return _ok(
+                rid,
+                {
+                    "output": message,
+                    **_takyon_scope_payload(session),
+                },
+            )
         output, next_business = _handle_shell_line(
             line,
-            current_business=str(session.get("takyon_current_business") or "") or None,
+            current_business=current_business,
             store=TakyonStore(),
             model=os.getenv("TAKYON_MODEL", ""),
             max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),

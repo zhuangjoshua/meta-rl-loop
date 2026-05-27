@@ -65,6 +65,187 @@ def test_err_envelope(server):
     }
 
 
+def test_takyon_wake_shell_exec_returns_before_background_run(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": "latexflow"}
+    ran = threading.Event()
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        pass
+
+    def fake_handle_shell_line(*_args, **_kwargs):
+        ran.set()
+        return "wake finished", "latexflow"
+
+    def fake_record_shell_turn(history, line, output):
+        history.append({"line": line, "output": output})
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._handle_shell_line = fake_handle_shell_line
+    fake_cli._record_shell_turn = fake_record_shell_turn
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda args, **_kwargs: (ran.set() or types.SimpleNamespace(returncode=0, stdout="{}")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_scope_payload",
+        lambda session: {"scope": "business:latexflow", "business": "latexflow", "current": {}, "businesses": []},
+    )
+
+    response = server._methods["takyon.shell.exec"]("wake-1", {"session_id": sid, "line": "/wake"})
+
+    assert response["result"]["output"].startswith("Wake started for business:latexflow")
+    assert ran.wait(1)
+
+
+def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": ""}
+    ran = threading.Event()
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def read(self, *_args, **_kwargs):
+            return {"businesses": []}
+
+    def fake_parse_business_start_args(*_args, **_kwargs):
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False, 25)
+
+    def fake_handle_shell_line(*_args, **_kwargs):
+        ran.set()
+        return "create finished", "latexflow"
+
+    def fake_record_shell_turn(history, line, output):
+        history.append({"line": line, "output": output})
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._parse_business_start_args = fake_parse_business_start_args
+    fake_cli._handle_shell_line = fake_handle_shell_line
+    fake_cli._record_shell_turn = fake_record_shell_turn
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda args, **_kwargs: (ran.set() or types.SimpleNamespace(returncode=0, stdout="{}")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_scope_payload",
+        lambda session: {"scope": f"business:{session.get('takyon_current_business')}", "business": session.get("takyon_current_business"), "current": {}, "businesses": []},
+    )
+
+    response = server._methods["takyon.shell.exec"](
+        "create-1",
+        {
+            "session_id": sid,
+            "line": '/create --test --budget 25 --schedule "every 6h" latexflow "overleaf competitor"',
+        },
+    )
+
+    assert response["result"]["output"].startswith("Create started for business:latexflow")
+    assert response["result"]["business"] == "latexflow"
+    assert ran.wait(1)
+
+
+def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": ""}
+    ran = threading.Event()
+    captured: dict[str, object] = {}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def read(self, *_args, **_kwargs):
+            return {"businesses": [{"slug": "latexflow"}]}
+
+    def fake_parse_business_start_args(*_args, **_kwargs):
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False, 25)
+
+    def fake_handle_shell_line(*_args, **_kwargs):
+        return "unexpected", None
+
+    def fake_record_shell_turn(history, line, output):
+        history.append({"line": line, "output": output})
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = args
+        ran.set()
+        return types.SimpleNamespace(returncode=0, stdout="{}")
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._parse_business_start_args = fake_parse_business_start_args
+    fake_cli._handle_shell_line = fake_handle_shell_line
+    fake_cli._record_shell_turn = fake_record_shell_turn
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(server.time, "strftime", lambda *_args, **_kwargs: "05262217")
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        server,
+        "_takyon_scope_payload",
+        lambda session: {"scope": f"business:{session.get('takyon_current_business')}", "business": session.get("takyon_current_business"), "current": {}, "businesses": []},
+    )
+
+    response = server._methods["takyon.shell.exec"](
+        "create-unique-1",
+        {
+            "session_id": sid,
+            "line": '/create --test --budget 25 --schedule "every 6h" latexflow "overleaf competitor"',
+        },
+    )
+
+    assert response["result"]["business"] == "latexflow-05262217"
+    assert ran.wait(1)
+    assert "latexflow-05262217" in captured["args"]
+
+
+def test_takyon_create_no_auto_stays_synchronous(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": ""}
+    ran = threading.Event()
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        pass
+
+    def fake_parse_business_start_args(*_args, **_kwargs):
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "", False, True, None)
+
+    def fake_handle_shell_line(*_args, **_kwargs):
+        ran.set()
+        return "created without auto", "latexflow"
+
+    def fake_record_shell_turn(history, line, output):
+        history.append({"line": line, "output": output})
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._parse_business_start_args = fake_parse_business_start_args
+    fake_cli._handle_shell_line = fake_handle_shell_line
+    fake_cli._record_shell_turn = fake_record_shell_turn
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(
+        server,
+        "_takyon_scope_payload",
+        lambda session: {"scope": f"business:{session.get('takyon_current_business')}", "business": session.get("takyon_current_business"), "current": {}, "businesses": []},
+    )
+
+    response = server._methods["takyon.shell.exec"](
+        "create-no-auto-1",
+        {"session_id": sid, "line": '/create --no-auto latexflow "overleaf competitor"'},
+    )
+
+    assert response["result"]["output"] == "created without auto"
+    assert response["result"]["business"] == "latexflow"
+    assert ran.is_set()
+
+
 # ── write_json ───────────────────────────────────────────────────────
 
 
