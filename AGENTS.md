@@ -32,6 +32,14 @@ When the operator asks to push or deploy Takyon, keep the three rails distinct:
 
 The deployment workflow is tracked at `.github/workflows/deploy.yml`: pushing `main` should run the dashboard web build, compile Python, redeploy the current Vercel `app.fourmanifold.com` frontdoor when `VERCEL_TOKEN` is configured, rsync the active runtime to the VPS, restart `takyon-dashboard.service`, apply tracked Caddy only when `deploy/argon-alpha-14/Caddyfile` changed, and verify the public dashboard host. Required GitHub secrets are `TAKYON_VPS_HOST`, `TAKYON_VPS_USER`, `TAKYON_VPS_SSH_KEY`, and optional Vercel metadata secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`. After pushing, verify the workflow with `gh run list` / `gh run watch`; if it fails or has not run, do not assume production updated.
 
+Fast path for ordinary code/docs/UI changes:
+
+1. Run only the focused local checks needed for the touched surface, plus `git diff --check`.
+2. Stage only intended files, commit in the outer repo, and `git push origin main`.
+3. Immediately run `gh run list --repo tejdiv/takyon-workspace --branch main --limit 5`, then `gh run watch <run-id> --repo tejdiv/takyon-workspace --exit-status`.
+4. If the workflow passes, report the run id and any direct smoke checks. Do not also do manual VPS/Vercel deploys.
+5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run. Use manual SSH/rsync only for emergency rollback or when the operator explicitly asks.
+
 ## User Terms
 
 Do not conflate Takyon users with product subusers.
