@@ -30,7 +30,7 @@ python3 -m compileall -q \
   "$RUNTIME_DIR/takyon_cli" \
   "$RUNTIME_DIR/tui_gateway"
 
-rsync -az --delete \
+rsync -az --delete --force \
   --exclude '.git/' \
   --exclude '.pytest_cache/' \
   --exclude '__pycache__/' \
@@ -49,5 +49,12 @@ if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
     "$ROOT_DIR/deploy/argon-alpha-14/apply-caddyfile.sh"
 fi
+
+for attempt in {1..12}; do
+  if curl -fsSI --max-time 20 "$TAKYON_SMOKE_HOST" >/dev/null; then
+    exit 0
+  fi
+  sleep 5
+done
 
 curl -fsSI --max-time 20 "$TAKYON_SMOKE_HOST" >/dev/null
