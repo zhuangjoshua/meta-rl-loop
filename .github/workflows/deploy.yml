@@ -82,13 +82,18 @@ jobs:
       - name: Redeploy Vercel frontdoor
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_SCOPE: ${{ secrets.VERCEL_SCOPE }}
         run: |
           if [[ -z "${VERCEL_TOKEN:-}" ]]; then
             echo "VERCEL_TOKEN is not configured; skipping Vercel redeploy."
             exit 0
           fi
-          npx --yes vercel@latest redeploy app.fourmanifold.com --target production --token "$VERCEL_TOKEN"
-          npx --yes vercel@latest inspect app.fourmanifold.com --token "$VERCEL_TOKEN"
+          scope_args=()
+          if [[ -n "${VERCEL_SCOPE:-}" ]]; then
+            scope_args=(--scope "$VERCEL_SCOPE")
+          fi
+          npx --yes vercel@latest redeploy app.fourmanifold.com --target production --token "$VERCEL_TOKEN" "${scope_args[@]}"
+          npx --yes vercel@latest inspect app.fourmanifold.com --token "$VERCEL_TOKEN" "${scope_args[@]}"
 
       - name: Deploy runtime to VPS
         env:
