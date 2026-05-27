@@ -1,0 +1,102 @@
+{
+	auto_https disable_redirects
+	on_demand_tls {
+		ask http://127.0.0.1:9119/api/product-tls/ask
+	}
+}
+
+app.fourmanifold.com {
+	reverse_proxy 127.0.0.1:9119
+}
+
+research-composer.fourmanifold.com {
+	reverse_proxy 127.0.0.1:9120
+}
+
+# Takyon shared product subdomain route.
+# New business product hosts are approved by the dashboard ask endpoint, which
+# only allows existing one-label business slugs under fourmanifold.com.
+https:// {
+	tls {
+		on_demand
+	}
+
+	@product {
+		host *.fourmanifold.com
+		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+	}
+	handle @product {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host {host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	respond "not found" 404
+}
+
+:80 {
+	@research_composer host research-composer.fourmanifold.com
+	handle @research_composer {
+		reverse_proxy 127.0.0.1:9120
+	}
+
+	@app host app.fourmanifold.com
+	handle @app {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host app.fourmanifold.com
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host app.fourmanifold.com
+			header_up X-Forwarded-Proto https
+		}
+	}
+}
+
+# Legacy static product hosts. New companies should not add Caddy blocks; they
+# should use the shared route above and Takyon's business-scoped product state.
+latexflow.fourmanifold.com {
+	root * /var/www/takyon-sites/latexflow
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+e2e-postfix-05262217.fourmanifold.com {
+	root * /var/www/takyon-sites/e2e-postfix-05262217
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+longer.fourmanifold.com {
+	root * /var/www/takyon-sites/longer
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+grantkit.fourmanifold.com {
+	root * /var/www/takyon-sites/grantkit
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+inboxpilot.fourmanifold.com {
+	root * /var/www/takyon-sites/inboxpilot
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+latexflow-0527124758.fourmanifold.com {
+	root * /var/www/takyon-sites/latexflow-0527124758
+	try_files {path} {path}/ /index.html
+	file_server
+}
+
+blog.fourmanifold.com {
+	root * /var/www/takyon-sites/blog
+	try_files {path} {path}/ /index.html
+	file_server
+}
