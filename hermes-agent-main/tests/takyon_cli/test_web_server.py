@@ -178,6 +178,31 @@ def test_shared_product_renderer_serves_business_subdomain(tmp_path, monkeypatch
     assert "Write LaTeX without tickets" in local_response.text
 
 
+def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    store = TakyonStore(tmp_path)
+    store.commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        idempotency_key="tls-ask-business",
+        reason="test",
+        actor="test",
+    )
+
+    client = TestClient(web_server.app)
+
+    assert client.get("/api/product-tls/ask?domain=latexflow.fourmanifold.com").status_code == 200
+    assert client.get("/api/product-tls/ask?domain=missing.fourmanifold.com").status_code == 404
+    assert client.get("/api/product-tls/ask?domain=app.fourmanifold.com").status_code == 404
+    assert client.get("/api/product-tls/ask?domain=latexflow.evil.test").status_code == 404
+
+
 class TestWebServerEndpoints:
     """Test the FastAPI REST endpoints using Starlette TestClient."""
 

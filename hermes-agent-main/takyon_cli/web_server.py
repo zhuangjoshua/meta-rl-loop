@@ -566,6 +566,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/config/defaults",
     "/api/config/schema",
     "/api/model/info",
+    "/api/product-tls/ask",
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
@@ -4035,6 +4036,42 @@ def _business_slug_from_product_host(host: str) -> str:
         return _safe_product_slug(slug)
     except HTTPException:
         return ""
+
+
+def _product_host_has_business(domain: str) -> tuple[bool, str]:
+    slug = _business_slug_from_product_host(_host_without_port(domain))
+    if not slug:
+        return False, "not_product_subdomain"
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        TakyonStore(get_takyon_home()).read(
+            scope=f"business:{slug}",
+            query="summary",
+            include=[],
+            limit=1,
+        )
+    except Exception:
+        return False, "business_not_found"
+    return True, slug
+
+
+@app.get("/api/product-tls/ask")
+async def product_tls_ask(domain: str = "") -> Response:
+    """Caddy on-demand TLS gate for shared product subdomains.
+
+    Caddy calls this before issuing a certificate. Keep it narrow so a random
+    hostname cannot make the VPS mint certificates unless Takyon already has a
+    matching business in its canonical store.
+    """
+    ok, reason = _product_host_has_business(domain)
+    if ok:
+        return Response(status_code=200, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        {"detail": reason},
+        status_code=404,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _configure_local_product_publish(host: str, port: int) -> None:
