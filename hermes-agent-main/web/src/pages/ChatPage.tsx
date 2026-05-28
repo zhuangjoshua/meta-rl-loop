@@ -52,7 +52,6 @@ import {
 } from "@/lib/gatewayClient";
 import {
   displayNameFromId,
-  formatActivityLine,
   metadataDebugDetail,
 } from "@/lib/takyonActivity";
 import { cn } from "@/lib/utils";
@@ -696,6 +695,81 @@ function conciseActivityDetail(value?: string): string {
   return text.length > 90 ? `${text.slice(0, 87)}...` : text;
 }
 
+function isStatusOnlyDetail(value?: string): boolean {
+  const text = (value || "").trim().toLowerCase();
+  return (
+    !text ||
+    text === "done" ||
+    text === "working" ||
+    text === "running" ||
+    /^running\s+\d+(?:\.\d+)?s$/.test(text) ||
+    /^done\s+in\s+\d+(?:\.\d+)?s$/.test(text)
+  );
+}
+
+function cleanTraceDetail(detail?: string, status?: string, label?: string): string {
+  const text = conciseActivityDetail(detail);
+  if (!text) return "";
+  const normalized = text.toLowerCase();
+  const normalizedStatus = (status || "").trim().toLowerCase();
+  const normalizedLabel = (label || "").trim().toLowerCase();
+  if (isStatusOnlyDetail(text)) return "";
+  if (normalized === normalizedStatus || normalized === normalizedLabel) return "";
+  if (normalized === `raw: runtime`) return "";
+  return text;
+}
+
+function cleanTraceStatus(status?: string): string {
+  const text = (status || "").trim();
+  if (!text) return "";
+  if (/^running\b/i.test(text)) return text.replace(/^running/i, "Running");
+  if (/^working$/i.test(text)) return "Working";
+  if (/^done\b/i.test(text)) return text.replace(/^done/i, "Done");
+  if (/^needs attention\b/i.test(text)) return text.replace(/^needs attention/i, "Needs attention");
+  return humanizeStatus(text);
+}
+
+function parseRuntimeAgentEvent(task: BusinessOverviewTask | BusinessOverviewJob): ActivityTraceItem | null {
+  const id = String(task.id || `${task.label || "runtime"}:${task.detail || ""}`);
+  const text = `${task.label || ""} ${task.detail || ""}`.trim();
+  const line = text.replace(/^(agent|ceo live trace)\s+/i, "").trim();
+  if (!line || /^\.?\s*done$/i.test(line) || /^tool\s*$/i.test(line)) return null;
+
+  let match = line.match(/^agent\s*(?:->|→)\s*receiving stream response/i);
+  if (match) {
+    return {
+      id,
+      label: "Receiving model response",
+      status: "Working",
+      tone: "running",
+    };
+  }
+
+  match = line.match(/^agent\s*(?:->|→)\s*starting API call\s+#?(\d+)/i);
+  if (match) {
+    return {
+      detail: `API call #${match[1]}`,
+      id,
+      label: "Starting model call",
+      status: "Working",
+      tone: "running",
+    };
+  }
+
+  match = line.match(/^agent\s*(?:->|→)\s*API call\s+#?(\d+)\s+completed/i);
+  if (match) {
+    return {
+      detail: `API call #${match[1]}`,
+      id,
+      label: "Model call finished",
+      status: "Done",
+      tone: "done",
+    };
+  }
+
+  return null;
+}
+
 interface ActivityTraceItem {
   detail?: string;
   id: string;
@@ -705,23 +779,43 @@ interface ActivityTraceItem {
   tone?: string;
 }
 
+function compactActivityItems(items: Array<ActivityTraceItem | null | undefined>): ActivityTraceItem[] {
+  const seen = new Set<string>();
+  const compacted: ActivityTraceItem[] = [];
+  for (const item of items) {
+    if (!item) continue;
+    const label = (item.label || "").trim();
+    const status = cleanTraceStatus(item.status);
+    const detail = cleanTraceDetail(item.detail, status, label);
+    if (!label || (/^(agent|tool|\.)$/i.test(label) && !detail)) continue;
+    const key = `${label.toLowerCase()}:${detail.toLowerCase()}:${status.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    compacted.push({ ...item, detail, status });
+  }
+  return compacted;
+}
+
 function activityFromTool(
   tool: ToolEntry,
   registry: RegistryDisplayPayload | undefined,
   now: number,
 ): ActivityTraceItem {
   const display = displayNameFromId(tool.name || "tool", registry, "tools");
-  const detail = conciseActivityDetail(
+  const status = toolActivityStatus(tool, now);
+  const detail = cleanTraceDetail(
     tool.status === "running"
       ? tool.context || tool.preview
       : tool.context || tool.summary || tool.preview,
+    status,
+    naturalToolLabel(tool, registry),
   );
   return {
     detail: metadataDebugDetail(tool.name || "", display.hasMetadata, detail),
     id: tool.id,
     label: naturalToolLabel(tool, registry),
     rawId: display.hasMetadata ? undefined : tool.name,
-    status: toolActivityStatus(tool, now),
+    status,
     tone: tool.status,
   };
 }
@@ -729,7 +823,9 @@ function activityFromTool(
 function activityFromTask(
   task: BusinessOverviewTask | BusinessOverviewJob,
   registry: RegistryDisplayPayload | undefined,
-): ActivityTraceItem {
+): ActivityTraceItem | null {
+  const runtimeAgentEvent = parseRuntimeAgentEvent(task);
+  if (runtimeAgentEvent) return runtimeAgentEvent;
   const runtimeTool = parseRuntimeTool(task);
   if (runtimeTool) {
     const display = displayNameFromId(runtimeTool.toolName, registry, "tools");
@@ -741,7 +837,7 @@ function activityFromTask(
       detail: metadataDebugDetail(
         runtimeTool.toolName,
         display.hasMetadata,
-        conciseActivityDetail(runtimeTool.detail),
+        cleanTraceDetail(runtimeTool.detail, status, display.label),
       ),
       id: String(task.id || `${runtimeTool.phase}:${runtimeTool.toolName}`),
       label: display.label,
@@ -752,12 +848,17 @@ function activityFromTask(
   }
   const rawId = (task as BusinessOverviewTask).source || (task as BusinessOverviewJob).kind || "";
   const display = displayNameFromId(rawId, registry, "tools");
+  const label = taskLabel(task, registry);
+  const status = humanizeStatus(task.status).toLowerCase();
+  if (/^(agent|tool|\.)$/i.test(label.trim()) && !cleanTraceDetail(task.detail, status, label)) {
+    return null;
+  }
   return {
-    detail: taskDetail(task, registry),
+    detail: cleanTraceDetail(taskDetail(task, registry), status, label),
     id: String(task.id || `${taskLabel(task, registry)}:${task.status || ""}`),
-    label: taskLabel(task, registry),
-    rawId: rawId && !display.hasMetadata ? rawId : undefined,
-    status: humanizeStatus(task.status).toLowerCase(),
+    label: /^preparing$/i.test(label) ? "Preparing next step" : label,
+    rawId: rawId && rawId !== "runtime" && !display.hasMetadata ? rawId : undefined,
+    status,
     tone: task.tone || task.status,
   };
 }
@@ -796,15 +897,17 @@ function workerItems(
     .slice(0, 6)
     .map((tool) => {
       const display = displayNameFromId(tool.name || "tool", registry, "tools");
-      const purpose = conciseActivityDetail(tool.context || tool.preview || tool.summary || tool.error);
-      const latestDetail = conciseActivityDetail(tool.summary || tool.preview || tool.error);
+      const status = toolActivityStatus(tool, now);
+      const name = naturalToolLabel(tool, registry);
+      const purpose = cleanTraceDetail(tool.context || tool.preview || tool.summary || tool.error, status, name);
+      const latestDetail = cleanTraceDetail(tool.summary || tool.preview || tool.error, status, name);
       return {
         id: `live:${tool.tool_id}`,
         latestDetail,
-        name: naturalToolLabel(tool, registry),
+        name,
         purpose,
         rawId: display.hasMetadata ? undefined : tool.name,
-        status: toolActivityStatus(tool, now),
+        status,
         tone: tool.status,
       };
     });
@@ -819,7 +922,7 @@ function workerItems(
       const status = phase === "completed"
         ? `done${runtimeTool?.duration ? ` in ${runtimeTool.duration}` : ""}`
         : "running";
-      const detail = conciseActivityDetail(runtimeTool?.detail || task.detail || "");
+      const detail = cleanTraceDetail(runtimeTool?.detail || task.detail || "", status, display.label);
       return {
         id: `runtime:${task.id || toolName}:${phase}`,
         latestDetail: detail,
@@ -3247,7 +3350,7 @@ function CompanyOverview({
         tone: "done",
       })),
   ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
-  const latestActivity: ActivityTraceItem[] = [
+  const latestActivity: Array<ActivityTraceItem | null> = [
     ...(activeTool ? [activityFromTool(activeTool, registry, now)] : []),
     ...tools
       .slice()
@@ -3263,7 +3366,8 @@ function CompanyOverview({
       tone: "active",
     })),
     ...tasks.filter(isActionableTask).slice(0, 6).map((task) => activityFromTask(task, registry)),
-  ].slice(0, 9);
+  ];
+  const visibleActivity = compactActivityItems(latestActivity).slice(0, 8);
   const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
   const [viewer, setViewer] = useState<{
     content?: string;
@@ -3314,7 +3418,7 @@ function CompanyOverview({
     [onReadFile, onResolveMedia],
   );
   const hasViewer = Boolean(viewer);
-  const showAside = Boolean(viewer || workers.length > 0 || latestActivity.length > 0 || evidenceRows.length > 0);
+  const showAside = Boolean(viewer || workers.length > 0 || visibleActivity.length > 0 || evidenceRows.length > 0);
 
   const workspaceColumn = (
     <div className="grid content-start gap-3">
@@ -3384,7 +3488,7 @@ function CompanyOverview({
 
   const activityContents = (
       <div className="mt-3 grid gap-2">
-        {latestActivity.map((item, index) => (
+        {visibleActivity.map((item, index) => (
           <ActivityTraceRow
             detail={item.detail}
             key={item.id || `${item.label}-${index}`}
@@ -3419,7 +3523,7 @@ function CompanyOverview({
     <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
       <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
         <Users className="h-4 w-4" />
-        Workers
+        Delegated work
       </div>
       <div className="mt-3 grid gap-2">
         {workers.map((worker) => (
@@ -3428,12 +3532,12 @@ function CompanyOverview({
       </div>
     </section>
   );
-  const activityBlock = (latestActivity.length > 0 || evidenceRows.length > 0) && (
-    latestActivity.length > 0 ? (
+  const activityBlock = (visibleActivity.length > 0 || evidenceRows.length > 0) && (
+    visibleActivity.length > 0 ? (
       <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
           <Activity className="h-4 w-4" />
-          Activity
+          Recent steps
         </div>
         {activityContents}
       </section>
@@ -5066,10 +5170,15 @@ function ActivityTraceRow({
   status: string;
   tone?: string;
 }) {
-  const cleanedDetail = detail && detail !== `raw: ${rawId || ""}` ? detail : "";
-  const line = formatActivityLine(label, cleanedDetail, status);
+  const cleanedStatus = cleanTraceStatus(status);
+  const cleanedDetail = cleanTraceDetail(
+    detail && detail !== `raw: ${rawId || ""}` ? detail : "",
+    cleanedStatus,
+    label,
+  );
   const debug = rawId && !detail?.includes(rawId) ? `raw: ${rawId}` : "";
-  const active = /active|running|working/i.test(`${tone || ""} ${status || ""}`);
+  const active = /active|running|working/i.test(`${tone || ""} ${cleanedStatus || ""}`);
+  const statusTone = `${tone || ""} ${cleanedStatus || ""}`;
   return (
     <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
       <div className="flex min-w-0 items-start gap-2">
@@ -5079,10 +5188,30 @@ function ActivityTraceRow({
             active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
           )}
         />
-        <div className="min-w-0">
-          <div className="break-words text-sm leading-6 text-zinc-300">
-            {line}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="break-words text-sm leading-6 text-zinc-300">
+              {label}
+            </div>
+            {cleanedStatus && (
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
+                  /active|running|working/i.test(statusTone) && "bg-sky-300/10 text-sky-100",
+                  /done|complete|success/i.test(statusTone) && "bg-emerald-400/10 text-emerald-200",
+                  /attention|blocked|error|fail/i.test(statusTone) && "bg-red-400/10 text-red-200",
+                  !/active|running|working|done|complete|success|attention|blocked|error|fail/i.test(statusTone) && "bg-zinc-900 text-zinc-400",
+                )}
+              >
+                {cleanedStatus}
+              </span>
+            )}
           </div>
+          {cleanedDetail && (
+            <div className="mt-0.5 break-words text-xs leading-5 text-zinc-500">
+              {cleanedDetail}
+            </div>
+          )}
           {debug && (
             <div className="mt-0.5 break-words font-mono text-[0.68rem] leading-5 text-zinc-600">
               {debug}
