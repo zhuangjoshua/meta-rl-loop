@@ -4795,22 +4795,6 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     verification = as_dict(validation.get("latest_verification"))
     source_path = brief_text(surface.get("source_path"))
 
-    def normalized_public_url(value: Any) -> str:
-        text = brief_text(value).strip()
-        if not text:
-            return ""
-        if re.match(r"^https?://", text, re.I):
-            return text
-        if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.I):
-            return f"https://{text}"
-        return ""
-
-    def shared_renderer_public_url() -> str:
-        policy = brief_text(surface.get("publish_policy")).strip().lower()
-        if policy not in {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}:
-            return ""
-        return normalized_public_url(surface.get("publish_target")) or f"https://{slug}.fourmanifold.com/"
-
     if not verification:
         for event in as_list(summary.get("events")):
             event_dict = as_dict(event)
@@ -5313,7 +5297,6 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
     routes = surface.get("routes") if isinstance(surface.get("routes"), list) else []
     business_budget = as_dict(current_state.get("business_budget"))
-    shared_public_url = shared_renderer_public_url()
     return {
         "goal": brief_text(business.get("goal")),
         "mode": brief_text(business.get("mode") or business.get("status") or business.get("state")),
@@ -5326,7 +5309,6 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "publish_policy": brief_text(surface.get("publish_policy")),
             "publish_status": brief_text(surface.get("publish_status")),
             "public_url": brief_text(surface.get("public_url")),
-            "shared_renderer_public_url": shared_public_url,
             "published_at": brief_text(surface.get("published_at")),
             "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
             "publish_blocker": brief_text(surface.get("publish_blocker")),
@@ -5391,7 +5373,6 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "deploy_status": "pending" if deploy_pending else "",
                 "source_path": source_path,
                 "public_url": brief_text(surface.get("public_url")),
-                "shared_renderer_public_url": shared_public_url,
                 "publish_target": brief_text(surface.get("publish_target")),
                 "publish_policy": brief_text(surface.get("publish_policy")),
                 "publish_status": brief_text(surface.get("publish_status")),

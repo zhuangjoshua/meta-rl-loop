@@ -119,7 +119,6 @@ interface BusinessOverviewProduct {
   publish_policy?: string;
   publish_status?: string;
   public_url?: string;
-  shared_renderer_public_url?: string;
   published_at?: string;
   publish_receipt_path?: string;
   publish_blocker?: string;
@@ -250,7 +249,6 @@ interface BusinessArtifactSummary {
   deploy_status?: string;
   source_path?: string;
   public_url?: string;
-  shared_renderer_public_url?: string;
   publish_target?: string;
   publish_policy?: string;
   publish_status?: string;
@@ -589,12 +587,14 @@ function parseRuntimeTool(task: BusinessOverviewTask | BusinessOverviewJob): {
   toolName: string;
 } | null {
   const text = `${task.label || ""} ${task.detail || ""}`.trim();
-  const match = text.match(/\b(preparing tool|tool started|tool completed)\s*(?:->|→|-)?\s*([a-zA-Z0-9_.:-]+)(?:\s*·\s*(.*))?/i);
+  const match =
+    text.match(/\b(preparing tool|tool started|tool completed)\s*(?:->|→|-)?\s*([a-zA-Z0-9_.:-]+)(?:\s*·\s*(.*))?/i) ||
+    text.match(/\bagent\s*(?:->|→)\s*(executing tool|tool completed):\s*([a-zA-Z0-9_.:-]+)(?:\s*\(([^)]*)\))?/i);
   if (!match) return null;
   const phase =
     match[1].toLowerCase().includes("completed")
       ? "completed"
-      : match[1].toLowerCase().includes("started")
+      : match[1].toLowerCase().includes("started") || match[1].toLowerCase().includes("executing")
         ? "started"
         : "preparing";
   const tail = (match[3] || "").trim();
@@ -773,29 +773,61 @@ interface WorkerDisplayItem {
 }
 
 function isWorkerTool(tool: ToolEntry, registry?: RegistryDisplayPayload): boolean {
-  const meta = registryTool(registry, tool.name);
+  return isWorkerToolName(tool.name, registry);
+}
+
+function isWorkerToolName(name?: string, registry?: RegistryDisplayPayload): boolean {
+  const meta = registryTool(registry, name);
   if (meta?.category === "agent") return true;
-  return /delegate|subagent|agent|claude/i.test(tool.name);
+  return /delegate|subagent|agent|claude/i.test(name || "");
 }
 
 function workerItems(
   tools: ToolEntry[],
   overviewWorkers: BusinessOverviewWorker[],
+  overviewTasks: BusinessOverviewTask[],
   registry: RegistryDisplayPayload | undefined,
   now: number,
 ): WorkerDisplayItem[] {
   const liveWorkers = tools
-    .filter((tool) => tool.status === "running" && isWorkerTool(tool, registry))
+    .filter((tool) => isWorkerTool(tool, registry))
+    .slice()
+    .reverse()
+    .slice(0, 6)
     .map((tool) => {
       const display = displayNameFromId(tool.name || "tool", registry, "tools");
+      const purpose = conciseActivityDetail(tool.context || tool.preview || tool.summary || tool.error);
+      const latestDetail = conciseActivityDetail(tool.summary || tool.preview || tool.error);
       return {
         id: `live:${tool.tool_id}`,
-        latestDetail: conciseActivityDetail(tool.preview || tool.summary || tool.error),
+        latestDetail,
         name: naturalToolLabel(tool, registry),
-        purpose: conciseActivityDetail(tool.context),
+        purpose,
         rawId: display.hasMetadata ? undefined : tool.name,
         status: toolActivityStatus(tool, now),
         tone: tool.status,
+      };
+    });
+  const runtimeWorkers = overviewTasks
+    .map((task) => ({ task, runtimeTool: parseRuntimeTool(task) }))
+    .filter(({ runtimeTool }) => runtimeTool && isWorkerToolName(runtimeTool.toolName, registry))
+    .slice(0, 6)
+    .map(({ task, runtimeTool }) => {
+      const toolName = runtimeTool?.toolName || "";
+      const display = displayNameFromId(toolName, registry, "tools");
+      const phase = runtimeTool?.phase || "started";
+      const status = phase === "completed"
+        ? `done${runtimeTool?.duration ? ` in ${runtimeTool.duration}` : ""}`
+        : "running";
+      const detail = conciseActivityDetail(runtimeTool?.detail || task.detail || "");
+      return {
+        id: `runtime:${task.id || toolName}:${phase}`,
+        latestDetail: detail,
+        name: display.label,
+        purpose: detail,
+        rawId: display.hasMetadata ? undefined : toolName,
+        status,
+        tone: task.tone || task.status,
       };
     });
   const historicalWorkers = overviewWorkers.map((worker) => {
@@ -813,7 +845,7 @@ function workerItems(
   });
 
   const seen = new Set<string>();
-  return [...liveWorkers, ...historicalWorkers].filter((worker) => {
+  return [...liveWorkers, ...runtimeWorkers, ...historicalWorkers].filter((worker) => {
     const key = `${worker.name}:${worker.purpose || ""}:${worker.status}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -936,12 +968,7 @@ function normalizeOpenableUrl(value?: string): string {
   return "";
 }
 
-function isSharedRendererPolicy(value?: string): boolean {
-  return /^(shared_renderer|shared_product_renderer|shared_page_renderer)$/i.test((value || "").trim());
-}
-
 function customerWebsiteUrl({
-  business,
   product,
   website,
 }: {
@@ -951,18 +978,7 @@ function customerWebsiteUrl({
 }): string {
   const explicit = normalizeOpenableUrl(website?.public_url || product?.public_url);
   if (explicit) return explicit;
-  const publishPolicy = website?.publish_policy || product?.publish_policy;
-  if (!isSharedRendererPolicy(publishPolicy)) return "";
-  const surfaceStatus = (product?.status || website?.status || "").trim().toLowerCase();
-  if (!surfaceStatus || surfaceStatus === "missing") return "";
-  const sharedUrl = normalizeOpenableUrl(
-    website?.shared_renderer_public_url || product?.shared_renderer_public_url,
-  );
-  if (sharedUrl) return sharedUrl;
-  const target = normalizeOpenableUrl(website?.publish_target || product?.publish_target);
-  if (target) return target;
-  const slug = normalizeBusinessLookup(business || "");
-  return slug ? `https://${slug}.fourmanifold.com/` : "";
+  return "";
 }
 
 function openUrlInNewTab(url: string): void {
@@ -1598,10 +1614,9 @@ export default function ChatPage() {
         await gw.connect();
         if (cancelled) return;
         setError(null);
-      } catch (err) {
+      } catch {
         if (cancelled) return;
-        const message = err instanceof Error ? err.message : String(err);
-        setError(`Live WebSocket is offline; using HTTP fallback while retrying. ${message}`);
+        setError(null);
       }
 
       try {
@@ -1677,12 +1692,10 @@ export default function ChatPage() {
 
     reconnectAttemptsRef.current += 1;
     const delayMs = Math.min(8_000, 500 * reconnectAttemptsRef.current);
-    if (state === "closed") {
-      setError("Live WebSocket closed; reconnecting. HTTP fallback keeps chat and status available.");
-    } else if (state === "polling") {
-      setError("Live WebSocket is offline; using HTTP fallback while retrying.");
-    } else if (gw.lastCloseMessage) {
+    if (state === "error" && gw.lastCloseMessage && gw.lastCloseCode === 4403) {
       setError(gw.lastCloseMessage);
+    } else {
+      setError(null);
     }
     const timer = window.setTimeout(() => setVersion((v) => v + 1), delayMs);
     return () => window.clearTimeout(timer);
@@ -3251,7 +3264,7 @@ function CompanyOverview({
     })),
     ...tasks.filter(isActionableTask).slice(0, 6).map((task) => activityFromTask(task, registry)),
   ].slice(0, 9);
-  const workers = workerItems(tools, overview.workers || [], registry, now);
+  const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;

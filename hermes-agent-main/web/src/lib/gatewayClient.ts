@@ -186,13 +186,14 @@ export class GatewayClient {
         if (settled) return;
         settled = true;
         cleanup();
-        this.setState("error");
+        this.setState("polling");
         reject(new Error("WebSocket connection failed"));
       };
       const onCloseBeforeOpen = (ev: CloseEvent) => {
         if (settled) return;
         settled = true;
         cleanup();
+        this.setState(ev.code === 4401 || ev.code === 4403 ? "error" : "polling");
         reject(new Error(this.describeClose(ev)));
       };
       ws.addEventListener("open", onOpen, { once: true });
@@ -206,7 +207,7 @@ export class GatewayClient {
     if (!ws) return;
     this.closingSockets.add(ws);
     this.ws = null;
-    this.rejectAllPending(new Error("Intercom reconnecting"));
+    this.rejectAllPending(new Error("Live stream reconnecting"));
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
       ws.close(1000, "client_close");
     }
@@ -246,9 +247,9 @@ export class GatewayClient {
 
   private describeClose(ev: CloseEvent): string {
     const suffix = ev.reason ? `: ${ev.reason}` : ev.code ? ` (${ev.code})` : "";
-    if (ev.code === 4401) return `Intercom unauthorized${suffix}`;
-    if (ev.code === 4403) return `Intercom forbidden${suffix}`;
-    return `Intercom disconnected${suffix}`;
+    if (ev.code === 4401) return `Live stream unauthorized${suffix}`;
+    if (ev.code === 4403) return `Live stream forbidden${suffix}`;
+    return `Live stream disconnected${suffix}`;
   }
 
   /** Send a JSON-RPC request. Rejects on error response or timeout. */

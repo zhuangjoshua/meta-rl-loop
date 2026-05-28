@@ -382,7 +382,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
-def test_shared_renderer_surface_publishes_without_product_source_files(tmp_path, monkeypatch):
+def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9127/site")
     store = TakyonStore(tmp_path)
@@ -390,7 +390,7 @@ def test_shared_renderer_surface_publishes_without_product_source_files(tmp_path
         store,
         "business:latexflow",
         [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
-        "init-shared-renderer",
+        "init-legacy-shared-renderer",
     )
     _commit(
         store,
@@ -415,7 +415,7 @@ def test_shared_renderer_surface_publishes_without_product_source_files(tmp_path
                 },
             }
         ],
-        "surface-shared-renderer",
+        "surface-legacy-shared-renderer",
     )
 
     verification = json.loads(
@@ -423,27 +423,29 @@ def test_shared_renderer_surface_publishes_without_product_source_files(tmp_path
             {
                 "business": "latexflow",
                 "install": False,
-                "idempotency_key": "verify-shared-renderer",
+                "idempotency_key": "verify-legacy-shared-renderer",
             }
         )
     )
 
     assert verification["success"] is True
     receipt = verification["verification"]
-    assert receipt["status"] == "passed"
-    assert receipt["kind"] == "shared_renderer"
-    assert receipt["done_gate_status"] == "passed"
-    assert receipt["publish"]["deploy_kind"] == "shared_renderer"
-    assert receipt["publish"]["public_url"] == "http://127.0.0.1:9127/site/latexflow/"
+    assert receipt["status"] == "missing"
+    assert receipt["effective_publish_policy"] == "publish_after_verify"
+    assert receipt["requested_publish_policy"] == "shared_renderer"
+    assert receipt["done_gate_status"] == "blocked"
+    assert receipt["publish"]["status"] == "blocked"
+    assert receipt["publish"]["public_url"] == ""
+    assert "source path does not exist" in receipt["blocker"].lower()
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["status"] == "draft"
     assert app["surface_contract"]["publish_policy"] == "shared_renderer"
-    assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "http://127.0.0.1:9127/site/latexflow/"
+    assert app["surface_contract"]["publish_status"] == "not_published"
+    assert app["surface_contract"]["public_url"] in {"", None}
     assert app["product_surface"]["has_source_files"] is False
-    assert app["product_surface"]["local_continuable_work"] == []
+    assert app["product_surface"]["local_continuable_work"]
     pulse = store.calculate_pulse("latexflow")
-    assert pulse["summary"]["local_continuable_product_work"] == 0
+    assert pulse["summary"]["local_continuable_product_work"] > 0
 
 
 def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, monkeypatch):

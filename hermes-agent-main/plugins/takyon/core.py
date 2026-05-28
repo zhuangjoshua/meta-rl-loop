@@ -77,7 +77,7 @@ _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
-_DEFAULT_PRODUCT_PUBLISH_POLICY = "shared_renderer"
+_DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_verify"
 _DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
 _DEFAULT_PRODUCT_DONE_GATE = "business_verify_product_surface:verified_and_published_or_exact_blocker"
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
@@ -1988,46 +1988,6 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
     return result
 
 
-def _verify_shared_renderer_surface(*, business_root: Path, slug: str, source_path: str, surface: dict[str, Any]) -> dict[str, Any]:
-    rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
-    source_root = (business_root / rel).resolve()
-    has_source = business_root.resolve() in (source_root, *source_root.parents) and source_root.exists() and source_root.is_dir()
-    inventory = _product_inventory(business_root, rel, surface=surface) if has_source else {
-        "status": "shared_renderer",
-        "routes": surface.get("routes") if isinstance(surface.get("routes"), list) else [],
-        "api_routes": [],
-        "claim_snippets": [],
-        "risk_markers": [],
-        "pretend_findings": [],
-        "source_path": rel,
-    }
-    return {
-        "status": "passed",
-        "kind": "shared_renderer",
-        "source_path": rel,
-        "checks": [],
-        "warnings": [] if has_source else ["shared renderer publish does not require per-business source files"],
-        "inventory": inventory,
-    }
-
-
-def _publish_shared_renderer_surface(*, slug: str, publish_target: str) -> dict[str, Any]:
-    local_url = _product_local_public_url(slug)
-    public_url = local_url or publish_target
-    return {
-        "status": "published",
-        "publish_target": publish_target,
-        "public_url": public_url,
-        "local_url": local_url,
-        "published_at": _now(),
-        "publish_root": "shared_renderer",
-        "publish_source_path": "app/surface.md",
-        "publish_mode": "shared_renderer",
-        "deploy_kind": "shared_renderer",
-        "blocker": "",
-    }
-
-
 def _canonical_product_url(store: "TakyonStore", conn: sqlite3.Connection, business: str) -> str:
     surface = store._app_surface_contract(conn, business)
     return str(surface.get("public_url") or surface.get("publish_target") or _product_publish_target(business)).strip()
@@ -2442,7 +2402,7 @@ class TakyonStore:
               theme_json TEXT,
               constraints_json TEXT,
               publish_target TEXT,
-              publish_policy TEXT NOT NULL DEFAULT 'shared_renderer',
+              publish_policy TEXT NOT NULL DEFAULT 'publish_after_verify',
               mode_behavior TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface',
               done_gate TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker',
               public_url TEXT,
@@ -2640,7 +2600,7 @@ class TakyonStore:
         surface_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_surface_contracts)").fetchall()}
         surface_additions = {
             "publish_target": "TEXT",
-            "publish_policy": "TEXT NOT NULL DEFAULT 'shared_renderer'",
+            "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_verify'",
             "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
             "done_gate": "TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker'",
             "public_url": "TEXT",
@@ -2989,16 +2949,8 @@ class TakyonStore:
             }
         root = self._business_root(slug) / source_path if source_path else None
         has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
-        shared_renderer = _is_shared_renderer_publish_policy(surface.get("publish_policy"))
         local_work: list[str] = []
-        if shared_renderer:
-            if not latest:
-                local_work.append("shared renderer surface has not been verified")
-            elif latest.get("status") not in {"passed"}:
-                local_work.append(f"shared renderer verification is {latest.get('status') or 'unknown'}")
-            elif latest.get("done_gate_status") not in {"passed"}:
-                local_work.append(latest.get("blocker") or "shared renderer surface is not published")
-        elif not source_path:
+        if not source_path:
             local_work.append("missing product source path")
         elif not has_source_files:
             local_work.append("missing product source files")
@@ -3043,19 +2995,6 @@ class TakyonStore:
         if status != "active":
             return status, metadata
         validation: dict[str, Any] = {"requested_status": "active"}
-        if _is_shared_renderer_publish_policy(publish_policy):
-            rows = conn.execute(
-                "SELECT * FROM events WHERE business_slug = ? AND event_type = 'product.surface.verify' ORDER BY created_at DESC LIMIT 25",
-                (slug,),
-            ).fetchall()
-            for row in rows:
-                event = self._row_to_dict(row) or {}
-                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-                publish = payload.get("publish") if isinstance(payload.get("publish"), dict) else {}
-                if publish.get("deploy_kind") == "shared_renderer" and payload.get("done_gate_status") == "passed":
-                    return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": payload.get("receipt_path"), "publish_policy": publish_policy}}
-            validation.update({"status": "unverified", "reason": "no passing shared renderer product.surface.verify receipt", "publish_policy": publish_policy})
-            return "unverified", {**metadata, "takyon_surface_validation": validation}
         if not source_path:
             validation.update({"status": "unverified", "reason": "missing source_path"})
             return "unverified", {**metadata, "takyon_surface_validation": validation}
@@ -5770,34 +5709,33 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         if not source_path:
             source_path = str(surface.get("source_path") or "product/site")
         publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
-        publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+        requested_publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+        legacy_shared_renderer = _is_shared_renderer_publish_policy(requested_publish_policy)
+        publish_policy = "publish_after_verify" if legacy_shared_renderer else requested_publish_policy
         install = bool(args.get("install", True))
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=60, minimum=15, maximum=900)
-        shared_renderer = _is_shared_renderer_publish_policy(publish_policy)
-        if shared_renderer:
-            verification = _verify_shared_renderer_surface(
+        verification = _verify_product_surface_path(
+            store._business_root(business),
+            source_path,
+            install=install,
+            timeout_seconds=timeout_seconds,
+        )
+        if legacy_shared_renderer:
+            warnings = list(verification.get("warnings") or [])
+            warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
+            verification = {
+                **verification,
+                "requested_publish_policy": requested_publish_policy,
+                "effective_publish_policy": publish_policy,
+                "warnings": warnings,
+            }
+        if verification.get("status") == "passed":
+            publish = _publish_product_surface_path(
                 business_root=store._business_root(business),
                 slug=business,
-                source_path=source_path,
-                surface=surface,
+                source_path=str(verification.get("source_path") or source_path),
+                publish_target=publish_target,
             )
-        else:
-            verification = _verify_product_surface_path(
-                store._business_root(business),
-                source_path,
-                install=install,
-                timeout_seconds=timeout_seconds,
-            )
-        if verification.get("status") == "passed":
-            if shared_renderer:
-                publish = _publish_shared_renderer_surface(slug=business, publish_target=publish_target)
-            else:
-                publish = _publish_product_surface_path(
-                    business_root=store._business_root(business),
-                    slug=business,
-                    source_path=str(verification.get("source_path") or source_path),
-                    publish_target=publish_target,
-                )
         else:
             publish = {
                 "status": "blocked",
@@ -5845,6 +5783,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                     "status": verification.get("status"),
                     "kind": verification.get("kind"),
                     "publish_policy": publish_policy,
+                    "requested_publish_policy": requested_publish_policy,
                     "error": verification.get("error"),
                     "warnings": verification.get("warnings") or [],
                     "inventory": inventory,
@@ -7700,7 +7639,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to shared_renderer for Polsia-style wildcard/shared product pages without per-business deploy. Use publish_after_verify only for explicit custom/static source publishing."},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
                 "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
                 "done_gate": {"type": "string", "description": "Defaults to verified and published, or exact blocker"},
                 "notes": {"type": "string"},
@@ -7714,7 +7653,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_verify_product_surface",
-        "description": "Verify and publish a business product surface. Defaults to shared_renderer; use publish_after_verify only for explicit custom/static source publishing.",
+        "description": "Verify and publish a business product surface from real source files; missing source or publish blockers are reported as exact blockers.",
         "handler": handle_business_verify_product_surface,
         "schema": _schema(
             "business_verify_product_surface",
@@ -7723,7 +7662,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to shared_renderer. Use publish_after_verify for explicit static/custom source publishing after choosing that path in the app surface contract."},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 60"},
                 "activate_on_success": {"type": "boolean", "description": "Update app surface status after verification; active only when publication succeeds; default true"},

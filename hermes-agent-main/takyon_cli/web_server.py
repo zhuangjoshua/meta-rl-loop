@@ -4106,111 +4106,6 @@ def _safe_product_slug(value: str) -> str:
     return slug
 
 
-def _surface_blocks(surface: dict[str, Any]) -> list[dict[str, Any]]:
-    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-    raw = (
-        metadata.get("shared_product_blocks")
-        or metadata.get("product_blocks")
-        or metadata.get("blocks")
-        or []
-    )
-    if isinstance(raw, dict):
-        raw = [raw]
-    blocks = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
-    if blocks:
-        return blocks[:12]
-    return [
-        {"type": "waitlist", "label": "Early access", "status": "available", "description": "Collect interest and workflow feedback."},
-        {"type": "signup", "label": "Signup/login", "status": "blocked", "description": "Use Hermes app-runtime auth when enabled."},
-        {"type": "checkout", "label": "Checkout", "status": "blocked", "description": "Use Stripe checkout only when configured."},
-    ]
-
-
-def _shared_product_status(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"available", "active", "live", "ready", "done", "published"}:
-        return "Available"
-    if raw in {"blocked", "missing", "unavailable", "not_wired", "not-wired"}:
-        return "Blocked"
-    if raw in {"planned", "next", "coming_soon", "building", "building_next"}:
-        return "Building next"
-    return "Recorded" if raw else "Planned"
-
-
-def _render_shared_product_surface(business: str) -> HTMLResponse:
-    slug = _safe_product_slug(business)
-    try:
-        from plugins.takyon.core import TakyonStore  # Imported lazily so dashboard startup stays light.
-
-        data = TakyonStore(get_takyon_home()).read(scope=f"business:{slug}", query="summary", include=["app"], limit=20)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"product site not found: {slug}") from exc
-    business_row = data.get("business") if isinstance(data.get("business"), dict) else {}
-    app_data = data.get("app") if isinstance(data.get("app"), dict) else {}
-    surface = app_data.get("surface_contract") if isinstance(app_data.get("surface_contract"), dict) else {}
-    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-    name = str(business_row.get("name") or slug).strip()
-    goal = str(business_row.get("goal") or metadata.get("subheadline") or metadata.get("description") or "").strip()
-    headline = str(metadata.get("headline") or name).strip()
-    publish_status = str(surface.get("publish_status") or surface.get("status") or "early access").strip()
-    public_url = str(surface.get("public_url") or surface.get("publish_target") or f"https://{slug}.{_company_base_domain()}/").strip()
-    blocks = _surface_blocks(surface)
-    block_cards = []
-    for block in blocks:
-        label = html.escape(str(block.get("label") or block.get("type") or "Product block"))
-        status = html.escape(_shared_product_status(block.get("status")))
-        description = html.escape(str(block.get("description") or block.get("reason") or ""))
-        block_cards.append(
-            f"<article class='block'><div><h2>{label}</h2>{f'<p>{description}</p>' if description else ''}</div><span>{status}</span></article>"
-        )
-    body = "\n".join(block_cards)
-    escaped_name = html.escape(name)
-    escaped_headline = html.escape(headline)
-    escaped_goal = html.escape(goal or "A focused early product surface for this business.")
-    escaped_status = html.escape(_shared_product_status(publish_status))
-    escaped_url = html.escape(public_url)
-    page = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{escaped_name}</title>
-  <style>
-    :root {{ color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #08090b; color: #f4f4f5; }}
-    body {{ margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #17212b 0, transparent 32rem), #08090b; }}
-    main {{ width: min(1040px, calc(100vw - 40px)); margin: 0 auto; padding: 72px 0; }}
-    header {{ display: grid; gap: 18px; padding: 36px 0 42px; border-bottom: 1px solid #26272b; }}
-    .eyebrow {{ color: #a1a1aa; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }}
-    h1 {{ margin: 0; max-width: 820px; font-size: clamp(44px, 7vw, 88px); line-height: .94; letter-spacing: 0; }}
-    p {{ margin: 0; color: #c4c4cc; font-size: 18px; line-height: 1.65; max-width: 720px; }}
-    .status {{ display: inline-flex; width: fit-content; align-items: center; gap: 8px; border: 1px solid #2b5547; background: #0d251d; color: #b7f7db; border-radius: 999px; padding: 8px 12px; font-size: 14px; }}
-    .status::before {{ content: ""; width: 8px; height: 8px; border-radius: 50%; background: #34d399; }}
-    .blocks {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 28px; }}
-    .block {{ min-height: 132px; display: flex; flex-direction: column; justify-content: space-between; gap: 18px; border: 1px solid #27272a; border-radius: 8px; padding: 18px; background: rgba(12, 13, 16, .82); }}
-    .block h2 {{ margin: 0 0 8px; font-size: 20px; letter-spacing: 0; }}
-    .block p {{ font-size: 14px; color: #a1a1aa; line-height: 1.5; }}
-    .block span {{ width: fit-content; border: 1px solid #3f3f46; border-radius: 999px; padding: 5px 9px; color: #d4d4d8; font-size: 12px; }}
-    footer {{ margin-top: 36px; color: #71717a; font-size: 13px; }}
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div class="eyebrow">{escaped_name}</div>
-      <h1>{escaped_headline}</h1>
-      <p>{escaped_goal}</p>
-      <div class="status">{escaped_status}</div>
-    </header>
-    <section class="blocks" aria-label="Product surface">
-      {body}
-    </section>
-    <footer>Shared Takyon product surface · {escaped_url}</footer>
-  </main>
-</body>
-</html>"""
-    return HTMLResponse(page, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
-
-
 async def _serve_product_site_file(business: str, full_path: str = "") -> Response:
     slug = _safe_product_slug(business)
     root = _dashboard_product_site_root().resolve()
@@ -4220,9 +4115,19 @@ async def _serve_product_site_file(business: str, full_path: str = "") -> Respon
         target = target / "index.html"
     if root in (target, *target.parents) and target.is_file():
         return FileResponse(target)
-    if rel in {"index.html", ""}:
-        return _render_shared_product_surface(slug)
-    raise HTTPException(status_code=404, detail="product site not found")
+    if not Path(rel).suffix:
+        for candidate in (target / "index.html", target.with_suffix(".html")):
+            candidate = candidate.resolve()
+            if root in (candidate, *candidate.parents) and candidate.is_file():
+                return FileResponse(candidate)
+    detail = {
+        "error": "product site file not found",
+        "business": slug,
+        "requested_path": rel,
+        "expected_file": str(target),
+        "site_root": str(root / slug),
+    }
+    return JSONResponse(detail, status_code=404, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/site/{business}")
@@ -4656,7 +4561,7 @@ def mount_spa(application: FastAPI):
                 _host_without_port(request.headers.get("host", ""))
             )
             if product_business:
-                return _render_shared_product_surface(product_business)
+                return await _serve_product_site_file(product_business, full_path)
             return JSONResponse(
                 {"error": "Frontend not built. Run: cd web && npm run build"},
                 status_code=404,
@@ -4724,7 +4629,7 @@ def mount_spa(application: FastAPI):
             _host_without_port(request.headers.get("host", ""))
         )
         if product_business:
-            return _render_shared_product_surface(product_business)
+            return await _serve_product_site_file(product_business, full_path)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)

@@ -125,39 +125,27 @@ def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
     assert web_server._load_or_create_session_token() == "env-token-that-is-long-enough-1234567890"
 
 
-def test_shared_product_renderer_serves_business_subdomain(tmp_path, monkeypatch):
+def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
     from plugins.takyon.core import TakyonStore
 
+    site_root = tmp_path / "product-sites"
+    latexflow_site = site_root / "latexflow"
+    latexflow_site.mkdir(parents=True)
+    (latexflow_site / "index.html").write_text(
+        "<!doctype html><title>Latexflow</title><main>Write LaTeX without tickets</main>",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
     store = TakyonStore(tmp_path)
     store.commit(
         scope="business:latexflow",
         operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
-        idempotency_key="shared-renderer-business",
-        reason="test",
-        actor="test",
-    )
-    store.commit(
-        scope="business:latexflow",
-        operations=[
-            {
-                "action": "app.surface.upsert",
-                "business": "latexflow",
-                "status": "draft",
-                "publish_policy": "shared_renderer",
-                "metadata": {
-                    "headline": "Write LaTeX without tickets",
-                    "shared_product_blocks": [
-                        {"type": "waitlist", "label": "Early access", "status": "available"}
-                    ],
-                },
-            },
-        ],
-        idempotency_key="shared-renderer-web",
+        idempotency_key="product-subdomain-business",
         reason="test",
         actor="test",
     )
@@ -167,16 +155,17 @@ def test_shared_product_renderer_serves_business_subdomain(tmp_path, monkeypatch
         client = TestClient(web_server.app)
         response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
         local_response = client.get("/site/latexflow/", headers={"Host": "localhost:9119"})
+        missing_response = client.get("/", headers={"Host": "missing.fourmanifold.com"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
 
     assert response.status_code == 200
     assert "Write LaTeX without tickets" in response.text
-    assert "Shared Takyon product surface" in response.text
-    assert "Early access" in response.text
     assert local_response.status_code == 200
     assert "Write LaTeX without tickets" in local_response.text
+    assert missing_response.status_code == 404
+    assert missing_response.json()["error"] == "product site file not found"
 
 
 def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch):
