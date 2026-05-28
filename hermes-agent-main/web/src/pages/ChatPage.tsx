@@ -50,6 +50,11 @@ import {
   GatewayClient,
   type ConnectionState,
 } from "@/lib/gatewayClient";
+import {
+  displayNameFromId,
+  formatActivityLine,
+  metadataDebugDetail,
+} from "@/lib/takyonActivity";
 import { cn } from "@/lib/utils";
 import { PluginSlot } from "@/plugins";
 
@@ -75,16 +80,24 @@ interface SessionCreateResponse {
   info?: SessionInfo;
 }
 
+interface GatewayHistoryMessage {
+  role?: "user" | "assistant" | "system" | "tool";
+  text?: string;
+  name?: string;
+  context?: string;
+}
+
 interface SessionResumeResponse {
   session_id: string;
   resumed?: string;
-  messages?: Array<{
-    role?: "user" | "assistant" | "system" | "tool";
-    text?: string;
-    name?: string;
-    context?: string;
-  }>;
+  messages?: GatewayHistoryMessage[];
   info?: SessionInfo;
+}
+
+interface SessionHistoryResponse {
+  count?: number;
+  messages?: GatewayHistoryMessage[];
+  running?: boolean;
 }
 
 interface BusinessSummary {
@@ -106,6 +119,7 @@ interface BusinessOverviewProduct {
   publish_policy?: string;
   publish_status?: string;
   public_url?: string;
+  shared_renderer_public_url?: string;
   published_at?: string;
   publish_receipt_path?: string;
   publish_blocker?: string;
@@ -177,6 +191,17 @@ interface BusinessOverviewTask {
   updated_at?: string;
 }
 
+interface BusinessOverviewWorker {
+  id?: string;
+  tool_name?: string;
+  name?: string;
+  purpose?: string;
+  status?: string;
+  updated_at?: string;
+  latest_detail?: string;
+  tone?: string;
+}
+
 interface BusinessOverviewStatusCard {
   label?: string;
   status?: string;
@@ -194,10 +219,15 @@ interface BusinessOverviewCeoLoop {
 interface BusinessOverviewResearch {
   status?: string;
   latest_path?: string;
-  strategy_path?: string;
-  icp_path?: string;
-  channels_path?: string;
   count?: number;
+  outputs?: BusinessOverviewResearchOutput[];
+}
+
+interface BusinessOverviewResearchOutput {
+  path?: string;
+  updated_at?: number | string;
+  size?: number;
+  source?: string;
 }
 
 interface BusinessOverviewWakeHealth {
@@ -220,7 +250,9 @@ interface BusinessArtifactSummary {
   deploy_status?: string;
   source_path?: string;
   public_url?: string;
+  shared_renderer_public_url?: string;
   publish_target?: string;
+  publish_policy?: string;
   publish_status?: string;
   publish_blocker?: string;
   publish_receipt_path?: string;
@@ -251,6 +283,23 @@ interface BusinessOverviewPost {
   unresolved_messages?: number;
 }
 
+interface RegistryDisplayEntry {
+  display_name?: string;
+  activity_verb?: string;
+  detail_hint?: string;
+  detail_keys?: string[];
+  implementation_status?: string;
+  category?: string;
+  effect?: string;
+}
+
+interface RegistryDisplayPayload {
+  version?: number | null;
+  tools?: Record<string, RegistryDisplayEntry>;
+  skills?: Record<string, RegistryDisplayEntry>;
+  warning?: string;
+}
+
 interface BusinessOverview {
   goal?: string;
   mode?: string;
@@ -261,10 +310,12 @@ interface BusinessOverview {
   files?: BusinessOverviewFile[];
   jobs?: BusinessOverviewJob[];
   agent_runs?: BusinessOverviewTask[];
+  workers?: BusinessOverviewWorker[];
   tasks?: BusinessOverviewTask[];
   status_cards?: BusinessOverviewStatusCard[];
   ceo_loop?: BusinessOverviewCeoLoop;
   research?: BusinessOverviewResearch;
+  research_outputs?: BusinessOverviewResearchOutput[];
   wake_health?: BusinessOverviewWakeHealth;
   posts?: BusinessOverviewPost[];
   artifacts?: {
@@ -273,6 +324,7 @@ interface BusinessOverview {
     creative_assets?: BusinessArtifactSummary;
   };
   conversations?: BusinessOverviewConversations;
+  registry?: RegistryDisplayPayload;
   generated_at?: string;
   pulse_warning?: string;
 }
@@ -351,6 +403,7 @@ interface ToolEntry {
   inline_diff?: string;
   startedAt: number;
   completedAt?: number;
+  duration_s?: number;
 }
 
 interface Deliverable {
@@ -375,8 +428,9 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
   open: "ready",
-  closed: "reconnecting",
-  error: "connection issue",
+  polling: "HTTP fallback",
+  closed: "Reconnecting",
+  error: "Offline, retrying",
 };
 
 const EMPTY_SCOPE_STATE: ScopeState = {
@@ -464,6 +518,20 @@ function readableDate(value?: string): string {
   });
 }
 
+function readableFileTime(value?: number | string): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return readableDate(new Date(value).toISOString());
+  }
+  return readableDate(typeof value === "string" ? value : "");
+}
+
+function formatBytes(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
 function humanizeJobKind(kind?: string): string {
   const value = (kind || "gated action").trim();
   if (value === "product.deploy") return "Deploy product site";
@@ -506,19 +574,78 @@ function humanizeStatus(status?: string): string {
   return humanizeJobKind(value);
 }
 
-function taskLabel(task: BusinessOverviewTask | BusinessOverviewJob): string {
-  const source = (task as BusinessOverviewTask).source;
-  const kind = (task as BusinessOverviewJob).kind;
-  return task.label || humanizeJobKind(source || kind);
+function registryTool(
+  registry: RegistryDisplayPayload | undefined,
+  name?: string,
+): RegistryDisplayEntry | undefined {
+  const key = (name || "").trim();
+  return key ? registry?.tools?.[key] : undefined;
 }
 
-function taskDetail(task: BusinessOverviewTask | BusinessOverviewJob): string {
+function parseRuntimeTool(task: BusinessOverviewTask | BusinessOverviewJob): {
+  detail?: string;
+  duration?: string;
+  phase: "preparing" | "started" | "completed";
+  toolName: string;
+} | null {
+  const text = `${task.label || ""} ${task.detail || ""}`.trim();
+  const match = text.match(/\b(preparing tool|tool started|tool completed)\s*(?:->|→|-)?\s*([a-zA-Z0-9_.:-]+)(?:\s*·\s*(.*))?/i);
+  if (!match) return null;
+  const phase =
+    match[1].toLowerCase().includes("completed")
+      ? "completed"
+      : match[1].toLowerCase().includes("started")
+        ? "started"
+        : "preparing";
+  const tail = (match[3] || "").trim();
+  const duration = /^\d+(?:\.\d+)?s$/.test(tail) ? tail : undefined;
+  return {
+    detail: duration ? "" : tail,
+    duration,
+    phase,
+    toolName: match[2],
+  };
+}
+
+function taskLabel(
+  task: BusinessOverviewTask | BusinessOverviewJob,
+  registry?: RegistryDisplayPayload,
+): string {
+  const runtimeTool = parseRuntimeTool(task);
+  if (runtimeTool) {
+    return displayNameFromId(runtimeTool.toolName, registry, "tools").label;
+  }
+  const source = (task as BusinessOverviewTask).source;
+  const kind = (task as BusinessOverviewJob).kind;
+  const rawId = source || kind;
+  if (!task.label && rawId) return displayNameFromId(rawId, registry, "tools").label;
+  return task.label || humanizeJobKind(rawId);
+}
+
+function taskDetail(
+  task: BusinessOverviewTask | BusinessOverviewJob,
+  registry?: RegistryDisplayPayload,
+): string {
+  const runtimeTool = parseRuntimeTool(task);
+  if (runtimeTool) {
+    const display = displayNameFromId(runtimeTool.toolName, registry, "tools");
+    const statusDetail = runtimeTool.duration ? `done in ${runtimeTool.duration}` : "";
+    return metadataDebugDetail(
+      runtimeTool.toolName,
+      display.hasMetadata,
+      [runtimeTool.detail, statusDetail].filter(Boolean).join(" · "),
+    );
+  }
   if (task.detail) return task.detail;
   if ("kind" in task) return gatedActionDetail(task);
   return task.updated_at ? `Updated ${readableDate(task.updated_at)}` : "";
 }
 
-function naturalToolLabel(tool: ToolEntry): string {
+function naturalToolLabel(tool: ToolEntry, registry?: RegistryDisplayPayload): string {
+  const display = displayNameFromId(tool.name || "tool", registry, "tools");
+  if (display.hasMetadata || /^business_/.test(tool.name || "")) {
+    return display.label;
+  }
   const text = `${tool.name} ${tool.context || ""} ${tool.summary || ""}`.toLowerCase();
   if (tool.status === "error") return "Action needs attention";
   if (/write|patch|edit|file|agent|claude/.test(text)) return "Editing files";
@@ -531,9 +658,167 @@ function naturalToolLabel(tool: ToolEntry): string {
   return humanizeJobKind(tool.name || "Action");
 }
 
-function toolDetail(tool: ToolEntry): string {
+function toolDetail(tool: ToolEntry, registry?: RegistryDisplayPayload): string {
   const detail = friendlyError(tool.error || tool.summary || tool.preview || tool.context || "");
-  return detail || humanizeStatus(tool.status);
+  const display = displayNameFromId(tool.name || "tool", registry, "tools");
+  return metadataDebugDetail(tool.name || "", display.hasMetadata, detail || humanizeStatus(tool.status));
+}
+
+function formatElapsedSeconds(seconds: number, options: { compact?: boolean } = {}): string {
+  const value = Math.max(0, seconds);
+  if (!options.compact && value < 10) return `${value.toFixed(1)}s`;
+  return `${Math.round(value)}s`;
+}
+
+function toolElapsedSeconds(tool: ToolEntry, now: number): number | null {
+  if (typeof tool.duration_s === "number" && Number.isFinite(tool.duration_s)) {
+    return Math.max(0, tool.duration_s);
+  }
+  if (tool.startedAt <= 0) return null;
+  const end = tool.completedAt || now;
+  return Math.max(0, (end - tool.startedAt) / 1000);
+}
+
+function toolActivityStatus(tool: ToolEntry, now: number): string {
+  const elapsed = toolElapsedSeconds(tool, now);
+  if (tool.status === "running") {
+    return elapsed === null ? "running" : `running ${formatElapsedSeconds(elapsed, { compact: true })}`;
+  }
+  if (tool.status === "error") {
+    return elapsed === null ? "needs attention" : `needs attention in ${formatElapsedSeconds(elapsed)}`;
+  }
+  return elapsed === null ? "done" : `done in ${formatElapsedSeconds(elapsed)}`;
+}
+
+function conciseActivityDetail(value?: string): string {
+  const text = cleanText(value || "");
+  if (!text) return "";
+  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+}
+
+interface ActivityTraceItem {
+  detail?: string;
+  id: string;
+  label: string;
+  rawId?: string;
+  status: string;
+  tone?: string;
+}
+
+function activityFromTool(
+  tool: ToolEntry,
+  registry: RegistryDisplayPayload | undefined,
+  now: number,
+): ActivityTraceItem {
+  const display = displayNameFromId(tool.name || "tool", registry, "tools");
+  const detail = conciseActivityDetail(
+    tool.status === "running"
+      ? tool.context || tool.preview
+      : tool.context || tool.summary || tool.preview,
+  );
+  return {
+    detail: metadataDebugDetail(tool.name || "", display.hasMetadata, detail),
+    id: tool.id,
+    label: naturalToolLabel(tool, registry),
+    rawId: display.hasMetadata ? undefined : tool.name,
+    status: toolActivityStatus(tool, now),
+    tone: tool.status,
+  };
+}
+
+function activityFromTask(
+  task: BusinessOverviewTask | BusinessOverviewJob,
+  registry: RegistryDisplayPayload | undefined,
+): ActivityTraceItem {
+  const runtimeTool = parseRuntimeTool(task);
+  if (runtimeTool) {
+    const display = displayNameFromId(runtimeTool.toolName, registry, "tools");
+    const status =
+      runtimeTool.phase === "completed"
+        ? `done${runtimeTool.duration ? ` in ${runtimeTool.duration}` : ""}`
+        : "running";
+    return {
+      detail: metadataDebugDetail(
+        runtimeTool.toolName,
+        display.hasMetadata,
+        conciseActivityDetail(runtimeTool.detail),
+      ),
+      id: String(task.id || `${runtimeTool.phase}:${runtimeTool.toolName}`),
+      label: display.label,
+      rawId: display.hasMetadata ? undefined : runtimeTool.toolName,
+      status,
+      tone: task.tone || task.status,
+    };
+  }
+  const rawId = (task as BusinessOverviewTask).source || (task as BusinessOverviewJob).kind || "";
+  const display = displayNameFromId(rawId, registry, "tools");
+  return {
+    detail: taskDetail(task, registry),
+    id: String(task.id || `${taskLabel(task, registry)}:${task.status || ""}`),
+    label: taskLabel(task, registry),
+    rawId: rawId && !display.hasMetadata ? rawId : undefined,
+    status: humanizeStatus(task.status).toLowerCase(),
+    tone: task.tone || task.status,
+  };
+}
+
+interface WorkerDisplayItem {
+  id: string;
+  latestDetail?: string;
+  name: string;
+  purpose?: string;
+  rawId?: string;
+  status: string;
+  tone?: string;
+}
+
+function isWorkerTool(tool: ToolEntry, registry?: RegistryDisplayPayload): boolean {
+  const meta = registryTool(registry, tool.name);
+  if (meta?.category === "agent") return true;
+  return /delegate|subagent|agent|claude/i.test(tool.name);
+}
+
+function workerItems(
+  tools: ToolEntry[],
+  overviewWorkers: BusinessOverviewWorker[],
+  registry: RegistryDisplayPayload | undefined,
+  now: number,
+): WorkerDisplayItem[] {
+  const liveWorkers = tools
+    .filter((tool) => tool.status === "running" && isWorkerTool(tool, registry))
+    .map((tool) => {
+      const display = displayNameFromId(tool.name || "tool", registry, "tools");
+      return {
+        id: `live:${tool.tool_id}`,
+        latestDetail: conciseActivityDetail(tool.preview || tool.summary || tool.error),
+        name: naturalToolLabel(tool, registry),
+        purpose: conciseActivityDetail(tool.context),
+        rawId: display.hasMetadata ? undefined : tool.name,
+        status: toolActivityStatus(tool, now),
+        tone: tool.status,
+      };
+    });
+  const historicalWorkers = overviewWorkers.map((worker) => {
+    const rawId = worker.tool_name || "";
+    const display = displayNameFromId(rawId, registry, "tools");
+    return {
+      id: `overview:${worker.id || worker.tool_name || worker.name || worker.updated_at || "worker"}`,
+      latestDetail: conciseActivityDetail(worker.latest_detail),
+      name: display.hasMetadata ? display.label : worker.name || display.label,
+      purpose: conciseActivityDetail(worker.purpose),
+      rawId: rawId && !display.hasMetadata ? rawId : undefined,
+      status: humanizeStatus(worker.status).toLowerCase(),
+      tone: worker.tone || worker.status,
+    };
+  });
+
+  const seen = new Set<string>();
+  return [...liveWorkers, ...historicalWorkers].filter((worker) => {
+    const key = `${worker.name}:${worker.purpose || ""}:${worker.status}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 6);
 }
 
 function toneClasses(tone?: string): string {
@@ -613,6 +898,24 @@ function uniqueDocs(items: Array<SourceDocTile | null | undefined>): SourceDocTi
   return [...byPath.values()];
 }
 
+function researchOutputItems(overview?: BusinessOverview): BusinessOverviewResearchOutput[] {
+  const rawItems = [
+    ...((overview?.research_outputs || []) as BusinessOverviewResearchOutput[]),
+    ...((overview?.research?.outputs || []) as BusinessOverviewResearchOutput[]),
+  ];
+  const byPath = new Map<string, BusinessOverviewResearchOutput>();
+  for (const item of rawItems) {
+    const path = normalizeBusinessPath(item.path);
+    if (!path || byPath.has(path)) continue;
+    byPath.set(path, { ...item, path });
+  }
+  return [...byPath.values()].sort((a, b) => {
+    const aTime = typeof a.updated_at === "number" ? a.updated_at : Date.parse(String(a.updated_at || ""));
+    const bTime = typeof b.updated_at === "number" ? b.updated_at : Date.parse(String(b.updated_at || ""));
+    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+  });
+}
+
 function normalizeBusinessPath(path?: string): string {
   return (path || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
 }
@@ -621,6 +924,57 @@ function pathIsUnder(path: string, root?: string): boolean {
   const cleanPath = normalizeBusinessPath(path);
   const cleanRoot = normalizeBusinessPath(root);
   return Boolean(cleanPath && cleanRoot && (cleanPath === cleanRoot || cleanPath.startsWith(`${cleanRoot}/`)));
+}
+
+function normalizeOpenableUrl(value?: string): string {
+  const text = (value || "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text) || /^data:/i.test(text)) return text;
+  if (/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/.*)?$/i.test(text)) {
+    return `https://${text}`;
+  }
+  return "";
+}
+
+function isSharedRendererPolicy(value?: string): boolean {
+  return /^(shared_renderer|shared_product_renderer|shared_page_renderer)$/i.test((value || "").trim());
+}
+
+function customerWebsiteUrl({
+  business,
+  product,
+  website,
+}: {
+  business?: string;
+  product?: BusinessOverviewProduct;
+  website?: BusinessArtifactSummary;
+}): string {
+  const explicit = normalizeOpenableUrl(website?.public_url || product?.public_url);
+  if (explicit) return explicit;
+  const publishPolicy = website?.publish_policy || product?.publish_policy;
+  if (!isSharedRendererPolicy(publishPolicy)) return "";
+  const surfaceStatus = (product?.status || website?.status || "").trim().toLowerCase();
+  if (!surfaceStatus || surfaceStatus === "missing") return "";
+  const sharedUrl = normalizeOpenableUrl(
+    website?.shared_renderer_public_url || product?.shared_renderer_public_url,
+  );
+  if (sharedUrl) return sharedUrl;
+  const target = normalizeOpenableUrl(website?.publish_target || product?.publish_target);
+  if (target) return target;
+  const slug = normalizeBusinessLookup(business || "");
+  return slug ? `https://${slug}.fourmanifold.com/` : "";
+}
+
+function openUrlInNewTab(url: string): void {
+  const target = normalizeOpenableUrl(url);
+  if (!target) throw new Error("No URL available.");
+  const opened = window.open(target, "_blank", "noopener,noreferrer");
+  if (opened) return;
+  const link = document.createElement("a");
+  link.href = target;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.click();
 }
 
 const STATE_STATUSES = new Set([
@@ -677,7 +1031,7 @@ function updateStreamingAssistant(
 }
 
 function messageFromResume(
-  item: NonNullable<SessionResumeResponse["messages"]>[number],
+  item: GatewayHistoryMessage,
 ): ChatMessage | null {
   if (item.role === "tool") {
     const label = item.name ? `Tool: ${item.name}` : "Tool";
@@ -688,6 +1042,22 @@ function messageFromResume(
     return text ? makeMessage(item.role, text) : null;
   }
   return null;
+}
+
+function mergePolledMessages(prev: ChatMessage[], polled: ChatMessage[]): ChatMessage[] {
+  if (!polled.length) return prev;
+  const hasAssistant = polled.some((message) => message.role === "assistant");
+  const next = hasAssistant
+    ? prev.filter((message) => !(message.role === "assistant" && message.status === "streaming"))
+    : [...prev];
+  const seen = new Set(next.map((message) => `${message.role}\n${message.content}`));
+  for (const message of polled) {
+    const key = `${message.role}\n${message.content}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(message);
+  }
+  return next;
 }
 
 function extractPaths(text: string): string[] {
@@ -782,8 +1152,12 @@ function prettyTime(ts: number): string {
 
 function connectionDot(state: ConnectionState): string {
   if (state === "open") return "bg-emerald-400";
-  if (state === "connecting" || state === "idle") return "bg-amber-400";
+  if (state === "connecting" || state === "idle" || state === "polling") return "bg-amber-400";
   return "bg-red-500";
+}
+
+function canUseConnection(state: ConnectionState): boolean {
+  return state === "open" || state === "polling";
 }
 
 function normalizeScopeState(value: Partial<ScopeState> | null | undefined): ScopeState {
@@ -1143,10 +1517,15 @@ export default function ChatPage() {
         summary?: string;
         error?: string;
         inline_diff?: string;
+        duration_s?: number;
       }>("tool.complete", (ev) => {
         const p = ev.payload;
         if (!p?.tool_id) return;
         const completedAt = Date.now();
+        const durationSeconds =
+          typeof p.duration_s === "number" && Number.isFinite(p.duration_s)
+            ? Math.max(0, p.duration_s)
+            : undefined;
         const completedTool: ToolEntry = {
           id: `tool-${p.tool_id}`,
           tool_id: p.tool_id,
@@ -1155,8 +1534,9 @@ export default function ChatPage() {
           summary: p.summary,
           error: p.error,
           inline_diff: p.inline_diff,
-          startedAt: completedAt,
+          startedAt: durationSeconds === undefined ? completedAt : completedAt - durationSeconds * 1000,
           completedAt,
+          duration_s: durationSeconds,
         };
 
         setTools((prev) => {
@@ -1171,6 +1551,7 @@ export default function ChatPage() {
                   error: p.error,
                   inline_diff: p.inline_diff,
                   completedAt,
+                  duration_s: durationSeconds,
                 }
               : tool,
           );
@@ -1197,25 +1578,33 @@ export default function ChatPage() {
       }),
     );
 
-    gw.connect()
-      .then(async () => {
+    const hydrateScope = async (nextSessionId: string) => {
+      const scope = !resumeParam && initialBusinessParam
+        ? await gw.request<ScopeState>(
+            "takyon.scope.set",
+            { session_id: nextSessionId, business: initialBusinessParam },
+            10_000,
+          )
+        : await gw.request<ScopeState>(
+            "takyon.scope.get",
+            { session_id: nextSessionId },
+            10_000,
+          );
+      if (!cancelled) setScopeState(normalizeScopeState(scope));
+    };
+
+    const initializeSession = async () => {
+      try {
+        await gw.connect();
         if (cancelled) return;
         setError(null);
-        const hydrateScope = async (nextSessionId: string) => {
-          const scope = !resumeParam && initialBusinessParam
-            ? await gw.request<ScopeState>(
-                "takyon.scope.set",
-                { session_id: nextSessionId, business: initialBusinessParam },
-                10_000,
-              )
-            : await gw.request<ScopeState>(
-                "takyon.scope.get",
-                { session_id: nextSessionId },
-                10_000,
-              );
-          if (!cancelled) setScopeState(normalizeScopeState(scope));
-        };
+      } catch (err) {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setError(`Live WebSocket is offline; using HTTP fallback while retrying. ${message}`);
+      }
 
+      try {
         if (resumeParam) {
           const res = await gw.request<SessionResumeResponse>(
             "session.resume",
@@ -1234,6 +1623,14 @@ export default function ChatPage() {
           return;
         }
 
+        const reusableSessionId = sessionIdRef.current;
+        if (reusableSessionId) {
+          await hydrateScope(reusableSessionId);
+          if (cancelled) return;
+          setSessionId(reusableSessionId);
+          return;
+        }
+
         const res = await gw.request<SessionCreateResponse>("session.create", {
           cols: 100,
         });
@@ -1243,13 +1640,16 @@ export default function ChatPage() {
         void hydrateScope(res.session_id).catch(() => {
           /* scope hydration is best effort */
         });
-      })
-      .catch((err: Error) => {
+      } catch (err) {
         if (!cancelled) {
-          setError(err.message);
-          setMessages((prev) => [...prev, makeMessage("system", err.message)]);
+          const message = err instanceof Error ? err.message : String(err);
+          setError(message);
+          setMessages((prev) => [...prev, makeMessage("system", message)]);
         }
-      });
+      }
+    };
+
+    void initializeSession();
 
     return () => {
       cancelled = true;
@@ -1273,12 +1673,14 @@ export default function ChatPage() {
       return;
     }
 
-    if (state !== "closed" && state !== "error") return;
+    if (state !== "closed" && state !== "error" && state !== "polling") return;
 
     reconnectAttemptsRef.current += 1;
     const delayMs = Math.min(8_000, 500 * reconnectAttemptsRef.current);
     if (state === "closed") {
-      setError("Intercom disconnected; reconnecting. Dashboard activity is preserved in business state.");
+      setError("Live WebSocket closed; reconnecting. HTTP fallback keeps chat and status available.");
+    } else if (state === "polling") {
+      setError("Live WebSocket is offline; using HTTP fallback while retrying.");
     } else if (gw.lastCloseMessage) {
       setError(gw.lastCloseMessage);
     }
@@ -1287,7 +1689,53 @@ export default function ChatPage() {
   }, [gw, state]);
 
   useEffect(() => {
-    if (state !== "open" || !sessionId || !scopeState.business) return;
+    if (!sessionId || (!running && state !== "polling" && state !== "closed")) return;
+    let cancelled = false;
+
+    const refresh = () => {
+      void gw
+        .request<SessionHistoryResponse>(
+          "session.history",
+          { session_id: sessionId },
+          10_000,
+        )
+        .then((res) => {
+          if (cancelled) return;
+          const polled = (res.messages || [])
+            .map(messageFromResume)
+            .filter((message): message is ChatMessage => !!message);
+          setMessages((prev) => mergePolledMessages(prev, polled));
+          setRunning(Boolean(res.running));
+          if (scopeState.business) {
+            void gw
+              .request<ScopeState>(
+                "takyon.scope.get",
+                { session_id: sessionId },
+                10_000,
+              )
+              .then((scope) => {
+                if (!cancelled) setScopeState(normalizeScopeState(scope));
+              })
+              .catch(() => {
+                /* scope refresh is best effort */
+              });
+          }
+        })
+        .catch(() => {
+          /* transport recovery is driven by reconnect state */
+        });
+    };
+
+    refresh();
+    const timer = window.setInterval(refresh, state === "polling" ? 2500 : 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [gw, running, scopeState.business, sessionId, state]);
+
+  useEffect(() => {
+    if (!canUseConnection(state) || !sessionId || !scopeState.business) return;
     let cancelled = false;
     void gw
       .request<BusinessOutputsResponse>(
@@ -1309,7 +1757,7 @@ export default function ChatPage() {
   }, [gw, scopeState.business, sessionId, state]);
 
   useEffect(() => {
-    if (state !== "open" || !sessionId || !scopeState.business) return;
+    if (!canUseConnection(state) || !sessionId || !scopeState.business) return;
     let cancelled = false;
     const refresh = () => {
       void gw
@@ -1334,7 +1782,7 @@ export default function ChatPage() {
   }, [gw, scopeState.business, sessionId, state]);
 
   useEffect(() => {
-    if (state !== "open" || !sessionId || !isSlashCommandPrefix(input)) {
+    if (!canUseConnection(state) || !sessionId || !isSlashCommandPrefix(input)) {
       const resetTimer = window.setTimeout(() => {
         setSlashItems((prev) => (prev.length ? [] : prev));
         setSlashIndex(0);
@@ -1444,7 +1892,7 @@ export default function ChatPage() {
   );
 
   useEffect(() => {
-    if (state !== "open" || !sessionId || !pendingBusinessSlug) return;
+    if (!canUseConnection(state) || !sessionId || !pendingBusinessSlug) return;
     let cancelled = false;
     let attempts = 0;
     let timer: number | undefined;
@@ -1583,7 +2031,7 @@ export default function ChatPage() {
 
   const runTakyonLine = useCallback(
     async (line: string) => {
-      if (state !== "open") return;
+      if (!canUseConnection(state)) return;
       setMessages((prev) => [...prev, makeMessage("user", line)]);
       setRunning(true);
       setError(null);
@@ -1659,7 +2107,7 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(async () => {
     const text = input.trim();
-    if (state !== "open") return;
+    if (!canUseConnection(state)) return;
     if (!text) {
       if (running) await interrupt();
       return;
@@ -1758,7 +2206,8 @@ export default function ChatPage() {
     }
   };
 
-  const canAct = state === "open" && (!!input.trim() || running);
+  const canAct = canUseConnection(state) && (!!input.trim() || running);
+  const canInteract = canUseConnection(state) && !!sessionId;
   const inBusiness = !!scopeState.business;
   const scopedHistoricalOutputs =
     historicalOutputs.business === scopeState.business
@@ -1799,7 +2248,7 @@ export default function ChatPage() {
                 </div>
               </div>
               <ScopeSwitcher
-                disabled={state !== "open" || !sessionId}
+                disabled={!canInteract}
                 onSelect={setTakyonScope}
                 scope={scopeState}
               />
@@ -1880,7 +2329,7 @@ export default function ChatPage() {
                 <Composer
                   canAct={canAct}
                   compact
-                  disabled={state !== "open" || !sessionId}
+                  disabled={!canInteract}
                   inputRef={inputRef}
                   isRunning={running}
                   onChange={setInput}
@@ -1901,6 +2350,7 @@ export default function ChatPage() {
               historicalOutputs={scopedHistoricalOutputs}
               onCommand={runTakyonLine}
               onListFiles={listBusinessFiles}
+              onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
               onClose={() => setRightOpen(false)}
@@ -1948,7 +2398,7 @@ function GlobalLaunchpad({
   const recentBusinesses = scope.businesses.slice(0, 6);
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
   const latestStatus = activeTool?.name || statusItems[0] || "";
-  const canCreate = state === "open" && !running && (!!name.trim() || !!goal.trim());
+  const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
   const displayError = friendlyError(error);
 
   const submit = (event: FormEvent) => {
@@ -2089,7 +2539,7 @@ function GlobalLaunchpad({
                 return (
                   <button
                     className="group min-w-0 rounded-xl border border-zinc-900 bg-black px-3 py-2.5 text-left transition-colors hover:border-zinc-800 hover:bg-zinc-950"
-                    disabled={!slug || state !== "open"}
+                    disabled={!slug || !canUseConnection(state)}
                     key={slug || item.name}
                     onClick={() => {
                       if (slug) void onSelectBusiness(slug);
@@ -2527,6 +2977,7 @@ function CompanyStatusHero({
   tools: ToolEntry[];
 }) {
   const overview = scope.overview || {};
+  const registry = overview.registry;
   const cron = (overview.cron || []).filter((job) => job.enabled !== false);
   const activeTask = (overview.tasks || []).find((task) =>
     /running|working|active|creating/i.test(`${task.status || ""} ${task.tone || ""}`),
@@ -2542,10 +2993,10 @@ function CompanyStatusHero({
   let headline: string;
   let tone: "active" | "idle" | "sleep";
   if (activeTool) {
-    headline = `Working — ${naturalToolLabel(activeTool)}`;
+    headline = `Working — ${naturalToolLabel(activeTool, registry)}`;
     tone = "active";
   } else if (activeTask) {
-    headline = taskLabel(activeTask);
+    headline = taskLabel(activeTask, registry);
     tone = "active";
   } else if (liveStatus) {
     headline = liveStatus;
@@ -2559,11 +3010,11 @@ function CompanyStatusHero({
   }
 
   const sub = activeTool
-    ? toolDetail(activeTool)
+    ? toolDetail(activeTool, registry)
     : activeTask
-      ? taskDetail(activeTask)
+      ? taskDetail(activeTask, registry)
     : lastCompleted
-      ? `Last: ${naturalToolLabel(lastCompleted)}${
+      ? `Last: ${naturalToolLabel(lastCompleted, registry)}${
           lastCompleted.completedAt
             ? ` · ${relativeTime(lastCompleted.completedAt)}`
             : ""
@@ -2648,6 +3099,14 @@ function CompanyOverview({
   const outreach = artifacts.outreach || {};
   const creativeAssets = artifacts.creative_assets || {};
   const tasks = overview.tasks || [];
+  const registry = overview.registry;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!tools.some((tool) => tool.status === "running")) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [tools]);
+  const researchOutputs = researchOutputItems(overview);
   const outreachItems = (Array.isArray(outreach.items) ? outreach.items : [])
     .filter((item) => (item.path || "").trim());
   const outreachRowsSource = outreachItems.length > 0
@@ -2669,7 +3128,11 @@ function CompanyOverview({
     .filter(Boolean)));
   const previewPath = website.path || website.source_path || product.source_path || "product/site";
   const sourcePath = website.source_path || product.source_path || "";
-  const publicSiteUrl = website.public_url || product.public_url || "";
+  const publicSiteUrl = customerWebsiteUrl({
+    business: scope.business,
+    product,
+    website,
+  });
   const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
   const canonicalDocPaths = new Set(
     [
@@ -2771,32 +3234,24 @@ function CompanyOverview({
         tone: "done",
       })),
   ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
-  const latestActivity = [
-    ...(activeTool ? [{ label: naturalToolLabel(activeTool), detail: toolDetail(activeTool), status: humanizeStatus(activeTool.status), tone: activeTool.status }] : []),
+  const latestActivity: ActivityTraceItem[] = [
+    ...(activeTool ? [activityFromTool(activeTool, registry, now)] : []),
     ...tools
       .slice()
       .reverse()
       .filter((tool) => tool.id !== activeTool?.id)
       .slice(0, 3)
-      .map((tool) => ({
-        label: naturalToolLabel(tool),
-        detail: toolDetail(tool),
-        status: humanizeStatus(tool.status),
-        tone: tool.status,
-      })),
+      .map((tool) => activityFromTool(tool, registry, now)),
     ...statusItems.slice(0, 3).map((item) => ({
+      id: `status:${item}`,
       label: "Live update",
       detail: item,
-      status: "Working",
+      status: "working",
       tone: "active",
     })),
-    ...tasks.filter(isActionableTask).slice(0, 6).map((task) => ({
-      label: taskLabel(task),
-      detail: taskDetail(task),
-      status: humanizeStatus(task.status),
-      tone: task.tone || task.status,
-    })),
+    ...tasks.filter(isActionableTask).slice(0, 6).map((task) => activityFromTask(task, registry)),
   ].slice(0, 9);
+  const workers = workerItems(tools, overview.workers || [], registry, now);
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -2846,11 +3301,26 @@ function CompanyOverview({
     [onReadFile, onResolveMedia],
   );
   const hasViewer = Boolean(viewer);
-  const showAside = Boolean(viewer || latestActivity.length > 0 || evidenceRows.length > 0);
+  const showAside = Boolean(viewer || workers.length > 0 || latestActivity.length > 0 || evidenceRows.length > 0);
 
   const workspaceColumn = (
     <div className="grid content-start gap-3">
       <section className="grid gap-3">
+        <SourceCard
+          empty="No research files are visible yet."
+          icon={<Search className="h-4 w-4" />}
+          label="Research"
+          onOpenDoc={openDocument}
+          status={researchOutputs.length ? `${researchOutputs.length} files` : ""}
+          tone={researchOutputs.length ? "done" : "neutral"}
+        >
+          {researchOutputs.length > 0 && (
+            <ResearchFileList
+              items={researchOutputs}
+              onOpenFile={(path) => openDocument({ label: compactPath(path), path })}
+            />
+          )}
+        </SourceCard>
         <SourceCard
           docs={deliverableDocs}
           empty={
@@ -2904,8 +3374,9 @@ function CompanyOverview({
         {latestActivity.map((item, index) => (
           <ActivityTraceRow
             detail={item.detail}
-            key={`${item.label}-${index}`}
+            key={item.id || `${item.label}-${index}`}
             label={item.label}
+            rawId={item.rawId}
             status={item.status}
             tone={item.tone}
           />
@@ -2930,6 +3401,19 @@ function CompanyOverview({
           />
         ))}
       </div>
+  );
+  const workersBlock = workers.length > 0 && (
+    <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
+      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
+        <Users className="h-4 w-4" />
+        Workers
+      </div>
+      <div className="mt-3 grid gap-2">
+        {workers.map((worker) => (
+          <WorkerTraceRow key={worker.id} worker={worker} />
+        ))}
+      </div>
+    </section>
   );
   const activityBlock = (latestActivity.length > 0 || evidenceRows.length > 0) && (
     latestActivity.length > 0 ? (
@@ -2963,6 +3447,7 @@ function CompanyOverview({
         </div>
         <div className="grid content-start gap-3">
           {workspaceColumn}
+          {workersBlock}
           {activityBlock}
         </div>
       </div>
@@ -2980,6 +3465,7 @@ function CompanyOverview({
 
       {showAside && (
         <div className="grid content-start gap-3">
+          {workersBlock}
           {activityBlock}
         </div>
       )}
@@ -3081,6 +3567,51 @@ function DocumentTileButton({
         )}
       </span>
     </button>
+  );
+}
+
+function ResearchFileList({
+  items,
+  limit = 12,
+  onOpenFile,
+}: {
+  items: BusinessOverviewResearchOutput[];
+  limit?: number;
+  onOpenFile?: (path: string) => void;
+}) {
+  if (items.length === 0) {
+    return <EmptyPanelLine text="No research files are visible yet." />;
+  }
+  return (
+    <div className="grid gap-1.5">
+      {items.slice(0, limit).map((item) => {
+        const path = item.path || "";
+        const updated = readableFileTime(item.updated_at);
+        const size = formatBytes(item.size);
+        const meta = [updated, size].filter(Boolean).join(" · ");
+        return (
+          <button
+            className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
+            key={path}
+            onClick={() => path && onOpenFile?.(path)}
+            title={path}
+            type="button"
+          >
+            <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-mono text-[0.72rem] text-zinc-300">
+                {path}
+              </span>
+              {meta && (
+                <span className="mt-0.5 block truncate text-[0.65rem] text-zinc-600">
+                  {meta}
+                </span>
+              )}
+            </span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3261,25 +3792,14 @@ function OpenSitePreviewButton({
   const [error, setError] = useState("");
 
   const openPreview = useCallback(() => {
-    const popup = window.open("about:blank", "_blank");
     setLoading(true);
     setError("");
     void onResolveSitePreview(path)
       .then((res) => {
         if (!res.url) throw new Error("No preview URL returned.");
-        if (popup) {
-          popup.opener = null;
-          popup.location.href = res.url;
-        } else {
-          const link = document.createElement("a");
-          link.href = res.url;
-          link.target = "_blank";
-          link.rel = "noreferrer";
-          link.click();
-        }
+        openUrlInNewTab(res.url);
       })
       .catch((err) => {
-        if (popup) popup.close();
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setLoading(false));
@@ -3331,19 +3851,12 @@ function ProductPreviewHero({
       <div className="flex flex-col gap-2">
         <button
           className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-100 px-4 py-3 text-sm font-medium text-zinc-900 transition-colors hover:bg-white"
-          onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
+          onClick={() => openUrlInNewTab(publicSiteUrl)}
           type="button"
         >
           <ExternalLink className="h-4 w-4" />
           Open website
         </button>
-        {websitePath && (
-          <OpenSitePreviewButton
-            label="Open local copy"
-            onResolveSitePreview={onResolveSitePreview}
-            path={previewPath}
-          />
-        )}
       </div>
     );
   }
@@ -3492,29 +4005,22 @@ function BusinessSnapshot({
   const artifacts = overview.artifacts || {};
   const website = artifacts.website || {};
   const sourcePath = website.source_path || product.source_path || "";
-  const publicSiteUrl = website.public_url || product.public_url || "";
+  const publicSiteUrl = customerWebsiteUrl({
+    business: scope.business,
+    product,
+    website,
+  });
   const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
   const previewPath = sourcePath || "product/site";
   const openSitePreview = useCallback(() => {
-    const popup = window.open("about:blank", "_blank");
     setPreviewLoading(true);
     setPreviewError("");
     void onResolveSitePreview(previewPath)
       .then((res) => {
         if (!res.url) throw new Error("No preview URL returned.");
-        if (popup) {
-          popup.opener = null;
-          popup.location.href = res.url;
-        } else {
-          const link = document.createElement("a");
-          link.href = res.url;
-          link.target = "_blank";
-          link.rel = "noreferrer";
-          link.click();
-        }
+        openUrlInNewTab(res.url);
       })
       .catch((err) => {
-        if (popup) popup.close();
         setPreviewError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setPreviewLoading(false));
@@ -3693,12 +4199,12 @@ function BusinessSnapshot({
             {publicSiteUrl && (
               <PanelActionButton
                 icon={<ExternalLink className="h-3.5 w-3.5" />}
-                onClick={() => window.open(publicSiteUrl, "_blank", "noreferrer")}
+                onClick={() => openUrlInNewTab(publicSiteUrl)}
               >
                 Open
               </PanelActionButton>
             )}
-            {website.path && (
+            {website.path && !publicSiteUrl && (
               <PanelActionButton
                 icon={<ExternalLink className="h-3.5 w-3.5" />}
                 onClick={openSitePreview}
@@ -4011,6 +4517,7 @@ function DeliverablesPanel({
   historicalOutputs,
   onCommand,
   onListFiles,
+  onReadFile,
   onResolveMedia,
   onResolveSitePreview,
   onClose,
@@ -4025,6 +4532,7 @@ function DeliverablesPanel({
   historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   onClose: () => void;
@@ -4081,13 +4589,14 @@ function DeliverablesPanel({
         )}
 
         {effectiveTab === "next" && (
-          <NextPanel onCommand={onCommand} scope={scope} />
+          <NextPanel onCommand={onCommand} onReadFile={onReadFile} scope={scope} />
         )}
 
         {effectiveTab === "files" && (
           <FilesPanel
             onCommand={onCommand}
             onListFiles={onListFiles}
+            onReadFile={onReadFile}
             onResolveMedia={onResolveMedia}
             scope={scope}
           />
@@ -4143,12 +4652,14 @@ function PanelTabs({
 
 function NextPanel({
   onCommand,
+  onReadFile,
   scope,
 }: {
   onCommand: (line: string) => void;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   scope: ScopeState;
 }) {
-  return <TaskBoard onCommand={onCommand} scope={scope} />;
+  return <TaskBoard onCommand={onCommand} onReadFile={onReadFile} scope={scope} />;
 }
 
 function FilesPanel({
@@ -4220,12 +4731,15 @@ function OutputsPanel({
 
 function TaskBoard({
   onCommand,
+  onReadFile,
   scope,
 }: {
   onCommand: (line: string) => void;
+  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   scope: ScopeState;
 }) {
   const overview = scope.overview || {};
+  const registry = overview.registry;
   const tasks = (overview.tasks || []).filter(isActionableTask);
   const fallbackJobs = (overview.jobs || [])
     .filter((job) => job.kind || job.status)
@@ -4234,8 +4748,31 @@ function TaskBoard({
     tasks.length > 0 ? tasks : fallbackJobs;
   const ceoLoop = overview.ceo_loop;
   const statusCards = overview.status_cards || [];
-  const research = overview.research || {};
+  const researchOutputs = researchOutputItems(overview);
   const wakeHealth = overview.wake_health;
+  const [researchPreview, setResearchPreview] = useState<{
+    content?: string;
+    error?: string;
+    loading?: boolean;
+    path: string;
+    truncated?: boolean;
+  } | null>(null);
+  const openResearchFile = useCallback(
+    (path: string) => {
+      setResearchPreview({ loading: true, path });
+      void onReadFile(path)
+        .then((res) => setResearchPreview({
+          content: res.content || "",
+          path: res.path || path,
+          truncated: Boolean(res.truncated),
+        }))
+        .catch((err) => setResearchPreview({
+          error: friendlyError(err instanceof Error ? err.message : String(err)),
+          path,
+        }));
+    },
+    [onReadFile],
+  );
 
   return (
     <div className="space-y-6">
@@ -4277,20 +4814,42 @@ function TaskBoard({
       </PanelSection>
 
       <PanelSection icon={<Search className="h-4 w-4" />} title="Research">
-        <div className="grid gap-2 md:grid-cols-2">
-          <TaskRow
-            detail={research.latest_path || research.strategy_path || research.icp_path || "ICP, channel, and strategy evidence should appear here first."}
-            label="ICP and strategy"
-            status={humanizeStatus(research.status)}
-            tone={research.status === "visible" ? "done" : "waiting"}
-          />
-          <TaskRow
-            detail={research.channels_path || "Channel evidence and reachable-user strategy"}
-            label="Channels"
-            status={research.channels_path ? "Ready" : "Waiting"}
-            tone={research.channels_path ? "done" : "waiting"}
-          />
-        </div>
+        <ResearchFileList items={researchOutputs} onOpenFile={openResearchFile} />
+        {researchPreview && (
+          <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-2">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium text-zinc-100">
+                  {researchPreview.path.split("/").pop() || researchPreview.path}
+                </div>
+                <div className="truncate font-mono text-[0.65rem] text-zinc-600">
+                  {researchPreview.path}
+                </div>
+              </div>
+              <IconButton label="Close research file" onClick={() => setResearchPreview(null)}>
+                <X className="h-4 w-4" />
+              </IconButton>
+            </div>
+            {researchPreview.loading ? (
+              <div className="p-3">
+                <EmptyPanelLine text="Opening..." />
+              </div>
+            ) : researchPreview.error ? (
+              <div className="p-3">
+                <EmptyPanelLine text={researchPreview.error} />
+              </div>
+            ) : (
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.72rem] leading-5 text-zinc-300">
+                {researchPreview.content || ""}
+              </pre>
+            )}
+            {researchPreview.truncated && (
+              <div className="border-t border-zinc-900 px-3 py-2 text-xs text-amber-200">
+                Preview truncated.
+              </div>
+            )}
+          </div>
+        )}
       </PanelSection>
 
       <PanelSection icon={<ListChecks className="h-4 w-4" />} title="Tasks">
@@ -4300,9 +4859,9 @@ function TaskBoard({
           <div className="grid gap-2 lg:grid-cols-2">
             {displayTasks.slice(0, 12).map((task, index) => (
               <TaskRow
-                detail={taskDetail(task)}
-                key={task.id || `${taskLabel(task)}-${index}`}
-                label={taskLabel(task)}
+                detail={taskDetail(task, registry)}
+                key={task.id || `${taskLabel(task, registry)}-${index}`}
+                label={taskLabel(task, registry)}
                 status={humanizeStatus(task.status)}
                 tone={task.tone || task.status}
               />
@@ -4344,6 +4903,7 @@ function DevPanel({
   statusItems: string[];
   tools: ToolEntry[];
 }) {
+  const registry = scope.overview?.registry;
   const builderItems = tools
     .filter((tool) => /tool|file|write|patch|shell|exec|agent|build|verify|npm|python|git|code/i.test(`${tool.name} ${tool.context || ""} ${tool.summary || ""}`))
     .slice()
@@ -4368,18 +4928,18 @@ function DevPanel({
             <>
               {builderItems.map((tool) => (
                 <TaskRow
-                  detail={toolDetail(tool)}
+                  detail={toolDetail(tool, registry)}
                   key={tool.id}
-                  label={naturalToolLabel(tool)}
+                  label={naturalToolLabel(tool, registry)}
                   status={humanizeStatus(tool.status)}
                   tone={tool.status}
                 />
               ))}
               {visibleTasks.slice(0, 3).map((task, index) => (
                 <TaskRow
-                  detail={taskDetail(task)}
+                  detail={taskDetail(task, registry)}
                   key={task.id || `${task.source}-${index}`}
-                  label={taskLabel(task)}
+                  label={taskLabel(task, registry)}
                   status={humanizeStatus(task.status)}
                   tone={task.tone || task.status}
                 />
@@ -4409,7 +4969,7 @@ function DevPanel({
           tools
             .slice()
             .reverse()
-            .map((tool) => <ToolActivityItem key={tool.id} tool={tool} />)
+            .map((tool) => <ToolActivityItem key={tool.id} registry={registry} tool={tool} />)
         )}
       </PanelSection>
 
@@ -4483,15 +5043,19 @@ function TaskRow({
 function ActivityTraceRow({
   detail,
   label,
+  rawId,
   status,
   tone,
 }: {
   detail?: string;
   label: string;
+  rawId?: string;
   status: string;
   tone?: string;
 }) {
-  const line = detail || label;
+  const cleanedDetail = detail && detail !== `raw: ${rawId || ""}` ? detail : "";
+  const line = formatActivityLine(label, cleanedDetail, status);
+  const debug = rawId && !detail?.includes(rawId) ? `raw: ${rawId}` : "";
   const active = /active|running|working/i.test(`${tone || ""} ${status || ""}`);
   return (
     <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
@@ -4502,9 +5066,63 @@ function ActivityTraceRow({
             active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
           )}
         />
-        <div className="min-w-0 break-words text-sm leading-6 text-zinc-300">
-          {line}
+        <div className="min-w-0">
+          <div className="break-words text-sm leading-6 text-zinc-300">
+            {line}
+          </div>
+          {debug && (
+            <div className="mt-0.5 break-words font-mono text-[0.68rem] leading-5 text-zinc-600">
+              {debug}
+            </div>
+          )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkerTraceRow({ worker }: { worker: WorkerDisplayItem }) {
+  const active = /active|running|working/i.test(`${worker.tone || ""} ${worker.status || ""}`);
+  return (
+    <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className={cn(
+                "h-1.5 w-1.5 shrink-0 rounded-full",
+                active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
+              )}
+            />
+            <div className="truncate text-sm font-medium text-zinc-200">{worker.name}</div>
+          </div>
+          {worker.purpose && (
+            <div className="mt-1 break-words text-xs leading-5 text-zinc-500">
+              {worker.purpose}
+            </div>
+          )}
+          {worker.latestDetail && (
+            <div className="mt-1 break-words text-xs leading-5 text-zinc-400">
+              {worker.latestDetail}
+            </div>
+          )}
+          {worker.rawId && (
+            <div className="mt-1 break-words font-mono text-[0.68rem] leading-5 text-zinc-600">
+              raw: {worker.rawId}
+            </div>
+          )}
+        </div>
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
+            active && "bg-sky-300/10 text-sky-100",
+            !active && /done|complete|success/.test(worker.status) && "bg-emerald-400/10 text-emerald-200",
+            !active && /attention|blocked|error|fail/.test(worker.status) && "bg-red-400/10 text-red-200",
+            !active && !/done|complete|success|attention|blocked|error|fail/.test(worker.status) && "bg-zinc-900 text-zinc-400",
+          )}
+        >
+          {worker.status}
+        </span>
       </div>
     </div>
   );
@@ -4626,11 +5244,17 @@ function MediaPreview({
   );
 }
 
-function ToolActivityItem({ tool }: { tool: ToolEntry }) {
+function ToolActivityItem({
+  registry,
+  tool,
+}: {
+  registry?: RegistryDisplayPayload;
+  tool: ToolEntry;
+}) {
   return (
     <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-sm text-zinc-200">{naturalToolLabel(tool)}</div>
+        <div className="min-w-0 truncate text-sm text-zinc-200">{naturalToolLabel(tool, registry)}</div>
         <span
           className={cn(
             "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
@@ -4644,7 +5268,7 @@ function ToolActivityItem({ tool }: { tool: ToolEntry }) {
       </div>
       {(tool.error || tool.summary || tool.preview || tool.context) && (
         <div className="mt-1 line-clamp-3 text-xs leading-5 text-zinc-500">
-          {toolDetail(tool)}
+          {toolDetail(tool, registry)}
         </div>
       )}
     </div>

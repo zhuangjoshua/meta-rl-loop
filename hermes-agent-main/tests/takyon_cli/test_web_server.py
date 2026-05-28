@@ -4,6 +4,7 @@ import os
 import json
 import stat
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -230,6 +231,37 @@ class TestWebServerEndpoints:
         assert "version" in data
         assert "takyon_home" in data
         assert "active_sessions" in data
+
+    def test_tui_rpc_http_fallback_routes_json_rpc(self, monkeypatch):
+        import takyon_cli.web_server as web_server
+        from tui_gateway import server as tui_server
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+        tui_server._sessions["rpc-sid"] = {
+            "agent": None,
+            "history": [{"role": "user", "content": "hello"}],
+            "history_lock": threading.Lock(),
+            "running": False,
+        }
+        try:
+            resp = self.client.post(
+                "/api/tui/rpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "rpc-1",
+                    "method": "session.history",
+                    "params": {"session_id": "rpc-sid"},
+                },
+            )
+        finally:
+            tui_server._sessions.pop("rpc-sid", None)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["jsonrpc"] == "2.0"
+        assert data["id"] == "rpc-1"
+        assert data["result"]["running"] is False
+        assert data["result"]["messages"][0]["text"] == "hello"
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tui_gateway import server
+from tui_gateway.transport import bind_transport, reset_transport
 
 
 class _ChunkyStdout:
@@ -30,6 +31,19 @@ class _BrokenStdout:
 
     def flush(self) -> None:
         return None
+
+
+class _FakeTransport:
+    def __init__(self):
+        self.writes: list[dict] = []
+        self.closed = False
+
+    def write(self, obj: dict) -> bool:
+        self.writes.append(obj)
+        return True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_write_json_serializes_concurrent_writes(monkeypatch):
@@ -728,6 +742,53 @@ def _session(agent=None, **extra):
         "tool_progress_mode": "all",
         **extra,
     }
+
+
+def test_session_request_reattaches_current_transport_on_reconnect():
+    old_transport = _FakeTransport()
+    new_transport = _FakeTransport()
+    server._sessions["sid"] = _session(transport=old_transport)
+    token = bind_transport(new_transport)
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.history", "params": {"session_id": "sid"}}
+        )
+        assert "result" in resp
+        assert server._sessions["sid"]["transport"] is new_transport
+    finally:
+        reset_transport(token)
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_context_wraps_plain_text_in_business_scope(monkeypatch):
+    server._sessions["sid"] = _session(takyon_current_business="laser-crm")
+    monkeypatch.setattr(
+        server,
+        "_takyon_scope_payload",
+        lambda session: {
+            "scope": "business:laser-crm",
+            "business": "laser-crm",
+            "current": {},
+            "businesses": [],
+            "overview": {},
+        },
+    )
+    try:
+        resp = server.handle_request(
+            {
+                "id": "ctx",
+                "method": "takyon.prompt.context",
+                "params": {
+                    "session_id": "sid",
+                    "text": "change market research",
+                },
+            }
+        )
+        assert resp["result"]["business"] == "laser-crm"
+        assert resp["result"]["text"].startswith("Scope: business:laser-crm")
+        assert "Operator request:\nchange market research" in resp["result"]["text"]
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):

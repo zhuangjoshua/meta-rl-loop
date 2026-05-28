@@ -241,6 +241,25 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         return f"to {target}: \"{msg}\""
 
     key = primary_args.get(tool_name)
+    if not key and str(tool_name or "").startswith("business_"):
+        try:
+            from plugins.takyon.registry import business_registry_snapshot
+
+            registry = business_registry_snapshot(kind="tools")
+            tool_meta = next(
+                (
+                    item
+                    for item in registry.get("tools", [])
+                    if isinstance(item, dict) and item.get("name") == tool_name
+                ),
+                {},
+            )
+            for detail_key in tool_meta.get("detail_keys", []):
+                if detail_key in args:
+                    key = str(detail_key)
+                    break
+        except Exception:
+            key = None
     if not key:
         for fallback_key in ("query", "text", "command", "path", "name", "prompt", "code", "goal"):
             if fallback_key in args:
@@ -983,5 +1002,4 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-
 

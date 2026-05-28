@@ -59,7 +59,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
     # running `takyon dashboard` needs fastapi+uvicorn; lazy install keeps
@@ -71,7 +71,7 @@ except ImportError:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel
+        from pydantic import BaseModel, Field
     except Exception:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
@@ -1110,6 +1110,13 @@ class EnvVarDelete(BaseModel):
 
 class EnvVarReveal(BaseModel):
     key: str
+
+
+class TuiRpcRequest(BaseModel):
+    jsonrpc: str = "2.0"
+    id: Any = None
+    method: str
+    params: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelAssignment(BaseModel):
@@ -4466,6 +4473,42 @@ async def gateway_ws(ws: WebSocket) -> None:
     from tui_gateway.ws import handle_ws
 
     await handle_ws(ws)
+
+
+@app.post("/api/tui/rpc")
+async def tui_rpc(body: TuiRpcRequest) -> dict:
+    """HTTP fallback for the dashboard chat JSON-RPC transport.
+
+    The WebSocket path remains the live stream. This endpoint intentionally
+    reuses the same tui_gateway handler table so scope, slash commands, prompt
+    submission, interrupts, file/status reads, and session history keep working
+    when an intermediary drops WebSocket upgrades.
+    """
+    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
+        raise HTTPException(status_code=403, detail="embedded chat disabled")
+
+    req = {
+        "jsonrpc": body.jsonrpc or "2.0",
+        "id": body.id,
+        "method": body.method,
+        "params": body.params or {},
+    }
+
+    from tui_gateway import server as tui_server
+
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            tui_server.handle_request,
+            req,
+        )
+    except Exception as exc:
+        _log.exception("dashboard HTTP tui rpc failed for method=%s", body.method)
+        return {
+            "jsonrpc": "2.0",
+            "id": body.id,
+            "error": {"code": -32000, "message": str(exc)},
+        }
 
 
 # ---------------------------------------------------------------------------

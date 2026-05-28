@@ -48,6 +48,7 @@ export type ConnectionState =
   | "idle"
   | "connecting"
   | "open"
+  | "polling"
   | "closed"
   | "error";
 
@@ -257,9 +258,7 @@ export class GatewayClient {
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     if (!this.ws || this._state !== "open") {
-      return Promise.reject(
-        new Error(`gateway not connected (state=${this._state})`),
-      );
+      return this.requestHttp<T>(method, params, timeoutMs);
     }
 
     const id = `w${++this.reqId}`;
@@ -285,6 +284,53 @@ export class GatewayClient {
         reject(e instanceof Error ? e : new Error(String(e)));
       }
     });
+  }
+
+  private async requestHttp<T>(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const resolved = window.__TAKYON_SESSION_TOKEN__ ?? "";
+    if (!resolved) {
+      this.setState("error");
+      throw new Error(
+        "Session token not available — page must be served by the Takyon dashboard",
+      );
+    }
+
+    const id = `h${++this.reqId}`;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(`${TAKYON_BASE_PATH}/api/tui/rpc`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Takyon-Session-Token": resolved,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`${res.status}: ${text}`);
+      }
+      const msg = await res.json();
+      const err = msg.error as { message?: string } | undefined;
+      if (err) throw new Error(err.message ?? "request failed");
+      if (this._state !== "open") this.setState("polling");
+      return msg.result as T;
+    } catch (err) {
+      if (this._state !== "open") this.setState("error");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error(`request timed out: ${method}`);
+      }
+      throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
 }
 

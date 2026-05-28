@@ -626,6 +626,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
 
 def _sess_nowait(params, rid):
     s = _sessions.get(params.get("session_id") or "")
+    if s:
+        transport = current_transport()
+        if transport is not None:
+            s["transport"] = transport
     return (s, None) if s else (None, _err(rid, 4001, "session not found"))
 
 
@@ -2508,6 +2512,7 @@ def _(rid, params: dict) -> dict:
         {
             "count": len(history),
             "messages": _history_to_messages(history),
+            "running": bool(session.get("running")),
         },
     )
 
@@ -4654,6 +4659,45 @@ def _takyon_maybe_auto_enter_created_business(
     return auto_slug, warning
 
 
+def _takyon_registry_display_payload() -> dict[str, Any]:
+    try:
+        from plugins.takyon.registry import business_registry_snapshot
+
+        snapshot = business_registry_snapshot()
+    except Exception as exc:
+        return {"version": None, "tools": {}, "skills": {}, "warning": str(exc)}
+
+    def display_entry(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "display_name": str(item.get("display_name") or "").strip(),
+            "activity_verb": str(item.get("activity_verb") or "").strip(),
+            "detail_hint": str(item.get("detail_hint") or "").strip(),
+            "detail_keys": [
+                str(key).strip()
+                for key in item.get("detail_keys", [])
+                if str(key).strip()
+            ],
+            "implementation_status": str(item.get("implementation_status") or "").strip(),
+            "category": str(item.get("category") or "").strip(),
+            "effect": str(item.get("effect") or "").strip(),
+        }
+
+    tools = {
+        str(item.get("name")): display_entry(item)
+        for item in snapshot.get("tools", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    skills: dict[str, dict[str, Any]] = {}
+    for item in snapshot.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        entry = display_entry(item)
+        for key in (item.get("name"), item.get("skill")):
+            if key:
+                skills[str(key)] = entry
+    return {"version": snapshot.get("version"), "tools": tools, "skills": skills}
+
+
 def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     def as_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
@@ -4750,6 +4794,22 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     validation = as_dict(metadata.get("takyon_surface_validation"))
     verification = as_dict(validation.get("latest_verification"))
     source_path = brief_text(surface.get("source_path"))
+
+    def normalized_public_url(value: Any) -> str:
+        text = brief_text(value).strip()
+        if not text:
+            return ""
+        if re.match(r"^https?://", text, re.I):
+            return text
+        if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.I):
+            return f"https://{text}"
+        return ""
+
+    def shared_renderer_public_url() -> str:
+        policy = brief_text(surface.get("publish_policy")).strip().lower()
+        if policy not in {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}:
+            return ""
+        return normalized_public_url(surface.get("publish_target")) or f"https://{slug}.fourmanifold.com/"
 
     if not verification:
         for event in as_list(summary.get("events")):
@@ -4877,6 +4937,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         )
 
     agent_runs: list[dict[str, Any]] = []
+    workers: list[dict[str, Any]] = []
     runtime_events: list[dict[str, Any]] = []
     conn = None
     try:
@@ -4890,21 +4951,48 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             result = as_dict(run.get("result"))
             completed = len(as_list(result.get("completed")))
             blockers = len(as_list(result.get("blockers")))
+            source = brief_text(result.get("source"))
+            workspace = brief_text(result.get("workspace"))
+            summary_text = brief_text(result.get("summary"))
+            error_text = brief_text(result.get("error"))
+            verification = as_dict(result.get("verification"))
             detail_parts = []
             if completed:
                 detail_parts.append(f"{completed} completed")
             if blockers:
                 detail_parts.append(f"{blockers} blocker{'s' if blockers != 1 else ''}")
+            if verification:
+                verify_status = brief_text(verification.get("status"))
+                verify_path = brief_text(verification.get("receipt_path"))
+                if verify_status:
+                    detail_parts.append(f"verification {verify_status}")
+                if verify_path:
+                    detail_parts.append(verify_path)
             agent_runs.append(
                 {
                     "id": brief_text(run.get("id")),
                     "status": brief_text(run.get("status")),
                     "updated_at": brief_text(run.get("updated_at") or run.get("created_at")),
                     "label": "CEO or worker run",
-                    "detail": ", ".join(detail_parts) or brief_text(run.get("prompt"))[:160] or "Run recorded in audit trail.",
+                    "detail": ", ".join(detail_parts) or summary_text or error_text or brief_text(run.get("prompt"))[:160] or "Run recorded in audit trail.",
                     "tone": status_tone(run.get("status")),
                 }
             )
+            if source or workspace or brief_text(run.get("scope")).startswith(f"business:{slug}/workspace:"):
+                worker_tool = "business_claude_agent_task" if source == "claude-agent-sdk" else "business_record_agent"
+                purpose = workspace or brief_text(run.get("scope")).replace(f"business:{slug}/workspace:", "").strip()
+                workers.append(
+                    {
+                        "id": brief_text(run.get("id")),
+                        "tool_name": worker_tool,
+                        "name": "Delegated worker" if worker_tool == "business_claude_agent_task" else "Agent run",
+                        "purpose": purpose or summary_text or brief_text(run.get("prompt"))[:120],
+                        "status": brief_text(run.get("status")) or "recorded",
+                        "updated_at": brief_text(run.get("updated_at") or run.get("created_at")),
+                        "latest_detail": error_text or summary_text or ", ".join(detail_parts) or brief_text(run.get("prompt"))[:180],
+                        "tone": status_tone(run.get("status")),
+                    }
+                )
         event_rows = conn.execute(
             "SELECT * FROM events WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%' ORDER BY created_at DESC LIMIT ?",
             (slug, 12),
@@ -4999,6 +5087,36 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         except Exception:
             return []
 
+    def business_file_index(rel_roots: list[str], *, limit: int = 80) -> list[dict[str, Any]]:
+        try:
+            business_root = store._business_root(slug)
+        except Exception:
+            return []
+        by_path: dict[str, dict[str, Any]] = {}
+        for rel_root in rel_roots:
+            try:
+                root = business_root / rel_root
+                if not root.is_dir():
+                    continue
+                for path in root.rglob("*"):
+                    if not path.is_file() or path.name.startswith("."):
+                        continue
+                    rel = str(path.relative_to(business_root))
+                    if rel in {"brain/index.md", "brain/pulse.md", "brain/wake_journal.md"}:
+                        continue
+                    stat = path.stat()
+                    by_path[rel] = {
+                        "path": rel,
+                        "updated_at": int(stat.st_mtime * 1000),
+                        "size": int(stat.st_size),
+                        "source": rel_root.strip("/"),
+                    }
+            except Exception:
+                continue
+        indexed = list(by_path.values())
+        indexed.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+        return indexed[: max(1, min(int(limit or 80), 200))]
+
     source_root = source_path.strip().strip("/")
     website_candidates = [
         f"{source_root}/index.html" if source_root else "",
@@ -5047,10 +5165,8 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         })
     creative_latest = latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES) or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
     creative_receipt = latest_under("receipts/creative-assets", {".json"})
-    research_latest = latest_under("research", {".md", ".txt"}) or latest_under("brain", {".md", ".txt"})
-    strategy_file = file_card("brain/strategy.md") or file_card("brain/business-model.md")
-    icp_file = file_card("research/icp.md") or file_card("brain/strategy.md")
-    channel_file = file_card("research/channels.md") or file_card("campaigns/research.md")
+    research_outputs = business_file_index(["research", "brain"], limit=80)
+    research_latest = research_outputs[0] if research_outputs else None
 
     now_ts = time.time()
     active_cron = [job for job in cron_jobs if job.get("enabled", True)]
@@ -5131,7 +5247,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
     blocked_count = sum(1 for task in task_cards if task.get("tone") == "blocked")
     product_visible = bool(website)
-    research_visible = bool(research_latest or strategy_file or icp_file or channel_file)
+    research_visible = bool(research_outputs)
     if wake_health["status"] == "needs_attention":
         ceo_loop = {
             "status": "needs_attention",
@@ -5150,14 +5266,14 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         ceo_loop = {
             "status": "research_first",
             "headline": "Research is the next visible company-building move.",
-            "detail": "The CEO should clarify ICP, channels, offer, and strategy before building product by default.",
-            "next_action": "Create ICP and channel research, then decide product.",
+            "detail": "No research files are visible in the business workspace yet.",
+            "next_action": "Create durable research notes, then decide the next business move from evidence.",
         }
     elif product_visible:
         ceo_loop = {
             "status": "working",
             "headline": "Product preview is available.",
-            "detail": "A customer-facing surface exists; keep checking whether the ICP and channel bet are right.",
+            "detail": "A customer-facing surface exists; keep checking it against the visible research files.",
             "next_action": "Open the preview or continue research.",
         }
     else:
@@ -5178,7 +5294,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         {
             "label": "Research",
             "status": "visible" if research_visible else "needed",
-            "detail": (research_latest or strategy_file or {}).get("path", "ICP/channel strategy should come before product by default."),
+            "detail": (research_latest or {}).get("path", "No research files are visible yet."),
             "tone": "done" if research_visible else "waiting",
         },
         {
@@ -5197,6 +5313,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
     routes = surface.get("routes") if isinstance(surface.get("routes"), list) else []
     business_budget = as_dict(current_state.get("business_budget"))
+    shared_public_url = shared_renderer_public_url()
     return {
         "goal": brief_text(business.get("goal")),
         "mode": brief_text(business.get("mode") or business.get("status") or business.get("state")),
@@ -5209,6 +5326,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "publish_policy": brief_text(surface.get("publish_policy")),
             "publish_status": brief_text(surface.get("publish_status")),
             "public_url": brief_text(surface.get("public_url")),
+            "shared_renderer_public_url": shared_public_url,
             "published_at": brief_text(surface.get("published_at")),
             "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
             "publish_blocker": brief_text(surface.get("publish_blocker")),
@@ -5245,6 +5363,8 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "files": files,
         "jobs": jobs,
         "agent_runs": agent_runs,
+        "workers": workers[:8],
+        "registry": _takyon_registry_display_payload(),
         "tasks": task_cards[:16],
         "status_cards": status_cards,
         "ceo_loop": ceo_loop,
@@ -5252,11 +5372,10 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "research": {
             "status": "visible" if research_visible else "needed",
             "latest_path": (research_latest or {}).get("path", ""),
-            "strategy_path": (strategy_file or {}).get("path", ""),
-            "icp_path": (icp_file or {}).get("path", ""),
-            "channels_path": (channel_file or {}).get("path", ""),
-            "count": (research_latest or {}).get("count", 0),
+            "count": len(research_outputs),
+            "outputs": research_outputs[:24],
         },
+        "research_outputs": research_outputs,
         "posts": posts[:12],
         "artifacts": {
             "website": {
@@ -5272,7 +5391,9 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "deploy_status": "pending" if deploy_pending else "",
                 "source_path": source_path,
                 "public_url": brief_text(surface.get("public_url")),
+                "shared_renderer_public_url": shared_public_url,
                 "publish_target": brief_text(surface.get("publish_target")),
+                "publish_policy": brief_text(surface.get("publish_policy")),
                 "publish_status": brief_text(surface.get("publish_status")),
                 "publish_blocker": brief_text(surface.get("publish_blocker")),
                 "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
@@ -5731,6 +5852,8 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
                         ],
                         "ceo_loop": pending_overview.get("ceo_loop") or overview.get("ceo_loop"),
                     }
+        if isinstance(overview, dict):
+            overview.setdefault("registry", _takyon_registry_display_payload())
         return {
             "scope": f"business:{current_business}" if current_business else "global",
             "business": current_business,

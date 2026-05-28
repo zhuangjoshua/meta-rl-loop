@@ -54,6 +54,7 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "idle",
   connecting: "connecting",
   open: "live",
+  polling: "HTTP fallback",
   closed: "closed",
   error: "error",
 };
@@ -65,6 +66,7 @@ const STATE_TONE: Record<
   idle: "secondary",
   connecting: "warning",
   open: "success",
+  polling: "warning",
   closed: "secondary",
   error: "destructive",
 };

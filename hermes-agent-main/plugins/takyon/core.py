@@ -4048,6 +4048,37 @@ class TakyonStore:
                         if len(brain_index) >= limit:
                             break
 
+            research_index: list[dict[str, Any]] = []
+            research_seen: set[str] = set()
+            business_root = self._business_root(slug)
+            for rel_root in ("research", "brain"):
+                root = business_root / rel_root
+                if not root.exists() or not root.is_dir():
+                    continue
+                for child in sorted(root.rglob("*"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+                    if not child.is_file() or child.name.startswith("."):
+                        continue
+                    rel = str(child.relative_to(business_root))
+                    if rel in {"brain/index.md", "brain/pulse.md", "brain/wake_journal.md"}:
+                        continue
+                    if rel in research_seen:
+                        continue
+                    research_seen.add(rel)
+                    try:
+                        stat = child.stat()
+                    except OSError:
+                        continue
+                    research_index.append({
+                        "path": rel,
+                        "updated_at": int(stat.st_mtime * 1000),
+                        "size": int(stat.st_size),
+                        "source": rel_root,
+                    })
+                    if len(research_index) >= limit:
+                        break
+                if len(research_index) >= limit:
+                    break
+
             response: dict[str, Any] = {
                 "success": True,
                 "scope": scope,
@@ -4055,6 +4086,7 @@ class TakyonStore:
                 "workspaces": workspaces,
                 "controls": controls,
                 "brain_index": brain_index,
+                "research_index": research_index,
             }
             if query in {"ledger", "summary"} or "ledger" in include_set:
                 response["ledger"] = ledger
@@ -7502,7 +7534,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_business",
-        "description": "Read one business summary, brain index, workspaces, controls, ledger, jobs, and events.",
+        "description": "Read one business summary, brain and research indexes, workspaces, controls, ledger, jobs, and events.",
         "handler": handle_business_read_business,
         "schema": _schema(
             "business_read_business",
