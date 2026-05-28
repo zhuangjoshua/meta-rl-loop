@@ -4,13 +4,19 @@ Shared between CLI (cli.py) and gateway (gateway/run.py) so both surfaces
 can invoke skills via /skill-name commands.
 """
 
-import json
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.skill_utils import (
+    extract_skill_description,
+    get_all_skills_dirs,
+    get_disabled_skill_names,
+    parse_frontmatter,
+    skill_matches_platform,
+)
 from takyon_constants import display_takyon_home
 from agent.skill_preprocessing import (
     expand_inline_shell as _expand_inline_shell,
@@ -56,66 +62,71 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     if not raw_identifier:
         return None
 
-    try:
-        from tools.skills_tool import SKILLS_DIR, skill_view
-        from agent.skill_utils import get_external_skills_dirs
+    identifier = raw_identifier.lstrip("/")
+    identifier_path = Path(raw_identifier).expanduser()
+    skill_file: Path | None = None
+    scan_dirs = get_all_skills_dirs()
 
-        identifier_path = Path(raw_identifier).expanduser()
-        if identifier_path.is_absolute():
-            normalized = None
-            trusted_roots = [SKILLS_DIR]
-            try:
-                trusted_roots.extend(get_external_skills_dirs())
-            except Exception:
-                pass
+    if identifier_path.is_absolute():
+        if identifier_path.is_dir():
+            candidate = identifier_path / "SKILL.md"
+            if candidate.exists():
+                skill_file = candidate
+        elif identifier_path.name == "SKILL.md" and identifier_path.exists():
+            skill_file = identifier_path
+    else:
+        for skills_dir in scan_dirs:
+            direct = skills_dir / identifier / "SKILL.md"
+            if direct.exists():
+                skill_file = direct
+                break
 
-            # Prefer the lexical path under a trusted skill root before
-            # resolving symlinks.  Slash-command discovery can legitimately
-            # find a skill via ~/.takyon/skills/<name> where <name> is a
-            # symlink to a checked-out skill elsewhere.  Resolving first turns
-            # that trusted visible path into an arbitrary absolute path that
-            # skill_view() refuses to load.
-            for root in trusted_roots:
+    if skill_file is None:
+        for skills_dir in scan_dirs:
+            for candidate in skills_dir.rglob("SKILL.md"):
                 try:
-                    normalized = str(identifier_path.relative_to(root))
-                    break
-                except ValueError:
-                    continue
-
-            if normalized is None:
-                try:
-                    normalized = str(identifier_path.resolve().relative_to(SKILLS_DIR.resolve()))
+                    raw = candidate.read_text(encoding="utf-8")
+                    frontmatter, body = parse_frontmatter(raw)
                 except Exception:
-                    normalized = raw_identifier
-        else:
-            normalized = raw_identifier.lstrip("/")
+                    continue
+                name = str(frontmatter.get("name") or candidate.parent.name).strip()
+                rel_dir = str(candidate.parent.relative_to(skills_dir)).replace("\\", "/")
+                if identifier in {name, candidate.parent.name, rel_dir}:
+                    skill_file = candidate
+                    break
+            if skill_file is not None:
+                break
 
-        loaded_skill = json.loads(
-            skill_view(normalized, task_id=task_id, preprocess=False)
-        )
-    except Exception:
+    if skill_file is None or not skill_file.exists():
         return None
 
-    if not loaded_skill.get("success"):
-        return None
-
-    skill_name = str(loaded_skill.get("name") or normalized)
-    skill_path = str(loaded_skill.get("path") or "")
-    skill_dir = None
-    # Prefer the absolute skill_dir returned by skill_view() — this is
-    # correct for both local and external skills.  Fall back to the old
-    # SKILLS_DIR-relative reconstruction only when skill_dir is absent
-    # (e.g. legacy skill_view responses).
-    abs_skill_dir = loaded_skill.get("skill_dir")
-    if abs_skill_dir:
-        skill_dir = Path(abs_skill_dir)
-    elif skill_path:
-        try:
-            skill_dir = SKILLS_DIR / Path(skill_path).parent
-        except Exception:
-            skill_dir = None
-
-    return loaded_skill, skill_dir, skill_name
+    raw = skill_file.read_text(encoding="utf-8")
+    frontmatter, body = parse_frontmatter(raw)
+    skill_name = str(frontmatter.get("name") or skill_file.parent.name).strip() or skill_file.parent.name
+    linked_files: dict[str, list[str]] = {}
+    for subdir in ("references", "templates", "scripts", "assets"):
+        subdir_path = skill_file.parent / subdir
+        if not subdir_path.exists():
+            continue
+        linked_files[subdir] = [
+            str(path.relative_to(skill_file.parent))
+            for path in sorted(subdir_path.rglob("*"))
+            if path.is_file() and not path.is_symlink()
+        ]
+    loaded_skill = {
+        "success": True,
+        "name": skill_name,
+        "path": str(skill_file),
+        "skill_dir": str(skill_file.parent),
+        "content": body.strip(),
+        "raw_content": raw,
+        "linked_files": linked_files,
+        "setup_needed": False,
+        "setup_skipped": False,
+        "gateway_setup_hint": "",
+        "setup_note": "",
+    }
+    return loaded_skill, skill_file.parent, skill_name
 
 
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
@@ -166,7 +177,7 @@ def _build_skill_message(
     session_id: str | None = None,
 ) -> str:
     """Format a loaded skill into a user/system message payload."""
-    from tools.skills_tool import SKILLS_DIR
+    from takyon_constants import get_skills_dir
 
     content = str(loaded_skill.get("content") or "")
 
@@ -235,7 +246,7 @@ def _build_skill_message(
 
     if supporting and skill_dir:
         try:
-            skill_view_target = str(skill_dir.relative_to(SKILLS_DIR))
+            skill_view_target = str(skill_dir.relative_to(get_skills_dir()))
         except ValueError:
             # Skill is from an external dir — use the skill name instead
             skill_view_target = skill_dir.name
@@ -270,16 +281,12 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     _skill_commands_platform = _resolve_skill_commands_platform()
     _skill_commands = {}
     try:
-        from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
-        from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
-        disabled = _get_disabled_skill_names()
+        from agent.skill_utils import iter_skill_index_files
+
+        disabled = get_disabled_skill_names()
         seen_names: set = set()
 
-        # Scan local dir first, then external dirs
-        dirs_to_scan = []
-        if SKILLS_DIR.exists():
-            dirs_to_scan.append(SKILLS_DIR)
-        dirs_to_scan.extend(get_external_skills_dirs())
+        dirs_to_scan = get_all_skills_dirs()
 
         for scan_dir in dirs_to_scan:
             for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
@@ -287,7 +294,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     continue
                 try:
                     content = skill_md.read_text(encoding='utf-8')
-                    frontmatter, body = _parse_frontmatter(content)
+                    frontmatter, body = parse_frontmatter(content)
                     # Skip skills incompatible with the current OS platform
                     if not skill_matches_platform(frontmatter):
                         continue
@@ -297,7 +304,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Respect user's disabled skills config
                     if name in disabled:
                         continue
-                    description = frontmatter.get('description', '')
+                    description = frontmatter.get('description', '') or extract_skill_description(frontmatter)
                     if not description:
                         for line in body.strip().split('\n'):
                             line = line.strip()

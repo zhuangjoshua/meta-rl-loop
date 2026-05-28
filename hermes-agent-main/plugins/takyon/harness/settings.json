@@ -138,7 +138,7 @@
     {"name": "setup", "description": "Run Takyon provider setup", "requiresBusiness": false, "priorityBand": "p0_control", "palette": "advanced"},
     {"name": "secret", "description": "List redacted secret keys or set one", "requiresBusiness": false, "priorityBand": "p0_control", "palette": "advanced"},
     {"name": "cron", "description": "List or tick cron jobs", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
-    {"name": "registry", "description": "Inspect Takyon tools and skills", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
+    {"name": "skills-index", "description": "Sync Takyon Hermes skills and rebuild the compact skills index", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth", "palette": "advanced"},
     {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
@@ -148,6 +148,6 @@
   ],
   "workspace": {
     "generatedReadonlyRoots": ["state", "jobs", "ledger", "tools", "website"],
-    "agentAuthoredRoots": ["brain", "goals", "research", "product", "distribution", "outreach", "campaigns", "memory", "agents", "conversations"]
+    "agentAuthoredRoots": ["product", "distribution", "research", "metrics"]
   }
 }

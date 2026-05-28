@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 import uuid
@@ -17,7 +18,19 @@ from pathlib import Path
 from typing import Any
 
 from .core import TakyonError, TakyonStore, _normalize_work_focus, _slugify, load_takyon_env, upgrade_businesses
-from .registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_SKILL_REGISTRY, business_registry_snapshot
+
+
+_CEO_PROMPT_PATH = Path(__file__).parent / "prompts" / "ceo.md"
+_TAKYON_SKILL_ALIASES = {
+    "market-research": "takyon-market-research",
+    "build-product": "takyon-build-product",
+    "app-runtime": "takyon-app-runtime",
+    "distribution": "takyon-distribution",
+    "business-pulse": "takyon-business-metrics",
+    "business-metrics": "takyon-business-metrics",
+    "claude-agent-sdk": "takyon-claude-agent-sdk",
+}
+_TAKYON_SKILL_PREFIX = "takyon-"
 
 
 _CLI_ONLY_COMMANDS = {
@@ -220,7 +233,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         "args",
         nargs=argparse.REMAINDER,
         help=(
-            "Natural language command, a registry-driven Takyon command, or a Takyon skill invocation."
+            "Natural language command, a Takyon control command, or a Takyon skill invocation."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print raw JSON")
@@ -345,8 +358,8 @@ def _format_cli_value(value: Any) -> str:
             f"  inbound messages: {sales.get('inbound_messages', 0)}; unresolved: {sales.get('unresolved_inbound', 0)}",
             "",
             f"Evidence strength: {(value.get('evidence_strength') or {}).get('score')} / 5",
-            f"Readable pulse: {storage.get('human_summary_path') or 'brain/pulse.md'}",
-            f"Business model: {storage.get('business_model_path') or 'brain/business-model.md'}",
+            f"Readable metrics: {storage.get('human_summary_path') or 'metrics/summary.md'}",
+            f"Strategy file: {storage.get('business_model_path') or 'research/strategy.md'}",
         ])
         missing = value.get("missing_metrics") or []
         if missing:
@@ -525,7 +538,7 @@ def _format_operation_result(item: Any) -> str:
         bits.append("external side effects suppressed")
         return "; ".join(bits)
     if action == "app.surface.upsert" and business:
-        return f"app surface -> {_business_artifact_path(business, 'app/surface.md')}"
+        return f"product surface -> {_business_artifact_path(business, 'product/surface.md')}"
     if action == "app.surface.publish_result" and business:
         status = str(item.get("publish_status") or "not_published")
         url = str(item.get("public_url") or item.get("publish_target") or "")
@@ -534,13 +547,13 @@ def _format_operation_result(item: Any) -> str:
     if action == "app.plan.upsert" and business:
         plan = str(item.get("plan_key") or "")
         suffix = f" ({plan})" if plan else ""
-        return f"app plans{suffix} -> {_business_artifact_path(business, 'app/plans.md')}"
+        return f"product plans{suffix} -> {_business_artifact_path(business, 'product/plans.md')}"
     if action == "app.budget.set" and business:
-        return f"app usage budget -> {_business_artifact_path(business, 'app/usage.md')}"
+        return f"product usage budget -> {_business_artifact_path(business, 'product/usage.md')}"
     if action in {"app.customer.upsert", "app.entitlement.upsert"} and business:
-        return f"app customers/entitlements -> {_business_artifact_path(business, 'app/customers.md')}"
+        return f"product customers/entitlements -> {_business_artifact_path(business, 'product/customers.md')}"
     if action == "app.usage.record" and business:
-        return f"app usage -> {_business_artifact_path(business, 'app/usage.md')}"
+        return f"product usage -> {_business_artifact_path(business, 'product/usage.md')}"
     if action in {"conversation.thread.upsert", "conversation.message.record"} and business:
         path = str(item.get("file") or "")
         where = f" -> {_business_artifact_path(business, path)}" if path else ""
@@ -744,17 +757,17 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         f"Business goal: {goal_text}",
         f"Mode: {active_mode or 'live'}",
         "",
-        "First read current business state and registry metadata. If relevant assets already exist, advance the missing",
+        "First read current business state. If relevant assets already exist, advance the missing",
         "highest-impact pieces instead of recreating them.",
         "",
-        "Use business_registry as the canonical Takyon skill/tool index. Load sibling skills as operating methods",
-        "when their registry purpose, use_when, category, and priority band fit the chosen move; do not follow",
-        "a separate hardcoded bootstrap stage list.",
+        "Takyon skills are available through the normal Hermes skills index. Prefer the real Takyon bundled skills",
+        "when they match the move: takyon-market-research, takyon-build-product, takyon-app-runtime,",
+        "takyon-distribution, takyon-business-metrics, and takyon-claude-agent-sdk.",
         "",
         "Prime directive: find users and become profitable. Re-evaluate ICP, where that ICP concentrates, what",
         "promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed,",
         "what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.",
-        "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in the business brain.",
+        "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in research/strategy.md.",
         "Distribution is required action during bootstrap. After research and the smallest credible offer/product surface,",
         "create or continue distribution/phase-1-outreach/ and run a Phase 1 outreach batch through",
         "durable campaign files plus business_publish_outreach intents. Phase 1 is a bootstrap/open-campaign completion contract,",
@@ -763,17 +776,17 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "local/mock outreach.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
         "business_conversation_agent_task path to compress it before deciding.",
-        "Call business_calculate_pulse and use the registry pulse skill to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
-        "Seed or update compact wake/traction notes in brain/wake_journal.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
+        "Call business_calculate_pulse and use takyon-business-metrics to establish the first metrics baseline in metrics/summary.md and research/strategy.md.",
+        "Seed or update compact wake notes in metrics/wake-history.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
         "ship, prescribe, perform, or guarantee a physical thing, express the business as a lawful software-native product around the real-world subject.",
         "",
         "In this bootstrap turn, make visible durable progress where safe. For a new or low-evidence business, do",
-        "research first: ICP, customer/channel evidence, competitor/pricing notes, strategy, and business-brain hypotheses.",
-        "Then normally use takyon:build-product to create or materially advance the smallest useful business-owned",
+        "research first: ICP, customer/channel evidence, competitor/pricing notes, strategy, and current hypotheses.",
+        "Then normally use takyon-build-product to create or materially advance the smallest useful business-owned",
         "product/site surface that the research supports. Research-first is sequencing, not permission to stop at notes.",
         "Skip product/source/publication only when current evidence, safety, scope, budget, credentials, or runtime gates make",
-        "building the wrong move; record that exact reason as a blocker or business-brain hypothesis.",
+        "building the wrong move; record that exact reason as a blocker or research hypothesis.",
         "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution files,",
         "guarded jobs or hidden suppressed audit receipts, and the next CEO wake when they are the justified move. Do not stop after",
         "research, source files, or a blocked website publish while Phase 1 outreach is absent or incomplete. If a Phase 1",
@@ -797,7 +810,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
             "For each Phase 1 outreach touch, call business_publish_outreach. If a forum/social channel or provider posting",
             "is unavailable, use local suppressed/mock publication with the intended channel/destination when known. Successful",
             "test-mode touches must create distribution/local-published/ and conversation mirrors; the tool writes",
-            "receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
+            "metrics/receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
         ])
     return "\n".join(lines)
 
@@ -943,6 +956,29 @@ def _list_harness_commands() -> list[dict[str, Any]]:
     return sorted(commands, key=lambda item: str(item["name"]))
 
 
+def _takyon_skill_entries() -> list[dict[str, Any]]:
+    try:
+        from agent.skill_commands import get_skill_commands
+    except Exception:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for command, info in sorted(get_skill_commands().items()):
+        bare = str(command or "").lstrip("/")
+        if not bare.startswith(_TAKYON_SKILL_PREFIX):
+            continue
+        skill_dir = Path(str((info or {}).get("skill_dir") or "")).expanduser()
+        if skill_dir.parent.name != "takyon":
+            continue
+        entries.append({
+            "command": command,
+            "name": bare,
+            "description": str((info or {}).get("description") or "").strip(),
+            "skill_dir": str(skill_dir).strip(),
+        })
+    return entries
+
+
 def _get_harness_command(name: str) -> dict[str, Any] | None:
     target = str(name or "").strip().lower().lstrip("/")
     for command in _list_harness_commands():
@@ -973,10 +1009,7 @@ def _render_harness_command(command: dict[str, Any], *, business: str | None, ar
 def _format_harness_commands() -> str:
     controls = _control_slash_commands()
     commands = _list_harness_commands()
-    registry_skills = sorted(
-        (item for item in TAKYON_SKILL_REGISTRY if item.get("name") != "ceo"),
-        key=lambda item: item["name"],
-    )
+    skill_entries = _takyon_skill_entries()
     lines = [
         "Takyon shell:",
         "  Plain text always goes to the CEO for the current scope.",
@@ -999,9 +1032,12 @@ def _format_harness_commands() -> str:
         band = command.get("priority_band") or "unbanded"
         lines.append(f"  /{command['name']:<12} {scope:<8} {band:<12} {command.get('description') or ''}".rstrip())
     lines.append("")
-    lines.append("Registry skills:")
-    for item in registry_skills:
-        lines.append(f"  /{item['name']:<22} {item.get('category')} {item.get('purpose') or ''}".rstrip())
+    lines.append("Takyon skills:")
+    if not skill_entries:
+        lines.append("  none")
+    for item in skill_entries:
+        skill_slug = str(item.get("command") or "").lstrip("/")
+        lines.append(f"  /{skill_slug:<28} takyon {item.get('description') or ''}".rstrip())
     return "\n".join(lines)
 
 
@@ -1019,14 +1055,13 @@ def _slash_entries() -> list[dict[str, Any]]:
     ]
     skills = [
         {
-            "name": item["name"],
+            "name": str(item.get("command") or "").lstrip("/"),
             "kind": "skill",
-            "description": item.get("purpose") or "",
-            "requires_business": item["name"] != "ceo",
-            "priority_band": (item.get("priority_bands") or [""])[0],
+            "description": item.get("description") or "",
+            "requires_business": True,
+            "priority_band": "p1_ceo",
         }
-        for item in TAKYON_SKILL_REGISTRY
-        if item.get("name") != "ceo"
+        for item in _takyon_skill_entries()
     ]
     seen: set[str] = set()
     entries: list[dict[str, Any]] = []
@@ -1056,7 +1091,7 @@ def _business_has_product_surface(current_business: str | None) -> bool:
         return False
     try:
         root = _business_root(current_business)
-        surface = root / "app" / "surface.md"
+        surface = root / "product" / "surface.md"
         if not surface.exists():
             return False
         text = surface.read_text(encoding="utf-8", errors="replace")
@@ -1315,11 +1350,11 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         business = str(data.get("business") or args.get("business") or "").strip()
         lines = []
         if business:
-            lines.append(f"checkout intent -> {_business_artifact_path(business, 'app/billing.md')}")
+            lines.append(f"checkout intent -> {_business_artifact_path(business, 'product/billing.md')}")
             if str(data.get("external_side_effects") or "") == "suppressed":
                 checkout_id = str(data.get("checkout_intent_id") or "")
                 if checkout_id:
-                    lines.append(f"checkout receipt -> {_business_artifact_path(business, f'receipts/app-checkout/{checkout_id}.json')}")
+                    lines.append(f"checkout receipt -> {_business_artifact_path(business, f'metrics/receipts/app-checkout/{checkout_id}.json')}")
         return lines
     if not results and str(name or "") == "business_claude_agent_task":
         business = str(data.get("business") or args.get("business") or "").strip()
@@ -1374,7 +1409,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 lines.append(f"receipt -> {_business_artifact_path(business, receipt)}")
         elif action == "app.surface.upsert":
             if business:
-                lines.append(f"app surface -> {_business_artifact_path(business, 'app/surface.md')}")
+                lines.append(f"product surface -> {_business_artifact_path(business, 'product/surface.md')}")
         elif action == "app.surface.publish_result":
             if business:
                 status = str(item.get("publish_status") or "not_published")
@@ -1385,16 +1420,16 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
             if business:
                 plan = str(item.get("plan_key") or "")
                 suffix = f" ({plan})" if plan else ""
-                lines.append(f"app plans{suffix} -> {_business_artifact_path(business, 'app/plans.md')}")
+                lines.append(f"product plans{suffix} -> {_business_artifact_path(business, 'product/plans.md')}")
         elif action == "app.budget.set":
             if business:
-                lines.append(f"app usage budget -> {_business_artifact_path(business, 'app/usage.md')}")
+                lines.append(f"product usage budget -> {_business_artifact_path(business, 'product/usage.md')}")
         elif action in {"app.customer.upsert", "app.entitlement.upsert"}:
             if business:
-                lines.append(f"app customers/entitlements -> {_business_artifact_path(business, 'app/customers.md')}")
+                lines.append(f"product customers/entitlements -> {_business_artifact_path(business, 'product/customers.md')}")
         elif action == "app.usage.record":
             if business:
-                lines.append(f"app usage -> {_business_artifact_path(business, 'app/usage.md')}")
+                lines.append(f"product usage -> {_business_artifact_path(business, 'product/usage.md')}")
         elif action in {"conversation.thread.upsert", "conversation.message.record"}:
             path = str(item.get("file") or "")
             if business and path:
@@ -2106,55 +2141,31 @@ def _resolve_skill_reference(name: str) -> tuple[str, str] | None:
     clean = str(name or "").strip().lstrip("/")
     if not clean:
         return None
-    key = f"/{clean}"
     try:
-        from agent.skill_commands import get_skill_commands
+        from agent.skill_commands import resolve_skill_command_key
 
-        if key in get_skill_commands():
-            return ("slash", key)
+        resolved = resolve_skill_command_key(clean)
+        if resolved:
+            return ("slash", resolved)
+        alias = _TAKYON_SKILL_ALIASES.get(clean)
+        if alias:
+            resolved = resolve_skill_command_key(alias)
+            if resolved:
+                return ("slash", resolved)
     except Exception:
         pass
-
-    for item in TAKYON_SKILL_REGISTRY:
-        if clean in {item["name"], item["skill"]}:
-            return ("plugin", item["skill"])
     return None
 
 
-def _plugin_skill_invocation_message(skill_ref: str, instruction: str) -> str | None:
+def _queue_skill_invocation(ctx: Any, skill_ref: str, instruction: str) -> str:
     try:
-        from tools.skills_tool import skill_view
+        from agent.skill_commands import build_skill_invocation_message
 
-        loaded = json.loads(skill_view(skill_ref))
-    except Exception as exc:
-        raise RuntimeError(f"could not load {skill_ref}: {exc}") from exc
-    if not loaded.get("success") or not loaded.get("content"):
-        return None
-    skill_name = str(loaded.get("name") or skill_ref)
-    content = str(loaded["content"])
-    activation_note = (
-        f'[IMPORTANT: The user has invoked the "{skill_name}" skill through /takyon, '
-        "indicating they want you to follow its instructions. The full skill content is loaded below.]"
-    )
-    return (
-        f"{activation_note}\n\n"
-        f"<skill name=\"{skill_name}\">\n{content}\n</skill>\n\n"
-        f"User instruction:\n{instruction or '(no extra instruction)'}"
-    )
-
-
-def _queue_skill_invocation(ctx: Any, skill_kind: str, skill_ref: str, instruction: str) -> str:
-    try:
-        if skill_kind == "slash":
-            from agent.skill_commands import build_skill_invocation_message
-
-            msg = build_skill_invocation_message(
-                skill_ref,
-                instruction,
-                runtime_note="Invoked through the /takyon skill namespace.",
-            )
-        else:
-            msg = _plugin_skill_invocation_message(skill_ref, instruction)
+        msg = build_skill_invocation_message(
+            skill_ref,
+            instruction,
+            runtime_note="Invoked through the /takyon skill namespace.",
+        )
     except Exception as exc:
         return f"Takyon skill error: {exc}"
     if not msg:
@@ -2171,7 +2182,7 @@ def _queue_ceo_invocation(ctx: Any, message: str) -> str:
     prompt = (
         "Takyon operator command:\n\n"
         f"{_operator_context_message(message, None)}\n\n"
-        "Use the Takyon CEO skill, business registry, and concrete business_* tools. Keep business state isolated."
+        "Use the Takyon CEO prompt, real Takyon skills from the Hermes skills index, and concrete business_* tools. Keep business state isolated."
     )
     if ctx is not None and hasattr(ctx, "inject_message") and ctx.inject_message(prompt):
         return "Queued Takyon CEO command."
@@ -2223,7 +2234,7 @@ def _run_agent(
     load_takyon_env()
     from run_agent import AIAgent
 
-    skill = _load_ceo_skill()
+    ceo_prompt = _load_ceo_prompt()
     model_config = _read_model_config(TakyonStore())
     resolved_model = _require_agent_model_config(model_config, model_override=model)
     provider = model_config.get("provider", "")
@@ -2236,7 +2247,7 @@ def _run_agent(
         "Takyon operator command:\n\n"
         f"{history_block}{message}\n\n"
         f"Configured response style: {response_style or 'default'}.\n"
-        "Use source-of-truth state, command behavior, registry metadata, and loaded skills before assumptions. "
+        "Use source-of-truth state, command behavior, declared skill metadata, and loaded skills before assumptions. "
         "Resolve short follow-ups like 'make #1' against the recent shell transcript when it is provided. "
         "If you do not know a fact from available context or tools, say so briefly. "
         "Default to action for operational business requests. If the operator gives a business slug, goal, or clear choice "
@@ -2262,8 +2273,8 @@ def _run_agent(
             max_iterations=max_turns,
             enabled_toolsets=["takyon", "web", "skills", "todo", "delegation"],
             disabled_toolsets=["cronjob", "messaging", "memory", "session_search", "terminal", "file", "browser", "code_execution"],
-            ephemeral_system_prompt=skill,
-            load_soul_identity=True,
+            ephemeral_system_prompt=ceo_prompt,
+            load_soul_identity=False,
             skip_memory=True,
             skip_context_files=True,
             platform="takyon",
@@ -2272,6 +2283,8 @@ def _run_agent(
             tool_gen_callback=progress.tool_generating if progress.enabled else None,
             tool_complete_callback=progress.tool_completed if progress.enabled else None,
         )
+        agent._memory_nudge_interval = 0
+        agent._skill_nudge_interval = 0
         agent.activity_callback = progress.activity if progress.enabled else None
         agent.suppress_status_output = not show_agent_activity
         return agent.run_conversation(prompt, stream_callback=None if show_agent_activity else (lambda _delta: None))
@@ -2288,17 +2301,8 @@ def _run_agent(
         progress.close()
 
 
-def _load_ceo_skill() -> str:
-    try:
-        from tools.skills_tool import skill_view
-
-        loaded = json.loads(skill_view("takyon:ceo"))
-        if loaded.get("success") and loaded.get("content"):
-            return str(loaded["content"])
-    except Exception:
-        pass
-    skill_path = Path(__file__).parent / "skills" / "ceo" / "SKILL.md"
-    return skill_path.read_text(encoding="utf-8")
+def _load_ceo_prompt() -> str:
+    return _CEO_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def run_takyon_command(
@@ -2404,37 +2408,7 @@ def run_takyon_command(
         )
 
     if command == "registry":
-        kind = "all"
-        category = None
-        priority_band = None
-        for token in argv[1:]:
-            value = token.strip()
-            if value in {"all", "tools", "skills"}:
-                kind = value
-            elif value in TAKYON_CATEGORIES:
-                category = value
-            elif value in TAKYON_PRIORITY_BANDS:
-                priority_band = value
-            else:
-                raise SystemExit(
-                    f"unknown registry filter {value!r}; use all|tools|skills, a category, or a priority band"
-                )
-        snapshot = business_registry_snapshot(kind=kind, category=category, priority_band=priority_band)
-        try:
-            from tools.video_generation_tool import get_video_generation_capability_snapshot
-
-            snapshot["runtime_capabilities"] = {
-                "video_generation": get_video_generation_capability_snapshot(),
-            }
-        except Exception as exc:
-            snapshot["runtime_capabilities"] = {
-                "video_generation": {
-                    "available": False,
-                    "gate": "capability_probe_failed",
-                    "error": str(exc),
-                }
-            }
-        return snapshot
+        raise SystemExit("takyon registry was removed. Use `./takyon skills-index` to sync Takyon skills and rebuild the Hermes skills index.")
 
     if command in {"status"}:
         if len(argv) < 2:
@@ -2507,10 +2481,18 @@ def run_takyon_command(
         slug = _slugify(argv[1])
         if command == "jobs":
             return store.read(scope=_scope_for_business(slug), query="jobs")
-        return (
-            f"Capabilities for business:{slug} are Hermes tools plus credential/budget/control gates.\n"
-            + _format_cli_value(business_registry_snapshot(kind="tools"))
-        )
+        return {
+            "success": True,
+            "business": slug,
+            "message": "Takyon capabilities come from Hermes skills plus business_* tool gates. Skill-specific API readiness is declared in skill frontmatter.",
+            "skills": [
+                {
+                    "name": item.get("name"),
+                    "description": item.get("description"),
+                }
+                for item in _takyon_skill_entries()
+            ],
+        }
 
     if command in {"campaigns", "workspaces"}:
         if len(argv) < 2:
@@ -2678,6 +2660,29 @@ def run_takyon_command(
             ],
         }
 
+    if command in {"skills-index", "skill-index"}:
+        action = argv[1].lower() if len(argv) >= 2 else "build"
+        if action != "build":
+            raise SystemExit("usage: takyon skills-index [build]")
+        script = Path(__file__).resolve().parents[2] / "scripts" / "build_takyon_skills_index.py"
+        proc = subprocess.run(
+            [sys.executable or "python3", str(script)],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[2]),
+        )
+        if proc.returncode != 0:
+            raise SystemExit(f"skills index build failed: {(proc.stderr or proc.stdout).strip() or f'exit {proc.returncode}'}")
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return {
+                "success": False,
+                "error": "skills index build returned non-JSON output",
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+
     if command == "budget":
         if len(argv) < 2:
             raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount> | takyon budget <business> <amount>")
@@ -2717,7 +2722,7 @@ def run_takyon_command(
             if len(argv) < 3:
                 raise SystemExit("usage: takyon memory list <business>")
             slug = _slugify(argv[2])
-            return store.read(scope=_scope_for_business(slug), query="list_files", path="brain")
+            return store.read(scope=_scope_for_business(slug), query="list_files", path="research")
         if subcommand == "record":
             if len(argv) < 4:
                 raise SystemExit("usage: takyon memory record <business> <text>")
@@ -2826,7 +2831,7 @@ def takyon_slash_command(raw_args: str, ctx: Any = None) -> str:
         skill_ref = _resolve_skill_reference(argv[1])
         if not skill_ref:
             return f"Unknown Takyon skill for /takyon: {argv[1]}"
-        return _queue_skill_invocation(ctx, skill_ref[0], skill_ref[1], " ".join(argv[2:]).strip())
+        return _queue_skill_invocation(ctx, skill_ref[1], " ".join(argv[2:]).strip())
 
     if command in _local_command_names():
         try:
@@ -2838,7 +2843,7 @@ def takyon_slash_command(raw_args: str, ctx: Any = None) -> str:
 
     skill_ref = _resolve_skill_reference(command)
     if skill_ref:
-        return _queue_skill_invocation(ctx, skill_ref[0], skill_ref[1], " ".join(argv[1:]).strip())
+        return _queue_skill_invocation(ctx, skill_ref[1], " ".join(argv[1:]).strip())
 
     return _queue_ceo_invocation(ctx, " ".join(argv).strip())
 

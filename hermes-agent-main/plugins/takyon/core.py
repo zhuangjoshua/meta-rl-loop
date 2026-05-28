@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from agent.skill_utils import parse_frontmatter
+
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv.
@@ -46,8 +48,6 @@ except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv
 from takyon_constants import get_takyon_home
 from tools.registry import tool_error, tool_result
 
-from .registry import business_registry_snapshot
-
 
 TAKYON_TOOLSET = "takyon"
 DEFAULT_TAKYON_DIRNAME = "takyon"
@@ -56,7 +56,9 @@ MAX_READ_CHARS = 64_000
 MAX_WRITE_CHARS = 1_000_000
 CURRENT_BUSINESS_SCHEMA_VERSION = 1
 CURRENT_BUSINESS_CAPABILITY_VERSION = 1
-BUSINESS_UPGRADE_RECEIPT = "receipts/upgrades/takyon-business-upgrade-v1.json"
+BUSINESS_UPGRADE_RECEIPT = "metrics/receipts/upgrades/takyon-business-upgrade-v1.json"
+TAKYON_BUSINESS_ROOTS = ("product", "distribution", "research", "metrics")
+TAKYON_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills" / "takyon"
 NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - You are not allowed to invent backend behavior.
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
@@ -119,6 +121,60 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "website_build_deploy": ("vercel",),
     "x_social": ("x",),
 }
+
+
+def _takyon_skill_publication_specs() -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for skill_md in sorted(TAKYON_SKILLS_ROOT.glob("takyon-*/SKILL.md")):
+        frontmatter, _body = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+        metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
+        takyon_meta = metadata.get("takyon") if isinstance(metadata.get("takyon"), dict) else {}
+        publication = takyon_meta.get("publication")
+        if not isinstance(publication, list) or not publication:
+            continue
+        specs.append(
+            {
+                "skill": str(frontmatter.get("name") or skill_md.parent.name),
+                "publication": [str(item).strip() for item in publication if str(item).strip()],
+                "templates_dir": skill_md.parent / "templates",
+            }
+        )
+    return specs
+
+
+def _publication_title(path: Path) -> str:
+    words = [part.replace("-", " ").replace("_", " ") for part in path.parts]
+    if path.suffix:
+        words[-1] = path.stem.replace("-", " ").replace("_", " ")
+    return " ".join(word.title() for word in words if word)
+
+
+def _publication_seed_text(relative_path: Path, templates_dir: Path) -> str:
+    if relative_path.suffix == ".json":
+        return "{}\n"
+    if relative_path.suffix == ".jsonl":
+        return ""
+    if relative_path.suffix == ".md":
+        template_path = templates_dir / relative_path.name
+        if template_path.is_file():
+            return template_path.read_text(encoding="utf-8")
+        return f"# {_publication_title(relative_path)}\n\n"
+    return ""
+
+
+def _seed_business_publication_paths(root: Path) -> None:
+    for spec in _takyon_skill_publication_specs():
+        templates_dir = spec["templates_dir"]
+        for publication_path in spec["publication"]:
+            rel = _safe_relpath(publication_path, field="publication")
+            target = root / rel
+            if not rel.suffix:
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                continue
+            _atomic_write_text(target, _publication_seed_text(rel, templates_dir))
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
 
 
@@ -1651,9 +1707,45 @@ _BRAIN_COMPLETION_EVIDENCE_TERMS = (
     ("remaining blocker", ("remaining blocker", "blocker", "blocked", "not wired")),
 )
 
+_TAKYON_PATH_EXACT_ALIASES = {
+    "brain/index.md": "research/index.md",
+    "brain/business-model.md": "research/strategy.md",
+    "brain/pulse.md": "metrics/summary.md",
+    "brain/wake_journal.md": "metrics/wake-history.md",
+    "app/index.md": "product/runtime.md",
+    "app/surface.md": "product/surface.md",
+    "app/plans.md": "product/plans.md",
+    "app/customers.md": "product/customers.md",
+    "app/billing.md": "product/billing.md",
+    "app/usage.md": "product/usage.md",
+    "conversations/index.md": "metrics/conversations/index.md",
+    "conversations/corpus/messages.jsonl": "metrics/conversations/corpus/messages.jsonl",
+    "conversations/corpus/events.jsonl": "metrics/conversations/corpus/events.jsonl",
+}
+_TAKYON_PATH_PREFIX_ALIASES = (
+    ("brain/", "research/"),
+    ("app/", "product/"),
+    ("conversations/", "metrics/conversations/"),
+    ("receipts/", "metrics/receipts/"),
+    ("sales/", "distribution/"),
+    ("campaigns/", "distribution/campaigns/"),
+    ("outreach/", "distribution/outreach/"),
+)
+
+
+def _canonical_business_relpath(rel: str) -> str:
+    normalized = _safe_relpath(rel, field="business path").as_posix()
+    exact = _TAKYON_PATH_EXACT_ALIASES.get(normalized)
+    if exact:
+        return exact
+    for old_prefix, new_prefix in _TAKYON_PATH_PREFIX_ALIASES:
+        if normalized.startswith(old_prefix):
+            return new_prefix + normalized[len(old_prefix):]
+    return normalized
+
 
 def _validate_brain_index_completion_gate(rel: str, content: str) -> None:
-    if rel != "brain/index.md":
+    if rel != "research/index.md":
         return
     if not any(pattern.search(content) for pattern in _BRAIN_COMPLETION_MARKERS):
         return
@@ -1665,7 +1757,7 @@ def _validate_brain_index_completion_gate(rel: str, content: str) -> None:
     ]
     if missing:
         raise TakyonError(
-            "brain/index.md cannot claim complete/built/done work without a feature evidence ledger. "
+            "research/index.md cannot claim complete/built/done work without a feature evidence ledger. "
             "For each feature list source files, runtime/tool endpoint used, audit/test record, "
             f"and remaining blocker. Missing: {', '.join(missing)}"
         )
@@ -2409,8 +2501,8 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "app.surface.upsert",
         "app.usage.record",
     }
-    product_paths = ("app/", "product/", "website/")
-    marketing_paths = ("distribution/", "campaigns/", "outreach/", "research/", "sales/")
+    product_paths = ("product/", "website/")
+    marketing_paths = ("distribution/", "research/", "metrics/conversations/")
 
     if focus == "marketing":
         if action in product_actions:
@@ -2435,7 +2527,7 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
 
 
 class TakyonStore:
-    """File + SQLite store for isolated business brains and campaign workspaces."""
+    """File + SQLite store for isolated business state and scoped workspaces."""
 
     def __init__(self, root: str | os.PathLike[str] | None = None):
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
@@ -2855,7 +2947,7 @@ class TakyonStore:
 
     def _resolve_business_file(self, slug: str, rel: str) -> Path:
         root = self._business_root(slug)
-        path = (root / _safe_relpath(rel)).resolve()
+        path = (root / _canonical_business_relpath(rel)).resolve()
         if root.resolve() not in (path, *path.parents):
             raise TakyonError("path escaped business root")
         return path
@@ -2916,7 +3008,7 @@ class TakyonStore:
     def _conversation_thread_relpath(self, thread: dict[str, Any]) -> str:
         source = _file_slug(str(thread.get("source") or "unknown"), "unknown")
         label = str(thread.get("external_id") or thread.get("title") or thread.get("id") or "thread")
-        return f"conversations/{source}/{_file_slug(label, 'thread')}.md"
+        return f"metrics/conversations/{source}/{_file_slug(label, 'thread')}.md"
 
     def _conversation_corpus_message(self, thread: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -2942,12 +3034,12 @@ class TakyonStore:
         }
 
     def _append_conversation_message_corpus(self, slug: str, thread: dict[str, Any], message: dict[str, Any]) -> str:
-        rel = "conversations/corpus/messages.jsonl"
+        rel = "metrics/conversations/corpus/messages.jsonl"
         _append_jsonl(self._business_root(slug) / rel, self._conversation_corpus_message(thread, message))
         return rel
 
     def _append_conversation_event_corpus(self, slug: str, event_type: str, payload: Any) -> str:
-        rel = "conversations/corpus/events.jsonl"
+        rel = "metrics/conversations/corpus/events.jsonl"
         _append_jsonl(
             self._business_root(slug) / rel,
             {
@@ -2979,10 +3071,10 @@ class TakyonStore:
             "",
             "## Permanent Corpus",
             "",
-            "- conversations/corpus/messages.jsonl",
-            "- conversations/corpus/events.jsonl",
+            "- metrics/conversations/corpus/messages.jsonl",
+            "- metrics/conversations/corpus/events.jsonl",
         ])
-        _atomic_write_text(self._business_root(slug) / "conversations" / "index.md", "\n".join(lines) + "\n")
+        _atomic_write_text(self._business_root(slug) / "metrics" / "conversations" / "index.md", "\n".join(lines) + "\n")
 
     def _rewrite_conversation_thread_file(self, conn: sqlite3.Connection, slug: str, thread_id: str) -> str:
         thread_row = conn.execute(
@@ -3056,7 +3148,7 @@ class TakyonStore:
             "latest_message_at": summary_row["latest_message_at"] if summary_row else None,
             "threads": threads,
             "unresolved": unresolved,
-            "filesystem_index": "conversations/index.md",
+            "filesystem_index": "metrics/conversations/index.md",
         }
 
     def _ensure_app_budget(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
@@ -3226,7 +3318,7 @@ class TakyonStore:
         return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
 
     def _rewrite_app_files(self, conn: sqlite3.Connection, slug: str) -> None:
-        root = self._business_root(slug) / "app"
+        root = self._business_root(slug) / "product"
         budget = self._ensure_app_budget(conn, slug)
         surface = self._app_surface_contract(conn, slug)
         surface_evidence = self._product_surface_evidence(conn, slug, surface)
@@ -3266,7 +3358,7 @@ class TakyonStore:
             "- [Usage Budget](usage.md)",
             "- [Surface Contract](surface.md)",
         ]
-        _atomic_write_text(root / "index.md", "\n".join(index) + "\n")
+        _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
 
         surface_lines = [
             "# App Surface Contract",
@@ -3436,7 +3528,7 @@ class TakyonStore:
                 self._row_to_dict(row)
                 for row in conn.execute("SELECT * FROM app_checkout_intents WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?", (slug, limit)).fetchall()
             ],
-            "filesystem_index": "app/index.md",
+            "filesystem_index": "product/runtime.md",
         }
 
     def calculate_pulse(self, slug: str, *, limit: int = 10) -> dict[str, Any]:
@@ -3810,8 +3902,8 @@ class TakyonStore:
                 "storage": {
                     "raw_sources": ["state.sqlite3", "events", "app_* tables", "conversation_* tables", "ledger_entries", "jobs"],
                     "snapshot_event_type": "business.pulse.snapshot",
-                    "human_summary_path": "brain/pulse.md",
-                    "business_model_path": "brain/business-model.md",
+                    "human_summary_path": "metrics/summary.md",
+                    "business_model_path": "research/strategy.md",
                 },
             }
 
@@ -4140,7 +4232,7 @@ class TakyonStore:
                     raise TakyonError(f"path is not a directory: {rel}")
                 files = []
                 for child in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-                    if rel in {"", "."} and child.name == "receipts":
+                    if rel in {"", "."} and child.name not in TAKYON_BUSINESS_ROOTS:
                         continue
                     if len(files) >= limit:
                         break
@@ -4201,7 +4293,7 @@ class TakyonStore:
             ]
 
             brain_index: list[dict[str, str]] = []
-            brain_root = self._business_root(slug) / "brain"
+            brain_root = self._business_root(slug) / "research"
             if brain_root.exists():
                 for child in sorted(brain_root.rglob("*")):
                     if child.is_file():
@@ -4212,7 +4304,7 @@ class TakyonStore:
             research_index: list[dict[str, Any]] = []
             research_seen: set[str] = set()
             business_root = self._business_root(slug)
-            for rel_root in ("research", "brain"):
+            for rel_root in ("research", "metrics"):
                 root = business_root / rel_root
                 if not root.exists() or not root.is_dir():
                     continue
@@ -4220,7 +4312,7 @@ class TakyonStore:
                     if not child.is_file() or child.name.startswith("."):
                         continue
                     rel = str(child.relative_to(business_root))
-                    if rel in {"brain/index.md", "brain/pulse.md", "brain/wake_journal.md"}:
+                    if rel in {"research/index.md", "research/strategy.md", "metrics/summary.md", "metrics/wake-history.md"}:
                         continue
                     if rel in research_seen:
                         continue
@@ -4413,10 +4505,13 @@ class TakyonStore:
                     (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), now, now),
                 )
             root = self._business_root(slug)
-            (root / "brain").mkdir(parents=True, exist_ok=True)
-            index = root / "brain" / "index.md"
-            if not index.exists():
-                _atomic_write_text(index, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
+            root.mkdir(parents=True, exist_ok=True)
+            for dirname in TAKYON_BUSINESS_ROOTS:
+                (root / dirname).mkdir(parents=True, exist_ok=True)
+            strategy = root / "research" / "strategy.md"
+            if not strategy.exists():
+                _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
+            _seed_business_publication_paths(root)
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
 
@@ -4572,7 +4667,7 @@ class TakyonStore:
             )
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
-            return {"action": action, "business": slug, "status": status, "surface_contract": "app/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
+            return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
         if action == "app.surface.publish_result":
             publish_status = str(op.get("publish_status") or op.get("status") or "").strip().lower()
@@ -4864,8 +4959,8 @@ class TakyonStore:
             return {"action": action, "business": slug, "usage_event": event_id, "actual_cost_microusd": actual}
 
         if action == "workspace.upsert":
-            rel = _safe_relpath(str(op.get("path") or op.get("workspace") or ""), field="workspace path")
-            path_text = rel.as_posix()
+            path_text = _canonical_business_relpath(str(op.get("path") or op.get("workspace") or ""))
+            rel = Path(path_text)
             kind = str(op.get("kind") or "workspace")
             status = str(op.get("status") or "active")
             budget = op.get("budget")
@@ -4884,8 +4979,8 @@ class TakyonStore:
 
         if action in {"artifact.write", "memory.write"}:
             raw_path = str(op.get("path") or "")
-            if action == "memory.write" and not raw_path.startswith("brain/"):
-                raw_path = f"brain/{raw_path}"
+            if action == "memory.write" and not raw_path.startswith("research/"):
+                raw_path = f"research/{raw_path}"
             file_path = self._resolve_business_file(slug, raw_path)
             content = str(op.get("content") or "")
             mode = str(op.get("mode") or "replace").strip().lower()
@@ -4898,7 +4993,7 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, content)
             _atomic_write_text(file_path, content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
-            if rel == "brain/pulse.md":
+            if rel == "metrics/summary.md":
                 self._record_event(
                     conn,
                     scope=f"business:{slug}",
@@ -4908,7 +5003,7 @@ class TakyonStore:
                         "generated_at": _now(),
                         "pulse_path": rel,
                         "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                        "source": "brain/pulse.md write",
+                        "source": "metrics/summary.md write",
                     },
                 )
             return {"action": action, "business": slug, "path": rel}
@@ -4929,7 +5024,7 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, updated_content)
             _atomic_write_text(file_path, updated_content)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
-            if rel == "brain/pulse.md":
+            if rel == "metrics/summary.md":
                 self._record_event(
                     conn,
                     scope=f"business:{slug}",
@@ -4939,7 +5034,7 @@ class TakyonStore:
                         "generated_at": _now(),
                         "pulse_path": rel,
                         "content_sha256": hashlib.sha256(updated_content.encode("utf-8")).hexdigest(),
-                        "source": "brain/pulse.md patch",
+                        "source": "metrics/summary.md patch",
                     },
                 )
             return {"action": action, "business": slug, "path": rel}
@@ -5017,7 +5112,7 @@ class TakyonStore:
             created_at = _now()
             file_stem = f"{created_at[:10]}-{_file_slug(target, 'target')}-{publish_id[:8]}"
             rel = f"distribution/local-published/{channel}/{file_stem}.md"
-            receipt_rel = f"receipts/outreach/{publish_id}.json"
+            receipt_rel = f"metrics/receipts/outreach/{publish_id}.json"
             _atomic_write_text(
                 self._business_root(slug) / rel,
                 _outreach_artifact_markdown(
@@ -5093,7 +5188,7 @@ class TakyonStore:
                 "thread": thread["id"],
                 "message": row["id"],
                 "conversation_file": mirror,
-                "conversation_corpus": corpus or "conversations/corpus/messages.jsonl",
+                "conversation_corpus": corpus or "metrics/conversations/corpus/messages.jsonl",
                 "external_side_effects": "suppressed",
                 "sent": False,
             }
@@ -5183,7 +5278,7 @@ class TakyonStore:
                 corpus = self._append_conversation_message_corpus(slug, thread, row)
             self._append_conversation_event_corpus(slug, action, {"thread": thread["id"], "message": row["id"], "direction": direction, "status": row["status"]})
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"thread": thread["id"], "message": row["id"], "direction": direction, "status": row["status"]})
-            return {"action": action, "business": slug, "thread": thread["id"], "message": row["id"], "file": file_path, "status": row["status"], "conversation_corpus": corpus or "conversations/corpus/messages.jsonl"}
+            return {"action": action, "business": slug, "thread": thread["id"], "message": row["id"], "file": file_path, "status": row["status"], "conversation_corpus": corpus or "metrics/conversations/corpus/messages.jsonl"}
 
         if action == "conversation.message.status.set":
             status = str(op.get("status") or "").strip().lower()
@@ -5295,12 +5390,12 @@ class TakyonStore:
     def _ceo_cron_prompt(self, slug: str) -> str:
         return (
             f"CEO wakeup for business:{slug}.\n"
-            "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn; use business state and pulse evidence to distinguish a first scheduled check from a later follow-up.\n"
-            "Start with business_calculate_pulse, then use takyon:business-pulse to write brain/pulse.md and record "
-            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update business memory, "
+            "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
+            "Start with business_calculate_pulse, then use takyon-business-metrics to write metrics/summary.md and record "
+            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
             "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
             "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
-            "memory inside this business scope. Read prior wake/traction notes from brain/wake_journal.md and compare "
+            "memory inside this business scope. Read prior wake notes from metrics/wake-history.md and compare "
             "this state to those notes, including business "
             "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
             "After reading business state, honor the business work_focus field as an operator constraint: "
@@ -5313,7 +5408,7 @@ class TakyonStore:
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
             "the same motion. "
-            "Append a compact wake snapshot to brain/wake_journal.md for future comparison. Never delete prior pulse, "
+            "Append a compact wake snapshot to metrics/wake-history.md for future comparison. Never delete prior metrics, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
             "Honor business mode: in test mode, keep product/website build and "
             "publication, app rails, distribution files, hidden audit receipts, conversations, and follow-up review active. Suppress external outreach, "
@@ -5332,11 +5427,11 @@ class TakyonStore:
             return {"updated": False, "reason": "no_existing_ceo_cron"}
         updated = update_job(
             existing["id"],
-            {
-                "prompt": self._ceo_cron_prompt(slug),
-                "skills": ["takyon:ceo"],
-                "enabled_toolsets": self._ceo_cron_toolsets(),
-            },
+                {
+                    "prompt": self._ceo_cron_prompt(slug),
+                    "skills": [],
+                    "enabled_toolsets": self._ceo_cron_toolsets(),
+                },
         )
         return {
             "updated": bool(updated),
@@ -5363,7 +5458,7 @@ class TakyonStore:
                 {
                     "prompt": prompt,
                     "schedule": schedule,
-                    "skills": ["takyon:ceo"],
+                    "skills": [],
                     "enabled_toolsets": enabled_toolsets,
                     "enabled": True,
                     "state": "scheduled",
@@ -5375,7 +5470,7 @@ class TakyonStore:
             schedule=schedule,
             name=name,
             deliver="local",
-            skills=["takyon:ceo"],
+            skills=[],
             enabled_toolsets=enabled_toolsets,
             repeat=None,
         )
@@ -5970,7 +6065,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                 "blocker": f"product source check did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
             }
         receipt_id = uuid.uuid4().hex
-        receipt_path = f"receipts/product-surface/{receipt_id}.json"
+        receipt_path = f"metrics/receipts/product-surface/{receipt_id}.json"
         done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
         inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
         if not inventory:
@@ -6154,7 +6249,7 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                 (link_id, business, user["id"], email, _hash_token(token), str(args.get("purpose") or "login"), expires_at, provider_message_id, _json_dumps({"app_slug": app_slug, "email_requested": send_email, "email_sent": email_sent, "external_side_effects": "suppressed" if test_mode and send_email else "none" if not send_email else "sent"}), now),
             )
             if test_mode and send_email:
-                receipt_rel = f"receipts/app-magic-link/{link_id}.json"
+                receipt_rel = f"metrics/receipts/app-magic-link/{link_id}.json"
                 _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
                     "id": link_id,
                     "business": business,
@@ -6309,7 +6404,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = ? WHERE id = ?",
                     (checkout_url, _now(), intent_id),
                 )
-                receipt_rel = f"receipts/app-checkout/{intent_id}.json"
+                receipt_rel = f"metrics/receipts/app-checkout/{intent_id}.json"
                 _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
                     "id": intent_id,
                     "business": business,
@@ -6650,7 +6745,7 @@ def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
             format_name=format_name,
             asset_id=asset_id,
         )
-        receipt_rel = f"receipts/creative-assets/{asset_id}.json"
+        receipt_rel = f"metrics/receipts/creative-assets/{asset_id}.json"
 
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
@@ -6970,7 +7065,7 @@ def _legacy_asset_paths(root: Path) -> list[str]:
                 rel = str(child.relative_to(root))
             except ValueError:
                 continue
-            if rel.startswith("receipts/"):
+            if rel.startswith("metrics/receipts/"):
                 continue
             assets.append(rel)
     return assets
@@ -7138,33 +7233,6 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
-def handle_business_registry(args: dict, **_: Any) -> str:
-    try:
-        snapshot = business_registry_snapshot(
-            kind=args.get("kind"),
-            category=args.get("category"),
-            priority_band=args.get("priority_band"),
-        )
-        try:
-            from tools.video_generation_tool import get_video_generation_capability_snapshot
-
-            snapshot["runtime_capabilities"] = {
-                "video_generation": get_video_generation_capability_snapshot(),
-            }
-        except Exception as exc:
-            snapshot["runtime_capabilities"] = {
-                "video_generation": {
-                    "available": False,
-                    "gate": "capability_probe_failed",
-                    "error": str(exc),
-                    "summary": f"video generation capability probe failed: {exc}",
-                }
-            }
-        return tool_result({"success": True, **snapshot})
-    except Exception as exc:
-        return tool_error(str(exc), success=False)
-
-
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
@@ -7315,7 +7383,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             verification = {
                 **verification,
                 "business": business,
-                "receipt_path": f"receipts/product-surface/{receipt_id}.json",
+                "receipt_path": f"metrics/receipts/product-surface/{receipt_id}.json",
                 "source": "business_claude_agent_task",
             }
         status = "completed" if sdk_result.get("success") else "failed"
@@ -7436,7 +7504,7 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
         allow_external_jobs = bool(args.get("allow_external_jobs", False))
 
         task_id = hashlib.sha256(f"{business}:{idempotency_key}:conversation-agent".encode("utf-8")).hexdigest()
-        workspace_raw = str(args.get("workspace") or f"conversations/tasks/{_now()[:10]}-{task_type}-{task_id[:8]}").strip()
+        workspace_raw = str(args.get("workspace") or f"metrics/conversations/tasks/{_now()[:10]}-{task_type}-{task_id[:8]}").strip()
         with store._connect() as conn:
             store._ensure_business(conn, business)
         workspace_path = store._resolve_business_file(business, workspace_raw)
@@ -7477,7 +7545,7 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
             messages = [store._row_to_dict(row) for row in rows]
             summary = store._conversation_summary(conn, business, limit=20)
             brain_index = []
-            brain_root = store._business_root(business) / "brain"
+            brain_root = store._business_root(business) / "research"
             if brain_root.exists():
                 brain_index = [
                     str(path.relative_to(store._business_root(business)))
@@ -7511,7 +7579,7 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
             f"- Unresolved messages: {summary.get('unresolved_messages')}",
             f"- Latest message: {summary.get('latest_message_at') or 'none'}",
             "",
-            "## Brain Files",
+            "## Research Files",
             "",
             *(f"- {item}" for item in brain_index),
             "",
@@ -7674,21 +7742,6 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
 
 TAKYON_TOOL_DEFINITIONS = [
     {
-        "name": "business_registry",
-        "description": "Read the business tool registry, Takyon skill registry, and runtime capability snapshot such as video_generation openai/sora availability.",
-        "handler": handle_business_registry,
-        "schema": _schema(
-            "business_registry",
-            "Read the business tool and Takyon skill registry plus runtime capabilities.",
-            {
-                "kind": {"type": "string", "description": "all, tools, or skills"},
-                "category": {"type": "string", "description": "Optional category id"},
-                "priority_band": {"type": "string", "description": "Optional priority band id"},
-            },
-            [],
-        ),
-    },
-    {
         "name": "business_list_businesses",
         "description": "List businesses and global control states.",
         "handler": handle_business_list_businesses,
@@ -7696,7 +7749,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_business",
-        "description": "Read one business summary, brain and research indexes, workspaces, controls, ledger, jobs, and events.",
+        "description": "Read one business summary, research and metrics indexes, workspaces, controls, ledger, jobs, and events.",
         "handler": handle_business_read_business,
         "schema": _schema(
             "business_read_business",
@@ -7829,9 +7882,9 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_record_memory",
-        "description": "Write flexible per-business memory under brain/ for strategy, pricing, product, distribution, learning, and CEO notes.",
+        "description": "Write flexible per-business memory under research/ for strategy, pricing, product, distribution, learning, and CEO notes.",
         "handler": handle_business_record_memory,
-        "schema": _schema("business_record_memory", "Write business brain memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
+        "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
     },
     {
         "name": "business_allocate_budget",
@@ -8074,7 +8127,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_conversation_thread",
-        "description": "Create or update a business-owned conversation thread and its Markdown mirror under conversations/.",
+        "description": "Create or update a business-owned conversation thread and its Markdown mirror under metrics/conversations/.",
         "handler": handle_business_upsert_conversation_thread,
         "schema": _schema(
             "business_upsert_conversation_thread",

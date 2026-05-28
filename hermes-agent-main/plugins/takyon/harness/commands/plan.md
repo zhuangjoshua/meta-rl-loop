@@ -11,7 +11,7 @@ Operator arguments:
 
 `$ARGUMENTS`
 
-Use only current business evidence. Update or propose the smallest useful set of business-scoped files, usually under `brain/`, `goals/`, `research/`, `product/`, `distribution/`, `conversations/`, or `memory/`.
+Use only current business evidence. Update or propose the smallest useful set of business-scoped files, usually under `research/`, `product/`, `distribution/`, or `metrics/`.
 
 The plan should preserve optionality. It should name the immediate next action, what evidence would change the decision, and any missing keys, budget, or control states that block real execution.
 

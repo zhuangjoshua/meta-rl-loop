@@ -242,24 +242,19 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
 
     key = primary_args.get(tool_name)
     if not key and str(tool_name or "").startswith("business_"):
-        try:
-            from plugins.takyon.registry import business_registry_snapshot
-
-            registry = business_registry_snapshot(kind="tools")
-            tool_meta = next(
-                (
-                    item
-                    for item in registry.get("tools", [])
-                    if isinstance(item, dict) and item.get("name") == tool_name
-                ),
-                {},
-            )
-            for detail_key in tool_meta.get("detail_keys", []):
-                if detail_key in args:
-                    key = str(detail_key)
-                    break
-        except Exception:
-            key = None
+        takyon_detail_keys = {
+            "business_read_business": ["business"],
+            "business_calculate_pulse": ["business"],
+            "business_upsert_app_surface_contract": ["source_path", "publish_target", "business"],
+            "business_publish_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
+            "business_claude_agent_task": ["workspace", "source_path", "business"],
+            "business_conversation_agent_task": ["goal", "task", "context", "business"],
+            "business_record_agent": ["scope", "status", "business"],
+        }
+        for detail_key in takyon_detail_keys.get(str(tool_name or ""), []):
+            if detail_key in args:
+                key = str(detail_key)
+                break
     if not key:
         for fallback_key in ("query", "text", "command", "path", "name", "prompt", "code", "goal"):
             if fallback_key in args:
@@ -1002,4 +997,3 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-

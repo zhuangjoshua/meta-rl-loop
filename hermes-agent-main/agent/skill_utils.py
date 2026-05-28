@@ -52,8 +52,9 @@ def yaml_load(content: str):
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     """Parse YAML frontmatter from a markdown string.
 
-    Uses yaml with CSafeLoader for full YAML support (nested metadata, lists)
-    with a fallback to simple key:value splitting for robustness.
+    Uses YAML with CSafeLoader for full YAML support (nested metadata, lists).
+    Invalid frontmatter is a hard error; callers should surface or log it,
+    not silently degrade into ad hoc parsing.
 
     Returns:
         (frontmatter_dict, remaining_body)
@@ -73,15 +74,14 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
 
     try:
         parsed = yaml_load(yaml_content)
-        if isinstance(parsed, dict):
-            frontmatter = parsed
-    except Exception:
-        # Fallback: simple key:value parsing for malformed YAML
-        for line in yaml_content.strip().split("\n"):
-            if ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            frontmatter[key.strip()] = value.strip()
+    except Exception as exc:
+        raise ValueError(f"invalid YAML frontmatter: {exc}") from exc
+
+    if parsed is None:
+        return frontmatter, body
+    if not isinstance(parsed, dict):
+        raise ValueError("YAML frontmatter must parse to a mapping")
+    frontmatter = parsed
 
     return frontmatter, body
 

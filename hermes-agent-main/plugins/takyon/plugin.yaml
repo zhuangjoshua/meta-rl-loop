@@ -4,7 +4,6 @@ description: "Business-isolated CEO operator plugin: durable business brains, ca
 author: Takyon
 kind: backend
 provides_tools:
-  - business_registry
   - business_list_businesses
   - business_read_business
   - business_read_file

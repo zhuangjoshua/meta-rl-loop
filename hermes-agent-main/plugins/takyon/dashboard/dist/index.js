@@ -25,7 +25,7 @@
     { key: "shell", label: "Shell", x: 270 },
     { key: "prompts", label: "Prompt Wrappers", x: 520 },
     { key: "ceo", label: "CEO", x: 770 },
-    { key: "registry", label: "Registry", x: 1020 },
+    { key: "skill-index", label: "Skill Index", x: 1020 },
     { key: "skills", label: "Skills", x: 1270 },
     { key: "tools", label: "Tools", x: 1520 },
     { key: "wakeups", label: "Wakeups", x: 1770 },
@@ -815,7 +815,7 @@
     const [expandedGroups, setExpandedGroups] = useState({});
 
     useEffect(function () {
-      if (graph && !selectedId) setSelectedId("skill:takyon:ceo");
+      if (graph && !selectedId) setSelectedId("prompt:ceo");
     }, [graph, selectedId]);
 
     if (loading) {
@@ -843,7 +843,7 @@
           h("h1", null, "Agent Map")
         ),
         h("div", { className: "takyon-map-header-meta" },
-          h("span", null, shortPath(graph.generated_from.registry)),
+          h("span", null, shortPath(graph.generated_from.ceo_prompt || graph.generated_from.skills_root)),
           expandedCount > 0 && h(MapButton, {
             type: "button",
             size: "xs",

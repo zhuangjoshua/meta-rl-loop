@@ -7,14 +7,13 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import importlib.util
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from agent.skill_utils import parse_frontmatter
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -26,10 +25,10 @@ PLUGIN_ROOT = DASHBOARD_ROOT.parent
 PROJECT_ROOT = PLUGIN_ROOT.parent.parent
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 
-SKILLS_ROOT = PLUGIN_ROOT / "skills"
+SKILLS_ROOT = PROJECT_ROOT / "skills" / "takyon"
 HARNESS_COMMANDS_ROOT = PLUGIN_ROOT / "harness" / "commands"
 
-REGISTRY_PATH = PLUGIN_ROOT / "registry.py"
+CEO_PROMPT_PATH = PLUGIN_ROOT / "prompts" / "ceo.md"
 CLI_PATH = PLUGIN_ROOT / "cli.py"
 CORE_PATH = PLUGIN_ROOT / "core.py"
 HARNESS_SETTINGS_PATH = PLUGIN_ROOT / "harness" / "settings.json"
@@ -37,14 +36,16 @@ CRON_JOBS_PY = PROJECT_ROOT / "cron" / "jobs.py"
 CRON_SCHEDULER_PY = PROJECT_ROOT / "cron" / "scheduler.py"
 ROOT_LAUNCHER = WORKSPACE_ROOT / "takyon"
 HERMES_LAUNCHER = PROJECT_ROOT / "takyon"
+BUILD_SKILLS_INDEX_PATH = PROJECT_ROOT / "scripts" / "build_takyon_skills_index.py"
 
 EXACT_EDITABLE = {
-    REGISTRY_PATH.resolve(),
+    CEO_PROMPT_PATH.resolve(),
     CLI_PATH.resolve(),
     CORE_PATH.resolve(),
     HARNESS_SETTINGS_PATH.resolve(),
     CRON_JOBS_PY.resolve(),
     CRON_SCHEDULER_PY.resolve(),
+    BUILD_SKILLS_INDEX_PATH.resolve(),
 }
 
 
@@ -82,7 +83,7 @@ def _cron_jobs_file() -> Path:
 
 def _exact_readable_files() -> set[Path]:
     files = {
-        REGISTRY_PATH.resolve(),
+        CEO_PROMPT_PATH.resolve(),
         CLI_PATH.resolve(),
         CORE_PATH.resolve(),
         HARNESS_SETTINGS_PATH.resolve(),
@@ -90,6 +91,7 @@ def _exact_readable_files() -> set[Path]:
         CRON_SCHEDULER_PY.resolve(),
         ROOT_LAUNCHER.resolve(),
         HERMES_LAUNCHER.resolve(),
+        BUILD_SKILLS_INDEX_PATH.resolve(),
     }
     jobs_file = _cron_jobs_file()
     if jobs_file.exists():
@@ -156,30 +158,13 @@ def _source_ref(path: Path, kind: str, label: str) -> dict[str, Any]:
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
-    if not text.startswith("---"):
+    try:
+        frontmatter, _ = parse_frontmatter(text)
+    except Exception:
         return {}
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not isinstance(frontmatter, dict):
         return {}
-    end_index = None
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            end_index = index
-            break
-    if end_index is None:
-        return {}
-    data: dict[str, Any] = {}
-    for line in lines[1:end_index]:
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip().replace("-", "_")
-        value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            data[key] = [part.strip().strip("'\"") for part in value[1:-1].split(",") if part.strip()]
-        else:
-            data[key] = value.strip("'\"")
-    return data
+    return frontmatter
 
 
 def _function_span(path: Path, name: str, class_name: str | None = None) -> tuple[int | None, int | None]:
@@ -221,22 +206,7 @@ def _line_for_pattern(path: Path, pattern: str) -> int | None:
 
 
 def _registry_snapshot() -> tuple[dict[str, Any], list[str]]:
-    warnings: list[str] = []
-    try:
-        module_name = "_takyon_map_registry"
-        spec = importlib.util.spec_from_file_location(module_name, REGISTRY_PATH)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("could not load registry spec")
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = mod
-        spec.loader.exec_module(mod)
-        snapshot = mod.business_registry_snapshot()
-        return snapshot, warnings
-    except Exception as exc:
-        warnings.append(f"registry import failed: {exc}")
-        return {"version": None, "priority_bands": {}, "categories": {}, "tools": [], "skills": []}, warnings
-    finally:
-        sys.modules.pop("_takyon_map_registry", None)
+    return {"version": None, "priority_bands": {}, "categories": {}, "tools": [], "skills": []}, ["takyon registry removed; using Hermes skill files directly"]
 
 
 def _load_harness_settings() -> tuple[dict[str, Any], list[str]]:
@@ -276,7 +246,7 @@ def _list_skill_files() -> dict[str, dict[str, Any]]:
         text = _read_text(path)
         meta = _parse_frontmatter(text)
         slug = path.parent.name
-        skill_ref = f"takyon:{slug}"
+        skill_ref = str(meta.get("name") or slug)
         result[skill_ref] = {
             "name": meta.get("name") or skill_ref,
             "description": meta.get("description") or "",
@@ -422,7 +392,7 @@ async def graph() -> dict[str, Any]:
         label="Shell settings",
         kind="config",
         lane="shell",
-        description="Registry-driven shell controls, palette visibility, thinking indicator, progress, and shell history tuning.",
+        description="Shell controls, palette visibility, thinking indicator, progress, and shell history tuning.",
         source_path=HARNESS_SETTINGS_PATH,
         source_kind="harness",
         tags=["source of truth", "slash commands"],
@@ -436,10 +406,10 @@ async def graph() -> dict[str, Any]:
 
     for function_name, label, node_id, desc in [
         ("_operator_context_message", "Scope wrapper", "operator-context", "Wraps plain text with global or business scope before the CEO sees it."),
-        ("_run_agent", "Initial CEO run prompt", "manual-ceo-prompt", "Builds the manual-turn operator prompt and passes takyon:ceo as the ephemeral system prompt."),
+        ("_run_agent", "Initial CEO run prompt", "manual-ceo-prompt", "Builds the manual-turn operator prompt and passes the Takyon CEO prompt as the ephemeral system prompt."),
         ("_business_bootstrap_instruction", "Create bootstrap prompt", "bootstrap-prompt", "Operational /create bootstrap instruction used by create/build when auto-starting a business."),
-        ("_plugin_skill_invocation_message", "Skill invocation wrapper", "skill-invocation-wrapper", "Loads a plugin skill and wraps the operator instruction for direct skill invocation."),
-        ("_load_ceo_skill", "CEO skill loader", "ceo-skill-loader", "Loads takyon:ceo through the skill tool with a filesystem fallback."),
+        ("_queue_skill_invocation", "Skill invocation wrapper", "skill-invocation-wrapper", "Loads a Hermes skill and wraps the operator instruction for direct skill invocation."),
+        ("_load_ceo_prompt", "CEO prompt loader", "ceo-prompt-loader", "Loads the stable Takyon CEO prompt file."),
     ]:
         start, end = _function_span(CLI_PATH, function_name)
         _add_node(
@@ -462,104 +432,39 @@ async def graph() -> dict[str, Any]:
     _add_edge(edges, edge_keys, "bootstrap-prompt", "manual-ceo-prompt", "create/build")
     _add_edge(edges, edge_keys, "skill-invocation-wrapper", "manual-ceo-prompt", "queued into session")
 
-    registry_skills = registry.get("skills") or []
-    registry_skill_refs = {str(item.get("skill")): item for item in registry_skills if item.get("skill")}
-    registered_skill_paths: set[str] = set()
-
     _add_node(
         nodes,
         sources,
-        node_id="registry",
-        label="Takyon registry",
-        kind="registry",
-        lane="registry",
-        description="Canonical Takyon skill, tool, category, and priority-band metadata used by the CEO and shell.",
-        source_path=REGISTRY_PATH,
-        source_kind="registry",
+        node_id="prompt:ceo",
+        label="Takyon CEO prompt",
+        kind="prompt",
+        lane="ceo",
+        description="Stable Takyon CEO runtime prompt. Wakes and creates add small invocation overlays instead of swapping prompt variants.",
+        source_path=CEO_PROMPT_PATH,
+        source_kind="runtime prompt",
         tags=["source of truth"],
         metadata={
-            "version": registry.get("version"),
-            "categories": registry.get("categories") or {},
-            "priority_bands": registry.get("priority_bands") or {},
-            "skill_count": len(registry.get("skills") or []),
-            "tool_count": len(registry.get("tools") or []),
+            "skills_root": str(SKILLS_ROOT),
+            "build_index_script": str(BUILD_SKILLS_INDEX_PATH),
         },
     )
-    _add_edge(edges, edge_keys, "manual-ceo-prompt", "registry", "tells CEO to use")
-
-    for item in registry_skills:
-        skill_ref = str(item.get("skill") or "")
-        name = str(item.get("name") or skill_ref.replace("takyon:", ""))
-        file_info = skill_files.get(skill_ref)
-        path = Path(file_info["path"]) if file_info else None
-        if path:
-            registered_skill_paths.add(str(path.resolve()))
-        node_id = f"skill:{skill_ref}"
-        is_ceo = skill_ref == "takyon:ceo"
-        _add_node(
-            nodes,
-            sources,
-            node_id=node_id,
-            label=skill_ref,
-            kind="skill",
-            lane="skills" if not is_ceo else "ceo",
-            description=str(item.get("purpose") or (file_info or {}).get("description") or ""),
-            source_path=path,
-            source_kind="skill",
-            tags=[
-                str(item.get("category") or "uncategorized"),
-                *[str(band) for band in (item.get("priority_bands") or [])],
-            ],
-            metadata={
-                "registry": item,
-                "frontmatter": (file_info or {}).get("frontmatter") or {},
-                "file_missing": path is None,
-            },
-        )
-        _add_edge(edges, edge_keys, "registry", node_id, "declares")
-        if is_ceo:
-            _add_edge(edges, edge_keys, "ceo-skill-loader", node_id, "loads")
-            _add_edge(edges, edge_keys, "manual-ceo-prompt", node_id, "ephemeral system prompt")
+    _add_edge(edges, edge_keys, "manual-ceo-prompt", "prompt:ceo", "ephemeral system prompt")
+    _add_edge(edges, edge_keys, "ceo-prompt-loader", "prompt:ceo", "loads")
 
     for skill_ref, file_info in skill_files.items():
-        if str(Path(file_info["path"]).resolve()) in registered_skill_paths:
-            continue
-        warnings.append(f"skill file is not in registry: {skill_ref}")
         _add_node(
             nodes,
             sources,
             node_id=f"skill:{skill_ref}",
             label=skill_ref,
-            kind="skill-orphan",
+            kind="skill",
             lane="skills",
-            description=file_info.get("description") or "Skill file exists but is not listed in TAKYON_SKILL_REGISTRY.",
+            description=file_info.get("description") or "Takyon Hermes skill",
             source_path=Path(file_info["path"]),
             source_kind="skill",
-            tags=["unregistered"],
+            tags=["takyon"],
             metadata={"frontmatter": file_info.get("frontmatter") or {}},
         )
-
-    tools_by_category: dict[str, list[dict[str, Any]]] = {}
-    for tool in registry.get("tools") or []:
-        tools_by_category.setdefault(str(tool.get("category") or "uncategorized"), []).append(tool)
-    for category, tools in sorted(tools_by_category.items()):
-        category_info = (registry.get("categories") or {}).get(category) or {}
-        _add_node(
-            nodes,
-            sources,
-            node_id=_tool_category_id(category),
-            label=f"Tools: {category}",
-            kind="tool-category",
-            lane="tools",
-            description=str(category_info.get("description") or f"{len(tools)} Takyon tools"),
-            source_path=REGISTRY_PATH,
-            source_kind="registry",
-            tags=["business_*", category],
-            metadata={"category": category, "tools": tools},
-        )
-        _add_edge(edges, edge_keys, "registry", _tool_category_id(category), f"{len(tools)} tools")
-
-    wake_tool = next((tool for tool in registry.get("tools") or [] if tool.get("name") == "business_schedule_ceo_wakeup"), None)
     _add_node(
         nodes,
         sources,
@@ -567,14 +472,12 @@ async def graph() -> dict[str, Any]:
         label="business_schedule_ceo_wakeup",
         kind="tool",
         lane="wakeups",
-        description=str((wake_tool or {}).get("purpose") or "Create or update a CEO wake cron job."),
-        source_path=REGISTRY_PATH,
-        source_kind="registry",
+        description="Create or update a CEO wake cron job.",
+        source_path=CORE_PATH,
+        source_kind="runtime",
         tags=["cron", "wakeup", "business_*"],
-        metadata={"registry": wake_tool or {}},
+        metadata={},
     )
-    _add_edge(edges, edge_keys, "registry", "tool:business_schedule_ceo_wakeup", "declares")
-    _add_edge(edges, edge_keys, "tool:business_schedule_ceo_wakeup", _tool_category_id("cron"), "belongs to")
 
     for function_name, label, node_id, desc, src in [
         ("handle_business_schedule_ceo_wakeup", "Schedule wakeup handler", "core-schedule-wakeup-handler", "business_schedule_ceo_wakeup commits cron.ensure_ceo_wakeup.", CORE_PATH),
@@ -609,7 +512,7 @@ async def graph() -> dict[str, Any]:
     _add_edge(edges, edge_keys, "cron-create-job", "cron-skill-fields", "stores skills")
     _add_edge(edges, edge_keys, "cron-skill-fields", "cron-build-job-prompt", "runtime load")
     _add_edge(edges, edge_keys, "cron-build-job-prompt", "cron-injection-scan", "guard")
-    _add_edge(edges, edge_keys, "cron-build-job-prompt", "skill:takyon:ceo", "loads takyon:ceo")
+    _add_edge(edges, edge_keys, "cron-build-job-prompt", "prompt:ceo", "uses stable CEO prompt")
 
     jobs_file = _cron_jobs_file()
     if jobs_file.exists():
@@ -637,7 +540,7 @@ async def graph() -> dict[str, Any]:
         if isinstance(skills, str):
             skills = [skills]
         skills = [str(item) for item in skills if item]
-        is_ceo_job = name.startswith("takyon-ceo:") or "takyon:ceo" in skills
+        is_ceo_job = name.startswith("takyon-ceo:")
         if not is_ceo_job:
             continue
         job_id = str(job.get("id") or name)
@@ -678,7 +581,7 @@ async def graph() -> dict[str, Any]:
         _add_edge(edges, edge_keys, "shell-settings", node_id, "file-backed command")
         _add_edge(edges, edge_keys, node_id, "manual-ceo-prompt", "renders into CEO turn")
 
-    relevant_controls = {"create", "wake", "registry", "skills", "commands", "cron", "run", "goal"}
+    relevant_controls = {"create", "wake", "skills-index", "skills", "commands", "cron", "run", "goal"}
     for command in settings.get("controlCommands") or []:
         name = str(command.get("name") or "").strip()
         if name not in relevant_controls:
@@ -704,12 +607,11 @@ async def graph() -> dict[str, Any]:
             _add_edge(edges, edge_keys, node_id, "tool:business_schedule_ceo_wakeup", "schedules")
         elif name in {"run", "goal"}:
             _add_edge(edges, edge_keys, node_id, "manual-ceo-prompt", "manual instruction")
-        elif name in {"registry", "skills", "commands"}:
-            _add_edge(edges, edge_keys, node_id, "registry", "reads")
+        elif name == "skills-index":
+            _add_edge(edges, edge_keys, node_id, "prompt:ceo", "rebuilds skill discovery context")
 
     # Derive cross-skill and skill-to-tool references from the actual skill text.
-    tool_names = [str(tool.get("name")) for tool in registry.get("tools") or [] if tool.get("name")]
-    tool_category_by_name = {str(tool.get("name")): str(tool.get("category") or "uncategorized") for tool in registry.get("tools") or []}
+    tool_names = ["business_calculate_pulse", "business_schedule_ceo_wakeup", "business_claude_agent_task", "business_publish_outreach"]
     skill_refs = sorted(skill_files.keys(), key=len, reverse=True)
     for skill_ref, file_info in skill_files.items():
         source_id = f"skill:{skill_ref}"
@@ -721,17 +623,12 @@ async def graph() -> dict[str, Any]:
                 _add_edge(edges, edge_keys, source_id, f"skill:{other_ref}", "mentions")
         for tool_name in tool_names:
             if re.search(rf"\b{re.escape(tool_name)}\b", content):
-                _add_edge(edges, edge_keys, source_id, _tool_category_id(tool_category_by_name[tool_name]), "uses tool category", "reference")
+                _add_edge(edges, edge_keys, source_id, "tool:business_schedule_ceo_wakeup" if tool_name == "business_schedule_ceo_wakeup" else "manual-ceo-prompt", f"mentions {tool_name}", "reference")
 
-    if "skill:takyon:business-pulse" in {node["id"] for node in nodes}:
-        _add_edge(edges, edge_keys, "core-ceo-cron-prompt", "skill:takyon:business-pulse", "wake step")
-        _add_edge(edges, edge_keys, "skill:takyon:ceo", "skill:takyon:business-pulse", "wake protocol")
-    _add_edge(edges, edge_keys, "skill:takyon:ceo", "registry", "routes by metadata")
-    _add_edge(edges, edge_keys, "skill:takyon:ceo", "tool:business_schedule_ceo_wakeup", "can schedule next wake")
-
-    registered_refs = set(registry_skill_refs)
-    for ref in sorted(registered_refs - set(skill_files)):
-        warnings.append(f"registry skill has no file: {ref}")
+    if "skill:takyon-business-metrics" in {node["id"] for node in nodes}:
+        _add_edge(edges, edge_keys, "core-ceo-cron-prompt", "skill:takyon-business-metrics", "wake step")
+        _add_edge(edges, edge_keys, "prompt:ceo", "skill:takyon-business-metrics", "wake protocol")
+    _add_edge(edges, edge_keys, "prompt:ceo", "tool:business_schedule_ceo_wakeup", "can schedule next wake")
 
     return {
         "version": 1,
@@ -739,8 +636,9 @@ async def graph() -> dict[str, Any]:
         "project_root": str(PROJECT_ROOT),
         "takyon_home": str(_cron_jobs_file().parent.parent),
         "generated_from": {
-            "registry": str(REGISTRY_PATH),
+            "ceo_prompt": str(CEO_PROMPT_PATH),
             "skills_root": str(SKILLS_ROOT),
+            "skills_index_build": str(BUILD_SKILLS_INDEX_PATH),
             "harness_settings": str(HARNESS_SETTINGS_PATH),
             "harness_commands": str(HARNESS_COMMANDS_ROOT),
             "cron_jobs": str(CRON_JOBS_PY),
@@ -750,9 +648,9 @@ async def graph() -> dict[str, Any]:
         "summary": {
             "nodes": len(nodes),
             "edges": len(edges),
-            "skills_registered": len(registry.get("skills") or []),
+            "skills_registered": len(skill_files),
             "skill_files": len(skill_files),
-            "tools": len(registry.get("tools") or []),
+            "tools": len(tool_names),
             "harness_commands": len(harness_commands),
             "cron_jobs": len(cron_jobs),
         },

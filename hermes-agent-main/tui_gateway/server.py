@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from agent.skill_utils import parse_frontmatter
 from takyon_constants import get_takyon_home
 from takyon_cli.env_loader import load_takyon_dotenv
 from utils import is_truthy_value
@@ -4661,41 +4662,54 @@ def _takyon_maybe_auto_enter_created_business(
 
 def _takyon_registry_display_payload() -> dict[str, Any]:
     try:
-        from plugins.takyon.registry import business_registry_snapshot
-
-        snapshot = business_registry_snapshot()
+        from plugins.takyon.core import TAKYON_TOOL_DEFINITIONS
     except Exception as exc:
         return {"version": None, "tools": {}, "skills": {}, "warning": str(exc)}
 
-    def display_entry(item: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "display_name": str(item.get("display_name") or "").strip(),
-            "activity_verb": str(item.get("activity_verb") or "").strip(),
-            "detail_hint": str(item.get("detail_hint") or "").strip(),
-            "detail_keys": [
-                str(key).strip()
-                for key in item.get("detail_keys", [])
-                if str(key).strip()
-            ],
-            "implementation_status": str(item.get("implementation_status") or "").strip(),
-            "category": str(item.get("category") or "").strip(),
-            "effect": str(item.get("effect") or "").strip(),
+    detail_keys = {
+        "business_read_business": ["business"],
+        "business_calculate_pulse": ["business"],
+        "business_upsert_app_surface_contract": ["source_path", "publish_target", "business"],
+        "business_publish_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
+        "business_claude_agent_task": ["workspace", "source_path", "business"],
+        "business_conversation_agent_task": ["goal", "task", "context", "business"],
+        "business_record_agent": ["scope", "status", "business"],
+    }
+    tools: dict[str, dict[str, Any]] = {}
+    for item in TAKYON_TOOL_DEFINITIONS:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        tools[name] = {
+            "display_name": name.replace("business_", "").replace("_", " ").strip().title(),
+            "activity_verb": "",
+            "detail_hint": "",
+            "detail_keys": detail_keys.get(name, []),
+            "implementation_status": "implemented",
+            "category": "",
+            "effect": "",
         }
 
-    tools = {
-        str(item.get("name")): display_entry(item)
-        for item in snapshot.get("tools", [])
-        if isinstance(item, dict) and item.get("name")
-    }
+    skills_root = Path(__file__).resolve().parents[1] / "skills" / "takyon"
     skills: dict[str, dict[str, Any]] = {}
-    for item in snapshot.get("skills", []):
-        if not isinstance(item, dict):
+    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+        try:
+            meta = parse_frontmatter(skill_file.read_text(encoding="utf-8"))[0]
+        except Exception:
+            meta = {}
+        skill_name = str(meta.get("name") or skill_file.parent.name).strip()
+        if not skill_name:
             continue
-        entry = display_entry(item)
-        for key in (item.get("name"), item.get("skill")):
-            if key:
-                skills[str(key)] = entry
-    return {"version": snapshot.get("version"), "tools": tools, "skills": skills}
+        skills[skill_name] = {
+            "display_name": skill_name,
+            "activity_verb": "",
+            "detail_hint": "",
+            "detail_keys": [],
+            "implementation_status": "implemented",
+            "category": str(((meta.get("metadata") or {}).get("hermes") or {}).get("category") or "").strip(),
+            "effect": "",
+        }
+    return {"version": "takyon-hermes-skills", "tools": tools, "skills": skills}
 
 
 def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
@@ -5086,7 +5100,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                     if not path.is_file() or path.name.startswith("."):
                         continue
                     rel = str(path.relative_to(business_root))
-                    if rel in {"brain/index.md", "brain/pulse.md", "brain/wake_journal.md"}:
+                    if rel in {"research/index.md", "metrics/summary.md", "metrics/wake-history.md"}:
                         continue
                     stat = path.stat()
                     by_path[rel] = {
@@ -5425,15 +5439,15 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
         return "file", "Website surface (local source)"
     if path.startswith("product/site/"):
         return "file", "Website source asset"
-    if path.startswith("receipts/outreach/"):
+    if path.startswith("metrics/receipts/outreach/"):
         return "receipt", "Outreach publish receipt"
-    if path.startswith("receipts/creative-assets/"):
+    if path.startswith("metrics/receipts/creative-assets/"):
         return "receipt", "Creative asset receipt"
     if path.startswith("distribution/outreach-drafts"):
         return "file", "Outreach draft only"
     if "ugc" in path.lower() and suffix in {".md", ".txt"}:
         return "file", "Creative brief draft only"
-    if top == "receipts":
+    if path.startswith("metrics/receipts/") or top == "receipts":
         return "receipt", "Business receipt"
     if top in {"reports", "outputs"}:
         return "report", "Historical output"
@@ -5518,12 +5532,12 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
 
     candidates: set[Path] = set()
     exact_paths = {
-        "app/index.md",
-        "app/surface.md",
-        "app/usage.md",
-        "brain/index.md",
-        "brain/pulse.md",
-        "brain/wake_journal.md",
+        "product/runtime.md",
+        "product/surface.md",
+        "product/usage.md",
+        "research/index.md",
+        "metrics/summary.md",
+        "metrics/wake-history.md",
         "product/design-brief.md",
         "product/mvp-spec.md",
         "product/site/index.html",

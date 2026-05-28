@@ -18,17 +18,17 @@ Keep these two identity layers separate:
 
 ## Takyon Product App Surfaces
 
-Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `app/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
+Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `product/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
 
 ## Hermes-Style Takyon Work
 
-Implement Takyon behavior the Hermes way: the CEO reasons through skills, skills describe operating modes, tools provide guarded state changes/side effects, and the business filesystem records durable context. Do not add local deterministic business flows, one-off worker stages, hardcoded startup sequences, or UI-only command lists when a skill, registry entry, harness command file, or business-scoped tool can express the behavior.
+Implement Takyon behavior the Hermes way: the CEO reasons through skills, skills describe operating modes, tools provide guarded state changes/side effects, and the business filesystem records durable context. Do not add local deterministic business flows, one-off worker stages, hardcoded startup sequences, or UI-only command lists when a skill, harness command file, or business-scoped tool can express the behavior.
 
 When Takyon creates or updates business artifacts, the operator should be able to see where they landed. Surface the business filesystem root and paths for outreach, website/app, product, campaign, receipt, conversation, job, and wakeup deliverables through tool results, shell progress, or concise CEO reports.
 
-Default rule: everything business-facing should be a Takyon skill or a business-scoped tool visible in `business_registry`. The clear exceptions are shared safety/control rails: path containment, idempotency, credential checks, budget gates, pause/kill controls, cron wake scheduling, auth/session/payment/webhook protocol, and UI rendering mechanics. Even those exceptions should publish their user-facing command metadata through a single source of truth rather than separate UI hardcoding.
+Default rule: everything business-facing should be a Takyon skill discoverable through the Hermes skills index or a business-scoped tool visible through tool schemas/results. The clear exceptions are shared safety/control rails: path containment, idempotency, credential checks, budget gates, pause/kill controls, cron wake scheduling, auth/session/payment/webhook protocol, and UI rendering mechanics. Even those exceptions should publish their user-facing command metadata through a single source of truth rather than separate UI hardcoding.
 
-Slash-command UI must be registry-driven. Shell palettes/help should derive from `plugins/takyon/harness/settings.json` for controls, `plugins/takyon/harness/commands/*.md` for harness skill commands, and `plugins/takyon/registry.py` for Takyon skills/tools. If a future command or skill is added, updating that canonical source must be enough for shell discovery; do not duplicate slash command names/descriptions in the UI.
+Slash-command UI must be source-of-truth driven. Shell palettes/help should derive from `plugins/takyon/harness/settings.json` for controls, `plugins/takyon/harness/commands/*.md` for harness skill commands, and Hermes skill discovery for Takyon skills. If a future command or skill is added, updating that canonical source must be enough for shell discovery; do not duplicate slash command names/descriptions in the UI.
 
 ## Takyon Shell Model
 
@@ -38,7 +38,7 @@ The CEO is the scoped operator agent role. Plain text in the shell should route 
 
 For actionable business requests, the shell/CEO posture is autonomous execution. Do not respond with "say X and I'll do it", a tool-call recipe, or a staged checklist when the operator has already named a business, supplied a goal, or chosen an idea. Use business tools and skills to make durable progress, then report what changed and where it landed.
 
-Slash commands are narrow shell controls only: scope navigation, local status/inspection, setup/config, debug/doctor, server start/stop, and exit. Product-building behavior belongs in skills, tools, registry metadata, and per-business state.
+Slash commands are narrow shell controls only: scope navigation, local status/inspection, setup/config, debug/doctor, server start/stop, and exit. Product-building behavior belongs in skills, tools, and per-business state.
 
 ## Development Environment
 

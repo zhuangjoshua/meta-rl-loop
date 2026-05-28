@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,14 +24,12 @@ from plugins.takyon.core import (
     handle_business_generate_creative_asset,
     handle_business_list_businesses,
     handle_business_publish_outreach,
-    handle_business_registry,
     handle_business_request_app_magic_link,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
     handle_business_upsert_business,
     handle_business_verify_product_surface,
 )
-from plugins.takyon.registry import TAKYON_CATEGORIES, TAKYON_PRIORITY_BANDS, TAKYON_REGISTRY
 
 
 class _FakePluginContext:
@@ -64,39 +61,31 @@ def _commit(store: TakyonStore, scope: str, operations: list[dict], key: str):
     return store.commit(scope=scope, operations=operations, idempotency_key=key, reason="test", actor="test")
 
 
-def test_plugin_registers_skill_pack():
+def test_plugin_registers_tools_and_commands():
     import plugins.takyon as takyon
 
     ctx = _FakePluginContext()
     takyon.register(ctx)
     assert sorted(ctx.tools) == sorted(tool["name"] for tool in TAKYON_TOOL_DEFINITIONS)
-    assert set(ctx.skills) == {
-        "build-product",
-        "business-pulse",
-        "ceo",
-        "app-runtime",
-        "claude-agent-sdk",
-        "market-research",
-    }
+    assert ctx.skills == []
     assert ctx.commands == ["takyon"]
     assert set(ctx.slash_commands) == {"takyon"}
 
 
-def test_registry_covers_tools_and_skills():
-    registered_tools = {tool["name"] for tool in TAKYON_TOOL_DEFINITIONS}
-    registry_tools = {tool["name"] for tool in TAKYON_REGISTRY["tools"]}
-    assert registry_tools == registered_tools
-
-    skills_root = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "skills"
-    skill_dirs = {path.parent.name for path in skills_root.glob("*/SKILL.md")}
-    registry_skills = {skill["name"] for skill in TAKYON_REGISTRY["skills"]}
-    assert registry_skills == skill_dirs
-
-    for collection in (TAKYON_REGISTRY["tools"], TAKYON_REGISTRY["skills"]):
-        for item in collection:
-            assert item["category"] in TAKYON_CATEGORIES
-            assert item["priority_bands"]
-            assert set(item["priority_bands"]).issubset(TAKYON_PRIORITY_BANDS)
+def test_bundled_takyon_skills_exist():
+    skills_root = Path(__file__).resolve().parents[2] / "skills" / "takyon"
+    skill_files = {path.parent.name: path for path in skills_root.glob("*/SKILL.md")}
+    assert set(skill_files) == {
+        "takyon-app-runtime",
+        "takyon-build-product",
+        "takyon-business-metrics",
+        "takyon-claude-agent-sdk",
+        "takyon-distribution",
+        "takyon-market-research",
+    }
+    for path in skill_files.values():
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("---\nname:")
 
 
 def test_bootstrap_prompt_requires_phase_one_outreach_batch():
@@ -114,37 +103,9 @@ def test_bootstrap_prompt_requires_phase_one_outreach_batch():
 def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
     prompt = TakyonStore(tmp_path)._ceo_cron_prompt("demo")
 
-    assert "Advance the outreach lifecycle" in prompt
-    assert "distribution/phase-1-outreach/" in prompt
-    assert "if Phase 1 is incomplete" in prompt
-    assert "if complete but unreviewed" in prompt
-
-
-def test_registry_keeps_trimmed_core_skill_metadata():
-    skills = {skill["name"]: skill for skill in TAKYON_REGISTRY["skills"]}
-
-    assert set(skills) == {
-        "app-runtime",
-        "build-product",
-        "business-pulse",
-        "ceo",
-        "claude-agent-sdk",
-        "market-research",
-    }
-
-    assert "product/site surface" in skills["build-product"]["use_when"]
-    assert "research first" in skills["market-research"]["use_when"]
-
-
-def test_registry_tool_filters_by_category_and_priority():
-    result = json.loads(
-        handle_business_registry(
-            {"kind": "tools", "category": "queue", "priority_band": "p2_growth"}
-        )
-    )
-    assert result["success"] is True
-    assert [tool["name"] for tool in result["tools"]] == ["business_enqueue_job"]
-    assert "skills" not in result
+    assert "Refresh `metrics/summary.md` first" in prompt
+    assert "Inspect unresolved inbound replies/comments" in prompt
+    assert "Append a short durable note to `metrics/wake-history.md`" in prompt
 
 
 def test_runtime_capability_check_reports_requested_commands():
@@ -164,14 +125,22 @@ def test_product_publish_target_defaults_to_business_subdomain():
     assert _product_publish_target("latexflow") == "https://latexflow.fourmanifold.com/"
 
 
-def test_takyon_slash_runs_local_registry_command():
+def test_takyon_slash_runs_skills_index_command(monkeypatch):
     import plugins.takyon as takyon
+    import subprocess
+
+    fake_result = subprocess.CompletedProcess(
+        args=["python3", "build_takyon_skills_index.py"],
+        returncode=0,
+        stdout=json.dumps({"skills_index_built": True}),
+        stderr="",
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: fake_result)
 
     ctx = _FakePluginContext()
     takyon.register(ctx)
-    result = ctx.slash_commands["takyon"]["handler"]("registry tools queue p2_growth")
-    assert "business_enqueue_job" in result
-    assert '"skills"' not in result
+    result = ctx.slash_commands["takyon"]["handler"]("skills-index")
+    assert '"skills_index_built": true' in result.lower()
 
 
 def test_takyon_slash_can_proxy_installed_skills(monkeypatch):
@@ -197,27 +166,27 @@ def test_takyon_slash_can_proxy_installed_skills(monkeypatch):
     assert ctx.injected == [("user", "skill=/demo-skill; instruction=do useful work")]
 
 
-def test_takyon_slash_can_proxy_takyon_plugin_skills(monkeypatch):
+def test_takyon_slash_can_proxy_takyon_skills(monkeypatch):
+    import agent.skill_commands as skill_commands
     import plugins.takyon as takyon
 
-    fake_skills_tool = types.ModuleType("tools.skills_tool")
-    fake_skills_tool.skill_view = lambda name: json.dumps(
-        {
-            "success": True,
-            "name": name,
-            "content": "# Market Research\n\nUse this skill.",
-        }
+    monkeypatch.setattr(
+        skill_commands,
+        "resolve_skill_command_key",
+        lambda name: "/takyon-market-research" if name in {"market-research", "takyon-market-research"} else None,
     )
-    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skills_tool)
+    monkeypatch.setattr(
+        skill_commands,
+        "build_skill_invocation_message",
+        lambda cmd_key, user_instruction="", **_: f"skill={cmd_key}; instruction={user_instruction}",
+    )
 
     ctx = _FakePluginContext()
     takyon.register(ctx)
     result = ctx.slash_commands["takyon"]["handler"]("market-research find channels")
 
-    assert result == "Queued Takyon skill takyon:market-research."
-    assert ctx.injected[0][0] == "user"
-    assert 'name="takyon:market-research"' in ctx.injected[0][1]
-    assert "find channels" in ctx.injected[0][1]
+    assert result == "Queued Takyon skill /takyon-market-research."
+    assert ctx.injected == [("user", "skill=/takyon-market-research; instruction=find channels")]
 
 
 def test_business_memory_is_business_scoped(tmp_path):
@@ -235,11 +204,11 @@ def test_business_memory_is_business_scoped(tmp_path):
         "write-pricing",
     )
 
-    result = store.read(scope="business:latexflow", query="read_file", path="brain/pricing.md")
+    result = store.read(scope="business:latexflow", query="read_file", path="research/pricing.md")
     assert result["content"] == "# Pricing\n"
 
     with pytest.raises(TakyonError):
-        store.read(scope="business:other", query="read_file", path="brain/pricing.md")
+        store.read(scope="business:other", query="read_file", path="research/pricing.md")
 
 
 def test_business_pulse_is_read_only_baseline(tmp_path):
@@ -264,6 +233,31 @@ def test_business_pulse_is_read_only_baseline(tmp_path):
     assert recorded["count"] == 0
 
 
+def test_business_upsert_seeds_skill_publication_paths(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Build PDFs"}],
+        "seed-publication-paths",
+    )
+
+    root = tmp_path / "businesses" / "latexflow"
+    assert (root / "product").is_dir()
+    assert (root / "distribution").is_dir()
+    assert (root / "research").is_dir()
+    assert (root / "metrics").is_dir()
+    assert (root / "research" / "strategy.md").exists()
+    assert (root / "research" / "market.md").read_text(encoding="utf-8").startswith("# Market Research")
+    assert (root / "research" / "sources.jsonl").read_text(encoding="utf-8") == ""
+    assert json.loads((root / "metrics" / "research-summary.json").read_text(encoding="utf-8")) == {}
+    assert (root / "product" / "design-brief.md").read_text(encoding="utf-8").startswith("# Product Design Brief")
+    assert (root / "product" / "site").is_dir()
+    assert (root / "distribution" / "phase-1-outreach").is_dir()
+    assert (root / "distribution" / "local-published").is_dir()
+    assert (root / "metrics" / "conversations").is_dir()
+
+
 def test_pulse_file_write_records_snapshot_event(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(
@@ -276,7 +270,7 @@ def test_pulse_file_write_records_snapshot_event(tmp_path):
     _commit(
         store,
         "business:latexflow",
-        [{"action": "artifact.write", "business": "latexflow", "path": "brain/pulse.md", "content": "# Pulse\n\nBaseline.\n"}],
+        [{"action": "artifact.write", "business": "latexflow", "path": "metrics/summary.md", "content": "# Summary\n\nBaseline.\n"}],
         "write-pulse",
     )
 
@@ -1188,8 +1182,8 @@ def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_p
     root_files = store.read(scope="business:longer", query="list_files", path=".")["files"]
     assert "distribution" in {item["path"] for item in root_files}
     assert "receipts" not in {item["path"] for item in root_files}
-    receipt_files = store.read(scope="business:longer", query="list_files", path="receipts")["files"]
-    assert "receipts/outreach" in {item["path"] for item in receipt_files}
+    receipt_files = store.read(scope="business:longer", query="list_files", path="metrics/receipts")["files"]
+    assert "metrics/receipts/outreach" in {item["path"] for item in receipt_files}
 
 
 def test_manual_paid_entitlement_requires_billing_evidence(tmp_path):
@@ -1301,7 +1295,7 @@ def test_brain_index_completion_gate_requires_feature_evidence(tmp_path):
         "good-index",
     )
 
-    assert result["results"][0]["path"] == "brain/index.md"
+    assert result["results"][0]["path"] == "research/index.md"
 
 
 def test_gc_is_dry_run_by_default_and_keeps_protected_rows(tmp_path):
@@ -1389,7 +1383,7 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
         prompt="CEO wakeup for business:latexflow.",
         schedule="every 1h",
         name="takyon-ceo:latexflow",
-        skills=["takyon:ceo"],
+        skills=[],
     )
 
     result = _commit(
@@ -1475,8 +1469,8 @@ def test_conversation_messages_append_permanent_corpus(tmp_path):
 
     message_result = result["results"][0]
     assert message_result["status"] == "needs_response"
-    corpus = tmp_path / "businesses" / "latexflow" / "conversations" / "corpus" / "messages.jsonl"
-    events = tmp_path / "businesses" / "latexflow" / "conversations" / "corpus" / "events.jsonl"
+    corpus = tmp_path / "businesses" / "latexflow" / "metrics" / "conversations" / "corpus" / "messages.jsonl"
+    events = tmp_path / "businesses" / "latexflow" / "metrics" / "conversations" / "corpus" / "events.jsonl"
     lines = corpus.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     row = json.loads(lines[0])
