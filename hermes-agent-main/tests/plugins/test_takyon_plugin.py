@@ -233,13 +233,13 @@ def test_business_pulse_is_read_only_baseline(tmp_path):
     assert recorded["count"] == 0
 
 
-def test_business_upsert_seeds_skill_publication_paths(tmp_path):
+def test_business_upsert_seeds_only_canonical_roots(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(
         store,
         "business:latexflow",
         [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Build PDFs"}],
-        "seed-publication-paths",
+        "seed-canonical-roots",
     )
 
     root = tmp_path / "businesses" / "latexflow"
@@ -248,14 +248,10 @@ def test_business_upsert_seeds_skill_publication_paths(tmp_path):
     assert (root / "research").is_dir()
     assert (root / "metrics").is_dir()
     assert (root / "research" / "strategy.md").exists()
-    assert (root / "research" / "market.md").read_text(encoding="utf-8").startswith("# Market Research")
-    assert (root / "research" / "sources.jsonl").read_text(encoding="utf-8") == ""
-    assert json.loads((root / "metrics" / "research-summary.json").read_text(encoding="utf-8")) == {}
-    assert (root / "product" / "design-brief.md").read_text(encoding="utf-8").startswith("# Product Design Brief")
-    assert (root / "product" / "site").is_dir()
-    assert (root / "distribution" / "phase-1-outreach").is_dir()
-    assert (root / "distribution" / "local-published").is_dir()
-    assert (root / "metrics" / "conversations").is_dir()
+    assert not (root / "research" / "market.md").exists()
+    assert not (root / "metrics" / "summary.md").exists()
+    assert not (root / "product" / "design-brief.md").exists()
+    assert not (root / "distribution" / "phase-1-outreach").exists()
 
 
 def test_pulse_file_write_records_snapshot_event(tmp_path):

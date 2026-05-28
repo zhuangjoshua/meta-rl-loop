@@ -23,8 +23,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from agent.skill_utils import parse_frontmatter
-
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv.
@@ -58,7 +56,6 @@ CURRENT_BUSINESS_SCHEMA_VERSION = 1
 CURRENT_BUSINESS_CAPABILITY_VERSION = 1
 BUSINESS_UPGRADE_RECEIPT = "metrics/receipts/upgrades/takyon-business-upgrade-v1.json"
 TAKYON_BUSINESS_ROOTS = ("product", "distribution", "research", "metrics")
-TAKYON_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills" / "takyon"
 NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - You are not allowed to invent backend behavior.
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
@@ -121,60 +118,6 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "website_build_deploy": ("vercel",),
     "x_social": ("x",),
 }
-
-
-def _takyon_skill_publication_specs() -> list[dict[str, Any]]:
-    specs: list[dict[str, Any]] = []
-    for skill_md in sorted(TAKYON_SKILLS_ROOT.glob("takyon-*/SKILL.md")):
-        frontmatter, _body = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
-        metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
-        takyon_meta = metadata.get("takyon") if isinstance(metadata.get("takyon"), dict) else {}
-        publication = takyon_meta.get("publication")
-        if not isinstance(publication, list) or not publication:
-            continue
-        specs.append(
-            {
-                "skill": str(frontmatter.get("name") or skill_md.parent.name),
-                "publication": [str(item).strip() for item in publication if str(item).strip()],
-                "templates_dir": skill_md.parent / "templates",
-            }
-        )
-    return specs
-
-
-def _publication_title(path: Path) -> str:
-    words = [part.replace("-", " ").replace("_", " ") for part in path.parts]
-    if path.suffix:
-        words[-1] = path.stem.replace("-", " ").replace("_", " ")
-    return " ".join(word.title() for word in words if word)
-
-
-def _publication_seed_text(relative_path: Path, templates_dir: Path) -> str:
-    if relative_path.suffix == ".json":
-        return "{}\n"
-    if relative_path.suffix == ".jsonl":
-        return ""
-    if relative_path.suffix == ".md":
-        template_path = templates_dir / relative_path.name
-        if template_path.is_file():
-            return template_path.read_text(encoding="utf-8")
-        return f"# {_publication_title(relative_path)}\n\n"
-    return ""
-
-
-def _seed_business_publication_paths(root: Path) -> None:
-    for spec in _takyon_skill_publication_specs():
-        templates_dir = spec["templates_dir"]
-        for publication_path in spec["publication"]:
-            rel = _safe_relpath(publication_path, field="publication")
-            target = root / rel
-            if not rel.suffix:
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                continue
-            _atomic_write_text(target, _publication_seed_text(rel, templates_dir))
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
 
 
@@ -4511,7 +4454,6 @@ class TakyonStore:
             strategy = root / "research" / "strategy.md"
             if not strategy.exists():
                 _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
-            _seed_business_publication_paths(root)
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
 
