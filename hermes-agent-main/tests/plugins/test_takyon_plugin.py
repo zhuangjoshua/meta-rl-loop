@@ -27,6 +27,8 @@ from plugins.takyon.core import (
     handle_business_request_app_magic_link,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
+    handle_business_list_conversation_messages,
+    handle_business_read_conversation_thread,
     handle_business_upsert_business,
     handle_business_verify_product_surface,
 )
@@ -67,6 +69,9 @@ def test_plugin_registers_tools_and_commands():
     ctx = _FakePluginContext()
     takyon.register(ctx)
     assert sorted(ctx.tools) == sorted(tool["name"] for tool in TAKYON_TOOL_DEFINITIONS)
+    assert "business_list_conversation_messages" in ctx.tools
+    assert "business_read_conversation_thread" in ctx.tools
+    assert "business_conversation_agent_task" not in ctx.tools
     assert ctx.skills == []
     assert ctx.commands == ["takyon"]
     assert set(ctx.slash_commands) == {"takyon"}
@@ -80,20 +85,23 @@ def test_bundled_takyon_skills_exist():
         "takyon-build-product",
         "takyon-business-metrics",
         "takyon-claude-agent-sdk",
+        "takyon-conversation-followup",
         "takyon-distribution",
         "takyon-market-research",
+        "takyon-reddit",
+        "takyon-x",
     }
     for path in skill_files.values():
         text = path.read_text(encoding="utf-8")
         assert text.startswith("---\nname:")
 
 
-def test_bootstrap_prompt_requires_phase_one_outreach_batch():
+def test_bootstrap_prompt_requires_distribution_campaign_batch():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    assert "distribution/phase-1-outreach/" in prompt
+    assert "distribution/campaign/" in prompt
     assert "3 evidence-backed lanes" in prompt
     assert "6 total" in prompt
     assert "business_publish_outreach" in prompt
@@ -101,11 +109,14 @@ def test_bootstrap_prompt_requires_phase_one_outreach_batch():
 
 
 def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
-    prompt = TakyonStore(tmp_path)._ceo_cron_prompt("demo")
+    store = TakyonStore(tmp_path)
+    prompt = store._ceo_cron_prompt("demo")
 
-    assert "Refresh `metrics/summary.md` first" in prompt
-    assert "Inspect unresolved inbound replies/comments" in prompt
-    assert "Append a short durable note to `metrics/wake-history.md`" in prompt
+    assert "Start with business_calculate_pulse" in prompt
+    assert "takyon-business-metrics" in prompt
+    assert "takyon-conversation-followup" in prompt
+    assert "business_conversation_agent_task" not in prompt
+    assert store._ceo_cron_toolsets() == ["takyon", "web", "skills", "todo"]
 
 
 def test_runtime_capability_check_reports_requested_commands():
@@ -125,22 +136,45 @@ def test_product_publish_target_defaults_to_business_subdomain():
     assert _product_publish_target("latexflow") == "https://latexflow.fourmanifold.com/"
 
 
-def test_takyon_slash_runs_skills_index_command(monkeypatch):
-    import plugins.takyon as takyon
-    import subprocess
+def test_takyon_skills_index_command_is_removed():
+    from plugins.takyon.cli import run_takyon_command, takyon_slash_command
 
-    fake_result = subprocess.CompletedProcess(
-        args=["python3", "build_takyon_skills_index.py"],
-        returncode=0,
-        stdout=json.dumps({"skills_index_built": True}),
-        stderr="",
+    message = "takyon skills-index was removed. Start a fresh ./takyon run or relaunch the shell to sync bundled skills automatically."
+
+    with pytest.raises(SystemExit, match="skills-index was removed"):
+        run_takyon_command(["skills-index"])
+
+    assert takyon_slash_command("skills-index") == message
+
+
+def test_plugin_cli_main_syncs_bundled_skills_on_startup(monkeypatch):
+    import plugins.takyon.cli as takyon_cli
+    import tools.skills_sync as skills_sync
+
+    calls: list[tuple[str, object]] = []
+
+    class _Parser:
+        def parse_args(self, argv):
+            calls.append(("parse_args", list(argv or [])))
+            return types.SimpleNamespace(example=True)
+
+    monkeypatch.setattr(takyon_cli, "build_parser", lambda: _Parser())
+    monkeypatch.setattr(
+        takyon_cli,
+        "takyon_command",
+        lambda args: calls.append(("takyon_command", args)),
     )
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: fake_result)
+    monkeypatch.setattr(
+        skills_sync,
+        "sync_skills",
+        lambda quiet=True: calls.append(("sync_skills", quiet)),
+    )
 
-    ctx = _FakePluginContext()
-    takyon.register(ctx)
-    result = ctx.slash_commands["takyon"]["handler"]("skills-index")
-    assert '"skills_index_built": true' in result.lower()
+    takyon_cli.main(["commands"])
+
+    assert ("parse_args", ["commands"]) in calls
+    assert ("sync_skills", True) in calls
+    assert any(name == "takyon_command" for name, _ in calls)
 
 
 def test_takyon_slash_can_proxy_installed_skills(monkeypatch):
@@ -251,7 +285,7 @@ def test_business_upsert_seeds_only_canonical_roots(tmp_path):
     assert not (root / "research" / "market.md").exists()
     assert not (root / "metrics" / "summary.md").exists()
     assert not (root / "product" / "design-brief.md").exists()
-    assert not (root / "distribution" / "phase-1-outreach").exists()
+    assert not (root / "distribution" / "campaign").exists()
 
 
 def test_pulse_file_write_records_snapshot_event(tmp_path):
@@ -1519,6 +1553,62 @@ def test_conversation_message_status_update_rewrites_thread(tmp_path):
     assert result["results"][0]["status"] == "ignored"
     thread_path = tmp_path / "businesses" / "latexflow" / result["results"][0]["file"]
     assert "Status: ignored" in thread_path.read_text(encoding="utf-8")
+
+
+def test_conversation_read_tools_return_filtered_backlog_and_thread(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "conversation.message.record",
+                "business": "latexflow",
+                "source": "reddit",
+                "thread_external_id": "post-9",
+                "thread_title": "Launch feedback",
+                "external_id": "comment-9",
+                "direction": "inbound",
+                "author_label": "founder",
+                "body": "This looks promising but I need pricing.",
+            },
+            {
+                "action": "conversation.message.record",
+                "business": "latexflow",
+                "source": "reddit",
+                "thread_external_id": "post-9",
+                "thread_title": "Launch feedback",
+                "external_id": "reply-9",
+                "direction": "outbound",
+                "author_label": "Takyon",
+                "body": "Thanks for the note.",
+                "status": "responded",
+            },
+        ],
+        "conversation",
+    )
+
+    backlog = json.loads(handle_business_list_conversation_messages({"business": "latexflow"}))
+    assert backlog["success"] is True
+    assert len(backlog["messages"]) == 1
+    assert backlog["messages"][0]["direction"] == "inbound"
+    assert backlog["messages"][0]["thread_file"].startswith("metrics/conversations/reddit/")
+
+    thread = json.loads(
+        handle_business_read_conversation_thread(
+            {"business": "latexflow", "thread_id": backlog["messages"][0]["thread_id"]}
+        )
+    )
+    assert thread["success"] is True
+    assert thread["file"].startswith("metrics/conversations/reddit/")
+    assert [message["direction"] for message in thread["messages"]] == ["inbound", "outbound"]
 
 
 def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_path, monkeypatch):

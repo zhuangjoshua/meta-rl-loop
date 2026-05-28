@@ -82,8 +82,9 @@ When changing CEO/runtime behavior, edit the stable CEO prompt at `hermes-agent-
 
 - `plugins/takyon/prompts/ceo.md` is the stable state-aware router prompt.
 - `takyon-claude-agent-sdk` / `business_claude_agent_task` is the bounded Claude Agent SDK path for business-scoped workspace edits.
+- Do not reintroduce generic Hermes `delegate_task` into normal Takyon CEO runs; the coding worker lane above is the one special worker path.
 - `takyon-app-runtime` and the canonical app tools own product customer auth, magic links, sessions, app customers/subusers, entitlements, plan policy, checkout, Stripe webhook reconciliation, revenue, and usage budgets.
-- `takyon-business-metrics`, `takyon-market-research`, `takyon-build-product`, and `takyon-distribution` own the remaining active business methods.
+- `takyon-business-metrics`, `takyon-market-research`, `takyon-build-product`, `takyon-distribution`, `takyon-x`, `takyon-reddit`, and `takyon-conversation-followup` own the remaining active business methods.
 
 When the operator asks to add a normal new Takyon feature or skill, always use the parsimonious addition path:
 
@@ -96,10 +97,10 @@ When the operator asks to add a normal new Takyon feature or skill, always use t
 4. Add `references/`, `templates/`, `scripts/`, or `assets/` only when the skill truly needs them.
 5. Add or modify a `business_*` tool only if the feature needs a new canonical state change, guarded side effect, provider call, receipt, budget gate, or durable runtime rail. The skill should name the tool in its body, but the tool must exist in code. If no existing tool fits, create the new tool in the same format documented in `hermes-agent-main/skills/takyon/BUILDING-SKILLS-AND-TOOLS.md`.
 6. Add a harness command only if the operator needs `/new-feature` as a shell affordance; do not create slash commands for ordinary CEO-choosable business methods.
-7. Rebuild the bundled skills snapshot with `./takyon skills-index`.
+7. Start a fresh `./takyon` run or relaunch the shell so bundled Takyon skills sync automatically and Hermes rebuilds the skills index from the updated skill tree.
 8. Do not edit the CEO prompt unless the CEO's general policy, routing rule, or safety contract changes.
 
-For every new feature, skill, or tool, first understand when it should be used and verify that the existing Takyon piping will let it be used in those places without hardcoding a deterministic workflow. Check the relevant routing and discovery surfaces: the initial/bootstrap prompt, `plugins/takyon/prompts/ceo.md`, related skills' `SKILL.md` files, the Hermes skills index build, shell/harness metadata, and any canonical tools or runtime rails. Update only the surfaces that genuinely need to know about the feature; do not duplicate routing rules across prompts, skills, or UI code.
+For every new feature, skill, or tool, first understand when it should be used and verify that the existing Takyon piping will let it be used in those places without hardcoding a deterministic workflow. Check the relevant routing and discovery surfaces: the initial/bootstrap prompt, `plugins/takyon/prompts/ceo.md`, related skills' `SKILL.md` files, the runtime Hermes skills index, shell/harness metadata, and any canonical tools or runtime rails. Update only the surfaces that genuinely need to know about the feature; do not duplicate routing rules across prompts, skills, or UI code.
 
 Takyon skills must keep rich normal-Hermes operational detail. Do not collapse `How to Run`, `Procedure`, or `Verification Checklist` into generic prompt prose. Those sections should explicitly name the exact tool names used, the files or state checked first, the expected outputs, the branch points for test/live or present/missing state, and the receipts or file paths that prove success. Converting a good Hermes skill into a Takyon skill means adding `metadata.takyon.*` and `## Publication`, not removing the concrete operational detail.
 

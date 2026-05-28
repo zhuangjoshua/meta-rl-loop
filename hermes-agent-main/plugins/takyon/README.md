@@ -12,7 +12,6 @@ takyon read latexflow research/index.md
 takyon show latexflow
 takyon files latexflow
 takyon wake latexflow "every 6h"
-takyon skills-index
 takyon budget set latexflow 100
 takyon delete latexflow
 takyon delete latexflow --confirm
@@ -27,7 +26,6 @@ In the interactive shell:
 /status
 /files
 /read research/index.md
-/skills-index
 ```
 
 Plain text in the shell goes to the scoped CEO by default. `/ceo` is only a focus/status affordance.
@@ -77,25 +75,18 @@ skills/takyon/takyon-market-research/
 skills/takyon/takyon-build-product/
 skills/takyon/takyon-app-runtime/
 skills/takyon/takyon-distribution/
+skills/takyon/takyon-x/
+skills/takyon/takyon-reddit/
+skills/takyon/takyon-conversation-followup/
 skills/takyon/takyon-business-metrics/
 skills/takyon/takyon-claude-agent-sdk/
 ```
 
 Each skill is discovered the Hermes way: `SKILL.md` frontmatter supplies name/description/platform metadata, Hermes builds a compact skills index, and the model loads a skill with `skill_view(...)` when it matches.
 
-Takyon skill frontmatter is strict YAML. Invalid or malformed frontmatter should fail `./takyon skills-index`; it should not degrade into ad hoc parsing.
+Takyon skill frontmatter is strict YAML. Invalid or malformed frontmatter should fail normal runtime skill discovery/build; it should not degrade into ad hoc parsing.
 
-The canonical local rebuild step is:
-
-```bash
-./takyon skills-index
-```
-
-That command:
-
-1. syncs bundled Takyon skills into the active Hermes skills directory
-2. rebuilds the cached Hermes skills snapshot
-3. primes the compact skills index used in future Takyon sessions
+Bundled Takyon skills sync automatically on CLI launch and gateway startup. After changing skills, start a fresh `./takyon` run or relaunch the shell so Hermes can rebuild the compact skills index from the updated skill tree.
 
 ## Canonical Skill Shape
 

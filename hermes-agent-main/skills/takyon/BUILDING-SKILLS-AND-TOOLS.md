@@ -33,11 +33,7 @@ When filling that template in, keep `How to Run`, `Procedure`, and `Verification
 - say what to do if the needed state is missing
 - say what file, mirror, or receipt proves success
 
-After editing a skill:
-
-```bash
-./takyon skills-index
-```
+After editing a skill, start a fresh `./takyon` run or relaunch the shell so bundled Takyon skills sync automatically and Hermes rebuilds the runtime skills index.
 
 ## Tool Template
 

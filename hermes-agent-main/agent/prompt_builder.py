@@ -141,12 +141,6 @@ DEFAULT_AGENT_IDENTITY = (
     "Be targeted and efficient in your exploration and investigations."
 )
 
-TAKYON_AGENT_HELP_GUIDANCE = (
-    "If the user asks about configuring, setting up, or using Takyon Agent "
-    "itself, load the `takyon-agent` skill with skill_view(name='takyon-agent') "
-    "before answering. Docs: https://takyon-agent.nousresearch.com/docs"
-)
-
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
     "tool: user preferences, environment details, tool quirks, and stable conventions. "
@@ -184,6 +178,8 @@ SKILLS_GUIDANCE = (
     "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
     "Skills that aren't maintained become liabilities."
 )
+
+TAKYON_AGENT_HELP_GUIDANCE = os.getenv("TAKYON_AGENT_HELP_GUIDANCE", "").strip()
 
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
@@ -1203,9 +1199,9 @@ def build_skills_system_prompt(
             "already know how to do, because the skill defines how it should be done here.\n"
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
             "or troubleshoot Takyon Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `takyon-agent` skill "
-            "first. It has the actual commands (e.g. `takyon config set …`, `takyon tools`, "
-            "`takyon setup`) so you don't have to guess or invent workarounds.\n"
+            "skills, voice, gateway, plugins, or any feature — prefer the built-in Takyon "
+            "CLI/config/tool metadata and the active runtime docs instead of assuming a separate "
+            "helper skill exists.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "

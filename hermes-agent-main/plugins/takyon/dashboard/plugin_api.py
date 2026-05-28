@@ -36,7 +36,6 @@ CRON_JOBS_PY = PROJECT_ROOT / "cron" / "jobs.py"
 CRON_SCHEDULER_PY = PROJECT_ROOT / "cron" / "scheduler.py"
 ROOT_LAUNCHER = WORKSPACE_ROOT / "takyon"
 HERMES_LAUNCHER = PROJECT_ROOT / "takyon"
-BUILD_SKILLS_INDEX_PATH = PROJECT_ROOT / "scripts" / "build_takyon_skills_index.py"
 
 EXACT_EDITABLE = {
     CEO_PROMPT_PATH.resolve(),
@@ -45,7 +44,6 @@ EXACT_EDITABLE = {
     HARNESS_SETTINGS_PATH.resolve(),
     CRON_JOBS_PY.resolve(),
     CRON_SCHEDULER_PY.resolve(),
-    BUILD_SKILLS_INDEX_PATH.resolve(),
 }
 
 
@@ -91,7 +89,6 @@ def _exact_readable_files() -> set[Path]:
         CRON_SCHEDULER_PY.resolve(),
         ROOT_LAUNCHER.resolve(),
         HERMES_LAUNCHER.resolve(),
-        BUILD_SKILLS_INDEX_PATH.resolve(),
     }
     jobs_file = _cron_jobs_file()
     if jobs_file.exists():
@@ -581,7 +578,7 @@ async def graph() -> dict[str, Any]:
         _add_edge(edges, edge_keys, "shell-settings", node_id, "file-backed command")
         _add_edge(edges, edge_keys, node_id, "manual-ceo-prompt", "renders into CEO turn")
 
-    relevant_controls = {"create", "wake", "skills-index", "skills", "commands", "cron", "run", "goal"}
+    relevant_controls = {"create", "wake", "skills", "commands", "cron", "run", "goal"}
     for command in settings.get("controlCommands") or []:
         name = str(command.get("name") or "").strip()
         if name not in relevant_controls:
@@ -607,9 +604,6 @@ async def graph() -> dict[str, Any]:
             _add_edge(edges, edge_keys, node_id, "tool:business_schedule_ceo_wakeup", "schedules")
         elif name in {"run", "goal"}:
             _add_edge(edges, edge_keys, node_id, "manual-ceo-prompt", "manual instruction")
-        elif name == "skills-index":
-            _add_edge(edges, edge_keys, node_id, "prompt:ceo", "rebuilds skill discovery context")
-
     # Derive cross-skill and skill-to-tool references from the actual skill text.
     tool_names = ["business_calculate_pulse", "business_schedule_ceo_wakeup", "business_claude_agent_task", "business_publish_outreach"]
     skill_refs = sorted(skill_files.keys(), key=len, reverse=True)
@@ -638,7 +632,6 @@ async def graph() -> dict[str, Any]:
         "generated_from": {
             "ceo_prompt": str(CEO_PROMPT_PATH),
             "skills_root": str(SKILLS_ROOT),
-            "skills_index_build": str(BUILD_SKILLS_INDEX_PATH),
             "harness_settings": str(HARNESS_SETTINGS_PATH),
             "harness_commands": str(HARNESS_COMMANDS_ROOT),
             "cron_jobs": str(CRON_JOBS_PY),

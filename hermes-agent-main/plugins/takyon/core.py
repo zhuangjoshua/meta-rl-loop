@@ -5345,7 +5345,7 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, publication, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
-            "Advance the outreach lifecycle: if no outreach campaign exists, start distribution/phase-1-outreach/; if Phase 1 is incomplete, continue missing lanes/touches/files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly or use business_conversation_agent_task to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
+            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly with takyon-x or takyon-reddit when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -5358,7 +5358,7 @@ class TakyonStore:
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
-        return ["takyon", "web", "skills", "todo", "delegation"]
+        return ["takyon", "web", "skills", "todo"]
 
     def _refresh_business_ceo_cron_prompt(self, slug: str) -> dict[str, Any]:
         from cron.jobs import list_jobs, update_job
@@ -6856,6 +6856,137 @@ def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_list_conversation_messages(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        if not business:
+            raise TakyonError("business is required")
+
+        direction = str(args.get("direction") or "inbound").strip().lower()
+        status = str(args.get("status") or "needs_response").strip().lower()
+        source_filter = str(args.get("source") or "").strip()
+        thread_id = str(args.get("thread_id") or "").strip()
+        thread_external_id = str(args.get("thread_external_id") or "").strip()
+        limit = _clamp_int(args.get("limit"), default=100, minimum=1, maximum=500)
+
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            filters = ["m.business_slug = ?"]
+            params: list[Any] = [business]
+            if direction and direction != "all":
+                filters.append("m.direction = ?")
+                params.append(direction)
+            if status and status != "all":
+                filters.append("m.status = ?")
+                params.append(status)
+            if source_filter:
+                filters.append("m.source = ?")
+                params.append(_file_slug(source_filter, "source"))
+            if thread_id:
+                filters.append("m.thread_id = ?")
+                params.append(thread_id)
+            if thread_external_id:
+                filters.append("t.external_id = ?")
+                params.append(thread_external_id)
+
+            rows = conn.execute(
+                f"""
+                SELECT
+                  m.*,
+                  t.source AS thread_source,
+                  t.external_id AS thread_external_id,
+                  t.title AS thread_title,
+                  t.url AS thread_url,
+                  t.status AS thread_status
+                FROM conversation_messages m
+                JOIN conversation_threads t ON t.id = m.thread_id
+                WHERE {" AND ".join(filters)}
+                ORDER BY m.received_at DESC, m.created_at DESC
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+            messages = [store._row_to_dict(row) for row in rows]
+
+        for message in messages:
+            thread_meta = {
+                "id": message.get("thread_id"),
+                "source": message.get("thread_source") or message.get("source"),
+                "external_id": message.get("thread_external_id") or message.get("thread_id"),
+                "title": message.get("thread_title") or message.get("thread_id"),
+                "url": message.get("thread_url"),
+            }
+            message["thread_file"] = store._conversation_thread_relpath(thread_meta)
+
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_list_conversation_messages",
+                "business": business,
+                "filters": {
+                    "direction": direction,
+                    "status": status,
+                    "source": source_filter,
+                    "thread_id": thread_id,
+                    "thread_external_id": thread_external_id,
+                },
+                "messages": messages,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_read_conversation_thread(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        if not business:
+            raise TakyonError("business is required")
+
+        thread_id = str(args.get("thread_id") or "").strip()
+        source_filter = str(args.get("source") or "").strip()
+        thread_external_id = str(args.get("external_id") or args.get("thread_external_id") or "").strip()
+
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if thread_id:
+                thread_row = conn.execute(
+                    "SELECT * FROM conversation_threads WHERE business_slug = ? AND id = ?",
+                    (business, thread_id),
+                ).fetchone()
+            else:
+                if not source_filter or not thread_external_id:
+                    raise TakyonError("thread_id or source + external_id is required")
+                thread_row = conn.execute(
+                    "SELECT * FROM conversation_threads WHERE business_slug = ? AND source = ? AND external_id = ?",
+                    (business, _file_slug(source_filter, "source"), thread_external_id),
+                ).fetchone()
+            if not thread_row:
+                raise TakyonError("conversation thread not found")
+
+            thread = store._row_to_dict(thread_row)
+            rows = conn.execute(
+                "SELECT * FROM conversation_messages WHERE business_slug = ? AND thread_id = ? ORDER BY received_at ASC, created_at ASC",
+                (business, thread["id"]),
+            ).fetchall()
+            messages = [store._row_to_dict(row) for row in rows]
+
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_read_conversation_thread",
+                "business": business,
+                "file": store._conversation_thread_relpath(thread),
+                "thread": thread,
+                "messages": messages,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_record_conversation_message(args: dict, **_: Any) -> str:
     operation = {
         "action": "conversation.message.record",
@@ -7405,283 +7536,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
-_CONVERSATION_AGENT_TASK_TYPES = {
-    "triage",
-    "cluster",
-    "draft_replies",
-    "respond",
-    "extract_learnings",
-    "identify_leads",
-}
-
-
-def _read_conversation_agent_actions(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8") or "{}")
-    if not isinstance(data, dict):
-        raise TakyonError("conversation agent actions.json must be an object")
-    return data
-
-
-def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
-    """Delegate bounded conversation response work to a business-scoped worker."""
-    store = _store()
-    try:
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-        idempotency_key = str(args.get("idempotency_key") or "").strip()
-        if not idempotency_key:
-            raise TakyonError("idempotency_key is required")
-        task_type = _file_slug(str(args.get("task_type") or "triage"), "triage")
-        if task_type not in _CONVERSATION_AGENT_TASK_TYPES:
-            raise TakyonError(f"conversation task_type must be one of {sorted(_CONVERSATION_AGENT_TASK_TYPES)}")
-        objective = str(args.get("objective") or "").strip() or f"{task_type} conversation backlog"
-        limit = _clamp_int(args.get("limit"), default=100, minimum=1, maximum=500)
-        direction = str(args.get("direction") or "inbound").strip().lower()
-        status = str(args.get("status") or "needs_response").strip().lower()
-        source_filter = str(args.get("source") or "").strip()
-        max_actions = _clamp_int(args.get("max_actions"), default=20, minimum=0, maximum=100)
-        apply_actions = bool(args.get("apply_actions") or args.get("execute_actions"))
-        allow_outbound_messages = bool(args.get("allow_outbound_messages", True))
-        allow_external_jobs = bool(args.get("allow_external_jobs", False))
-
-        task_id = hashlib.sha256(f"{business}:{idempotency_key}:conversation-agent".encode("utf-8")).hexdigest()
-        workspace_raw = str(args.get("workspace") or f"metrics/conversations/tasks/{_now()[:10]}-{task_type}-{task_id[:8]}").strip()
-        with store._connect() as conn:
-            store._ensure_business(conn, business)
-        workspace_path = store._resolve_business_file(business, workspace_raw)
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        if not workspace_path.is_dir():
-            raise TakyonError(f"conversation agent workspace is not a directory: {workspace_raw}")
-
-        with store._connect() as conn:
-            business_row = store._ensure_business(conn, business)
-            filters = ["m.business_slug = ?"]
-            params: list[Any] = [business]
-            if direction and direction != "all":
-                filters.append("m.direction = ?")
-                params.append(direction)
-            if status and status != "all":
-                filters.append("m.status = ?")
-                params.append(status)
-            if source_filter:
-                filters.append("m.source = ?")
-                params.append(_file_slug(source_filter, "source"))
-            where = " AND ".join(filters)
-            rows = conn.execute(
-                f"""
-                SELECT
-                  m.*,
-                  t.source AS thread_source,
-                  t.external_id AS thread_external_id,
-                  t.title AS thread_title,
-                  t.url AS thread_url
-                FROM conversation_messages m
-                JOIN conversation_threads t ON t.id = m.thread_id
-                WHERE {where}
-                ORDER BY m.received_at DESC, m.created_at DESC
-                LIMIT ?
-                """,
-                [*params, limit],
-            ).fetchall()
-            messages = [store._row_to_dict(row) for row in rows]
-            summary = store._conversation_summary(conn, business, limit=20)
-            brain_index = []
-            brain_root = store._business_root(business) / "research"
-            if brain_root.exists():
-                brain_index = [
-                    str(path.relative_to(store._business_root(business)))
-                    for path in sorted(brain_root.rglob("*"))
-                    if path.is_file()
-                ][:50]
-
-        input_md = [
-            f"# Conversation Agent Task: {task_type}",
-            "",
-            f"- Business: {business}",
-            f"- Business mode: {business_row.get('mode') or 'live'}",
-            f"- Objective: {objective}",
-            f"- Selected messages: {len(messages)}",
-            f"- Direction filter: {direction}",
-            f"- Status filter: {status}",
-            f"- Source filter: {source_filter or 'all'}",
-            f"- Max structured actions Takyon may apply: {max_actions}",
-            f"- Apply actions requested: {'yes' if apply_actions else 'no'}",
-            f"- Allow local outbound conversation records: {'yes' if allow_outbound_messages else 'no'}",
-            f"- Allow queued external send/post jobs: {'yes' if allow_external_jobs else 'no'}",
-            "",
-            "## Business",
-            "",
-            f"- Name: {business_row.get('name') or business}",
-            f"- Goal: {business_row.get('goal') or 'not set'}",
-            "",
-            "## Inbox Summary",
-            "",
-            f"- Active threads: {summary.get('active_threads')}",
-            f"- Unresolved messages: {summary.get('unresolved_messages')}",
-            f"- Latest message: {summary.get('latest_message_at') or 'none'}",
-            "",
-            "## Research Files",
-            "",
-            *(f"- {item}" for item in brain_index),
-            "",
-            "## Required Outputs",
-            "",
-            "- `triage.md`: compressed findings, priority groups, recommended CEO-level decisions.",
-            "- `drafts.md`: human-readable drafts or response principles when useful.",
-            "- `learnings.md`: reusable objections, language, opportunities, and strategy updates.",
-            "- `actions.json`: optional structured actions Takyon can apply after this worker returns.",
-        ]
-        _atomic_write_text(workspace_path / "input.md", "\n".join(input_md).rstrip() + "\n")
-        _atomic_write_text(workspace_path / "messages.jsonl", "".join(_json_dumps(message) + "\n" for message in messages))
-        _atomic_write_text(
-            workspace_path / "actions.json",
-            _json_dumps({
-                "outbound_messages": [],
-                "status_updates": [],
-                "job_requests": [],
-                "memory_updates": [],
-            }) + "\n",
-        )
-
-        instruction = "\n".join([
-            "Use the business conversation response path for this bounded task.",
-            "Read input.md and messages.jsonl in the current workspace.",
-            "Do not try to read every historical conversation unless the task slice requires it.",
-            "Use business impact, volume, recency, risk, budget, and the stated objective to decide what matters.",
-            "You may triage, batch, sample, ignore, escalate, learn from, or draft replies; do not assume every message deserves a response.",
-            "Do not perform external side effects. If external sending/posting is warranted, add a guarded job request to actions.json instead of claiming it happened.",
-            "Write triage.md, drafts.md, learnings.md, and actions.json.",
-            "actions.json schema: outbound_messages[], status_updates[], job_requests[], memory_updates[].",
-            "outbound_messages are local conversation records, not external sends; include source, thread_external_id or thread_id, thread_title, body, and optional external_id.",
-            "status_updates include message_id or source/external_id plus status: needs_response, responded, ignored, or archived.",
-            "job_requests include kind, payload, requires_api[], requires_env[].",
-            "memory_updates include path, content, and optional mode.",
-            f"Task objective: {objective}",
-        ])
-        worker_raw = handle_business_claude_agent_task(
-            {
-                "business": business,
-                "workspace": workspace_raw,
-                "instruction": instruction,
-                "budget_usd": args.get("budget_usd") or 2.0,
-                "model": args.get("model"),
-                "max_turns": args.get("max_turns") or 12,
-                "timeout_ms": args.get("timeout_ms") or 300_000,
-                "idempotency_key": f"{idempotency_key}:conversation-worker",
-                "reason": args.get("reason") or "conversation response agent task",
-                "actor": args.get("actor") or "agent",
-            }
-        )
-        worker = json.loads(worker_raw)
-        action_commit = None
-        action_error = None
-        action_counts: dict[str, int] = {}
-        if worker.get("success") and apply_actions and max_actions > 0:
-            try:
-                actions = _read_conversation_agent_actions(workspace_path / "actions.json")
-                operations: list[dict[str, Any]] = []
-                for item in list(actions.get("outbound_messages") or [])[:max_actions]:
-                    if not allow_outbound_messages or not isinstance(item, dict):
-                        continue
-                    operations.append({
-                        "action": "conversation.message.record",
-                        "business": business,
-                        "source": item.get("source") or source_filter or "conversation-agent",
-                        "thread_id": item.get("thread_id"),
-                        "thread_external_id": item.get("thread_external_id"),
-                        "thread_title": item.get("thread_title") or item.get("subject") or "Response agent thread",
-                        "url": item.get("url"),
-                        "external_id": item.get("external_id") or f"{task_id}:outbound:{len(operations)}",
-                        "direction": "outbound",
-                        "author_label": item.get("author_label") or "Takyon response agent",
-                        "body": item.get("body") or "",
-                        "status": item.get("status") or "responded",
-                    })
-                for item in list(actions.get("status_updates") or [])[:max_actions]:
-                    if not isinstance(item, dict):
-                        continue
-                    operations.append({
-                        "action": "conversation.message.status.set",
-                        "business": business,
-                        "message_id": item.get("message_id"),
-                        "source": item.get("source"),
-                        "external_id": item.get("external_id"),
-                        "status": item.get("status"),
-                    })
-                if allow_external_jobs:
-                    for item in list(actions.get("job_requests") or [])[:max_actions]:
-                        if not isinstance(item, dict):
-                            continue
-                        operations.append({
-                            "action": "job.enqueue",
-                            "business": business,
-                            "scope": f"business:{business}/workspace:{workspace_raw}",
-                            "kind": item.get("kind") or "conversation_response_send",
-                            "payload": item.get("payload") or {},
-                            "requires_api": item.get("requires_api") or [],
-                            "requires_env": item.get("requires_env") or [],
-                        })
-                for item in list(actions.get("memory_updates") or [])[:max_actions]:
-                    if not isinstance(item, dict):
-                        continue
-                    operations.append({
-                        "action": "memory.write",
-                        "business": business,
-                        "path": item.get("path") or "conversation-learnings.md",
-                        "content": item.get("content") or "",
-                        "mode": item.get("mode") or "replace",
-                    })
-                if operations:
-                    action_commit = store.commit(
-                        scope=f"business:{business}/workspace:{workspace_raw}",
-                        operations=operations[:max_actions],
-                        idempotency_key=f"{idempotency_key}:conversation-actions",
-                        reason=args.get("reason") or "apply conversation response agent actions",
-                        actor=args.get("actor") or "conversation-agent",
-                    )
-                    for result in action_commit.get("results") or []:
-                        key = str(result.get("action") or "unknown")
-                        action_counts[key] = action_counts.get(key, 0) + 1
-            except Exception as exc:
-                action_error = str(exc)
-
-        event_payload = {
-            "task_type": task_type,
-            "objective": objective,
-            "workspace": workspace_raw,
-            "selected_messages": len(messages),
-            "apply_actions": apply_actions,
-            "action_counts": action_counts,
-            "action_error": action_error,
-            "worker_success": bool(worker.get("success")),
-        }
-        event_record = store.commit(
-            scope=f"business:{business}/workspace:{workspace_raw}",
-            operations=[{"action": "event.record", "business": business, "event_type": "conversation.agent_task", "payload": event_payload}],
-            idempotency_key=f"{idempotency_key}:conversation-event",
-            reason=args.get("reason") or "record conversation response agent task",
-            actor=args.get("actor") or "agent",
-        )
-
-        return tool_result({
-            "success": bool(worker.get("success")) and not action_error,
-            "business": business,
-            "task_type": task_type,
-            "workspace": workspace_raw,
-            "input": f"{workspace_raw}/input.md",
-            "messages": f"{workspace_raw}/messages.jsonl",
-            "actions": f"{workspace_raw}/actions.json",
-            "selected_messages": len(messages),
-            "worker": worker,
-            "action_commit": action_commit,
-            "action_error": action_error,
-            "event_record": event_record,
-        })
-    except Exception as exc:
-        return tool_error(str(exc), success=False)
-
-
 TAKYON_TOOL_DEFINITIONS = [
     {
         "name": "business_list_businesses",
@@ -7732,6 +7586,42 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "List files or directories inside a business scope.",
         "handler": handle_business_list_files,
         "schema": _schema("business_list_files", "List business-scoped files.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "limit": {"type": "integer"}}, ["business"]),
+    },
+    {
+        "name": "business_list_conversation_messages",
+        "description": "List business conversation messages with deterministic filters for backlog review and follow-up triage.",
+        "handler": handle_business_list_conversation_messages,
+        "schema": _schema(
+            "business_list_conversation_messages",
+            "List business conversation messages.",
+            {
+                "business": _BUSINESS_PROP,
+                "direction": {"type": "string", "description": "inbound, outbound, internal, or all"},
+                "status": {"type": "string", "description": "needs_response, responded, ignored, archived, or all"},
+                "source": {"type": "string", "description": "Optional source/channel filter"},
+                "thread_id": {"type": "string", "description": "Optional Takyon conversation thread id"},
+                "thread_external_id": {"type": "string", "description": "Optional source-native thread id"},
+                "limit": {"type": "integer", "description": "Maximum messages to return, default 100 and capped at 500"},
+            },
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_read_conversation_thread",
+        "description": "Read one business conversation thread with its messages and canonical filesystem mirror path.",
+        "handler": handle_business_read_conversation_thread,
+        "schema": _schema(
+            "business_read_conversation_thread",
+            "Read a business conversation thread.",
+            {
+                "business": _BUSINESS_PROP,
+                "thread_id": {"type": "string", "description": "Takyon conversation thread id"},
+                "source": {"type": "string", "description": "Optional source/channel when using external_id lookup"},
+                "external_id": {"type": "string", "description": "Source-native thread id when thread_id is not known"},
+                "thread_external_id": {"type": "string", "description": "Alias for external_id"},
+            },
+            ["business"],
+        ),
     },
     {
         "name": "business_upsert_business",
@@ -8034,37 +7924,6 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "instruction", "idempotency_key"],
-        ),
-    },
-    {
-        "name": "business_conversation_agent_task",
-        "description": "Delegate bounded per-business conversation response work to a scoped worker, optionally applying capped local conversation actions through guarded tools.",
-        "handler": handle_business_conversation_agent_task,
-        "schema": _schema(
-            "business_conversation_agent_task",
-            "Run a scoped conversation response agent task for a business.",
-            {
-                "business": _BUSINESS_PROP,
-                "task_type": {"type": "string", "description": "triage, cluster, draft_replies, respond, extract_learnings, or identify_leads"},
-                "objective": {"type": "string", "description": "Business objective for this conversation slice"},
-                "source": {"type": "string", "description": "Optional source/channel filter"},
-                "direction": {"type": "string", "description": "Message direction filter; default inbound, or all"},
-                "status": {"type": "string", "description": "Message status filter; default needs_response, or all"},
-                "limit": {"type": "integer", "description": "Maximum messages to pass to the worker, default 100 and capped at 500"},
-                "workspace": {"type": "string", "description": "Optional business-relative task workspace"},
-                "apply_actions": {"type": "boolean", "description": "Apply capped actions from actions.json after worker completes"},
-                "allow_outbound_messages": {"type": "boolean", "description": "Allow local outbound conversation records from actions.json"},
-                "allow_external_jobs": {"type": "boolean", "description": "Allow queued external send/post job requests from actions.json"},
-                "max_actions": {"type": "integer", "description": "Maximum structured actions to apply, default 20 and capped at 100"},
-                "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped by the underlying worker"},
-                "model": {"type": "string", "description": "Optional Claude model override"},
-                "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
-                "idempotency_key": _IDEMPOTENCY_PROP,
-                "reason": _REASON_PROP,
-                "actor": _ACTOR_PROP,
-            },
-            ["business", "idempotency_key"],
         ),
     },
     {

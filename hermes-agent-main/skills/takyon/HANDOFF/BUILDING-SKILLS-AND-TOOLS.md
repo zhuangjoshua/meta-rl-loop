@@ -24,11 +24,7 @@ Use the real template here:
 
 - [SKILL-TEMPLATE.md](/Users/Zygote/Downloads/takyon/hermes-agent-main/skills/takyon/SKILL-TEMPLATE.md)
 
-After editing a skill:
-
-```bash
-./takyon skills-index
-```
+After editing a skill, start a fresh `./takyon` run or relaunch the shell so bundled Takyon skills sync automatically and Hermes rebuilds the runtime skills index.
 
 ## Tool Template
 

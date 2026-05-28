@@ -8,6 +8,8 @@ provides_tools:
   - business_read_business
   - business_read_file
   - business_list_files
+  - business_list_conversation_messages
+  - business_read_conversation_thread
   - business_upsert_business
   - business_delete_business
   - business_set_mode
@@ -33,7 +35,6 @@ provides_tools:
   - business_publish_test_outreach
   - business_generate_creative_asset
   - business_claude_agent_task
-  - business_conversation_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message
   - business_update_conversation_message_status

@@ -10,7 +10,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 import threading
 import uuid
@@ -57,6 +56,11 @@ _CLI_ONLY_COMMANDS = {
     "init",
     "build",
     "upgrade",
+}
+
+_REMOVED_COMMANDS = {
+    "skills-index": "takyon skills-index was removed. Start a fresh ./takyon run or relaunch the shell to sync bundled skills automatically.",
+    "skill-index": "takyon skill-index was removed. Start a fresh ./takyon run or relaunch the shell to sync bundled skills automatically.",
 }
 
 _COLOR_ENABLED = (
@@ -253,9 +257,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _sync_bundled_skills_startup() -> None:
+    try:
+        from tools.skills_sync import sync_skills
+
+        sync_skills(quiet=True)
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _sync_bundled_skills_startup()
     takyon_command(args)
 
 
@@ -760,22 +774,19 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "First read current business state. If relevant assets already exist, advance the missing",
         "highest-impact pieces instead of recreating them.",
         "",
-        "Takyon skills are available through the normal Hermes skills index. Prefer the real Takyon bundled skills",
-        "when they match the move: takyon-market-research, takyon-build-product, takyon-app-runtime,",
-        "takyon-distribution, takyon-business-metrics, and takyon-claude-agent-sdk.",
-        "",
         "Prime directive: find users and become profitable. Re-evaluate ICP, where that ICP concentrates, what",
         "promise/product they would pay for, how Takyon can reach them with current permissions, what evidence changed,",
         "what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.",
         "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in research/strategy.md.",
         "Distribution is required action during bootstrap. After research and the smallest credible offer/product surface,",
-        "create or continue distribution/phase-1-outreach/ and run a Phase 1 outreach batch through",
-        "durable campaign files plus business_publish_outreach intents. Phase 1 is a bootstrap/open-campaign completion contract,",
+        "create or continue distribution/campaign/ and run an opening distribution campaign batch through",
+        "durable campaign files plus business_publish_outreach intents. The opening distribution campaign is a bootstrap/open-campaign completion contract,",
         "not a forever recurring funnel: normally use at least 3 evidence-backed lanes and 6 total",
         "business_publish_outreach intents, unless a named safety, scope, budget, or operator blocker prevents even",
         "local/mock outreach.",
-        "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
-        "business_conversation_agent_task path to compress it before deciding.",
+        "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, load",
+        "takyon-conversation-followup and use its published follow-up note before deciding.",
+        "For channel-native public execution, prefer takyon-x for X and takyon-reddit for Reddit instead of stretching the broad distribution skill.",
         "Call business_calculate_pulse and use takyon-business-metrics to establish the first metrics baseline in metrics/summary.md and research/strategy.md.",
         "Seed or update compact wake notes in metrics/wake-history.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
@@ -789,8 +800,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "building the wrong move; record that exact reason as a blocker or research hypothesis.",
         "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution files,",
         "guarded jobs or hidden suppressed audit receipts, and the next CEO wake when they are the justified move. Do not stop after",
-        "research, source files, or a blocked website publish while Phase 1 outreach is absent or incomplete. If a Phase 1",
-        "campaign already exists, continue it instead of restarting it. A blocked public URL does not block outreach; use",
+        "research, source files, or a blocked website publish while the distribution campaign is absent or incomplete. If a",
+        "distribution campaign already exists, continue it instead of restarting it. A blocked public URL does not block outreach; use",
         "the business publish_target or a truthful discovery/mock message and name the product blocker.",
         "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider.",
         "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace videos, local outreach publication, websites, checkout, deploys, or provider-backed work with Markdown summaries.",
@@ -807,7 +818,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
             "Test mode rules: product and website build/publication/deploy are allowed when they are the business-owned",
             "product surface and the normal path, budget, credential, and receipt/job gates pass. Product deploy is Vercel-gated.",
             "Do not send outreach, post to social/forums, buy ads, charge customers, or send marketing emails externally.",
-            "For each Phase 1 outreach touch, call business_publish_outreach. If a forum/social channel or provider posting",
+            "For each distribution campaign touch, call business_publish_outreach. If a forum/social channel or provider posting",
             "is unavailable, use local suppressed/mock publication with the intended channel/destination when known. Successful",
             "test-mode touches must create distribution/local-published/ and conversation mirrors; the tool writes",
             "metrics/receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
@@ -2271,7 +2282,7 @@ def _run_agent(
             provider=provider or None,
             model=resolved_model,
             max_iterations=max_turns,
-            enabled_toolsets=["takyon", "web", "skills", "todo", "delegation"],
+            enabled_toolsets=["takyon", "web", "skills", "todo"],
             disabled_toolsets=["cronjob", "messaging", "memory", "session_search", "terminal", "file", "browser", "code_execution"],
             ephemeral_system_prompt=ceo_prompt,
             load_soul_identity=False,
@@ -2321,6 +2332,9 @@ def run_takyon_command(
         return store.read(scope="global", query="list_businesses")
 
     command = argv[0].lower()
+    removed_message = _REMOVED_COMMANDS.get(command)
+    if removed_message:
+        raise SystemExit(removed_message)
 
     if command in {"help", "-h", "--help"}:
         if len(argv) >= 2:
@@ -2408,7 +2422,7 @@ def run_takyon_command(
         )
 
     if command == "registry":
-        raise SystemExit("takyon registry was removed. Use `./takyon skills-index` to sync Takyon skills and rebuild the Hermes skills index.")
+        raise SystemExit("takyon registry was removed. Takyon bundled skills sync automatically on startup and the Hermes skills index rebuilds at runtime.")
 
     if command in {"status"}:
         if len(argv) < 2:
@@ -2660,29 +2674,6 @@ def run_takyon_command(
             ],
         }
 
-    if command in {"skills-index", "skill-index"}:
-        action = argv[1].lower() if len(argv) >= 2 else "build"
-        if action != "build":
-            raise SystemExit("usage: takyon skills-index [build]")
-        script = Path(__file__).resolve().parents[2] / "scripts" / "build_takyon_skills_index.py"
-        proc = subprocess.run(
-            [sys.executable or "python3", str(script)],
-            capture_output=True,
-            text=True,
-            cwd=str(Path(__file__).resolve().parents[2]),
-        )
-        if proc.returncode != 0:
-            raise SystemExit(f"skills index build failed: {(proc.stderr or proc.stdout).strip() or f'exit {proc.returncode}'}")
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            return {
-                "success": False,
-                "error": "skills index build returned non-JSON output",
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-            }
-
     if command == "budget":
         if len(argv) < 2:
             raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount> | takyon budget <business> <amount>")
@@ -2819,6 +2810,9 @@ def takyon_slash_command(raw_args: str, ctx: Any = None) -> str:
         return _takyon_help()
 
     command = argv[0].lower()
+    removed_message = _REMOVED_COMMANDS.get(command)
+    if removed_message:
+        return removed_message
     if command in {"help", "-h", "--help"}:
         return _takyon_help()
 
