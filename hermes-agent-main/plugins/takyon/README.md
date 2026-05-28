@@ -115,6 +115,8 @@ metadata:
     category: research
     tags: [takyon, market-research]
     related_skills: [takyon-build-product]
+    requires_toolsets: []
+    requires_tools: []
   takyon:
     scope: business
     allowed_roots: [research, metrics]
@@ -141,6 +143,22 @@ Not every skill needs all of them.
 For new Takyon skills, start from:
 
 - `skills/takyon/SKILL-TEMPLATE.md`
+- `skills/takyon/BUILDING-SKILLS-AND-TOOLS.md`
+
+Each Takyon skill lives in its own folder:
+
+```text
+skills/takyon/<skill-name>/
+  SKILL.md
+  references/
+  templates/
+  scripts/
+  assets/
+```
+
+Only `SKILL.md` is required. Add the optional subdirectories only when the skill really needs them.
+
+Hermes-side tool availability gating belongs in `metadata.hermes.requires_toolsets` and `metadata.hermes.requires_tools`. The exact durable Takyon tools a skill expects to use should be named in the skill body itself. If a skill needs a durable action and no canonical `business_*` tool exists for it yet, the skill does not plug in by itself; add or modify the owning tool in code and then reference it from the skill.
 
 ## Tools
 

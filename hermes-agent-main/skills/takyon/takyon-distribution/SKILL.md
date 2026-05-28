@@ -10,6 +10,8 @@ metadata:
     category: takyon
     tags: [takyon, distribution, outreach, campaigns, replies]
     related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics]
+    requires_toolsets: [takyon]
+    requires_tools: [business_read_business, business_publish_outreach, business_conversation_agent_task]
   takyon:
     scope: business
     allowed_roots: [distribution, metrics, research]
@@ -24,7 +26,16 @@ required_credential_files: []
 
 # Takyon Distribution
 
+## Overview
+
 Use this skill for demand creation and response handling: outreach, campaign workspaces, message drafts, local test publication, and reply review.
+
+## When to Use
+
+- Use when the business needs outbound demand creation or campaign iteration.
+- Use on `/wake` when unresolved inbound messages need attention.
+- Use when the operator asks to launch, continue, or review outreach or campaigns.
+- Do not use for product-surface changes that belong in `takyon-build-product`.
 
 ## Quick Reference
 
@@ -32,6 +43,14 @@ Use this skill for demand creation and response handling: outreach, campaign wor
 - Publication paths: `distribution/phase-1-outreach/`, `distribution/local-published/`, `metrics/conversations/`
 - Best call points: outbound demand creation, reply handling, campaign continuation
 - Publication lane: suppressed/local publication goes to `distribution/local-published/`; live sends/posts require tools and receipts
+- Tool names used by this skill: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_create_workspace`, `business_write_file`, `business_patch_file`, `business_generate_creative_asset`, `business_publish_outreach`, `business_publish_test_outreach`, `business_enqueue_job`, `business_conversation_agent_task`, `business_upsert_conversation_thread`, `business_record_conversation_message`, `business_update_conversation_message_status`
+
+## Prerequisites
+
+- The Takyon toolset must be available.
+- Start with `business_read_business` and usually `business_calculate_pulse` so you know whether replies are waiting and what campaign state already exists.
+- If you need to inspect specific campaign files or conversation mirrors, use `business_read_file` or `business_list_files` instead of guessing the current state.
+- If a provider-backed publish path is blocked, use the publish tools or `business_enqueue_job` to record the real blocker; do not hand-claim success.
 
 ## References
 
@@ -42,19 +61,25 @@ Use this skill for demand creation and response handling: outreach, campaign wor
 - `templates/campaign.md`
 - `templates/reply-draft.md`
 
-## When to Use
+## How to Run
 
-- Use when the business needs outbound demand creation or campaign iteration.
-- Use on `/wake` when unresolved inbound messages need attention.
-- Use when the operator asks to launch, continue, or review outreach or campaigns.
+- Call `business_read_business` first to inspect current campaign state, conversation state, and existing publication artifacts.
+- Call `business_calculate_pulse` when you need the latest unresolved inbound and reply pressure before deciding whether to push outbound work.
+- Use `business_conversation_agent_task` when inbound volume is too large to review manually; otherwise use `business_upsert_conversation_thread`, `business_record_conversation_message`, and `business_update_conversation_message_status` for direct conversation maintenance.
+- Use `business_create_workspace`, `business_write_file`, and `business_patch_file` to create or update campaign workspaces under `distribution/phase-1-outreach/`.
+- Use `business_generate_creative_asset` when the campaign needs provider-backed image or video assets.
+- Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
+- If the publish path needs deferred vendor, ads, or external work rather than an immediate publish, use `business_enqueue_job` instead of inventing a successful send.
 
 ## Procedure
 
-1. Check unresolved inbound messages before new outward motion.
-2. Continue an existing campaign when it is still the right lane.
-3. Publish through the canonical business outreach tools.
-4. Keep campaign assets and notes inside `distribution/`.
-5. Record reply state and meaningful results in `metrics/`.
+1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. If unresolved inbound exists, handle that first unless the operator explicitly prioritizes outbound work anyway.
+2. If the conversation backlog is large or noisy, call `business_conversation_agent_task` to cluster, triage, or draft replies before starting new outreach. If the backlog is small, maintain the canonical thread and message state directly with the conversation tools.
+3. Inspect the current campaign workspace. If there is no suitable workspace under `distribution/phase-1-outreach/`, create one with `business_create_workspace` and write the initial campaign files there.
+4. Draft or update campaign assets under `distribution/phase-1-outreach/`. If the campaign needs creative media, call `business_generate_creative_asset` first and store the resulting local asset path in the workspace.
+5. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a conversation mirror or receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
+6. If the business is in live mode and the publish path is provider-backed, call `business_publish_outreach` and inspect the resulting job, receipt, or blocker. If the channel requires deferred external work rather than immediate publication, record it with `business_enqueue_job`.
+7. After publish or reply handling, make sure thread state and message status are mirrored under `metrics/conversations/` with the conversation tools so future wakes see the real state.
 
 ## Output Format
 
@@ -70,17 +95,18 @@ Use this skill for demand creation and response handling: outreach, campaign wor
 - Live external publication belongs to canonical business tools and their receipts, not hand-written success claims.
 - Reply/conversation aftermath should be mirrored in `metrics/conversations/`.
 
-## Pitfalls
+## Common Pitfalls
 
 - Launching new outreach while replies are sitting unresolved
 - Treating drafted copy as if it was already sent
 - Scattering campaign assets outside `distribution/`
 
-## Verification
+## Verification Checklist
 
-- Current campaign assets are visible under `distribution/`
-- Any claimed send/post/publish has a corresponding tool success or receipt
-- `metrics/conversations/` reflects unresolved inbound and reply state truthfully
+- [ ] Current campaign assets are visible under `distribution/phase-1-outreach/`
+- [ ] Any claimed send, post, or publish has a corresponding tool result, local artifact, queued job, or receipt
+- [ ] `distribution/local-published/` contains the expected suppressed artifact in test-mode publication paths
+- [ ] `metrics/conversations/` reflects unresolved inbound and reply state truthfully
 
 ## Rules
 

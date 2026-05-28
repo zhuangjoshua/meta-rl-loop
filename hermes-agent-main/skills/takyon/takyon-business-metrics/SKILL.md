@@ -10,6 +10,8 @@ metadata:
     category: takyon
     tags: [takyon, metrics, wake, business, conversations]
     related_skills: [takyon-market-research, takyon-distribution, takyon-build-product]
+    requires_toolsets: [takyon]
+    requires_tools: [business_calculate_pulse, business_read_business, business_write_file]
   takyon:
     scope: business
     allowed_roots: [metrics, research]
@@ -24,7 +26,16 @@ required_credential_files: []
 
 # Takyon Business Metrics
 
+## Overview
+
 Use this skill to interpret deterministic business metrics, summarize what changed, and keep wake-to-wake continuity without turning metrics into strategy fiction.
+
+## When to Use
+
+- Use on every `/wake`.
+- Use on `/create` to establish the first baseline.
+- Use whenever current users, revenue, usage, or unresolved replies materially matter to the next business move.
+- Do not use this skill to invent strategy from missing metrics.
 
 ## Quick Reference
 
@@ -32,6 +43,13 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 - Publication paths: `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`
 - Best call points: every `/wake`, first `/create`, decisions that depend on usage/revenue/replies
 - Publication location: `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`
+- Tool names used by this skill: `business_calculate_pulse`, `business_read_business`, `business_read_file`, `business_write_file`, `business_patch_file`, `business_conversation_agent_task`
+
+## Prerequisites
+
+- The Takyon toolset must be available.
+- Start with `business_calculate_pulse`, then use `business_read_business` and `business_read_file` to compare the new pulse against the current canonical summaries.
+- If conversation noise is too high to summarize cleanly, use `business_conversation_agent_task` before writing the final metrics summary.
 
 ## References
 
@@ -41,19 +59,21 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 
 - `templates/summary.md`
 
-## When to Use
+## How to Run
 
-- Use on every `/wake`.
-- Use on `/create` to establish the first baseline.
-- Use whenever current users, revenue, usage, or unresolved replies materially matter to the next business move.
+- Call `business_calculate_pulse` first. Treat that as the deterministic input snapshot for the current turn.
+- Use `business_read_business` and `business_read_file` to inspect `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`, and any relevant strategy file before rewriting them.
+- Use `business_conversation_agent_task` if unresolved inbound or conversation volume is too noisy to summarize directly.
+- Use `business_write_file` or `business_patch_file` to update the canonical metrics files.
 
 ## Procedure
 
-1. Start with `business_calculate_pulse`.
-2. Compare the current metrics to the previous canonical summary and recent strategy.
-3. Write the publication paths.
-4. Surface unresolved inbound messages, replies, and evidence gaps clearly.
-5. Append one concise wake note after the business decision is made.
+1. Call `business_calculate_pulse` and inspect the current snapshot: users, revenue, usage, jobs, controls, unresolved inbound, and recent events.
+2. If `metrics/summary.md`, `metrics/summary.json`, or `metrics/wake-history.md` already exist, load them with `business_read_file` and compare the current pulse against the prior state. If they do not exist, create a first baseline instead of implying history that is not there.
+3. If unresolved inbound or conversation volume is too noisy to summarize confidently, call `business_conversation_agent_task` to compress it before finalizing the metrics narrative.
+4. Write or patch `metrics/summary.md` with the short human summary: what changed, what matters, what is blocked, and what evidence gap remains.
+5. Write or patch `metrics/summary.json` with the same state in compact structured form so future wakes can compare deltas quickly.
+6. After the CEO chooses the next move, append one concise note to `metrics/wake-history.md` describing the wake context and chosen action. Do not turn it into a diary.
 
 ## Output Format
 
@@ -68,17 +88,18 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 - Publish wake continuity notes to `metrics/wake-history.md`.
 - Do not treat metrics summaries or wake history as evidence of an external side effect.
 
-## Pitfalls
+## Common Pitfalls
 
 - Turning thin metrics into overconfident strategy claims
 - Hiding unresolved replies inside aggregate numbers
 - Writing wake history like a diary instead of a compact operating log
 
-## Verification
+## Verification Checklist
 
-- `metrics/summary.md` is readable in one quick pass
-- `metrics/summary.json` and `metrics/summary.md` describe the same current state
-- `metrics/wake-history.md` adds one concise note per wake without deleting history
+- [ ] `metrics/summary.md` is readable in one quick pass
+- [ ] `metrics/summary.json` and `metrics/summary.md` describe the same current state
+- [ ] `metrics/wake-history.md` adds one concise note per wake without deleting history
+- [ ] Unresolved inbound and evidence gaps remain visible instead of being buried in aggregates
 
 ## Rules
 
