@@ -586,6 +586,20 @@ function parseRuntimeTool(task: BusinessOverviewTask | BusinessOverviewJob): {
   toolName: string;
 } | null {
   const text = `${task.label || ""} ${task.detail || ""}`.trim();
+  const delegatedMatch = text.match(
+    /\bagent\s*(?:->|→)\s*(delegate_task|business_claude_agent_task):\s*(.*)/i,
+  );
+  if (delegatedMatch) {
+    const detail = (delegatedMatch[2] || "")
+      .replace(/\s*·\s*(?:running|working|done)$/i, "")
+      .replace(/^subagent\b/i, "Subagent")
+      .trim();
+    return {
+      detail,
+      phase: /\b(done|completed|finished)\b/i.test(detail) ? "completed" : "started",
+      toolName: delegatedMatch[1],
+    };
+  }
   const match =
     text.match(/\b(preparing tool|tool started|tool completed)\s*(?:->|→|-)?\s*([a-zA-Z0-9_.:-]+)(?:\s*·\s*(.*))?/i) ||
     text.match(/\bagent\s*(?:->|→)\s*(executing tool|tool completed):\s*([a-zA-Z0-9_.:-]+)(?:\s*\(([^)]*)\))?/i);
