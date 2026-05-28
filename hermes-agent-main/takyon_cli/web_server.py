@@ -25,7 +25,9 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
+from http import HTTPStatus
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -53,6 +55,24 @@ from takyon_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from plugins.takyon.app_api import (
+    SESSION_COOKIE as TAKYON_APP_SESSION_COOKIE,
+    _anthropic_key as _takyon_app_anthropic_key,
+    _anthropic_payload as _takyon_app_anthropic_payload,
+    _anthropic_rates_microusd_per_token as _takyon_app_anthropic_rates_microusd_per_token,
+    _anthropic_text as _takyon_app_anthropic_text,
+    _app_budget_remaining_microusd as _takyon_app_budget_remaining_microusd,
+    _call_anthropic as _takyon_app_call_anthropic,
+    _microusd_cost as _takyon_app_microusd_cost,
+)
+from plugins.takyon.core import (
+    handle_business_create_app_checkout,
+    handle_business_read_app_account,
+    handle_business_record_app_usage,
+    handle_business_record_stripe_webhook,
+    handle_business_request_app_magic_link,
+    handle_business_verify_app_magic_link,
+)
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -575,6 +595,16 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
 })
 
 
+def _is_public_api_path(path: str) -> bool:
+    if path in _PUBLIC_API_PATHS:
+        return True
+    return path.startswith((
+        "/api/takyon/apps/",
+        "/api/generated-apps/",
+        "/api/webhooks/stripe",
+    ))
+
+
 def _has_valid_session_token(request: Request) -> bool:
     """True if the request carries a valid dashboard session token.
 
@@ -688,7 +718,7 @@ async def host_header_middleware(request: Request, call_next):
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+    if path.startswith("/api/") and not _is_public_api_path(path):
         if not _has_valid_session_token(request):
             return JSONResponse(
                 status_code=401,
@@ -896,6 +926,289 @@ async def auth0_me(request: Request):
             "sub": session.get("sub"),
         },
     }
+
+
+def _takyon_app_tool(raw: str) -> tuple[int, dict[str, Any]]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return int(HTTPStatus.INTERNAL_SERVER_ERROR), {"success": False, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return int(HTTPStatus.INTERNAL_SERVER_ERROR), {"success": False, "error": "tool did not return a JSON object"}
+    if payload.get("success") is False or payload.get("error"):
+        return int(HTTPStatus.BAD_REQUEST), payload
+    return int(HTTPStatus.OK), payload
+
+
+def _takyon_app_json(status: int | HTTPStatus, payload: dict[str, Any]) -> JSONResponse:
+    return JSONResponse(status_code=int(status), content=payload)
+
+
+def _takyon_app_session_token(request: Request) -> str:
+    return _cookie_value(request.headers.get("cookie", ""), TAKYON_APP_SESSION_COOKIE)
+
+
+def _takyon_app_origin(request: Request, body: dict[str, Any] | None = None) -> str:
+    body_origin = (body or {}).get("origin")
+    if isinstance(body_origin, str) and body_origin.strip():
+        return body_origin.strip().rstrip("/")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    return f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+
+
+def _takyon_app_set_session_cookie(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        TAKYON_APP_SESSION_COOKIE,
+        token,
+        max_age=30 * 24 * 60 * 60,
+        path="/",
+        secure=_https_for_cookie(request.headers, _takyon_app_origin(request)),
+        httponly=True,
+        samesite="lax",
+    )
+
+
+async def _takyon_app_read_json(request: Request) -> dict[str, Any]:
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    return data if isinstance(data, dict) else {}
+
+
+def _takyon_app_route_parts(route: str) -> list[str]:
+    return [part for part in route.split("/") if part]
+
+
+async def _takyon_app_get(request: Request, business: str, route: str) -> Response:
+    parts = _takyon_app_route_parts(route)
+    if parts == ["auth", "verify"]:
+        status, payload = _takyon_app_tool(handle_business_verify_app_magic_link({
+            "business": business,
+            "token": request.query_params.get("token") or "",
+        }))
+        if status != int(HTTPStatus.OK):
+            return _takyon_app_json(status, payload)
+        redirect = _same_origin_path(request.query_params.get("redirect") or "/?signed_in=1")
+        response = RedirectResponse(redirect, status_code=int(HTTPStatus.FOUND))
+        _takyon_app_set_session_cookie(response, request, str(payload["session_token"]))
+        return response
+
+    if parts in (["session"], ["account"]):
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+        status, payload = _takyon_app_tool(handle_business_read_app_account({
+            "business": business,
+            "session_token": token,
+        }))
+        payload["authenticated"] = status == int(HTTPStatus.OK)
+        return _takyon_app_json(status, payload)
+
+    return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+
+
+async def _takyon_app_post(request: Request, business: str, route: str) -> Response:
+    try:
+        body = await _takyon_app_read_json(request)
+    except json.JSONDecodeError as exc:
+        return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": f"invalid JSON body: {exc}"})
+
+    parts = _takyon_app_route_parts(route)
+    if parts == ["auth", "request"]:
+        status, payload = _takyon_app_tool(handle_business_request_app_magic_link({
+            "business": business,
+            "email": body.get("email"),
+            "name": body.get("name"),
+            "origin": _takyon_app_origin(request, body),
+            "app_slug": body.get("app_slug") or business,
+            "product_name": body.get("product_name") or business,
+            "send_email": bool(body.get("send_email", True)),
+        }))
+        if body.get("return_token") is not True:
+            payload.pop("token", None)
+        return _takyon_app_json(status, payload)
+
+    if parts == ["checkout"]:
+        token = _takyon_app_session_token(request)
+        account: dict[str, Any] = {}
+        if token:
+            _account_status, account = _takyon_app_tool(handle_business_read_app_account({
+                "business": business,
+                "session_token": token,
+            }))
+        status, payload = _takyon_app_tool(handle_business_create_app_checkout({
+            "business": business,
+            "plan_key": body.get("plan_key") or body.get("planKey"),
+            "success_url": body.get("success_url") or body.get("successUrl"),
+            "cancel_url": body.get("cancel_url") or body.get("cancelUrl"),
+            "customer_email": body.get("customer_email") or body.get("customerEmail") or (account.get("user") or {}).get("email"),
+            "app_user_id": (account.get("user") or {}).get("id"),
+            "metadata": body.get("metadata") or {},
+        }))
+        return _takyon_app_json(status, payload)
+
+    if parts == ["usage"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        account_status, account = _takyon_app_tool(handle_business_read_app_account({
+            "business": business,
+            "session_token": token,
+        }))
+        if account_status != int(HTTPStatus.OK):
+            return _takyon_app_json(account_status, account)
+        user = account.get("user") or {}
+        status, payload = _takyon_app_tool(handle_business_record_app_usage({
+            "business": business,
+            "app_user_id": user.get("id"),
+            "app_user_tier": user.get("tier"),
+            "purpose": body.get("purpose") or "product_usage",
+            "route": body.get("route") or request.url.path,
+            "status": body.get("status") or "completed",
+            "estimated_cost_microusd": body.get("estimated_cost_microusd") or body.get("estimatedCostMicrousd") or 0,
+            "actual_cost_microusd": body.get("actual_cost_microusd") or body.get("actualCostMicrousd") or 0,
+            "input_tokens": body.get("input_tokens") or body.get("inputTokens"),
+            "output_tokens": body.get("output_tokens") or body.get("outputTokens"),
+            "provider_request_id": body.get("provider_request_id") or body.get("providerRequestId"),
+            "provider": body.get("provider"),
+            "model": body.get("model"),
+            "metadata": body.get("metadata") or {},
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"usage:{business}:{user.get('id')}:{uuid.uuid4().hex}",
+        }))
+        return _takyon_app_json(status, payload)
+
+    if parts == ["generate"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        account_status, account = _takyon_app_tool(handle_business_read_app_account({
+            "business": business,
+            "session_token": token,
+        }))
+        if account_status != int(HTTPStatus.OK):
+            return _takyon_app_json(account_status, account)
+        user = account.get("user") or {}
+        try:
+            anthropic_payload, model, estimated_input_tokens = _takyon_app_anthropic_payload(body)
+        except Exception as exc:
+            return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
+        estimated_output_tokens = int(anthropic_payload.get("max_tokens") or 0)
+        estimated_cost = int(
+            body.get("estimated_cost_microusd")
+            or body.get("estimatedCostMicrousd")
+            or _takyon_app_microusd_cost(model, estimated_input_tokens, estimated_output_tokens)
+        )
+        budget = _takyon_app_budget_remaining_microusd(business)
+        if budget["status"] != "active":
+            return _takyon_app_json(HTTPStatus.PAYMENT_REQUIRED, {"success": False, "error": "app budget is not active", "budget": budget})
+        if estimated_cost > int(budget["remaining_microusd"]):
+            return _takyon_app_json(
+                HTTPStatus.PAYMENT_REQUIRED,
+                {
+                    "success": False,
+                    "error": "app usage would exceed budget cap",
+                    "estimated_cost_microusd": estimated_cost,
+                    "budget": budget,
+                },
+            )
+        api_key = _takyon_app_anthropic_key()
+        if not api_key:
+            return _takyon_app_json(HTTPStatus.FAILED_DEPENDENCY, {"success": False, "error": "missing Anthropic API credential"})
+        provider_request_id = ""
+        try:
+            provider_response = _takyon_app_call_anthropic(anthropic_payload, api_key)
+            provider_request_id = str(provider_response.get("id") or "")
+            usage = provider_response.get("usage") or {}
+            input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            actual_cost = _takyon_app_microusd_cost(model, input_tokens, output_tokens)
+            status, usage_payload = _takyon_app_tool(handle_business_record_app_usage({
+                "business": business,
+                "app_user_id": user.get("id"),
+                "app_user_tier": user.get("tier"),
+                "purpose": body.get("purpose") or "ai_generate",
+                "route": f"/api/takyon/apps/{business}/generate",
+                "status": "completed",
+                "estimated_cost_microusd": estimated_cost,
+                "actual_cost_microusd": actual_cost,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "provider_request_id": provider_request_id,
+                "provider": "anthropic",
+                "model": model,
+                "metadata": {
+                    "cost_rate_source": _takyon_app_anthropic_rates_microusd_per_token(model)[2],
+                    "request_metadata": body.get("metadata") or {},
+                },
+                "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate:{business}:{user.get('id')}:{provider_request_id or uuid.uuid4().hex}",
+            }))
+            if status != int(HTTPStatus.OK):
+                return _takyon_app_json(status, usage_payload)
+            return _takyon_app_json(HTTPStatus.OK, {
+                "success": True,
+                "text": _takyon_app_anthropic_text(provider_response),
+                "content": provider_response.get("content") or [],
+                "model": model,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "estimated_cost_microusd": estimated_cost,
+                    "actual_cost_microusd": actual_cost,
+                },
+                "receipt": usage_payload,
+            })
+        except Exception as exc:
+            _takyon_app_tool(handle_business_record_app_usage({
+                "business": business,
+                "app_user_id": user.get("id"),
+                "app_user_tier": user.get("tier"),
+                "purpose": body.get("purpose") or "ai_generate",
+                "route": f"/api/takyon/apps/{business}/generate",
+                "status": "failed",
+                "estimated_cost_microusd": estimated_cost,
+                "actual_cost_microusd": 0,
+                "provider_request_id": provider_request_id,
+                "provider": "anthropic",
+                "model": model,
+                "error": str(exc),
+                "metadata": {"request_metadata": body.get("metadata") or {}},
+                "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate-failed:{business}:{user.get('id')}:{uuid.uuid4().hex}",
+            }))
+            return _takyon_app_json(HTTPStatus.BAD_GATEWAY, {"success": False, "error": str(exc)})
+
+    return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+
+
+@app.get("/api/takyon/apps/{business}/{route:path}")
+async def takyon_app_api_get(request: Request, business: str, route: str):
+    return await _takyon_app_get(request, business, route)
+
+
+@app.post("/api/takyon/apps/{business}/{route:path}")
+async def takyon_app_api_post(request: Request, business: str, route: str):
+    return await _takyon_app_post(request, business, route)
+
+
+@app.get("/api/generated-apps/{business}/{route:path}")
+async def takyon_generated_app_api_get(request: Request, business: str, route: str):
+    return await _takyon_app_get(request, business, route)
+
+
+@app.post("/api/generated-apps/{business}/{route:path}")
+async def takyon_generated_app_api_post(request: Request, business: str, route: str):
+    return await _takyon_app_post(request, business, route)
+
+
+@app.post("/api/webhooks/stripe")
+async def takyon_app_stripe_webhook(request: Request):
+    raw_body = (await request.body()).decode("utf-8", errors="replace")
+    status, payload = _takyon_app_tool(handle_business_record_stripe_webhook({
+        "raw_body": raw_body,
+        "stripe_signature": request.headers.get("stripe-signature") or "",
+    }))
+    return _takyon_app_json(status, payload)
 
 
 # ---------------------------------------------------------------------------

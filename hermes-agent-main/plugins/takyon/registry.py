@@ -206,7 +206,7 @@ TAKYON_TOOL_REGISTRY: list[dict[str, Any]] = [
         "category": "product",
         "priority_bands": ["p1_ceo", "p2_growth", "p4_maintenance"],
         "effect": "durable_write",
-        "purpose": "Verify and publish a real business-owned product/website source path, then write receipts/blockers without deciding strategy. Default publication copies verified static output to the shared slug host; legacy shared_renderer policies are compatibility aliases only.",
+        "purpose": "Verify and publish a real business-owned product/website source path, including homepage-plus-app-route contract checks for app-like surfaces, then write receipts/blockers without deciding strategy. Default publication copies verified static output to the shared slug host; legacy shared_renderer policies are compatibility aliases only.",
     },
     {
         "name": "business_upsert_app_plan",
@@ -453,12 +453,12 @@ TAKYON_SKILL_REGISTRY: list[dict[str, Any]] = [
         "implementation_status": "implemented",
         "category": "product",
         "priority_bands": ["p2_growth"],
-        "purpose": "Shape or improve product and offer when the business lacks a usable product surface.",
+        "purpose": "Shape or improve product and offer when the business lacks a usable product surface; for app-like companies, default to a homepage plus working app subroute on canonical shared runtime rails.",
         "use_when": "Use when the operator asks for product/source/publication, after initial market research in an operational /create/build/setup bootstrap when the research supports a useful product/site surface, when evidence makes the product bet clear enough, or when a product artifact is the best evidence-gathering move.",
         "keywords": ["build product", "website", "app surface", "product source", "publish site", "MVP", "checkout", "product verification", "shared product blocks", "own runtime"],
         "capabilities": ["app_surface_contract", "product_source_generation", "product_surface_verification", "canonical_app_runtime", "shared_product_blocks", "own_runtime_gate"],
         "capability_gates": {
-            "shared_product_blocks": "available through canonical app-runtime rails, surface contracts, and business-owned frontend/source files; assemble the smallest credible product workflow from these before asking for custom backend runtime.",
+            "shared_product_blocks": "available through canonical app-runtime rails, surface contracts, and business-owned frontend/source files; assemble the smallest credible homepage-plus-app product workflow from these before asking for custom backend runtime.",
             "own_runtime": "stub_unavailable unless a registry/tool receipt explicitly says custom backend deploy is configured; do not attempt ad hoc systemd, Caddy, Vercel, or serverless deploy work as a substitute.",
         },
     },

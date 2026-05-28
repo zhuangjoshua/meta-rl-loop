@@ -847,6 +847,49 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/api/takyon/apps/"),
     re.compile(r"\bHermes\b.*\bruntime\b", re.IGNORECASE),
 )
+_PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("runtime_api", re.compile(r"/api/takyon/apps/|/api/generated-apps/", re.IGNORECASE)),
+    ("auth", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?auth/(?:request|verify)\b", re.IGNORECASE)),
+    ("session", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?session\b", re.IGNORECASE)),
+    ("account", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?account\b", re.IGNORECASE)),
+    ("checkout", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?checkout\b", re.IGNORECASE)),
+    ("usage", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?usage\b", re.IGNORECASE)),
+    ("generate", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?generate\b", re.IGNORECASE)),
+)
+_PRODUCT_WORKFLOW_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("form", re.compile(r"<form\b", re.IGNORECASE)),
+    ("input", re.compile(r"<(?:input|textarea|select)\b", re.IGNORECASE)),
+    ("file_upload", re.compile(r"type\s*=\s*['\"]file['\"]", re.IGNORECASE)),
+    ("runtime_fetch", re.compile(r"\bfetch\s*\(", re.IGNORECASE)),
+    ("event_handler", re.compile(r"\baddEventListener\s*\(", re.IGNORECASE)),
+)
+_PRODUCT_DECLARED_ROUTE_PATTERN = re.compile(
+    r"""(?:href|to)\s*=\s*["'](?P<html>/[A-Za-z0-9][A-Za-z0-9_/\-.]*)["']|"""
+    r"""(?P<quoted>['"]/(?:app|dashboard|workspace|editor|scan|upload|generate|coach|chat|tracker|settings|account|login|checkout|intake|wizard|builder|tool|pricing)(?:/[A-Za-z0-9_/\-.]*)?['"])""",
+    re.IGNORECASE,
+)
+_PRODUCT_LANDING_ONLY_FLAGS = {
+    "allow_landing_only",
+    "landing_page_only",
+    "offer_page_only",
+    "validation_landing_page_only",
+}
+_PRODUCT_AI_SURFACE_PATTERN = re.compile(
+    r"\b(?:ai|llm|generate|summari[sz]e|classif(?:y|ier|ication)|analy[sz]e|analysis|assistant|coach|scan|chat)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_AUTH_SURFACE_PATTERN = re.compile(
+    r"\b(?:auth|login|log in|sign[- ]?in|magic[- ]?link|session|account|customer|entitlement)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_CHECKOUT_SURFACE_PATTERN = re.compile(
+    r"\b(?:checkout|billing|subscription|stripe|upgrade|paid|pro plan)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_WORKFLOW_ROUTE_PATTERN = re.compile(
+    r"\b(?:app|dashboard|workspace|editor|scan|upload|generate|coach|chat|tracker|settings|account|login|checkout|intake|wizard|builder|tool)\b",
+    re.IGNORECASE,
+)
 _ACCOUNT_LOADING_TOKENS = {
     "account",
     "account-email",
@@ -950,8 +993,11 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "source_path": source_rel,
         "generated_at": _now(),
         "routes": [],
+        "declared_routes": [],
         "api_routes": [],
         "package": {},
+        "runtime_integrations": [],
+        "workflow_markers": [],
         "risk_markers": [],
         "claim_snippets": [],
         "pretend_findings": [],
@@ -971,7 +1017,10 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         return inventory
 
     routes: set[str] = set()
+    declared_routes: set[str] = set()
     api_routes: set[str] = set()
+    runtime_integrations: set[str] = set()
+    workflow_markers: set[str] = set()
     risk_markers: list[dict[str, Any]] = []
     claim_snippets: list[dict[str, Any]] = []
     files_scanned = 0
@@ -1029,6 +1078,16 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
             continue
         files_scanned += 1
         for number, line in enumerate(text.splitlines(), start=1):
+            for route_match in _PRODUCT_DECLARED_ROUTE_PATTERN.finditer(line):
+                route_value = (route_match.group("html") or route_match.group("quoted") or "").strip("'\"")
+                if route_value and not route_value.startswith("/api/") and route_value != "/":
+                    declared_routes.add(route_value.rstrip("/") or "/")
+            for label, pattern in _PRODUCT_RUNTIME_INTEGRATION_PATTERNS:
+                if pattern.search(line):
+                    runtime_integrations.add(label)
+            for label, pattern in _PRODUCT_WORKFLOW_MARKERS:
+                if pattern.search(line):
+                    workflow_markers.add(label)
             if len(risk_markers) < _PRODUCT_INVENTORY_MAX_MARKERS:
                 for label, pattern in _PRODUCT_INVENTORY_MARKERS:
                     if pattern.search(line):
@@ -1054,7 +1113,10 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
     inventory.update({
         "status": "partial" if partial else "collected",
         "routes": sorted(routes),
+        "declared_routes": sorted(declared_routes),
         "api_routes": sorted(api_routes),
+        "runtime_integrations": sorted(runtime_integrations),
+        "workflow_markers": sorted(workflow_markers),
         "risk_markers": risk_markers,
         "claim_snippets": claim_snippets,
         "files_scanned": files_scanned,
@@ -1073,8 +1135,11 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
             "source_path": source_text,
             "generated_at": _now(),
             "routes": [],
+            "declared_routes": [],
             "api_routes": [],
             "package": {},
+            "runtime_integrations": [],
+            "workflow_markers": [],
             "risk_markers": [],
             "claim_snippets": [],
             "pretend_findings": [],
@@ -1084,6 +1149,128 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
             "publish_receipt_path": str((surface or {}).get("publish_receipt_path") or "") if isinstance(surface, dict) else "",
             "scanner_error": _truncate_text(str(exc), 500),
         }
+
+
+def _surface_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _surface_allows_landing_only(surface: dict[str, Any] | None) -> bool:
+    if not isinstance(surface, dict):
+        return False
+    for container_name in ("metadata", "constraints", "theme"):
+        container = surface.get(container_name)
+        if isinstance(container, dict):
+            for key in _PRODUCT_LANDING_ONLY_FLAGS:
+                if key in container and _surface_bool(container.get(key)):
+                    return True
+    for key in _PRODUCT_LANDING_ONLY_FLAGS:
+        if key in surface and _surface_bool(surface.get(key)):
+            return True
+    return False
+
+
+def _surface_routes(surface: dict[str, Any] | None) -> list[str]:
+    if not isinstance(surface, dict):
+        return []
+    values = surface.get("routes")
+    routes: list[str] = []
+    if isinstance(values, list):
+        for item in values:
+            if isinstance(item, str):
+                path = item
+            elif isinstance(item, dict):
+                path = str(item.get("path") or "")
+            else:
+                path = ""
+            path = path.strip()
+            if path:
+                routes.append(path.rstrip("/") or "/")
+    return routes
+
+
+def _surface_text(surface: dict[str, Any] | None) -> str:
+    if not isinstance(surface, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("status", "runtime_api_base", "notes", "publish_policy", "done_gate"):
+        value = surface.get(key)
+        if value:
+            parts.append(str(value))
+    for item in surface.get("routes") or []:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for key in ("path", "label", "description", "purpose", "type"):
+                if item.get(key):
+                    parts.append(str(item.get(key)))
+    for key in ("constraints", "metadata"):
+        value = surface.get(key)
+        if isinstance(value, dict):
+            parts.extend(f"{nested_key}={nested_value}" for nested_key, nested_value in value.items())
+    return "\n".join(parts)
+
+
+def _surface_contract_kind(surface: dict[str, Any] | None) -> dict[str, bool]:
+    text = _surface_text(surface)
+    routes = _surface_routes(surface)
+    route_text = "\n".join(route for route in routes if route != "/")
+    has_workflow_route = any(_PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) for route in routes if route != "/")
+    return {
+        "landing_only": _surface_allows_landing_only(surface),
+        "app_like": has_workflow_route
+        or _PRODUCT_AI_SURFACE_PATTERN.search(text) is not None
+        or _PRODUCT_AUTH_SURFACE_PATTERN.search(text) is not None
+        or _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(text) is not None
+        or _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route_text) is not None,
+        "ai": _PRODUCT_AI_SURFACE_PATTERN.search(text) is not None,
+        "auth": _PRODUCT_AUTH_SURFACE_PATTERN.search(text) is not None,
+        "checkout": _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(text) is not None,
+    }
+
+
+def _validate_product_surface_contract(
+    inventory: dict[str, Any],
+    surface: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    kind = _surface_contract_kind(surface)
+    if not kind["app_like"] or kind["landing_only"]:
+        return True, ""
+
+    source_routes = set(str(route) for route in inventory.get("routes") or [])
+    declared_routes = set(str(route) for route in inventory.get("declared_routes") or [])
+    effective_routes = source_routes | declared_routes
+    app_routes = {
+        route
+        for route in effective_routes
+        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route)
+    }
+    if "/" not in source_routes:
+        return False, "app-like product surface must include a homepage route at /"
+    if not app_routes:
+        return False, "app-like product surface must include and link a working app subroute such as /app, or mark the surface landing_page_only"
+
+    workflow_markers = set(str(marker) for marker in inventory.get("workflow_markers") or [])
+    if not ({"form", "input"} & workflow_markers) and "runtime_fetch" not in workflow_markers:
+        return False, "app-like product surface must contain a real product workflow, not only marketing sections"
+
+    integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
+    if kind["ai"]:
+        if "generate" not in integrations:
+            return False, "AI-backed product surface must call the shared /api/takyon/apps/<business>/generate runtime route"
+        if not ({"auth", "session", "account"} & integrations):
+            return False, "AI-backed product surface must include the shared app-session auth/account runtime route used by /generate"
+    if kind["auth"] and not ({"auth", "session", "account"} & integrations):
+        return False, "auth/session product surface must call the shared /api/takyon/apps/<business>/auth or session runtime routes"
+    if kind["checkout"] and "checkout" not in integrations:
+        return False, "checkout/billing product surface must call the shared /api/takyon/apps/<business>/checkout runtime route or mark checkout unavailable"
+    return True, ""
 
 
 def _product_source_files(root: Path, *, limit: int = 200) -> list[str]:
@@ -1282,6 +1469,7 @@ def _verify_product_surface_path(
     business_root: Path,
     source_path: str,
     *,
+    surface: dict[str, Any] | None = None,
     install: bool = True,
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
@@ -1294,7 +1482,7 @@ def _verify_product_surface_path(
         "status": "unverified",
         "checks": [],
         "warnings": [],
-        "inventory": _product_inventory(business_root, source_rel),
+        "inventory": _product_inventory(business_root, source_rel, surface=surface),
         "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv")),
     }
     if business_root.resolve() not in (root, *root.parents):
@@ -1317,6 +1505,11 @@ def _verify_product_surface_path(
         return result
     if not files:
         result.update({"status": "missing", "error": "source path contains no recognized product source files"})
+        return result
+
+    contract_ok, contract_error = _validate_product_surface_contract(result.get("inventory") or {}, surface)
+    if not contract_ok:
+        result.update({"status": "failed", "error": contract_error})
         return result
 
     package_json = root / "package.json"
@@ -1877,9 +2070,18 @@ def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
     block = (
         f"{host} {{\n"
-        f"    root * {static_root}\n"
-        "    try_files {path} {path}/ /index.html\n"
-        "    file_server\n"
+        "    @takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe\n"
+        "    handle @takyon_app_runtime {\n"
+        "        reverse_proxy 127.0.0.1:9119 {\n"
+        "            header_up Host {host}\n"
+        "            header_up X-Forwarded-Proto https\n"
+        "        }\n"
+        "    }\n"
+        "    handle {\n"
+        f"        root * {static_root}\n"
+        "        try_files {path} {path}/ /index.html\n"
+        "        file_server\n"
+        "    }\n"
         "}\n"
     )
     pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
@@ -5717,6 +5919,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         verification = _verify_product_surface_path(
             store._business_root(business),
             source_path,
+            surface=surface,
             install=install,
             timeout_seconds=timeout_seconds,
         )

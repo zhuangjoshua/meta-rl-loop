@@ -382,6 +382,128 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
+def test_app_like_surface_cannot_pass_as_landing_page_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:briefpilot",
+        [{"action": "business.upsert", "business": "briefpilot", "name": "BriefPilot"}],
+        "init-app-like-landing",
+    )
+    _commit(
+        store,
+        "business:briefpilot",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "briefpilot",
+                "status": "draft",
+                "source_path": "product/site",
+                "routes": [
+                    {"path": "/", "name": "Homepage"},
+                    {"path": "/app", "name": "App", "description": "AI brief builder workflow"},
+                ],
+                "notes": "AI brief builder app.",
+            }
+        ],
+        "surface-app-like-landing",
+    )
+    site = tmp_path / "businesses" / "briefpilot" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>BriefPilot</h1><p>Join the waitlist.</p>\n", encoding="utf-8")
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "briefpilot",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-app-like-landing",
+            }
+        )
+    )["verification"]
+
+    assert verification["status"] == "failed"
+    assert verification["done_gate_status"] == "blocked"
+    assert "app subroute" in verification["error"]
+    assert verification["publish"]["status"] == "blocked"
+
+
+def test_static_spa_app_surface_with_shared_runtime_routes_passes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:briefpilot",
+        [{"action": "business.upsert", "business": "briefpilot", "name": "BriefPilot"}],
+        "init-static-spa-app",
+    )
+    _commit(
+        store,
+        "business:briefpilot",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "briefpilot",
+                "status": "draft",
+                "source_path": "product/site",
+                "runtime_api_base": "/api/takyon/apps/briefpilot",
+                "routes": [
+                    {"path": "/", "name": "Homepage"},
+                    {"path": "/app", "name": "App", "description": "AI brief builder workflow"},
+                ],
+                "notes": "AI brief builder app.",
+            }
+        ],
+        "surface-static-spa-app",
+    )
+    site = tmp_path / "businesses" / "briefpilot" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        """
+        <h1>BriefPilot</h1>
+        <a href="/app">Open app</a>
+        <form id="signin"><input name="email" type="email"></form>
+        <form id="workspace"><textarea name="brief"></textarea><button>Generate</button></form>
+        <script>
+        fetch('/api/takyon/apps/briefpilot/session');
+        document.getElementById('signin').addEventListener('submit', function (event) {
+          event.preventDefault();
+          fetch('/api/takyon/apps/briefpilot/auth/request', { method: 'POST' });
+        });
+        document.getElementById('workspace').addEventListener('submit', function (event) {
+          event.preventDefault();
+          fetch('/api/takyon/apps/briefpilot/generate', { method: 'POST' });
+        });
+        </script>
+        """,
+        encoding="utf-8",
+    )
+
+    verification = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "briefpilot",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-static-spa-app",
+            }
+        )
+    )["verification"]
+
+    assert verification["status"] == "passed"
+    assert verification["done_gate_status"] == "passed"
+    inventory = verification["inventory"]
+    assert inventory["routes"] == ["/"]
+    assert inventory["declared_routes"] == ["/app"]
+    assert {"auth", "generate", "session"}.issubset(set(inventory["runtime_integrations"]))
+    assert {"form", "input", "runtime_fetch"}.issubset(set(inventory["workflow_markers"]))
+    assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
+
+
 def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9127/site")
@@ -481,7 +603,10 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
     assert verification["publish"]["status"] == "published"
     assert verification["publish"]["caddyfile"] == str(tmp_path / "Caddyfile")
     assert "latexflow.fourmanifold.com" in caddyfile
+    assert "@takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe" in caddyfile
+    assert "reverse_proxy 127.0.0.1:9119" in caddyfile
     assert f"root * {tmp_path / 'published-sites' / 'latexflow'}" in caddyfile
+    assert "try_files {path} {path}/ /index.html" in caddyfile
     assert "file_server" in caddyfile
     assert ((tmp_path / "published-sites" / "latexflow" / "index.html").stat().st_mode & 0o777) == 0o644
 
