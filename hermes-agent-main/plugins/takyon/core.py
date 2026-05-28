@@ -1102,8 +1102,6 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
                 clean = line.strip()
                 if clean:
                     claim_snippets.append({"path": rel, "line": number, "snippet": clean[:220]})
-            if len(risk_markers) >= _PRODUCT_INVENTORY_MAX_MARKERS and len(claim_snippets) >= _PRODUCT_INVENTORY_MAX_SNIPPETS:
-                break
 
     try:
         inventory["pretend_findings"] = _scan_for_pretend_product_state(root, limit=12)
@@ -1649,7 +1647,7 @@ _BRAIN_COMPLETION_MARKERS = (
 _BRAIN_COMPLETION_EVIDENCE_TERMS = (
     ("source files", ("source file", "source files", "source_path", "source path")),
     ("runtime/tool endpoint used", ("runtime/tool endpoint", "runtime endpoint", "tool endpoint", "endpoint used", "tool used", "runtime used")),
-    ("receipt or test record", ("receipt", "test record", "test_record", "job id", "agent record")),
+    ("audit/test record", ("audit record", "audit", "receipt", "test record", "test_record", "job id", "agent record")),
     ("remaining blocker", ("remaining blocker", "blocker", "blocked", "not wired")),
 )
 
@@ -1668,7 +1666,7 @@ def _validate_brain_index_completion_gate(rel: str, content: str) -> None:
     if missing:
         raise TakyonError(
             "brain/index.md cannot claim complete/built/done work without a feature evidence ledger. "
-            "For each feature list source files, runtime/tool endpoint used, receipt or test record, "
+            "For each feature list source files, runtime/tool endpoint used, audit/test record, "
             f"and remaining blocker. Missing: {', '.join(missing)}"
         )
 
@@ -2410,7 +2408,7 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "app.usage.record",
     }
     product_paths = ("app/", "product/", "website/")
-    marketing_paths = ("campaigns/", "outreach/", "research/", "sales/")
+    marketing_paths = ("distribution/", "campaigns/", "outreach/", "research/", "sales/")
 
     if focus == "marketing":
         if action in product_actions:
@@ -4123,7 +4121,11 @@ class TakyonStore:
                 if not directory.is_dir():
                     raise TakyonError(f"path is not a directory: {rel}")
                 files = []
-                for child in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:limit]:
+                for child in sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+                    if rel in {"", "."} and child.name == "receipts":
+                        continue
+                    if len(files) >= limit:
+                        break
                     files.append({"path": str(child.relative_to(self._business_root(slug))), "type": "dir" if child.is_dir() else "file"})
                 return {"success": True, "scope": scope, "path": rel, "files": files}
 
@@ -4996,7 +4998,7 @@ class TakyonStore:
             publish_id = str(op.get("id") or uuid.uuid4().hex)
             created_at = _now()
             file_stem = f"{created_at[:10]}-{_file_slug(target, 'target')}-{publish_id[:8]}"
-            rel = f"outreach/local-published/{channel}/{file_stem}.md"
+            rel = f"distribution/local-published/{channel}/{file_stem}.md"
             receipt_rel = f"receipts/outreach/{publish_id}.json"
             _atomic_write_text(
                 self._business_root(slug) / rel,
@@ -5288,7 +5290,7 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, verification, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
-            "Advance the outreach lifecycle: if no outreach campaign exists, start campaigns/phase-1-outreach/; if Phase 1 is incomplete, continue missing lanes/touches/receipts; if complete but unreviewed, review receipts, conversation mirrors, blockers, replies, and elapsed time; if replies exist, route follow-up through sales/conversation response; if no replies after review, choose the next distribution campaign or changed offer. "
+            "Advance the outreach lifecycle: if no outreach campaign exists, start distribution/phase-1-outreach/; if Phase 1 is incomplete, continue missing lanes/touches/files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly or use business_conversation_agent_task to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -5296,7 +5298,7 @@ class TakyonStore:
             "Append a compact wake snapshot to brain/wake_journal.md for future comparison. Never delete prior pulse, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
             "Honor business mode: in test mode, keep product/website build and "
-            "publication, app rails, receipts, conversations, and follow-up review active. Suppress external outreach, "
+            "publication, app rails, distribution files, hidden audit receipts, conversations, and follow-up review active. Suppress external outreach, "
             "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
         )
 
@@ -5432,7 +5434,7 @@ def _creative_asset_relpath(
             return rel
         return f"{rel}.{default_ext}"
     campaign = _file_slug(str(args.get("campaign") or "default"), "default")
-    return f"campaigns/{campaign}/creatives/{channel}-{format_name}/{asset_id}.{default_ext}"
+    return f"distribution/{campaign}/creatives/{channel}-{format_name}/{asset_id}.{default_ext}"
 
 
 def _creative_asset_source_bytes(source: str) -> bytes:
@@ -7515,7 +7517,7 @@ def handle_business_conversation_agent_task(args: dict, **_: Any) -> str:
         )
 
         instruction = "\n".join([
-            "Use the takyon:conversation-response method for this bounded task.",
+            "Use the business conversation response path for this bounded task.",
             "Read input.md and messages.jsonl in the current workspace.",
             "Do not try to read every historical conversation unless the task slice requires it.",
             "Use business impact, volume, recency, risk, budget, and the stated objective to decide what matters.",
@@ -7977,7 +7979,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "shot_list": {"type": "array", "items": {"type": "string"}, "description": "Ordered UGC shots or beats"},
                 "provider": {"type": "string", "description": "Provider credential alias to gate, e.g. fal, openai, or xai. The active generator backend still comes from Takyon tools config."},
                 "model": {"type": "string", "description": "Optional model override passed to the generator"},
-                "output_path": {"type": "string", "description": "Optional business-relative output path; default campaigns/<campaign>/creatives/<channel>-ugc/<asset-id>.<ext>"},
+                "output_path": {"type": "string", "description": "Optional business-relative output path; default distribution/<campaign>/creatives/<channel>-ugc/<asset-id>.<ext>"},
                 "budget_usd": {"type": "number", "description": "Required spend allocation under the business budget cap before calling a provider"},
                 "image_url": {"type": "string", "description": "Optional source image URL for image-to-video"},
                 "reference_image_urls": {"type": "array", "items": {"type": "string"}},

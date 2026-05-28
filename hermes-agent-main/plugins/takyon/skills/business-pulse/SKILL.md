@@ -37,6 +37,6 @@ Raw metrics remain in canonical SQLite/app/conversation/job/ledger/event stores.
 
 Deterministic pulse math is not delegated. Use `business_calculate_pulse`.
 
-Customer response review remains the existing conversation path. If replies, comments, support messages, or outreach results are too large or noisy to inspect cheaply, use `takyon:conversation-response` / `business_conversation_agent_task` to summarize qualitative evidence before the CEO decides.
+Customer response review remains the existing conversation path. If replies, comments, support messages, or outreach results are too large or noisy to inspect cheaply, use `business_conversation_agent_task` to summarize qualitative evidence before the CEO decides.
 
 The CEO decides. The pulse skill interprets. The calculator computes.

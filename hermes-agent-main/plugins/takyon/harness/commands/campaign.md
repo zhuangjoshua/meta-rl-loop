@@ -11,8 +11,8 @@ Operator arguments:
 
 `$ARGUMENTS`
 
-Campaign work must stay under a campaign folder in `campaigns/`. Keep the brief, plan, research, creative, outreach, receipts, worklog, and learnings inside that campaign workspace.
+Campaign work must stay under a distribution folder in `distribution/`. Keep the brief, plan, research notes, creative, outreach assets, worklog, and learnings inside that visible campaign workspace. Receipts are hidden audit/debug state, not campaign deliverables.
 
 Before any outward distribution, inspect unresolved inbound conversation state. If people have replied and need attention, handle or escalate that before new posting/outreach.
 
-Use distribution, outreach, ad creative, market research, or conversion skills when they fit. External spend, posting, vendor mutation, and launches require explicit credentials, budget, controls, and receipts.
+Use `takyon:market-research` when the campaign still lacks evidence. Use `business_publish_outreach` for outward publish intents, `business_generate_creative_asset` for local creative assets, and `business_conversation_agent_task` when replies are too large or noisy to inspect directly. External spend, posting, vendor mutation, and launches require explicit credentials, budget, controls, and audit receipts.

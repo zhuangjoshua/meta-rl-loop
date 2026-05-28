@@ -18,8 +18,8 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 ## Integrated Skill Surface
 
 - Demand Radar is merged into `takyon:market-research`.
-- Traffic Attribution is merged into `takyon:app-runtime` for runtime gates and `takyon:conversion-review` for interpretation.
-- New skills: `takyon:experimentation`, `takyon:sales-pipeline`, `takyon:skill-safety-review`.
+- Traffic Attribution is merged into `takyon:app-runtime` for runtime gates; interpretation currently stays CEO/research-led.
+- Experiment tracking, sales-pipeline handling, and third-party skill review are not standalone Takyon skills in the current trimmed set.
 
 These skill integrations use existing Takyon tools first: `business_registry`, `business_calculate_pulse`, `business_read_business`, `business_write_file`, `business_record_event`, `business_enqueue_job`, conversation tools, outreach tools, app-runtime tools, and guarded provider gates.
 

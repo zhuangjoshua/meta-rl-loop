@@ -756,13 +756,13 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "what should change in product/ICP/pricing/distribution, and the highest expected-profit move now.",
         "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in the business brain.",
         "Distribution is required action during bootstrap. After research and the smallest credible offer/product surface,",
-        "create or continue campaigns/phase-1-outreach/ and run a Phase 1 outreach batch through",
-        "takyon:distribution-campaign and takyon:outreach. Phase 1 is a bootstrap/open-campaign completion contract,",
+        "create or continue distribution/phase-1-outreach/ and run a Phase 1 outreach batch through",
+        "durable campaign files plus business_publish_outreach intents. Phase 1 is a bootstrap/open-campaign completion contract,",
         "not a forever recurring funnel: normally use at least 3 evidence-backed lanes and 6 total",
         "business_publish_outreach intents, unless a named safety, scope, budget, or operator blocker prevents even",
         "local/mock outreach.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, use the existing",
-        "takyon:conversation-response / business_conversation_agent_task path to compress it before deciding.",
+        "business_conversation_agent_task path to compress it before deciding.",
         "Call business_calculate_pulse and use the registry pulse skill to establish the first pulse baseline in brain/pulse.md and brain/business-model.md.",
         "Seed or update compact wake/traction notes in brain/wake_journal.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
@@ -774,8 +774,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "product/site surface that the research supports. Research-first is sequencing, not permission to stop at notes.",
         "Skip product/source/publication only when current evidence, safety, scope, budget, credentials, or runtime gates make",
         "building the wrong move; record that exact reason as a blocker or business-brain hypothesis.",
-        "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution assets,",
-        "guarded jobs or suppressed local receipts, and the next CEO wake when they are the justified move. Do not stop after",
+        "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution files,",
+        "guarded jobs or hidden suppressed audit receipts, and the next CEO wake when they are the justified move. Do not stop after",
         "research, source files, or a blocked website publish while Phase 1 outreach is absent or incomplete. If a Phase 1",
         "campaign already exists, continue it instead of restarting it. A blocked public URL does not block outreach; use",
         "the business publish_target or a truthful discovery/mock message and name the product blocker.",
@@ -785,7 +785,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
         "",
         "Final response: concise status only. Include business filesystem root, research/strategy created or updated,",
-        "files changed, receipts/jobs/wakeups, the next CEO action, what is still missing, and whether pricing/research",
+        "files changed, jobs/wakeups, the next CEO action, what is still missing, and whether pricing/research",
         "is evidence-backed or a recorded hypothesis.",
     ]
     if active_mode == "test":
@@ -796,8 +796,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
             "Do not send outreach, post to social/forums, buy ads, charge customers, or send marketing emails externally.",
             "For each Phase 1 outreach touch, call business_publish_outreach. If a forum/social channel or provider posting",
             "is unavailable, use local suppressed/mock publication with the intended channel/destination when known. Successful",
-            "test-mode touches must create outreach/local-published/, receipts/outreach/, and conversation mirrors; otherwise",
-            "record the exact blocker.",
+            "test-mode touches must create distribution/local-published/ and conversation mirrors; the tool writes",
+            "receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
         ])
     return "\n".join(lines)
 
@@ -2519,7 +2519,7 @@ def run_takyon_command(
         data = store.read(scope=_scope_for_business(slug), query="summary")
         workspaces = [
             item for item in data.get("workspaces", [])
-            if str(item.get("path", "")).startswith("campaigns/")
+            if str(item.get("path", "")).startswith(("distribution/", "campaigns/"))
         ]
         return {"success": True, "business": slug, "campaigns": workspaces}
 

@@ -71,23 +71,12 @@ def test_plugin_registers_skill_pack():
     takyon.register(ctx)
     assert sorted(ctx.tools) == sorted(tool["name"] for tool in TAKYON_TOOL_DEFINITIONS)
     assert set(ctx.skills) == {
-        "ad-creative",
         "build-product",
-        "business-learning",
         "business-pulse",
         "ceo",
         "app-runtime",
         "claude-agent-sdk",
-        "conversation-response",
-        "conversion-review",
-        "distribution-campaign",
-        "experimentation",
-        "failure-recovery",
         "market-research",
-        "outreach",
-        "pricing-strategy",
-        "sales-pipeline",
-        "skill-safety-review",
     }
     assert ctx.commands == ["takyon"]
     assert set(ctx.slash_commands) == {"takyon"}
@@ -115,7 +104,7 @@ def test_bootstrap_prompt_requires_phase_one_outreach_batch():
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    assert "campaigns/phase-1-outreach/" in prompt
+    assert "distribution/phase-1-outreach/" in prompt
     assert "3 evidence-backed lanes" in prompt
     assert "6 total" in prompt
     assert "business_publish_outreach" in prompt
@@ -126,23 +115,25 @@ def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
     prompt = TakyonStore(tmp_path)._ceo_cron_prompt("demo")
 
     assert "Advance the outreach lifecycle" in prompt
-    assert "campaigns/phase-1-outreach/" in prompt
+    assert "distribution/phase-1-outreach/" in prompt
     assert "if Phase 1 is incomplete" in prompt
     assert "if complete but unreviewed" in prompt
 
 
-def test_registry_exposes_phase_one_outreach_metadata():
+def test_registry_keeps_trimmed_core_skill_metadata():
     skills = {skill["name"]: skill for skill in TAKYON_REGISTRY["skills"]}
 
-    distribution = skills["distribution-campaign"]
-    outreach = skills["outreach"]
+    assert set(skills) == {
+        "app-runtime",
+        "build-product",
+        "business-pulse",
+        "ceo",
+        "claude-agent-sdk",
+        "market-research",
+    }
 
-    assert "phase-one outreach" in distribution["use_when"]
-    assert "multi_lane_outreach_batch" in distribution["capabilities"]
-    assert "phase-one outreach" in distribution["keywords"]
-    assert "phase-one outreach touches" in outreach["use_when"]
-    assert "business_publish_outreach" in outreach["capabilities"]
-    assert "test_mode_local_receipts" in outreach["capabilities"]
+    assert "product/site surface" in skills["build-product"]["use_when"]
+    assert "research first" in skills["market-research"]["use_when"]
 
 
 def test_registry_tool_filters_by_category_and_priority():
@@ -862,8 +853,8 @@ def test_kill_switch_blocks_child_writes(tmp_path):
     with pytest.raises(TakyonError, match="killed"):
         _commit(
             store,
-            "business:latexflow/workspace:campaigns/finals",
-            [{"action": "workspace.upsert", "path": "campaigns/finals"}],
+            "business:latexflow/workspace:distribution/finals",
+            [{"action": "workspace.upsert", "path": "distribution/finals"}],
             "blocked",
         )
 
@@ -1190,8 +1181,15 @@ def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_p
 
     assert result["external_side_effects"] == "suppressed"
     assert result["sent"] is False
+    assert result["artifact"].startswith("distribution/local-published/")
     assert (tmp_path / "businesses" / "longer" / result["artifact"]).exists()
+    assert not (tmp_path / "businesses" / "longer" / result["artifact"].replace("distribution/", "outreach/", 1)).exists()
     assert (tmp_path / "businesses" / "longer" / result["receipt"]).exists()
+    root_files = store.read(scope="business:longer", query="list_files", path=".")["files"]
+    assert "distribution" in {item["path"] for item in root_files}
+    assert "receipts" not in {item["path"] for item in root_files}
+    receipt_files = store.read(scope="business:longer", query="list_files", path="receipts")["files"]
+    assert "receipts/outreach" in {item["path"] for item in receipt_files}
 
 
 def test_manual_paid_entitlement_requires_billing_evidence(tmp_path):
@@ -1294,7 +1292,7 @@ def test_brain_index_completion_gate_requires_feature_evidence(tmp_path):
                 "content": (
                     "# Longer\n\n"
                     "Bootstrap: COMPLETE\n\n"
-                    "| Feature | Source files | Runtime/tool endpoint used | Receipt or test record | Remaining blocker |\n"
+                    "| Feature | Source files | Runtime/tool endpoint used | Audit/test record | Remaining blocker |\n"
                     "|---|---|---|---|---|\n"
                     "| Account | product/site/account.html | /api/takyon/apps/longer/account | agent record abc | blocked until browser endpoint is wired |\n"
                 ),
@@ -1580,6 +1578,7 @@ def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_pat
     )
 
     assert result["success"] is True
+    assert result["path"].startswith("distribution/launch/creatives/meta-ugc/")
     asset_path = tmp_path / "businesses" / "clipbook" / result["path"]
     receipt_path = tmp_path / "businesses" / "clipbook" / result["receipt"]
     assert asset_path.read_bytes() == b"fake mp4 bytes"
@@ -1622,10 +1621,12 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     assert result["success"] is True
     publish = result["results"][0]
     assert publish["external_side_effects"] == "suppressed"
+    assert publish["artifact"].startswith("distribution/local-published/")
     artifact = tmp_path / "businesses" / "jobtailor" / publish["artifact"]
     receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
     assert artifact.is_file()
     assert receipt.is_file()
+    assert not (tmp_path / "businesses" / "jobtailor" / publish["artifact"].replace("distribution/", "outreach/", 1)).exists()
     artifact_text = artifact.read_text(encoding="utf-8")
     assert artifact_text == "# Try JobTailor\n\nPaste a job description and see what your resume is missing.\n"
     assert "\\n" not in artifact_text

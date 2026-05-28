@@ -85,7 +85,7 @@ When changing CEO/runtime behavior, edit the active skills under `hermes-agent-m
 - `takyon:ceo` is the state-aware router.
 - `takyon:claude-agent-sdk` / `business_claude_agent_task` is the bounded Claude Agent SDK path for business-scoped workspace edits.
 - `takyon:app-runtime` and the canonical app tools own product customer auth, magic links, sessions, app customers/subusers, entitlements, plan policy, checkout, Stripe webhook reconciliation, revenue, and usage budgets.
-- `takyon:business-pulse`, `takyon:outreach`, `takyon:conversation-response`, `takyon:distribution-campaign`, `takyon:ad-creative`, `takyon:market-research`, `takyon:pricing-strategy`, `takyon:conversion-review`, `takyon:business-learning`, and `takyon:failure-recovery` own their respective business methods.
+- `takyon:business-pulse`, `takyon:market-research`, and `takyon:build-product` own the remaining active business methods; distribution, creative, and conversation follow-up now route through canonical business tools until a replacement skill set is added.
 
 When the operator asks to add a normal new Takyon feature or skill, always use the parsimonious addition path:
 

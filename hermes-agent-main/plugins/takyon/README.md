@@ -20,12 +20,12 @@ takyon commands
 takyon app-server 127.0.0.1 8787
 takyon registry
 takyon registry tools queue p2_growth
-takyon registry skills distribution p2_growth
+takyon registry skills research p2_growth
 takyon budget set latexflow 100
 takyon wake latexflow "every 6h"
 takyon pause business:latexflow "operator pause"
 takyon resume business:latexflow "operator resume"
-takyon kill business:latexflow/workspace:campaigns/finals "stop campaign"
+takyon kill business:latexflow/workspace:distribution/finals "stop campaign"
 takyon delete latexflow
 takyon delete latexflow --confirm
 takyon gc 90
@@ -38,7 +38,8 @@ In an interactive Takyon session, use the slash command:
 ```text
 /takyon businesses
 /takyon registry tools queue p2_growth
-/takyon kill business:latexflow/workspace:campaigns/finals "stop campaign"
+/takyon registry skills research p2_growth
+/takyon kill business:latexflow/workspace:distribution/finals "stop campaign"
 /takyon delete latexflow
 /takyon market-research compare latex tools for finals week
 /takyon skill python-debugpy help debug this failing test
@@ -66,9 +67,11 @@ $TAKYON_HOME/
   businesses/
     <business>/
       brain/
+      research/
       conversations/
-      campaigns/
+      distribution/
       product/
+      app/
       sales/
 ```
 
@@ -165,7 +168,7 @@ Web search comes from Takyon's web toolset. Ad posting, deploys, vendor calls, m
 
 `businesses.mode` is the source of truth for live/test behavior. `business_set_mode` and `takyon test <business> on|off|status` switch one business only. Test mode keeps CEO wakeups, local planning, product/website build and publication, app rails, conversations, and follow-up review active. It suppresses outbound acquisition, outreach delivery, paid spend, and money movement, not the product surface itself.
 
-In test mode, guarded `business_enqueue_job` requests with missing provider credentials are still recorded with `external_side_effects=suppressed` and the missing credentials listed in the job payload. Product/website jobs may be real when credentials and budgets exist; otherwise the CEO should still build the local product surface under the business filesystem and record the blocked deploy. Use `business_publish_test_outreach` to publish outreach locally under `outreach/local-published/`, write a receipt under `receipts/outreach/`, and mirror the outbound message into `conversations/` without sending externally. Stripe checkout and Postmark sends create local suppressed receipts in test mode instead of calling providers.
+In test mode, guarded `business_enqueue_job` requests with missing provider credentials are still recorded with `external_side_effects=suppressed` and the missing credentials listed in the job payload. Product/website jobs may be real when credentials and budgets exist; otherwise the CEO should still build the local product surface under the business filesystem and record the blocked deploy. Use `business_publish_test_outreach` to publish outreach locally under `distribution/local-published/` and mirror the outbound message into `conversations/` without sending externally. The tool writes a receipt under `receipts/outreach/` as hidden audit/debug state, not as a deliverable. Stripe checkout and Postmark sends create local suppressed receipts in test mode instead of calling providers.
 
 General agentic workspace work can use `business_claude_agent_task`, which runs Claude Agent SDK inside one business workspace with path containment, Anthropic credential checks, budget allocation, no Bash, and an agent-run audit record.
 
@@ -199,17 +202,10 @@ Skills are business operating methods. They are intentionally separate from tool
 
 ```text
 takyon:ceo
-takyon:business-learning
+takyon:business-pulse
 takyon:build-product
 takyon:market-research
-takyon:pricing-strategy
-takyon:distribution-campaign
-takyon:ad-creative
-takyon:outreach
-takyon:conversion-review
-takyon:failure-recovery
 takyon:claude-agent-sdk
-takyon:conversation-response
 takyon:app-runtime
 ```
 
