@@ -147,7 +147,7 @@
     {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"}
   ],
   "workspace": {
-    "generatedReadonlyRoots": ["state", "jobs", "ledger", "tools", "receipts", "website"],
-    "agentAuthoredRoots": ["brain", "goals", "product", "outreach", "campaigns", "memory", "agents", "conversations"]
+    "generatedReadonlyRoots": ["state", "jobs", "ledger", "tools", "website"],
+    "agentAuthoredRoots": ["brain", "goals", "research", "product", "distribution", "outreach", "campaigns", "memory", "agents", "conversations"]
   }
 }

@@ -1505,14 +1505,14 @@ def _verify_product_surface_path(
         result.update({"status": "missing", "error": "source path contains no recognized product source files"})
         return result
 
-    contract_ok, contract_error = _validate_product_surface_contract(result.get("inventory") or {}, surface)
-    if not contract_ok:
-        result.update({"status": "failed", "error": contract_error})
+    static_publish_source, _static_publish_label = _product_static_publish_source(root)
+    if static_publish_source is not None:
+        result.update({"status": "passed", "kind": "static_source_present"})
         return result
 
     package_json = root / "package.json"
     if not package_json.exists():
-        result.update({"status": "passed", "kind": "static_source_present"})
+        result.update({"status": "passed", "kind": "source_present"})
         return result
 
     try:
@@ -1568,7 +1568,7 @@ def _verify_product_surface_path(
         else:
             result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
     if "build" not in scripts:
-        result.update({"status": "unverified", "error": "package.json has no build script"})
+        result.update({"status": "passed", "kind": "source_present"})
         return result
     build_command = _javascript_run_script_command(package_manager, "build", root=root)
     if not build_command:
@@ -2055,6 +2055,8 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
 
 
 def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static_root: Path) -> tuple[Path | None, str]:
+    if not os.getenv("TAKYON_PRODUCT_CADDYFILE", "").strip() and not _product_deploy_dry_run():
+        return None, ""
     caddyfile = _product_service_caddyfile()
     host = urllib.parse.urlparse(publish_target).netloc
     if not host:
@@ -2150,7 +2152,7 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
     metadata, blocker = _product_next_service_metadata(source_root)
     if metadata is None:
         result["blocker"] = (
-            "product surface verified, but no static publish directory with index.html exists; "
+            "product surface source exists, but no static publish directory with index.html exists; "
             f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
         )
         return result
@@ -2258,7 +2260,7 @@ def _publish_product_surface_path(
         if service_result.get("status") == "published":
             return service_result
         result["blocker"] = (
-            "product surface verified with static output, but no static hosting root is configured; "
+            "product surface has static output, but no static hosting root is configured; "
             "set TAKYON_PRODUCT_SITE_ROOT to the directory served for business subdomains, "
             f"or fix the service deploy rail: {service_result.get('blocker') or 'unknown service deploy blocker'}"
         )
@@ -3155,12 +3157,12 @@ class TakyonStore:
         elif not has_source_files:
             local_work.append("missing product source files")
         elif not latest:
-            local_work.append("product source has not been verified")
+            local_work.append("product source has not been published")
         else:
             if latest.get("status") not in {"passed"}:
-                local_work.append(f"product verification is {latest.get('status') or 'unknown'}")
+                local_work.append(f"product publish check is {latest.get('status') or 'unknown'}")
             if latest.get("done_gate_status") not in {"passed"}:
-                local_work.append(latest.get("blocker") or "product is verified only when published or an exact blocker is recorded")
+                local_work.append(latest.get("blocker") or "product is complete only when published or an exact blocker is recorded")
         risk_issues = {
             str(item.get("issue") or "")
             for item in (inventory.get("risk_markers") or [])
@@ -3207,7 +3209,7 @@ class TakyonStore:
         if not latest or latest.get("status") != "passed":
             validation.update({
                 "status": "unverified",
-                "reason": "no passing product.surface.verify receipt for source_path",
+                "reason": "no passing product.surface.publish receipt for source_path",
                 "source_path": source_path,
                 "latest_verification": latest,
             })
@@ -3216,7 +3218,7 @@ class TakyonStore:
         if latest.get("done_gate_status") != "passed" or publish.get("status") != "published":
             validation.update({
                 "status": "publish_blocked",
-                "reason": "no verified and published product.surface.verify receipt for source_path",
+                "reason": "no published product.surface receipt for source_path",
                 "source_path": source_path,
                 "latest_verification": latest,
             })
@@ -4028,6 +4030,14 @@ class TakyonStore:
             else []
         )
         filesystem = self._filesystem_summary(root)
+        published_root = _product_publish_root()
+        published_site = (published_root / slug).resolve() if published_root else None
+        published_site_summary: dict[str, Any] = {"path": str(published_site or ""), "exists": False}
+        if published_site is not None:
+            publish_root_resolved = published_root.resolve()
+            if publish_root_resolved not in (published_site, *published_site.parents):
+                raise TakyonError("refusing to delete published site outside product site root")
+            published_site_summary = self._filesystem_summary(published_site)
         cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
         db_counts = self._business_delete_db_counts(conn, slug)
 
@@ -4037,6 +4047,7 @@ class TakyonStore:
             "dry_run": not confirm,
             "business_record": business,
             "filesystem": filesystem,
+            "published_site": published_site_summary,
             "cron": cron_preview,
             "domains": {"provider": "vercel", "candidates": domains, "results": []},
             "database": {"candidates": db_counts, "deleted": {}},
@@ -4056,6 +4067,13 @@ class TakyonStore:
             result["filesystem"] = {**filesystem, "removed": False}
         else:
             result["filesystem"] = {**filesystem, "removed": False, "skipped": True}
+        if delete_files and published_site is not None and published_site.exists():
+            shutil.rmtree(published_site)
+            result["published_site"] = {**published_site_summary, "removed": True}
+        elif delete_files and published_site is not None:
+            result["published_site"] = {**published_site_summary, "removed": False}
+        else:
+            result["published_site"] = {**published_site_summary, "removed": False, "skipped": True}
 
         deleted = self._delete_business_db_rows(conn, slug)
         result["database"] = {"candidates": db_counts, "deleted": deleted}
@@ -5287,7 +5305,7 @@ class TakyonStore:
             "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
             "After reading business state, honor the business work_focus field as an operator constraint: "
             "marketing means choose only marketing, demand, research, outreach, pricing, conversion, campaign, or sales work; "
-            "product means choose only product, offer, app runtime, checkout, surface, build, verification, or product-support work; "
+            "product means choose only product, offer, app runtime, checkout, surface, build, publication, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
             "Advance the outreach lifecycle: if no outreach campaign exists, start distribution/phase-1-outreach/; if Phase 1 is incomplete, continue missing lanes/touches/files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly or use business_conversation_agent_task to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
@@ -5949,7 +5967,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                 "published_at": "",
                 "publish_root": "",
                 "publish_source_path": "",
-                "blocker": f"verification did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
+                "blocker": f"product source check did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
             }
         receipt_id = uuid.uuid4().hex
         receipt_path = f"receipts/product-surface/{receipt_id}.json"
@@ -6037,7 +6055,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
             scope=f"business:{business}",
             operations=operations,
             idempotency_key=idempotency_key,
-            reason=args.get("reason") or "product surface verification",
+            reason=args.get("reason") or "product surface publication",
             actor=args.get("actor") or "agent",
         )
         return tool_result({"success": True, "business": business, "verification": verification, "result": result})
@@ -7846,7 +7864,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
                 "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
-                "done_gate": {"type": "string", "description": "Defaults to verified and published, or exact blocker"},
+                "done_gate": {"type": "string", "description": "Defaults to published, or exact blocker"},
                 "notes": {"type": "string"},
                 "metadata": {"type": "object"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
@@ -7858,11 +7876,11 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_verify_product_surface",
-        "description": "Verify and publish a business product surface from real source files; missing source or publish blockers are reported as exact blockers.",
+        "description": "Publish a business product surface from real source files; missing source or publish blockers are reported as exact blockers.",
         "handler": handle_business_verify_product_surface,
         "schema": _schema(
             "business_verify_product_surface",
-            "Verify product surface source/build when requested, publish shared/static output or supported custom service, and write a receipt with nonfatal inventory evidence.",
+            "Publish product surface source/build output to the shared slug host and write a receipt with nonfatal inventory evidence.",
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
@@ -7870,7 +7888,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 60"},
-                "activate_on_success": {"type": "boolean", "description": "Update app surface status after verification; active only when publication succeeds; default true"},
+                "activate_on_success": {"type": "boolean", "description": "Update app surface status after publication; active only when publication succeeds; default true"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
@@ -8013,9 +8031,9 @@ TAKYON_TOOL_DEFINITIONS = [
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
-                "verify_surface": {"type": "boolean", "description": "Verify product/website source after edits and write a receipt; product/* workspaces default to verification"},
-                "install": {"type": "boolean", "description": "Run package install before build during verification; default true"},
-                "verification_timeout_seconds": {"type": "integer", "description": "Per verification command timeout; default 60"},
+                "verify_surface": {"type": "boolean", "description": "Check product/website source after edits and write a receipt; product/* workspaces default to this source check"},
+                "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
+                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 60"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

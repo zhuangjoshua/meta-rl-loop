@@ -810,6 +810,26 @@ function compactActivityItems(items: Array<ActivityTraceItem | null | undefined>
   return compacted;
 }
 
+function normalizedTraceKey(value?: string): string {
+  return cleanText(value || "")
+    .toLowerCase()
+    .replace(/\(iteration\s+\d+\/\d+\)/g, "(iteration)")
+    .replace(/\brunning\s+\d+(?:\.\d+)?s\b/g, "running")
+    .replace(/\bdone\s+in\s+\d+(?:\.\d+)?s\b/g, "done")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isWorkerTask(
+  task: BusinessOverviewTask | BusinessOverviewJob,
+  registry?: RegistryDisplayPayload,
+): boolean {
+  const runtimeTool = parseRuntimeTool(task);
+  if (runtimeTool && isWorkerToolName(runtimeTool.toolName, registry)) return true;
+  const rawId = (task as BusinessOverviewTask).source || (task as BusinessOverviewJob).kind || "";
+  return isWorkerToolName(rawId, registry);
+}
+
 function activityFromTool(
   tool: ToolEntry,
   registry: RegistryDisplayPayload | undefined,
@@ -963,11 +983,15 @@ function workerItems(
 
   const seen = new Set<string>();
   return [...liveWorkers, ...runtimeWorkers, ...historicalWorkers].filter((worker) => {
-    const key = `${worker.name}:${worker.purpose || ""}:${worker.status}`;
+    const key = [
+      worker.rawId || worker.name,
+      normalizedTraceKey(worker.purpose || worker.latestDetail),
+      normalizedTraceKey(worker.status),
+    ].join(":");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).slice(0, 6);
+  }).slice(0, 3);
 }
 
 function toneClasses(tone?: string): string {
@@ -1004,7 +1028,7 @@ function gatedActionDetail(job: BusinessOverviewJob): string {
   } else if (kind === "vendor.stripe_setup") {
     gate = "Requires live mode, Stripe credentials, products/prices, and webhook setup.";
   } else if (kind === "product.api_route") {
-    gate = "Requires provider credentials, product auth, budget gates, and usage receipts.";
+    gate = "Requires provider credentials, product auth, budget gates, and usage audit records.";
   }
   return [gate, updated].filter(Boolean).join(" · ");
 }
@@ -1107,7 +1131,30 @@ function openUrlInNewTab(url: string): void {
   link.href = target;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
+  link.style.display = "none";
+  document.body.appendChild(link);
   link.click();
+  link.remove();
+}
+
+function reserveTabForUserClick(): Window | null {
+  try {
+    return window.open("about:blank", "_blank", "noopener,noreferrer");
+  } catch {
+    return null;
+  }
+}
+
+function navigateReservedTab(tab: Window | null, url: string): boolean {
+  const target = normalizeOpenableUrl(url);
+  if (!target) throw new Error("No URL available.");
+  if (!tab || tab.closed) return false;
+  try {
+    tab.location.href = target;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const STATE_STATUSES = new Set([
@@ -3249,13 +3296,6 @@ function CompanyOverview({
           updated_at: outreach.updated_at,
         }]
       : [];
-  const outreachReceiptPaths = Array.from(new Set([
-    ...(Array.isArray(outreach.receipts) ? outreach.receipts : []),
-    ...outreachRowsSource.map((item) => item.receipt || ""),
-    outreach.receipt || "",
-  ]
-    .map((path) => normalizeBusinessPath(path))
-    .filter(Boolean)));
   const previewPath = website.path || website.source_path || product.source_path || "product/site";
   const sourcePath = website.source_path || product.source_path || "";
   const publicSiteUrl = customerWebsiteUrl({
@@ -3263,16 +3303,12 @@ function CompanyOverview({
     product,
     website,
   });
-  const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
   const canonicalDocPaths = new Set(
     [
       sourcePath,
       website.path,
-      publishReceipt,
-      ...outreachRowsSource.flatMap((item) => [item.path, item.receipt]),
-      ...outreachReceiptPaths,
+      ...outreachRowsSource.map((item) => item.path),
       creativeAssets.path,
-      creativeAssets.receipt,
     ]
       .map((path) => normalizeBusinessPath(path))
       .filter(Boolean),
@@ -3281,17 +3317,15 @@ function CompanyOverview({
     .filter((item) => {
       const path = item.path || "";
       return (
-        item.kind === "receipt" ||
         item.kind === "image" ||
         item.kind === "video" ||
-        path.startsWith("outreach/local-published/") ||
-        path.startsWith("receipts/")
+        path.startsWith("distribution/") ||
+        path.startsWith("outreach/local-published/")
       );
     })
     .filter((item) => {
       const path = normalizeBusinessPath(item.path);
       if (!path || canonicalDocPaths.has(path)) return false;
-      if (publishReceipt && path.startsWith("receipts/product-surface/")) return false;
       if (pathIsUnder(path, sourcePath || website.path) && item.kind !== "image" && item.kind !== "video") return false;
       return true;
     })
@@ -3303,11 +3337,11 @@ function CompanyOverview({
       detail: item.detail,
       label: item.title || compactPath(item.path),
       path: item.path || "",
-      status: item.kind === "receipt" ? "Receipt" : item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
+      status: item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
     }));
   const deliverableDocs = uniqueDocs([
-    creativeAssets.path && creativeAssets.receipt ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
-    ...outputDocs.filter((doc) => doc.status !== "Receipt"),
+    creativeAssets.path ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
+    ...outputDocs,
   ]);
   const deliverableRows = [
     ...outreachRowsSource.map((item, index) => ({
@@ -3317,59 +3351,20 @@ function CompanyOverview({
       status: humanizeArtifactStatus(item.status || outreach.status),
       tone: "done",
     })),
-    creativeAssets.path && creativeAssets.receipt && {
-      detail: creativeAssets.receipt,
+    creativeAssets.path && {
+      detail: creativeAssets.path,
       id: "creative",
       label: "Creative asset",
       status: humanizeArtifactStatus(creativeAssets.status),
       tone: "done",
     },
   ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
-  const evidenceRows = [
-    (sourcePath || website.path) && {
-      detail: sourcePath || website.path,
-      id: "source",
-      label: "Product source",
-      status: "Source",
-      tone: "done",
-    },
-    publishReceipt && {
-      detail: publishReceipt,
-      id: "publish",
-      label: "Deploy receipt",
-      status: "Receipt",
-      tone: "done",
-    },
-    ...outreachReceiptPaths.map((path, index) => ({
-      detail: path,
-      id: `outreach-receipt-${index}-${path}`,
-      label: "Outreach receipt",
-      status: "Receipt",
-      tone: "done",
-    })),
-    creativeAssets.receipt && {
-      detail: creativeAssets.receipt,
-      id: "creative-receipt",
-      label: "Creative receipt",
-      status: "Receipt",
-      tone: "done",
-    },
-    ...outputDocs
-      .filter((doc) => doc.status === "Receipt")
-      .map((doc, index) => ({
-        detail: doc.path,
-        id: `receipt-${index}-${doc.path}`,
-        label: doc.label,
-        status: doc.status,
-        tone: "done",
-      })),
-  ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
   const latestActivity: Array<ActivityTraceItem | null> = [
-    ...(activeTool ? [activityFromTool(activeTool, registry, now)] : []),
+    ...(activeTool && !isWorkerTool(activeTool, registry) ? [activityFromTool(activeTool, registry, now)] : []),
     ...tools
       .slice()
       .reverse()
-      .filter((tool) => tool.id !== activeTool?.id)
+      .filter((tool) => tool.id !== activeTool?.id && !isWorkerTool(tool, registry))
       .slice(0, 3)
       .map((tool) => activityFromTool(tool, registry, now)),
     ...statusItems.slice(0, 3).map((item) => ({
@@ -3379,7 +3374,7 @@ function CompanyOverview({
       status: "working",
       tone: "active",
     })),
-    ...tasks.filter(isActionableTask).slice(0, 6).map((task) => activityFromTask(task, registry)),
+    ...tasks.filter((task) => isActionableTask(task) && !isWorkerTask(task, registry)).slice(0, 6).map((task) => activityFromTask(task, registry)),
   ];
   const visibleActivity = compactActivityItems(latestActivity).slice(0, 8);
   const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
@@ -3432,7 +3427,7 @@ function CompanyOverview({
     [onReadFile, onResolveMedia],
   );
   const hasViewer = Boolean(viewer);
-  const showAside = Boolean(viewer || workers.length > 0 || visibleActivity.length > 0 || evidenceRows.length > 0);
+  const showAside = Boolean(viewer || workers.length > 0 || visibleActivity.length > 0);
 
   const workspaceColumn = (
     <div className="grid content-start gap-3">
@@ -3459,7 +3454,7 @@ function CompanyOverview({
               ? undefined
               : sourcePath
                 ? "Product source exists, but no public or previewable website was recorded."
-                : "No proof-backed deliverables yet."
+                : "No deliverables yet."
           }
           icon={<FileText className="h-4 w-4" />}
           label="Deliverables"
@@ -3512,25 +3507,6 @@ function CompanyOverview({
             tone={item.tone}
           />
         ))}
-        {evidenceRows.length > 0 && (
-          <div className="pt-2 text-[0.65rem] uppercase tracking-[0.16em] text-zinc-600">
-            Evidence
-          </div>
-        )}
-        {evidenceRows.map((item) => (
-          <TaskRow
-            detail={item.detail}
-            key={item.id}
-            label={item.label}
-            onClick={
-              item.id !== "source" && item.detail
-                ? () => openDocument({ label: item.label, path: item.detail })
-                : undefined
-            }
-            status={item.status}
-            tone={item.tone}
-          />
-        ))}
       </div>
   );
   const workersBlock = workers.length > 0 && (
@@ -3546,8 +3522,7 @@ function CompanyOverview({
       </div>
     </section>
   );
-  const activityBlock = (visibleActivity.length > 0 || evidenceRows.length > 0) && (
-    visibleActivity.length > 0 ? (
+  const activityBlock = visibleActivity.length > 0 && (
       <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
           <Activity className="h-4 w-4" />
@@ -3555,15 +3530,6 @@ function CompanyOverview({
         </div>
         {activityContents}
       </section>
-    ) : (
-      <details className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
-          <Activity className="h-4 w-4" />
-          Activity / Debug
-        </summary>
-        {activityContents}
-    </details>
-    )
   );
 
   if (hasViewer && viewer) {
@@ -3925,12 +3891,16 @@ function OpenSitePreviewButton({
   const openPreview = useCallback(() => {
     setLoading(true);
     setError("");
+    const reservedTab = reserveTabForUserClick();
     void onResolveSitePreview(path)
       .then((res) => {
         if (!res.url) throw new Error("No preview URL returned.");
-        openUrlInNewTab(res.url);
+        if (!navigateReservedTab(reservedTab, res.url)) {
+          openUrlInNewTab(res.url);
+        }
       })
       .catch((err) => {
+        if (reservedTab && !reservedTab.closed) reservedTab.close();
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setLoading(false));
@@ -4141,7 +4111,6 @@ function BusinessSnapshot({
     product,
     website,
   });
-  const publishReceipt = website.publish_receipt_path || product.publish_receipt_path || product.verification_receipt || website.receipt || "";
   const previewPath = sourcePath || "product/site";
   const openSitePreview = useCallback(() => {
     setPreviewLoading(true);
@@ -4219,9 +4188,7 @@ function BusinessSnapshot({
     ? "live"
     : sourcePath || website.path
       ? "built_local"
-      : publishReceipt
-        ? "receipt"
-        : "No deliverables";
+      : "No deliverables";
   const openMessages =
     asNumber(metrics.unresolved_inbound) ||
     asNumber(overview.conversations?.unresolved_messages);
@@ -4288,8 +4255,8 @@ function BusinessSnapshot({
         detail={
           publicSiteUrl ||
           sourcePath ||
-          publishReceipt ||
-          "No proof-backed deliverable recorded yet."
+          website.path ||
+          "No deliverable recorded yet."
         }
       >
         <div className="flex flex-wrap gap-2">
@@ -4299,14 +4266,6 @@ function BusinessSnapshot({
               onClick={() => onCommand(`/files ${sourcePath}`)}
             >
               Source
-            </PanelActionButton>
-          )}
-          {publishReceipt && (
-            <PanelActionButton
-              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${publishReceipt}`)}
-            >
-              Receipt
             </PanelActionButton>
           )}
         </div>
@@ -4364,7 +4323,7 @@ function BusinessSnapshot({
         </PreviewCard>
       )}
 
-      {outreach.path && outreach.receipt && (
+      {outreach.path && (
         <PreviewCard
           icon={<MessageCircle className="h-4 w-4" />}
           title="Outreach"
@@ -4378,17 +4337,11 @@ function BusinessSnapshot({
             >
               Post
             </PanelActionButton>
-            <PanelActionButton
-              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${outreach.receipt}`)}
-            >
-              Receipt
-            </PanelActionButton>
           </div>
         </PreviewCard>
       )}
 
-      {creativeAssets.path && creativeAssets.receipt && (
+      {creativeAssets.path && (
         <PreviewCard
           icon={<Play className="h-4 w-4" />}
           title="Creative assets"
@@ -4401,12 +4354,6 @@ function BusinessSnapshot({
               onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
             >
               Files
-            </PanelActionButton>
-            <PanelActionButton
-              icon={<CheckCircle2 className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${creativeAssets.receipt}`)}
-            >
-              Receipt
             </PanelActionButton>
           </div>
         </PreviewCard>

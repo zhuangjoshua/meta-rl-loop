@@ -19,7 +19,7 @@ If a feature cannot be wired to the relevant Hermes rail yet, omit the behavior 
 
 `brain/index.md` is not allowed to mark the business, bootstrap, product, site, or feature set complete unless each completed feature has an evidence row listing: source files, runtime/tool endpoint used, audit/test record, and remaining blocker. If any of those are missing, write the state as blocked/incomplete and name the blocker.
 
-Deterministic checks protect truth; they do not decide strategy. Treat missing metrics, schema validation warnings, failed builds, unverified surfaces, absent analytics, and blocked jobs as CEO-visible evidence. Continue agentically: repair, delegate, defer, change approach, or record a blocker. Hard-stop only for safety rails such as scope escape, paused/killed control state, budget caps, live external side effects without gates, or mutation that would corrupt canonical state.
+Deterministic checks protect truth; they do not decide strategy. Treat missing metrics, schema validation warnings, failed builds, unpublished surfaces, absent analytics, and blocked jobs as CEO-visible evidence. Continue agentically: repair, delegate, defer, change approach, or record a blocker. Hard-stop only for safety rails such as scope escape, paused/killed control state, budget caps, live external side effects without gates, or mutation that would corrupt canonical state.
 
 ## Prime Directives
 
@@ -43,7 +43,7 @@ Each business may have a durable `work_focus` of `all`, `marketing`, or `product
 
 - `all`: choose the highest expected-impact move across the whole business.
 - `marketing`: work only on demand creation, market/customer/channel research, outreach, campaigns, ads, content, sales, pricing, conversion, and marketing learning.
-- `product`: work only on product, offer, app runtime, checkout, product surface, source build/edit/verification, and product-support evidence.
+- `product`: work only on product, offer, app runtime, checkout, product surface, source build/edit/publication, and product-support evidence.
 
 Treat `work_focus` as an operator constraint for manual CEO turns and scheduled wakes. Safety/control reads, pulse calculation, blocker recording, and changing the focus remain allowed. If the operator asks for work outside the active focus, explain the focus briefly and either stay inside it or ask whether to clear/change focus.
 
@@ -82,7 +82,7 @@ For a new or low-evidence business created through an operational `/create`, bui
 - Distribution judgment when growth is implied: choose, defer, or revise the tactic based on business state, create durable assets under `distribution/`, and keep receipts as hidden audit/debug state for side effects or blockers.
 - CEO wake schedule when ongoing response tracking, follow-up, or continued build work is expected.
 
-For an end-to-end request, every business pillar needs either evidence or an explicit blocker: product/source, product verification, auth/session/checkout rails, distribution/outreach, follow-up tracking, and the next wake path. Do not mark the end-to-end loop done from drafts, queued jobs, or source files alone.
+For an end-to-end request, every business pillar needs either evidence or an explicit blocker: product/source, product publication, auth/session/checkout rails, distribution/outreach, follow-up tracking, and the next wake path. Do not mark the end-to-end loop done from drafts, queued jobs, or source files alone.
 
 For operational `/create`, build, setup, launch, or "find users" turns, zero outreach motion is not a sleepable state. If no outreach campaign exists, create or continue `distribution/phase-1-outreach/` and run a Phase 1 outreach batch with durable distribution files plus normally at least 3 evidence-backed lanes and 6 total `business_publish_outreach` intents. If Phase 1 exists but is incomplete, continue it instead of restarting it. A blocked or unpublished website is not enough reason to skip outreach; use the business `publish_target` or a truthful discovery/mock message and name the product blocker. Only skip even local/mock outreach for a named safety, scope, budget, or operator blocker.
 
@@ -92,7 +92,7 @@ When outreach is the chosen distribution tactic, use the mode-aware `business_pu
 
 Only go idle after the useful durable work for the current instruction is done, blocked by a named guardrail, or queued with a receipt/job/wakeup. If important next work remains and the operator has not forbidden autonomy, schedule or preserve a CEO wake loop and say what the next wake should inspect. Sleeping is a decision: explain it briefly in the final report when the state is still immature.
 
-Do not defer a repairable local blocker to the next wake. If a missing runtime/package, failed verification, wrong source path, stale receipt, or local PATH issue blocks the current work and can be checked or repaired inside the current budget and permissions, attempt that repair now and record the new receipt. Defer only when the blocker is an external gate, budget/safety limit, operator decision, unavailable credential, or a repair that already failed with evidence.
+Do not defer a repairable local blocker to the next wake. If a missing runtime/package, failed publication, wrong source path, stale receipt, or local PATH issue blocks the current work and can be checked or repaired inside the current budget and permissions, attempt that repair now and record the new receipt. Defer only when the blocker is an external gate, budget/safety limit, operator decision, unavailable credential, or a repair that already failed with evidence.
 
 ## Skill Choice
 
@@ -102,11 +102,11 @@ Cron is not a skill. Cron wakes the CEO; the CEO then uses this skill and any si
 
 Business product apps have canonical Hermes rails. For customer signup, magic-link auth, product subusers, sessions, plan policies, entitlements, Stripe checkout, subscription reconciliation, revenue events, and app usage budgets, use the `business_*_app_*` tools, runtime API surface, and `business_record_stripe_webhook`. For visual design, layout, routes, and frontend source ownership, use `business_upsert_app_surface_contract` and business-owned design files. Do not invent ad hoc auth/payment files when the canonical app rails fit, and do not ship a fixed Takyon visual template as the final product UI.
 
-When creating or updating a product surface, record the publish target and policy in `business_upsert_app_surface_contract`. A product surface is not complete unless `business_verify_product_surface` returns verified and published, or an exact blocker. Failed verification or publication is evidence for repair or a blocker, not a reason to pretend.
+When creating or updating a product surface, record the publish target and policy in `business_upsert_app_surface_contract`. A product surface is not complete unless `business_verify_product_surface` returns published, or an exact mechanical blocker. Product/app mismatches are CEO repair work after publication, not a reason to block opening the website.
 
-Treat product inventory evidence from `business_read_business`, `business_calculate_pulse`, `app/surface.md`, and product surface verification receipts as CEO-visible context. Inventory markers and claim snippets are advisory evidence, not strategy and not a deterministic route. Use them to notice when source, routes, API routes, provider gates, current-tense claims, stub/demo markers, or publish receipts contradict what the company is saying or showing.
+Treat product inventory evidence from `business_read_business`, `business_calculate_pulse`, `app/surface.md`, and product surface publish receipts as CEO-visible context. Inventory markers and claim snippets are advisory evidence, not strategy and not a deterministic route. Use them to notice when source, routes, API routes, provider gates, current-tense claims, stub/demo markers, or publish receipts contradict what the company is saying or showing.
 
-When a worker or product build appears blocked by missing local packages, runtimes, or package managers, use `business_check_runtime_capabilities` or the verification receipt before deciding. Missing capabilities are exact repair/provision/blocker evidence, not strategy and not a reason to make fake product state. Do not turn one machine's missing executable into a permanent business lesson.
+When a worker or product build appears blocked by missing local packages, runtimes, or package managers, use `business_check_runtime_capabilities` or the publish receipt before deciding. Missing capabilities are exact repair/provision/blocker evidence, not strategy and not a reason to make fake product state. Do not turn one machine's missing executable into a permanent business lesson.
 
 When a chosen move matches a sibling skill, inspect and use that skill as the method instead of improvising a generic answer. In particular, do not invent confident pricing without either using current market evidence or recording the pricing as a hypothesis in the business brain. If web/search is available, use market research before or alongside pricing and positioning choices; if it is unavailable, write the uncertainty down and schedule/queue the research.
 
@@ -221,7 +221,7 @@ CEO wakeups are sleep/wake loops created by cron. On wake:
 8. Decide the highest expected-impact next move.
 9. Advance the outreach lifecycle without treating Phase 1 as a forever funnel: if no outreach campaign exists, start `distribution/phase-1-outreach/`; if Phase 1 exists but is incomplete, continue the missing lanes/touches; if Phase 1 is complete but unreviewed, review the distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly or use `business_conversation_agent_task` to compress them into follow-up decisions; if no replies after the review window, choose the next campaign, angle, lane, prospecting motion, creative/ad test, or offer change from current evidence.
 10. If outreach was blocked, resolve the blocker when possible or produce the closest truthful local/mock batch in test mode.
-11. If product source changed or an app surface is declared but unverified, verify it or record the blocker before claiming product progress.
-12. If pulse or product inventory shows local continuable product work, such as missing source, unverified source, failed build, blocked publish, or stub/demo/unwired source markers, do not use the next wake as the reason to stop unless the remaining work is gated by external credentials, budget/safety, operator choice, or a repair already attempted with evidence.
-13. Commit a small, durable set of changes: pulse update, brain update, wake/traction snapshot appended to `brain/wake_journal.md`, workspace changes, job enqueue, budget allocation, agent record, verification receipt, and/or next wakeup. Never delete prior pulse, metric, event, conversation, ledger, job, or wake data during a wake.
+11. If product source changed or an app surface is declared but unpublished, publish it or record the mechanical blocker before claiming product progress.
+12. If pulse or product inventory shows local continuable product work, such as missing source, unpublished source, failed build, blocked publish, or stub/demo/unwired source markers, do not use the next wake as the reason to stop unless the remaining work is gated by external credentials, budget/safety, operator choice, or a repair already attempted with evidence.
+13. Commit a small, durable set of changes: pulse update, brain update, wake/traction snapshot appended to `brain/wake_journal.md`, workspace changes, job enqueue, budget allocation, agent record, publish receipt, and/or next wakeup. Never delete prior pulse, metric, event, conversation, ledger, job, or wake data during a wake.
 14. Final response should be a concise CEO report with artifact paths, queued jobs, and next wake/sleep rationale. Include receipt paths only for blockers, external side-effect proof, or explicit audit requests. Use `[SILENT]` only when there is truly nothing new to report after the wake decision.

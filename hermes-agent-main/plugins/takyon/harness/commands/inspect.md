@@ -17,7 +17,7 @@ Return:
 - what is unknown
 - blockers and missing capabilities
 - unresolved inbound conversations that should stop outward distribution
-- which files or receipts should exist next
+- which visible filesystem files should exist next, with receipt gaps named only for external side effects or blockers
 - whether product/value delivery and demand creation both have live evidence
 
 Do not invent hidden state or infer a completed action from a plan.

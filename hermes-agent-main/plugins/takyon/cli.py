@@ -1332,7 +1332,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 status = verification.get("status") or "unverified"
                 receipt = verification.get("receipt_path") or ""
                 suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
-                lines.append(f"product verification {status}{suffix}")
+                lines.append(f"product publish check {status}{suffix}")
             agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
             for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
                 lines.append(line)
@@ -1344,7 +1344,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
             status = verification.get("status") or "unverified"
             receipt = verification.get("receipt_path") or ""
             suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
-            return [f"product verification {status}{suffix}"]
+            return [f"product publish check {status}{suffix}"]
     lines: list[str] = []
     seen_root: set[str] = set()
     for item in results:

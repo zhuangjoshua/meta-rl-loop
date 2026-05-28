@@ -620,6 +620,11 @@ def _has_valid_session_token(request: Request) -> bool:
     ):
         return True
 
+    if request.url.path.startswith("/api/takyon/site-preview/"):
+        query_token = request.query_params.get("token", "")
+        if query_token and hmac.compare_digest(query_token.encode(), _SESSION_TOKEN.encode()):
+            return True
+
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
     return hmac.compare_digest(auth.encode(), expected.encode())

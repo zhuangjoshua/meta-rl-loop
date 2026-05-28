@@ -4855,7 +4855,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             conversation_file = brief_text(store._conversation_thread_relpath(thread_dict))
         except Exception:
             conversation_file = ""
-        mode = "test" if source_l.startswith("test-") or artifact_path.startswith("outreach/local-published/") else "live"
+        mode = "test" if source_l.startswith("test-") or artifact_path.startswith(("distribution/local-published/", "outreach/local-published/")) else "live"
         thread_id = brief_text(thread_dict.get("id"))
         posts.append(
             {
@@ -5112,7 +5112,10 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         and str(job.get("status") or "").lower() not in {"done", "complete", "completed", "success"}
         for job in jobs
     )
-    outreach_published = all_under("outreach/local-published", {".md", ".txt"})
+    outreach_published = [
+        *all_under("distribution/local-published", {".md", ".txt"}),
+        *all_under("outreach/local-published", {".md", ".txt"}),
+    ]
     outreach_receipts = all_under("receipts/outreach", {".json"})
     outreach_latest = outreach_published[0] if outreach_published else None
     outreach_receipt = outreach_receipts[0] if outreach_receipts else None
@@ -5147,7 +5150,11 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "receipt": "",
             "status": "draft_only",
         })
-    creative_latest = latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES) or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
+    creative_latest = (
+        latest_under("distribution", _TAKYON_MEDIA_SUFFIXES)
+        or latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES)
+        or latest_under("creatives", _TAKYON_MEDIA_SUFFIXES)
+    )
     creative_receipt = latest_under("receipts/creative-assets", {".json"})
     research_outputs = business_file_index(["research", "brain"], limit=80)
     research_latest = research_outputs[0] if research_outputs else None
@@ -5380,7 +5387,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
             },
             "outreach": {
-                "status": "published_local" if outreach_latest and outreach_receipt else ("draft_only" if outreach_draft else "missing"),
+                "status": "published_local" if outreach_latest else ("draft_only" if outreach_draft else "missing"),
                 "path": (outreach_latest or outreach_draft or {}).get("path", ""),
                 "receipt": (outreach_receipt or {}).get("path", ""),
                 "updated_at": (outreach_latest or outreach_draft or {}).get("updated_at"),
@@ -5389,7 +5396,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 "receipts": [str(receipt.get("path") or "") for receipt in outreach_receipts if receipt.get("path")],
             },
             "creative_assets": {
-                "status": "generated" if creative_latest and creative_receipt else ("asset_without_receipt" if creative_latest else "missing"),
+                "status": "generated" if creative_latest else "missing",
                 "path": (creative_latest or {}).get("path", ""),
                 "receipt": (creative_receipt or {}).get("path", ""),
                 "updated_at": (creative_latest or {}).get("updated_at"),
@@ -5430,7 +5437,7 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
         return "receipt", "Business receipt"
     if top in {"reports", "outputs"}:
         return "report", "Historical output"
-    if path.startswith("outreach/local-published/"):
+    if path.startswith(("distribution/local-published/", "outreach/local-published/")):
         return "file", "Local published outreach"
     if top == "app":
         return "file", "App runtime artifact"
@@ -5451,7 +5458,7 @@ _TAKYON_MAX_FILE_READ_BYTES = 512 * 1024
 _TAKYON_MAX_SITE_PREVIEW_BYTES = 8 * 1024 * 1024
 
 
-def _takyon_site_asset_data_url(index_path: Path, raw_url: str) -> str | None:
+def _takyon_site_asset_data_url(index_path: Path, raw_url: str, *, site_root: Path | None = None) -> str | None:
     url = str(raw_url or "").strip()
     if (
         not url
@@ -5463,8 +5470,10 @@ def _takyon_site_asset_data_url(index_path: Path, raw_url: str) -> str | None:
     clean = url.split("#", 1)[0].split("?", 1)[0]
     if not clean:
         return None
-    candidate = (index_path.parent / clean.lstrip("/")).resolve()
-    if not candidate.is_file() or index_path.parent.resolve() not in (candidate, *candidate.parents):
+    root = (site_root or index_path.parent).resolve()
+    base = root if url.startswith("/") and site_root else index_path.parent.resolve()
+    candidate = (base / clean.lstrip("/")).resolve()
+    if not candidate.is_file() or root not in (candidate, *candidate.parents):
         return None
     try:
         if candidate.stat().st_size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
@@ -5479,14 +5488,14 @@ def _takyon_site_asset_data_url(index_path: Path, raw_url: str) -> str | None:
         return None
 
 
-def _takyon_inline_static_site(index_path: Path) -> str:
+def _takyon_inline_static_site(index_path: Path, *, site_root: Path | None = None) -> str:
     html_text = index_path.read_text(encoding="utf-8", errors="replace")
 
     def replace_attr(match: re.Match[str]) -> str:
         prefix = match.group("prefix")
         url = match.group("url")
         suffix = match.group("suffix")
-        data_url = _takyon_site_asset_data_url(index_path, url)
+        data_url = _takyon_site_asset_data_url(index_path, url, site_root=site_root)
         if not data_url:
             return match.group(0)
         return f"{prefix}{data_url}{suffix}"
@@ -5527,10 +5536,9 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
     recursive_roots = [
         "outputs",
         "reports",
-        "receipts",
         "campaigns",
-        "outreach/local-published",
         "distribution",
+        "outreach/local-published",
         "product/site",
     ]
     allowed_suffixes = {".md", ".html", ".css", ".js", ".txt", ".json", *_TAKYON_MEDIA_SUFFIXES}
@@ -6053,7 +6061,13 @@ def _(rid, params: dict) -> dict:
         size = candidate.stat().st_size
         if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
             return _err(rid, 4130, f"site preview is too large: {size} bytes")
-        html_text = _takyon_inline_static_site(candidate)
+        business_root = store._business_root(business)
+        source_root = (business_root / "product/site").resolve()
+        candidate_resolved = candidate.resolve()
+        html_text = _takyon_inline_static_site(
+            candidate,
+            site_root=source_root if source_root in (candidate_resolved, *candidate_resolved.parents) else None,
+        )
         encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
         rel = str(candidate.relative_to(store._business_root(business)))
         return _ok(
@@ -6298,12 +6312,12 @@ def _(rid, params: dict) -> dict:
             if detached_kind == "create":
                 message = (
                     f"Create started for business:{target_business}. The CEO bootstrap is running in the background; "
-                    "open the business after a moment to see receipts, blockers, and deliverables."
+                    "open the business after a moment to see files, blockers, and deliverables."
                 )
             else:
                 message = (
                     f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
-                    "to see receipts, blockers, and deliverables."
+                    "to see files, blockers, and deliverables."
                 )
             return _ok(
                 rid,

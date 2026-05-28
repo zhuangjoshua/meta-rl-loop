@@ -373,7 +373,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
-def test_app_like_surface_cannot_pass_as_landing_page_only(tmp_path, monkeypatch):
+def test_app_like_surface_publish_is_not_blocked_by_app_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -416,10 +416,10 @@ def test_app_like_surface_cannot_pass_as_landing_page_only(tmp_path, monkeypatch
         )
     )["verification"]
 
-    assert verification["status"] == "failed"
-    assert verification["done_gate_status"] == "blocked"
-    assert "app subroute" in verification["error"]
-    assert verification["publish"]["status"] == "blocked"
+    assert verification["status"] == "passed"
+    assert verification["done_gate_status"] == "passed"
+    assert verification["publish"]["status"] == "published"
+    assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
 
 
 def test_static_spa_app_surface_with_shared_runtime_routes_passes(tmp_path, monkeypatch):
@@ -1364,6 +1364,7 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
     import cron.jobs as cron_jobs
 
     cron_dir = tmp_path / "cron"
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     monkeypatch.setattr(cron_jobs, "CRON_DIR", cron_dir)
     monkeypatch.setattr(cron_jobs, "JOBS_FILE", cron_dir / "jobs.json")
     monkeypatch.setattr(cron_jobs, "OUTPUT_DIR", cron_dir / "output")
@@ -1381,6 +1382,9 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
         [{"action": "artifact.write", "path": "product/spec.md", "content": "# Spec\n"}],
         "write-delete-confirm",
     )
+    published = tmp_path / "published-sites" / "latexflow"
+    published.mkdir(parents=True)
+    (published / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
     cron_jobs.create_job(
         prompt="CEO wakeup for business:latexflow.",
         schedule="every 1h",
@@ -1405,7 +1409,9 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
 
     assert deletion["dry_run"] is False
     assert deletion["filesystem"]["removed"] is True
+    assert deletion["published_site"]["removed"] is True
     assert not (tmp_path / "businesses" / "latexflow").exists()
+    assert not published.exists()
     assert store.read(scope="global", query="list_businesses")["businesses"] == []
     assert cron_jobs.list_jobs(include_disabled=True) == []
 
