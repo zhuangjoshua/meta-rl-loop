@@ -665,6 +665,58 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     assert "duplicate workspace prefix" in verification["verification"]["error"]
 
 
+def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeStore:
+        def read(self, **_: object) -> dict[str, object]:
+            return {
+                "app": {
+                    "surface": {
+                        "source_path": "product/site",
+                        "publish_target": "https://latexflow.fourmanifold.com/",
+                    }
+                }
+            }
+
+        def commit(self, **_: object) -> dict[str, object]:
+            return {"success": True, "results": []}
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        captured["timeout_seconds"] = kwargs["timeout_seconds"]
+        return {
+            "status": "passed",
+            "done_gate_status": "passed",
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.fourmanifold.com/",
+                "blocker": "",
+            },
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "inventory": {},
+        }
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore())
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+    monkeypatch.setattr(
+        takyon_core,
+        "_product_surface_verification_operations",
+        lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
+    )
+
+    result = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "idempotency_key": "verify-default-timeout",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["timeout_seconds"] == 300
+
+
 def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)

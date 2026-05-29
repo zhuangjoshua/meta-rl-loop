@@ -6267,7 +6267,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         legacy_shared_renderer = _is_shared_renderer_publish_policy(requested_publish_policy)
         publish_policy = "publish_after_verify" if legacy_shared_renderer else requested_publish_policy
         install = bool(args.get("install", True))
-        timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=60, minimum=15, maximum=900)
+        timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=300, minimum=15, maximum=900)
         receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
         verification = _finalize_product_surface_verification(
             store=store,
@@ -7671,7 +7671,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 requested_publish_policy=requested_publish_policy,
                 publish_policy=publish_policy,
                 install=bool(args.get("install", True)),
-                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=60, minimum=15, maximum=900),
+                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=300, minimum=15, maximum=900),
                 receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
                 verification_source="business_claude_agent_task",
             )
@@ -7978,7 +7978,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
-                "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 60"},
+                "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 300"},
                 "activate_on_success": {"type": "boolean", "description": "Update app surface status after publication; active only when publication succeeds; default true"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
@@ -8125,7 +8125,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
                 "verify_surface": {"type": "boolean", "description": "Check product/website source after edits and write a receipt; product/* workspaces default to this source check"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
-                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 60"},
+                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 300"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
