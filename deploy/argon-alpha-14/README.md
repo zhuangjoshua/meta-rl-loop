@@ -8,6 +8,14 @@ Apply it with:
 deploy/argon-alpha-14/apply-caddyfile.sh
 ```
 
+The tracked dashboard systemd unit lives at:
+
+```bash
+deploy/argon-alpha-14/takyon-dashboard.service
+```
+
+Deploys should install that unit on the VPS before restarting `takyon-dashboard.service`.
+
 The Caddyfile owns:
 
 - `app.fourmanifold.com` -> Takyon dashboard on `127.0.0.1:9119`

@@ -1,0 +1,17 @@
+[Unit]
+Description=Takyon Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/takyon/hermes-agent-main
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build --tui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

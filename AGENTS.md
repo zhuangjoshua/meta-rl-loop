@@ -23,6 +23,8 @@ The current Takyon VPS target is `137.184.75.57` (`argon-alpha-14`). Use the loc
 
 The public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code.
 
+For `app.fourmanifold.com`, the intended operator experience is the embedded Takyon business/chat UI, not the plain dashboard Sessions shell. On the VPS, make sure `takyon-dashboard.service` starts the dashboard with `takyon dashboard --tui` or sets `TAKYON_DASHBOARD_TUI=1`. If the host shows `/sessions`, `Sessions`, `Models`, or `Logs` as the main landing view, treat that as a dashboard startup-mode misconfiguration on the VPS rather than a frontend deploy failure.
+
 When the operator asks to push or deploy Takyon, keep the three rails distinct:
 
 1. Git push uses the outer workspace repo at `/Users/Zygote/Downloads/takyon`, not the nested `hermes-agent-main` git metadata. Stage only the intended hunks, commit in the outer repo, and push `origin main` unless the operator asked for a branch.
