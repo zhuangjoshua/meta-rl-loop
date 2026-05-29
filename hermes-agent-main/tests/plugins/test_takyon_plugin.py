@@ -1008,6 +1008,46 @@ def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, m
     assert verification["checks"] == []
 
 
+def test_verify_next_product_with_static_export_still_runs_build(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "feedbackpilot"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "out").mkdir()
+    (site / "out" / "index.html").write_text("<h1>Static export exists</h1>\n", encoding="utf-8")
+    (site / "next.config.js").write_text("module.exports = {};\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "feedbackpilot-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_run_verification_command",
+        lambda command, **kwargs: {"command": command, "status": "passed"},
+    )
+
+    verification = _verify_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    assert verification["kind"] == "node_build"
+    assert [check["command"] for check in verification["checks"]] == [
+        ["/usr/bin/npm", "install", "--ignore-scripts"],
+        ["/usr/bin/npm", "run", "build"],
+    ]
+
+
 def test_path_escape_is_rejected(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(

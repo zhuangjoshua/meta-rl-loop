@@ -1656,13 +1656,12 @@ def _verify_product_surface_path(
         result.update({"status": "missing", "error": "source path contains no recognized product source files"})
         return result
 
-    static_publish_source, _static_publish_label = _product_static_publish_source(root)
-    if static_publish_source is not None:
-        result.update({"status": "passed", "kind": "static_source_present"})
-        return result
-
     package_json = root / "package.json"
     if not package_json.exists():
+        static_publish_source, _static_publish_label = _product_static_publish_source(root)
+        if static_publish_source is not None:
+            result.update({"status": "passed", "kind": "static_source_present"})
+            return result
         result.update({"status": "passed", "kind": "source_present"})
         return result
 
@@ -1675,6 +1674,15 @@ def _verify_product_surface_path(
     dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}
     dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}
     deps = {**dependencies, **dev_dependencies}
+    looks_next = (
+        "next" in deps
+        or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
+        or (root / ".next").is_dir()
+    )
+    static_publish_source, _static_publish_label = _product_static_publish_source(root)
+    if static_publish_source is not None and not looks_next:
+        result.update({"status": "passed", "kind": "static_source_present"})
+        return result
     if "next" in deps:
         next_value = str(deps.get("next") or "")
         if re.search(r"\b14\.2\.5\b", next_value):
@@ -2434,6 +2442,18 @@ def _publish_product_surface_path(
         if service_result.get("publish_source_path") == source_root.name:
             service_result["publish_source_path"] = rel
         return service_result
+
+    next_service_metadata, _next_service_blocker = _product_next_service_metadata(source_root)
+    if next_service_metadata is not None:
+        service_result = _publish_next_product_service(
+            source_root=source_root,
+            slug=slug,
+            publish_target=publish_target,
+        )
+        if service_result.get("publish_source_path") == source_root.name:
+            service_result["publish_source_path"] = rel
+        if service_result.get("status") == "published":
+            return service_result
 
     publish_root = _product_publish_root()
     if publish_root is None:
