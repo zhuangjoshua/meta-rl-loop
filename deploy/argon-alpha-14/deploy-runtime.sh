@@ -10,6 +10,9 @@ TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SMOKE_HOST="${TAKYON_SMOKE_HOST:-https://app.fourmanifold.com/}"
+TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER:-}"
+TAKYON_SMOKE_CONNECT_TIMEOUT="${TAKYON_SMOKE_CONNECT_TIMEOUT:-5}"
+TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -50,11 +53,43 @@ if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then
     "$ROOT_DIR/deploy/argon-alpha-14/apply-caddyfile.sh"
 fi
 
+if [[ -z "$TAKYON_SMOKE_HOST_HEADER" ]]; then
+  TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST#*://}"
+  TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER%%/*}"
+  TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER%%:*}"
+fi
+
 for attempt in {1..12}; do
-  if curl -fsSI --max-time 20 "$TAKYON_SMOKE_HOST" >/dev/null; then
+  curl_status=0
+  if curl -fsSI \
+    --connect-timeout "$TAKYON_SMOKE_CONNECT_TIMEOUT" \
+    --max-time "$TAKYON_SMOKE_MAX_TIME" \
+    "$TAKYON_SMOKE_HOST" >/dev/null; then
     exit 0
+  else
+    curl_status=$?
+  fi
+  if [[ "$curl_status" == "6" || "$curl_status" == "7" || "$curl_status" == "28" ]]; then
+    break
   fi
   sleep 5
 done
 
-curl -fsSI --max-time 20 "$TAKYON_SMOKE_HOST" >/dev/null
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
+  root_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/)
+  case \"\$root_status\" in
+    200|302) ;;
+    *)
+      echo \"unexpected dashboard root status: \$root_status\" >&2
+      exit 1
+      ;;
+  esac
+  api_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/api/status)
+  case \"\$api_status\" in
+    200|401) ;;
+    *)
+      echo \"unexpected dashboard api status: \$api_status\" >&2
+      exit 1
+      ;;
+  esac"
