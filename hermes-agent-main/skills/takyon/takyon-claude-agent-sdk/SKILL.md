@@ -35,6 +35,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 - Use for bounded workspace edits, synthesis, or source changes inside one business.
 - Use when the task benefits from a separate scoped worker with path containment.
+- Under `takyon-build-product`, use this as the default implementation lane for non-trivial `product/site/` work while leaving product ownership with `takyon-build-product`.
 - Do not use when normal business tools are enough.
 
 ## Quick Reference
@@ -42,6 +43,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 - Primary root: `product/` by default, but bounded work may land in any canonical Takyon root
 - Allowed roots: `product/`, `distribution/`, `research/`, `metrics/`
 - Best call points: narrow file work, bounded synthesis, contained source edits
+- Optional guidance lane: pass `guidance_skills: ["claude-design"]` for design-heavy `product/site/` work
 - Publication location: the exact target path named in the delegated task, inside a canonical Takyon root
 - Tool names used by this skill: `business_read_business`, `business_claude_agent_task`, `business_verify_product_surface`
 
@@ -56,6 +58,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 - Call `business_read_business` first and decide whether the task is narrow enough to delegate.
 - Call `business_claude_agent_task` with one bounded workspace, a clear instruction, and an explicit desired output path.
+- When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design"]` so the worker receives the distilled design guidance.
 - If the worker edits product source that should be verified or published, follow with `business_verify_product_surface`.
 - If the result implies a send, deploy, runtime mutation, or other external effect, switch back to the appropriate Takyon skill or `business_*` tool path after the worker completes.
 
@@ -63,7 +66,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 1. Call `business_read_business` and decide whether this task really needs a worker. If normal Takyon tools are enough, do not delegate.
 2. Choose one narrow workspace inside `product/`, `distribution/`, `research/`, or `metrics/`. Name the exact target files or directory in the instruction.
-3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected.
+3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design"]`.
 4. Review the changed files. Keep only durable changes that stay inside the requested business scope and canonical roots.
 5. If the worker changed `product/site/` or another product source path that should be validated, call `business_verify_product_surface` before claiming product success.
 6. If the worker output implies a real publish, send, checkout, auth, or billing effect, route that next step back through the appropriate Takyon skill and `business_*` tool instead of pretending the worker already did it.

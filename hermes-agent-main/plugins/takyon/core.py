@@ -43,6 +43,7 @@ except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv
                 os.environ[key] = value
         return True
 
+from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_takyon_home
 from tools.registry import tool_error, tool_result
 
@@ -70,6 +71,15 @@ WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - Do not recreate the workspace path inside itself. If the workspace is `product/site`, write `index.html`, `app/page.tsx`, or `package.json`, not `product/site/index.html` or `product/site/app/page.tsx`.
 - If an instruction mentions the workspace path, interpret it as the current working directory unless it explicitly asks for a different business-relative path.
 """
+_WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
+    "claude-design": (
+        "When To Use This Skill vs `popular-web-designs` vs `design-md`",
+        "When To Use",
+        "Design Principle: Start From Context, Not Vibes",
+        "Workflow",
+        "Artifact Format Rules",
+    ),
+}
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
@@ -144,6 +154,147 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _normalize_guidance_skills(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    values = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple, set)) else []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
+
+
+def _find_guidance_skill_file(identifier: str) -> Path | None:
+    raw_identifier = str(identifier or "").strip()
+    if not raw_identifier:
+        return None
+    identifier = raw_identifier.lstrip("/")
+    identifier_path = Path(raw_identifier).expanduser()
+    scan_dirs = get_all_skills_dirs()
+
+    if identifier_path.is_absolute():
+        if identifier_path.is_dir():
+            candidate = identifier_path / "SKILL.md"
+            if candidate.exists():
+                return candidate
+        elif identifier_path.name == "SKILL.md" and identifier_path.exists():
+            return identifier_path
+
+    for skills_dir in scan_dirs:
+        direct = skills_dir / identifier / "SKILL.md"
+        if direct.exists():
+            return direct
+
+    for skills_dir in scan_dirs:
+        for candidate in skills_dir.rglob("SKILL.md"):
+            try:
+                raw = candidate.read_text(encoding="utf-8")
+                frontmatter, _ = parse_frontmatter(raw)
+            except Exception:
+                continue
+            name = str(frontmatter.get("name") or candidate.parent.name).strip()
+            try:
+                rel_dir = str(candidate.parent.relative_to(skills_dir)).replace("\\", "/")
+            except ValueError:
+                rel_dir = candidate.parent.name
+            if identifier in {name, candidate.parent.name, rel_dir}:
+                return candidate
+    return None
+
+
+def _normalize_heading_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("`", "").strip()).lower()
+
+
+def _excerpt_guidance_skill(content: str, *, section_titles: tuple[str, ...], max_chars: int = 12_000) -> str:
+    body = str(content or "").strip()
+    if not body:
+        return ""
+
+    lines = body.splitlines()
+    heading_re = re.compile(r"^(#{1,6})\s+(.*)$")
+    intro_end = len(lines)
+    title_lines: list[str] = []
+    intro_lines: list[str] = []
+    if lines:
+        title_lines.append(lines[0])
+        for idx in range(1, len(lines)):
+            if heading_re.match(lines[idx]):
+                intro_end = idx
+                break
+            intro_lines.append(lines[idx])
+
+    wanted = {_normalize_heading_text(title) for title in section_titles}
+    sections: list[str] = []
+    idx = intro_end
+    while idx < len(lines):
+        match = heading_re.match(lines[idx])
+        if not match:
+            idx += 1
+            continue
+        level = len(match.group(1))
+        title = match.group(2)
+        start = idx
+        idx += 1
+        while idx < len(lines):
+            next_match = heading_re.match(lines[idx])
+            if next_match and len(next_match.group(1)) <= level:
+                break
+            idx += 1
+        if _normalize_heading_text(title) in wanted:
+            sections.extend(lines[start:idx])
+            sections.append("")
+
+    excerpt_parts: list[str] = []
+    if title_lines:
+        excerpt_parts.extend(title_lines)
+    if intro_lines:
+        excerpt_parts.append("")
+        excerpt_parts.extend(intro_lines)
+    if sections:
+        excerpt_parts.append("")
+        excerpt_parts.extend(sections)
+    excerpt = "\n".join(excerpt_parts).strip()
+    if not excerpt:
+        excerpt = body
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars].rstrip() + "\n...[truncated]"
+    return excerpt
+
+
+def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[str], str]:
+    resolved_names: list[str] = []
+    blocks: list[str] = []
+    for identifier in skill_identifiers:
+        skill_file = _find_guidance_skill_file(identifier)
+        if skill_file is None:
+            raise TakyonError(
+                f"guidance skill '{identifier}' was requested for business_claude_agent_task but is not installed"
+            )
+        raw = skill_file.read_text(encoding="utf-8")
+        frontmatter, body = parse_frontmatter(raw)
+        skill_name = str(frontmatter.get("name") or skill_file.parent.name).strip() or skill_file.parent.name
+        resolved_names.append(skill_name)
+        section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
+        excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
+        block = (
+            f"[Hermes guidance skill: {skill_name}]\n"
+            "Follow this guidance when it improves the artifact quality or UX. "
+            "Business state, workspace boundaries, runtime truth, and the Hermes no-pretend contract override this guidance if they conflict.\n\n"
+            f"{excerpt}"
+        )
+        blocks.append(block.strip())
+    return resolved_names, "\n\n".join(blocks).strip()
 
 
 def _microusd_to_cents(value: int | float | None) -> int:
@@ -7389,8 +7540,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or _model_from_config("claude_agent_default", "deep_work_default")
             or DEFAULT_CLAUDE_AGENT_MODEL
         ).strip()
+        guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
+        resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
         workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_raw)
-        worker_instruction = instruction.rstrip() + "\n\n" + workspace_contract + "\n\n" + NO_PRETEND_PRODUCT_CONTRACT
+        worker_instruction_parts = [instruction.rstrip()]
+        if guidance_block:
+            worker_instruction_parts.append(guidance_block)
+        worker_instruction_parts.extend([workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
+        worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
         payload = {
             "business": business,
             "workspace": workspace_raw,
@@ -7499,6 +7656,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "source": "claude-agent-sdk",
                     "workspace": workspace_raw,
                     "model": model,
+                    "guidance_skills": resolved_guidance_skills,
                     "summary": sdk_result.get("summary") or "",
                     "error": sdk_result.get("error") or None,
                     "pretend_product_findings": pretend_findings,
@@ -7522,6 +7680,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "workspace": workspace_raw,
                 "source": "claude-agent-sdk",
                 "model": model,
+                "guidance_skills": resolved_guidance_skills,
                 "budget": budget,
                 "agent_record": agent_record,
                 "verification": verification,
@@ -7912,6 +8071,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design for product/site UI work"},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},

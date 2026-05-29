@@ -700,6 +700,83 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
     assert not (tmp_path / "businesses" / "latexflow" / "product" / "site" / "product" / "site").exists()
 
 
+def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    skills_dir = tmp_path / "skills"
+    skill_file = skills_dir / "creative" / "claude-design" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text(
+        """---
+name: claude-design
+---
+
+# Claude Design for CLI/API Agents
+
+Use this skill for strong product UI work.
+
+## When To Use
+
+- landing pages
+- dashboard concepts
+
+## Workflow
+
+1. Read the product context.
+2. Build the artifact with intentional hierarchy.
+
+## Artifact Format Rules
+
+- Prefer local files.
+""",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "get_all_skills_dirs", lambda: [skills_dir])
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build a more intentional product surface.",
+                "guidance_skills": ["claude-design"],
+                "idempotency_key": "workspace-guidance",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = captured["payload"]["instruction"]
+    assert result["success"] is True
+    assert result["guidance_skills"] == ["claude-design"]
+    assert "[Hermes guidance skill: claude-design]" in instruction
+    assert "## Workflow" in instruction
+    assert "Build the artifact with intentional hierarchy." in instruction
+    assert "current working directory is already the requested business workspace: product/site" in instruction
+
+
 def test_product_verification_records_publish_blocker_when_hosting_root_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", "")

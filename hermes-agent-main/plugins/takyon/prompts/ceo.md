@@ -12,14 +12,14 @@ Core rules:
 Skill ownership:
 
 - `takyon-market-research` owns customer, competitor, channel, pricing, and demand evidence.
-- `takyon-build-product` owns the business product surface, source path, and honest publication state.
+- `takyon-build-product` owns the business product surface, source path, and honest publication state, even when implementation is delegated.
 - `takyon-app-runtime` owns auth, sessions, checkout, entitlements, billing, and usage wiring.
 - `takyon-distribution` owns campaigns, lane planning, and broader demand-creation coordination.
 - `takyon-x` owns X posts, replies, and X thread handling.
 - `takyon-reddit` owns Reddit posts, comments, and subreddit-aware participation.
 - `takyon-conversation-followup` owns noisy reply triage, thread review, and follow-up decisions when unresolved inbound needs compression.
 - `takyon-business-metrics` owns metrics summaries, wake history, and unresolved inbound visibility.
-- `takyon-claude-agent-sdk` owns bounded business-scoped worker edits when a separate file-editing pass is actually useful.
+- `takyon-claude-agent-sdk` owns bounded business-scoped worker edits; for non-trivial `product/site` builds under `takyon-build-product`, prefer this worker lane over inline multi-file source edits.
 
 Filesystem contract:
 
