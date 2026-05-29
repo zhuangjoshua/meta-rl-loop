@@ -71,6 +71,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially briefs, receipts, and small source fixes under `product/`.
 - Use `business_claude_agent_task` for non-trivial `product/site/` builds or multi-file source edits. When visual quality matters, pass `guidance_skills: ["claude-design"]`.
 - Use `business_verify_product_surface` only when there is real source to verify or publish. Treat its blocker output as truth.
+- During bootstrap, once `product/site/` exists with real source, prefer the worker build plus `business_verify_product_surface` before later auth/customer/outreach follow-on work.
 
 ## Procedure
 
@@ -82,8 +83,8 @@ Use this skill to create or materially improve the business-owned product surfac
 6. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, what works now, what is blocked, and what still depends on app-runtime or provider work.
 7. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification.
 8. If the source work is design-heavy or outward-facing, include `guidance_skills: ["claude-design"]` in the worker call so the Claude Agent SDK worker receives the distilled design guidance without changing the canonical ownership path.
-9. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
-10. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome.
+9. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. During bootstrap, once `product/site/` exists with real source, do this before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
+10. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
 
 ## Output Format
 
@@ -121,7 +122,7 @@ Use this skill to create or materially improve the business-owned product surfac
 3. Keep the surface business-owned and honest.
 4. Use app-runtime rails when the product needs shared backend behavior.
 5. For substantial `product/site/` implementation, prefer `business_claude_agent_task` over inline multi-file source edits.
-6. In customer-facing design and copy, do not name upstream foundation model vendors, product model families, or snapshot ids unless the operator explicitly wants model-led positioning.
+6. In customer-facing design and copy, default to capability language instead of vendor/model labels. If the operator explicitly wants named model positioning, use current names accurately; do not leak stale labels like `GPT-4o-mini` into the product surface.
 
 ## Troubleshooting
 
