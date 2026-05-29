@@ -1,6 +1,6 @@
 # argon-alpha-14 deploy config
 
-This directory tracks the VPS Caddy config for `159.65.217.13`.
+This directory tracks the VPS Caddy config for `137.184.75.57`.
 
 Apply it with:
 

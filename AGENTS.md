@@ -19,9 +19,9 @@ Do not recreate `polsia3`, do not restore `polsia3/takyon`, and do not describe 
 
 ## Deployment Notes
 
-The current Takyon VPS target is `159.65.217.13` (`argon-alpha-14`). Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access.
+The current Takyon VPS target is `137.184.75.57` (`argon-alpha-14`). Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access.
 
-The planned public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo; keep it pointed at Vercel until the VPS dashboard is healthy, then cut the `app` record over to `159.65.217.13`.
+The planned public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo; keep it pointed at Vercel until the VPS dashboard is healthy, then cut the `app` record over to `137.184.75.57`.
 
 When the operator asks to push or deploy Takyon, keep the three rails distinct:
 

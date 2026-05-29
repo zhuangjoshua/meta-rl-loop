@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 
-TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@159.65.217.13}"
+TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
