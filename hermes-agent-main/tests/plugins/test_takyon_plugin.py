@@ -717,6 +717,59 @@ def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch
     assert captured["timeout_seconds"] == 300
 
 
+def test_business_verify_product_surface_treats_null_install_as_default_true(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeStore:
+        def read(self, **_: object) -> dict[str, object]:
+            return {
+                "app": {
+                    "surface": {
+                        "source_path": "product/site",
+                        "publish_target": "https://latexflow.fourmanifold.com/",
+                    }
+                }
+            }
+
+        def commit(self, **_: object) -> dict[str, object]:
+            return {"success": True, "results": []}
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        captured["install"] = kwargs["install"]
+        return {
+            "status": "passed",
+            "done_gate_status": "passed",
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.fourmanifold.com/",
+                "blocker": "",
+            },
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "inventory": {},
+        }
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore())
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+    monkeypatch.setattr(
+        takyon_core,
+        "_product_surface_verification_operations",
+        lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
+    )
+
+    result = json.loads(
+        handle_business_verify_product_surface(
+            {
+                "business": "latexflow",
+                "install": None,
+                "idempotency_key": "verify-null-install-default",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["install"] is True
+
+
 def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -882,6 +935,61 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
     assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+
+
+def test_claude_agent_task_treats_null_install_as_default_true_for_verification(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        captured["install"] = kwargs["install"]
+        return {
+            "status": "passed",
+            "done_gate_status": "passed",
+            "publish": {
+                "status": "published",
+                "public_url": "https://latexflow.fourmanifold.com/",
+                "blocker": "",
+            },
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "inventory": {},
+        }
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the product surface under product/site.",
+                "idempotency_key": "workspace-null-install-default",
+                "install": None,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["install"] is True
 
 
 def test_product_verification_records_publish_blocker_when_hosting_root_missing(tmp_path, monkeypatch):

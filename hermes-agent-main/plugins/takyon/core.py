@@ -6321,7 +6321,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         requested_publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
         legacy_shared_renderer = _is_shared_renderer_publish_policy(requested_publish_policy)
         publish_policy = "publish_after_verify" if legacy_shared_renderer else requested_publish_policy
-        install = bool(args.get("install", True))
+        install = _boolish(args.get("install"), default=True)
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=300, minimum=15, maximum=900)
         receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
         verification = _finalize_product_surface_verification(
@@ -6346,7 +6346,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
                 publish_target=publish_target,
                 publish_policy=publish_policy,
                 requested_publish_policy=requested_publish_policy,
-                activate_on_success=bool(args.get("activate_on_success", True)),
+                activate_on_success=_boolish(args.get("activate_on_success"), default=True),
             ),
             idempotency_key=idempotency_key,
             reason=args.get("reason") or "product surface publication",
@@ -7725,7 +7725,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 publish_target=_product_publish_target(business, surface.get("publish_target")),
                 requested_publish_policy=requested_publish_policy,
                 publish_policy=publish_policy,
-                install=bool(args.get("install", True)),
+                install=_boolish(args.get("install"), default=True),
                 timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=300, minimum=15, maximum=900),
                 receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
                 verification_source="business_claude_agent_task",
