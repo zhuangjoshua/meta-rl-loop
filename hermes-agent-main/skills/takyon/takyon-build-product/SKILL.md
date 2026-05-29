@@ -52,6 +52,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - If the source path, framework, or local toolchain is unclear, use `business_check_runtime_capabilities` before acting as if a build stack already exists.
 - If the business has no surface contract yet, create it first with `business_upsert_app_surface_contract`.
 - For substantial `product/site/` implementation, plan to delegate through `business_claude_agent_task` while keeping this skill as the canonical owner of the product surface.
+- During bootstrap for a software business, establish a real `product/site/` source path before expanding runtime mirror docs such as `product/runtime.md` or `product/billing.md`.
 
 ## References
 
@@ -82,6 +83,7 @@ Use this skill to create or materially improve the business-owned product surfac
 7. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification.
 8. If the source work is design-heavy or outward-facing, include `guidance_skills: ["claude-design"]` in the worker call so the Claude Agent SDK worker receives the distilled design guidance without changing the canonical ownership path.
 9. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
+10. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome.
 
 ## Output Format
 
@@ -110,6 +112,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - [ ] `product/site/` contains usable source, not only notes
 - [ ] Any claimed publication state is backed by `business_verify_product_surface` output or visible receipts
 - [ ] Any runtime-dependent feature is either routed to `takyon-app-runtime` or left visibly blocked
+- [ ] Bootstrap did not substitute runtime mirror docs for missing `product/site/` source
 
 ## Rules
 

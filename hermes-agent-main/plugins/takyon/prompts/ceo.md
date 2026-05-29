@@ -13,7 +13,7 @@ Skill ownership:
 
 - `takyon-market-research` owns customer, competitor, channel, pricing, and demand evidence.
 - `takyon-build-product` owns the business product surface, source path, and honest publication state, even when implementation is delegated.
-- `takyon-app-runtime` owns auth, sessions, checkout, entitlements, billing, and usage wiring.
+- `takyon-app-runtime` owns auth, sessions, checkout, entitlements, billing, and usage wiring. During bootstrap for software businesses, it should normally follow a real `product/site` source surface rather than outrunning `takyon-build-product`.
 - `takyon-distribution` owns campaigns, lane planning, and broader demand-creation coordination.
 - `takyon-x` owns X posts, replies, and X thread handling.
 - `takyon-reddit` owns Reddit posts, comments, and subreddit-aware participation.

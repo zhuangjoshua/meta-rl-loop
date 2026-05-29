@@ -3268,6 +3268,15 @@ function CompanyOverview({
   ];
   const visibleActivity = compactActivityItems(latestActivity).slice(0, 8);
   const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
+  const isBusinessBusy = Boolean(activeTool)
+    || tasks.some((task) =>
+      /(running|working|active|queued|waiting|preparing)/i.test(
+        `${task?.status || ""} ${task?.tone || ""}`,
+      ))
+    || workers.some((worker) =>
+      /(running|working|active|queued|waiting|preparing)/i.test(
+        `${worker?.status || ""} ${worker?.tone || ""}`,
+      ));
   const canonicalRootCards = [
     {
       root: "research",
@@ -3367,6 +3376,7 @@ function CompanyOverview({
             tone="neutral"
           >
             <BusinessFileBrowser
+              autoRefreshIntervalMs={isBusinessBusy ? 2500 : 0}
               initialFiles={EMPTY_BUSINESS_FILES}
               initialPath={card.root}
               onCommand={onCommand}
@@ -4241,6 +4251,7 @@ function BusinessSnapshot({
 }
 
 function BusinessFileBrowser({
+  autoRefreshIntervalMs = 0,
   initialFiles,
   initialPath = ".",
   onCommand,
@@ -4248,6 +4259,7 @@ function BusinessFileBrowser({
   onReadFile,
   onResolveMedia,
 }: {
+  autoRefreshIntervalMs?: number;
   initialFiles: BusinessOverviewFile[];
   initialPath?: string;
   onCommand: (line: string) => void;
@@ -4298,6 +4310,14 @@ function BusinessFileBrowser({
     }
     void openPath(normalizedPath);
   }, [initialFiles, initialPath, openPath]);
+
+  useEffect(() => {
+    if (!autoRefreshIntervalMs || preview || textPreview) return;
+    const timer = window.setInterval(() => {
+      if (!loading) void openPath(path);
+    }, autoRefreshIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshIntervalMs, loading, openPath, path, preview, textPreview]);
 
   return (
     <div className="space-y-2">

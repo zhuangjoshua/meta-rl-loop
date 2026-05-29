@@ -108,6 +108,16 @@ def test_bootstrap_prompt_requires_distribution_campaign_batch():
     assert "not a forever recurring funnel" in prompt
 
 
+def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    assert "product/site/" in prompt
+    assert "product/surface.md records that source_path truthfully" in prompt
+    assert "Do not expand product/runtime.md" in prompt
+
+
 def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
     store = TakyonStore(tmp_path)
     prompt = store._ceo_cron_prompt("demo")

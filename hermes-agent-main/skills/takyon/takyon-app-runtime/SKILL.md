@@ -53,6 +53,7 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 - Start with `business_read_business`, then inspect any existing runtime mirrors with `business_read_file`.
 - Keep top-level Takyon users and product customers separate; this skill only manages the product-customer side.
 - If live auth, checkout, email, or billing depends on provider credentials, let the runtime tools expose the blocker instead of pretending those providers are already configured.
+- If `product/surface.md` has no real `source_path` or `product/site/` does not exist yet, route software-business bootstrap work back through `takyon-build-product` before expanding runtime mirror docs.
 
 ## References
 
@@ -76,12 +77,13 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 
 1. Call `business_read_business` and identify which runtime lane is actually changing: plan policy, auth/session, customer state, entitlement, checkout, billing, or usage.
 2. If the product surface currently claims runtime features that are not wired, update the surface contract first with `business_upsert_app_surface_contract` or route the product copy repair back through `takyon-build-product`.
-3. For plan and budget work, call `business_configure_app_budget` and `business_upsert_app_plan` before editing any mirror files. Expect those tools to define the real limits and pricing state.
-4. For customer and auth work, use `business_upsert_app_customer`, `business_grant_app_entitlement`, `business_request_app_magic_link`, `business_verify_app_magic_link`, and `business_read_app_account` in the order needed by the flow. If a provider or credential is missing, keep the blocker visible instead of faking a session.
-5. For paid flows, call `business_create_app_checkout` to create the checkout intent and `business_record_stripe_webhook` when real Stripe events arrive. Do not claim paid entitlement or revenue until webhook reconciliation has happened.
-6. For usage metering, call `business_record_app_usage` and reflect the resulting truth in `product/usage.md` and `product/billing.md`.
-7. After real tool-backed changes, write or patch `product/runtime.md`, `product/plans.md`, `product/customers.md`, `product/billing.md`, and `product/usage.md` so they mirror actual runtime state and blockers.
-8. If a feature is blocked by credentials, providers, or missing runtime setup, leave that path explicitly blocked in the publication files instead of inventing success.
+3. During bootstrap for a software business, do not let these runtime mirror files become the first main product artifact. If `product/site/` is still missing or `product/surface.md` has no real source path, route back to `takyon-build-product` first unless runtime-first work was explicitly requested.
+4. For plan and budget work, call `business_configure_app_budget` and `business_upsert_app_plan` before editing any mirror files. Expect those tools to define the real limits and pricing state.
+5. For customer and auth work, use `business_upsert_app_customer`, `business_grant_app_entitlement`, `business_request_app_magic_link`, `business_verify_app_magic_link`, and `business_read_app_account` in the order needed by the flow. If a provider or credential is missing, keep the blocker visible instead of faking a session.
+6. For paid flows, call `business_create_app_checkout` to create the checkout intent and `business_record_stripe_webhook` when real Stripe events arrive. Do not claim paid entitlement or revenue until webhook reconciliation has happened.
+7. For usage metering, call `business_record_app_usage` and reflect the resulting truth in `product/usage.md` and `product/billing.md`.
+8. After real tool-backed changes, write or patch `product/runtime.md`, `product/plans.md`, `product/customers.md`, `product/billing.md`, and `product/usage.md` so they mirror actual runtime state and blockers.
+9. If a feature is blocked by credentials, providers, or missing runtime setup, leave that path explicitly blocked in the publication files instead of inventing success.
 
 ## Output Format
 
