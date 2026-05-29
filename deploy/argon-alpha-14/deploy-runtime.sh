@@ -59,6 +59,27 @@ if [[ -z "$TAKYON_SMOKE_HOST_HEADER" ]]; then
   TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER%%:*}"
 fi
 
+run_remote_smoke() {
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "set -euo pipefail
+    root_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/)
+    case \"\$root_status\" in
+      200|302) ;;
+      *)
+        echo \"unexpected dashboard root status: \$root_status\" >&2
+        exit 1
+        ;;
+    esac
+    api_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/api/status)
+    case \"\$api_status\" in
+      200|401) ;;
+      *)
+        echo \"unexpected dashboard api status: \$api_status\" >&2
+        exit 1
+        ;;
+    esac"
+}
+
 for attempt in {1..12}; do
   curl_status=0
   if curl -fsSI \
@@ -75,21 +96,11 @@ for attempt in {1..12}; do
   sleep 5
 done
 
-ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
-  "set -euo pipefail
-  root_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/)
-  case \"\$root_status\" in
-    200|302) ;;
-    *)
-      echo \"unexpected dashboard root status: \$root_status\" >&2
-      exit 1
-      ;;
-  esac
-  api_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/api/status)
-  case \"\$api_status\" in
-    200|401) ;;
-    *)
-      echo \"unexpected dashboard api status: \$api_status\" >&2
-      exit 1
-      ;;
-  esac"
+for attempt in {1..12}; do
+  if run_remote_smoke; then
+    exit 0
+  fi
+  sleep 5
+done
+
+run_remote_smoke
