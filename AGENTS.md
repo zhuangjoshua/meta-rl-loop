@@ -21,7 +21,7 @@ Do not recreate `polsia3`, do not restore `polsia3/takyon`, and do not describe 
 
 The current Takyon VPS target is `137.184.75.57` (`argon-alpha-14`). Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access.
 
-The planned public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo; keep it pointed at Vercel until the VPS dashboard is healthy, then cut the `app` record over to `137.184.75.57`.
+The public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code.
 
 When the operator asks to push or deploy Takyon, keep the three rails distinct:
 
@@ -153,6 +153,8 @@ When the operator wants live monitoring, run the shell in a terminal visible to 
 Do not stop at analysis because the workspace is dirty. There may be existing user or previous-agent edits. Read the relevant files, preserve unrelated changes, and make the requested change in the canonical location.
 
 Do not begin with a verbose prompt restatement. If the request is actionable, inspect and act. If context is ambiguous, ask one concise question or state the assumption you are using.
+
+When discussing a repo, package, website, downloaded artifact, or generated output, only describe contents you actually inspected. If local files are not present or you have not opened the relevant source, say that plainly. Do not guess what is inside, do not imply direct inspection when you only inferred from names/docs/marketing copy, and do not gaslight the operator about what you actually verified.
 
 When in doubt:
 

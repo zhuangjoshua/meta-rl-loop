@@ -1,0 +1,31 @@
+{
+  "business": "<business id, e.g. lumen-analytics>",
+  "product": "<product display name, e.g. Lumen>",
+  "one_liner": "<what the product does, in one plain sentence>",
+  "classification": {
+    "funnel": "cold | warm | hot",
+    "awareness": "unaware | problem-aware | solution-aware | product-aware | most-aware",
+    "strategy": "<the core promise / angle this ad sells>",
+    "format": "short-ugc | story | adhd"
+  },
+  "target_seconds": 22,
+
+  "subject": "<age / gender / ethnicity / hair / real everyday features — see realism-framework.md>",
+  "wardrobe": "<what they wear, e.g. a soft cream knit sweater>",
+  "setting": "<location + the real light source, e.g. a tidy home desk, large window off to her left casting soft daylight>",
+  "expression": "<what they are doing / feeling, e.g. warm and easy, talking to a friend>",
+  "framing": null,
+  "image_extra": null,
+
+  "persona": {
+    "accent": null,
+    "vibe": "<delivery energy, e.g. warm, casual>",
+    "eye_direction": "looking into the lens",
+    "camera_motion": null,
+    "_camera_motion_note": "OPTIONAL free choice of camera direction/framing for this ad (null = default arm's-length selfie). Pick any shot that fits — e.g. 'a walk-and-talk selfie down a sunny sidewalk', 'phone propped on the desk at a slight low angle', 'a slow handheld push-in'. Realism (organic real phone footage, never a fake locked-off/CGI move) is applied automatically on top of whatever you choose — see realism-framework.md §3."
+  },
+
+  "cta": "<the call-to-action line>",
+
+  "_script_note": "Pair this brief with a script.json (see templates/script.json) via --script, OR embed it under a 'script' key here (see assets/example-brief.json). The script is the SCRIPT LAYER output and is authored separately with references/dialogue-action-framework.md."
+}

@@ -1,0 +1,29 @@
+{
+  "_layer": "SCRIPT LAYER output — authored with references/dialogue-action-framework.md ONLY.",
+  "_about": "Ordered dialogue+action beats. Each beat is one spoken line plus the action performed while saying it. build_ad.py groups consecutive beats into clips of <=10s of speech and stitches them. Production fields (look, lighting, camera) live in the brief, NOT here.",
+
+  "hook_type": "Curiosity | Contrarian | Social Proof | Story | Demographic | Result | Pattern Interrupt | Fascinating Fact",
+  "structure": "HOOK (0-3s) -> PROBLEM -> MECHANISM -> RESULT -> CTA",
+
+  "beats": [
+    {
+      "dialogue": "<HOOK line — stop the scroll in the first 3 seconds>",
+      "action": "<what the speaker physically does while saying it>",
+      "seconds": null
+    },
+    {
+      "dialogue": "<PROBLEM line — the pain the viewer feels>",
+      "action": "<paired action / glance / gesture>"
+    },
+    {
+      "dialogue": "<MECHANISM line — what the product does, shown in-scene on a real device if relevant>",
+      "action": "<paired action, e.g. tipping head toward the open laptop>"
+    },
+    {
+      "dialogue": "<RESULT + CTA line>",
+      "action": "<paired action, e.g. a warm shrug and easy smile>"
+    }
+  ],
+
+  "_seconds_note": "Set 'seconds' on a beat only to override the auto estimate (~2.5 words/sec). Leave null to auto-estimate. A single beat should stay well under 10s of speech."
+}

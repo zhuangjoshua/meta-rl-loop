@@ -21,10 +21,10 @@ from plugins.takyon.core import (
     _verify_product_surface_path,
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
-    handle_business_generate_creative_asset,
     handle_business_list_businesses,
     handle_business_publish_outreach,
     handle_business_request_app_magic_link,
+    handle_business_ugc_ad_write,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
     handle_business_list_conversation_messages,
@@ -81,6 +81,7 @@ def test_bundled_takyon_skills_exist():
     skills_root = Path(__file__).resolve().parents[2] / "skills" / "takyon"
     skill_files = {path.parent.name: path for path in skills_root.glob("*/SKILL.md")}
     assert set(skill_files) == {
+        "ugc-video-ad",
         "takyon-app-runtime",
         "takyon-build-product",
         "takyon-business-metrics",
@@ -789,6 +790,20 @@ def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch
     assert captured["timeout_seconds"] == 300
 
 
+def test_bundled_claude_design_guidance_skills_exist():
+    skills_root = Path(__file__).resolve().parents[2] / "skills" / "creative"
+    expected = {
+        "claude-design",
+        "claude-design-openai",
+        "claude-design-stripe",
+        "claude-design-superhuman",
+        "claude-design-vibrant",
+        "claude-design-doodle",
+    }
+    found = {path.parent.name for path in skills_root.glob("*/SKILL.md")}
+    assert expected.issubset(found)
+
+
 def test_business_verify_product_surface_treats_null_install_as_default_true(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -887,6 +902,50 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
     assert not (tmp_path / "businesses" / "latexflow" / "product" / "site" / "product" / "site").exists()
 
 
+def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Refresh the landing page copy.",
+                "idempotency_key": "workspace-ai-copy-contract",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = captured["payload"]["instruction"]
+    assert result["success"] is True
+    assert "Customer-facing AI product copy contract" in instruction
+    assert "Claude Opus 4.7, Claude Sonnet 4.6, and Claude Haiku 4.5" in instruction
+    assert "Do not describe Claude-backed behavior with GPT names" in instruction
+
+
 def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -962,6 +1021,101 @@ Use this skill for strong product UI work.
     assert "## Workflow" in instruction
     assert "Build the artifact with intentional hierarchy." in instruction
     assert "current working directory is already the requested business workspace: product/site" in instruction
+
+
+def test_claude_agent_task_distills_method_and_style_guidance_skills(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:dogsnap",
+        [{"action": "business.upsert", "business": "dogsnap", "name": "Dogsnap", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    skills_dir = tmp_path / "skills"
+    method_file = skills_dir / "creative" / "claude-design" / "SKILL.md"
+    style_file = skills_dir / "creative" / "claude-design-doodle" / "SKILL.md"
+    method_file.parent.mkdir(parents=True, exist_ok=True)
+    style_file.parent.mkdir(parents=True, exist_ok=True)
+
+    method_file.write_text(
+        """---
+name: claude-design
+---
+
+# Claude Design
+
+Use this skill for outward-facing product/site work.
+
+## Shared Style Selection
+
+- `claude-design-doodle`: whimsical playful consumer
+
+## Workflow
+
+1. Pick one coherent style skill.
+2. Build the surface with intentional hierarchy.
+""",
+        encoding="utf-8",
+    )
+    style_file.write_text(
+        """---
+name: claude-design-doodle
+---
+
+# Claude Design Doodle
+
+Playful shared design system.
+
+## Visual Direction
+
+- whimsical
+- friendly
+
+## Hard Rules
+
+- playful still has to ship
+""",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Dogsnap</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "get_all_skills_dirs", lambda: [skills_dir])
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "dogsnap",
+                "workspace": "product/site",
+                "instruction": "Build a playful dog photo-sharing homepage.",
+                "guidance_skills": ["claude-design", "claude-design-doodle"],
+                "idempotency_key": "workspace-guidance-pair",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = captured["payload"]["instruction"]
+    assert result["success"] is True
+    assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
+    assert "[Hermes guidance skill: claude-design]" in instruction
+    assert "[Hermes guidance skill: claude-design-doodle]" in instruction
+    assert "Pick one coherent style skill." in instruction
+    assert "playful still has to ship" in instruction
 
 
 def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypatch):
@@ -2047,9 +2201,8 @@ def test_conversation_read_tools_return_filtered_backlog_and_thread(tmp_path, mo
     assert [message["direction"] for message in thread["messages"]] == ["inbound", "outbound"]
 
 
-def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_path, monkeypatch):
+def test_business_ugc_ad_write_records_existing_publication(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    monkeypatch.setenv("FAL_KEY", "test-fal-key")
     store = TakyonStore(tmp_path)
     _commit(
         store,
@@ -2064,50 +2217,46 @@ def test_business_generate_creative_asset_writes_local_video_and_receipt(tmp_pat
         ],
         "init-clipbook",
     )
-    source = tmp_path / "source.mp4"
-    source.write_bytes(b"fake mp4 bytes")
-
-    import tools.video_generation_tool as video_tool
-
-    monkeypatch.setattr(
-        video_tool,
-        "_handle_video_generate",
-        lambda _args: json.dumps(
-            {
-                "success": True,
-                "video": str(source),
-                "provider": "fal",
-                "model": "test-video-model",
-                "prompt": "UGC test",
-            }
-        ),
-    )
+    publication_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "clipbook-demo"
+    publication_dir.mkdir(parents=True, exist_ok=True)
+    (publication_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+    (publication_dir / "reference.png").write_bytes(b"fake png bytes")
+    script = {"dialogue_action": [{"dialogue": "UGC test", "action": "holding the product"}]}
+    (publication_dir / "script.json").write_text(json.dumps(script), encoding="utf-8")
 
     result = json.loads(
-        handle_business_generate_creative_asset(
+        handle_business_ugc_ad_write(
             {
                 "business": "clipbook",
-                "kind": "video",
-                "channel": "meta",
-                "format": "ugc",
-                "campaign": "launch",
-                "prompt": "UGC test",
-                "provider": "fal",
-                "budget_usd": 0.25,
-                "idempotency_key": "clipbook-meta-ugc-video",
+                "value": {
+                    "slug": "clipbook-demo",
+                    "path": "product/ugc-ads/clipbook-demo/ad.mp4",
+                    "seconds": 12.4,
+                    "n_clips": 2,
+                    "script": script,
+                },
+                "idempotency_key": "clipbook-ugc-ad-write",
             }
         )
     )
 
     assert result["success"] is True
-    assert result["path"].startswith("distribution/launch/creatives/meta-ugc/")
-    asset_path = tmp_path / "businesses" / "clipbook" / result["path"]
-    receipt_path = tmp_path / "businesses" / "clipbook" / result["receipt"]
-    assert asset_path.read_bytes() == b"fake mp4 bytes"
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["external_side_effects"] == "local_asset_only"
-    assert receipt["posted"] is False
-    assert receipt["provider"] == "fal"
+    assert result["path"] == "product/ugc-ads/clipbook-demo/ad.mp4"
+    assert result["publication_dir"] == "product/ugc-ads/clipbook-demo"
+    assert result["files"] == [
+        "product/ugc-ads/clipbook-demo/ad.mp4",
+        "product/ugc-ads/clipbook-demo/script.json",
+        "product/ugc-ads/clipbook-demo/reference.png",
+    ]
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "ugc_ad.write"
+    payload = json.loads(row["payload_json"])
+    assert payload["path"] == "product/ugc-ads/clipbook-demo/ad.mp4"
+    assert payload["script"] == script
 
 
 def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):

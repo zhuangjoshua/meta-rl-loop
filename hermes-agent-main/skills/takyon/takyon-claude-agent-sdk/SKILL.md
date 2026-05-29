@@ -43,9 +43,10 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 - Primary root: `product/` by default, but bounded work may land in any canonical Takyon root
 - Allowed roots: `product/`, `distribution/`, `research/`, `metrics/`
 - Best call points: narrow file work, bounded synthesis, contained source edits
-- Optional guidance lane: pass `guidance_skills: ["claude-design"]` for design-heavy `product/site/` work
+- Optional guidance lane: pass `guidance_skills: ["claude-design", "claude-design-openai"]` by default for design-heavy `product/site/` work, or swap the second skill for `claude-design-stripe`, `claude-design-superhuman`, `claude-design-vibrant`, or `claude-design-doodle`
 - Publication location: the exact target path named in the delegated task, inside a canonical Takyon root
 - Tool names used by this skill: `business_read_business`, `business_claude_agent_task`, `business_verify_product_surface`
+- Customer-facing product rule: for `product/site/` work, keep copy capability-first; do not leak stale vendor/model labels into the generated UI
 
 ## Prerequisites
 
@@ -58,7 +59,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 - Call `business_read_business` first and decide whether the task is narrow enough to delegate.
 - Call `business_claude_agent_task` with one bounded workspace, a clear instruction, and an explicit desired output path.
-- When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design"]` so the worker receives the distilled design guidance.
+- When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design", "<style-skill>"]` so the worker receives both the shared frontend method and one shared design system.
 - If the worker edits product source that should be verified or published, follow with `business_verify_product_surface`.
 - If the result implies a send, deploy, runtime mutation, or other external effect, switch back to the appropriate Takyon skill or `business_*` tool path after the worker completes.
 
@@ -66,10 +67,23 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 1. Call `business_read_business` and decide whether this task really needs a worker. If normal Takyon tools are enough, do not delegate.
 2. Choose one narrow workspace inside `product/`, `distribution/`, `research/`, or `metrics/`. Name the exact target files or directory in the instruction.
-3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design"]`.
+3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 4. Review the changed files. Keep only durable changes that stay inside the requested business scope and canonical roots.
 5. If the worker changed `product/site/` or another product source path that should be validated, call `business_verify_product_surface` before claiming product success.
 6. If the worker output implies a real publish, send, checkout, auth, or billing effect, route that next step back through the appropriate Takyon skill and `business_*` tool instead of pretending the worker already did it.
+7. For customer-facing product copy, default to capability language. Only mention model families when the operator explicitly wants that positioning, and never leak stale names like `GPT-4o-mini` into a Claude-backed product surface.
+
+### Shared style skills
+
+Choose exactly one style skill when pairing with `claude-design`:
+
+- `claude-design-openai`: calm serious default for AI tools, prosumer software, research/productivity
+- `claude-design-stripe`: premium commercial, infra, fintech, polished B2B
+- `claude-design-superhuman`: premium productivity and speed-focused software
+- `claude-design-vibrant`: fun colorful consumer or lively prosumer
+- `claude-design-doodle`: whimsical playful consumer, pet, kid, or intentionally silly products
+
+Default to `claude-design-openai` when no stronger style signal exists.
 
 ## Output Format
 
@@ -100,6 +114,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 1. The worker may not invent backend behavior.
 2. The worker may not escape the business workspace.
 3. Product verification failures are blockers, not success.
+4. Customer-facing product/UI copy should not expose stale or accidental foundation-model labels.
 
 ## Troubleshooting
 

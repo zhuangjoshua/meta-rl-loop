@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import base64
 import json
 import os
 import re
@@ -66,6 +65,14 @@ NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
 - In customer-facing product copy, describe capabilities instead of naming upstream foundation model vendors or snapshot ids unless the operator explicitly wants model-led positioning.
 """
+CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
+- This work may ship to customers or prospects.
+- Default to capability-first language, not vendor/model-name-first language.
+- Do not mention OpenAI, GPT-* names, Anthropic, Claude family names, model snapshots, or API internals in customer-facing UI/copy unless the operator explicitly asks for provider/model-led positioning or comparison.
+- If named model context is truly required, use current Anthropic family names accurately: Claude Opus 4.7, Claude Sonnet 4.6, and Claude Haiku 4.5.
+- Never mix vendors accidentally. Do not describe Claude-backed behavior with GPT names or stale model labels like GPT-4o-mini.
+- Prefer customer-visible claims like analyze feedback, cluster themes, rank opportunities, explain why, and export insights.
+"""
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
 - Write files relative to the current working directory.
@@ -74,12 +81,19 @@ WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 """
 _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design": (
-        "When To Use This Skill vs `popular-web-designs` vs `design-md`",
         "When To Use",
-        "Design Principle: Start From Context, Not Vibes",
+        "Shared Style Selection",
         "Workflow",
-        "Artifact Format Rules",
+        "Marketing Surfaces",
+        "Product Surfaces",
+        "Self Review Loop",
+        "Hard Rules",
     ),
+    "claude-design-openai": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "claude-design-stripe": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
 }
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
@@ -2588,6 +2602,13 @@ def _scope_parts(scope: str) -> dict[str, str | None]:
     if not resource:
         raise TakyonError("scope resource is empty")
     return {"raw": f"business:{business}/{resource}", "business": business, "kind": "resource", "resource": resource}
+
+
+def _workspace_needs_customer_ai_copy_contract(workspace_raw: str) -> bool:
+    normalized = str(workspace_raw or "").strip().strip("/").lower()
+    if normalized in {"product", "site", "website"}:
+        return True
+    return normalized.startswith("product/")
 
 
 def _scope_ancestors(scope: str) -> list[str]:
@@ -5668,128 +5689,37 @@ def _commit_tool(args: dict, operation: dict[str, Any], *, scope: str | None = N
         return tool_error(str(exc), success=False)
 
 
-_CREATIVE_ASSET_KINDS = {"video": "mp4", "image": "png"}
-_CREATIVE_ASSET_CHANNELS = {"meta", "tiktok", "x", "linkedin"}
-_CREATIVE_ASSET_FORMATS = {"ugc"}
+def _ugc_ad_record(args: dict[str, Any]) -> dict[str, Any]:
+    value = args.get("value")
+    if not isinstance(value, dict):
+        raise TakyonError("value is required")
 
+    record = dict(value)
+    slug = _file_slug(str(record.get("slug") or args.get("slug") or ""), "ugc-ad")
+    path = _safe_relpath(str(record.get("path") or args.get("path") or ""), field="value.path").as_posix()
+    expected_prefix = f"product/ugc-ads/{slug}/"
+    if not path.startswith(expected_prefix):
+        raise TakyonError(f"value.path must stay under {expected_prefix}")
+    if Path(path).name != "ad.mp4":
+        raise TakyonError("value.path must point to ad.mp4")
 
-def _normalize_creative_asset_choice(value: Any, allowed: set[str], *, field: str) -> str:
-    clean = str(value or "").strip().lower().replace("_", "-")
-    if clean not in allowed:
-        raise TakyonError(f"{field} must be one of {sorted(allowed)}")
-    return clean
+    seconds = record.get("seconds")
+    if seconds not in (None, ""):
+        seconds = float(seconds)
+        if seconds < 0:
+            raise TakyonError("value.seconds must be non-negative")
+        record["seconds"] = seconds
 
+    n_clips = record.get("n_clips")
+    if n_clips not in (None, ""):
+        n_clips = int(n_clips)
+        if n_clips < 0:
+            raise TakyonError("value.n_clips must be non-negative")
+        record["n_clips"] = n_clips
 
-def _creative_asset_prompt(args: dict[str, Any]) -> str:
-    prompt = str(args.get("prompt") or args.get("generation_prompt") or "").strip()
-    if prompt:
-        return prompt
-    parts: list[str] = []
-    script = str(args.get("script") or "").strip()
-    if script:
-        parts.extend(["Script:", script])
-    shot_list = args.get("shot_list") or args.get("shots")
-    if isinstance(shot_list, str):
-        shot_text = shot_list.strip()
-    elif isinstance(shot_list, (list, tuple)):
-        shot_text = "\n".join(f"- {str(item).strip()}" for item in shot_list if str(item).strip())
-    else:
-        shot_text = ""
-    if shot_text:
-        parts.extend(["Shot list:", shot_text])
-    return "\n\n".join(parts).strip()
-
-
-def _creative_asset_relpath(
-    *,
-    args: dict[str, Any],
-    kind: str,
-    channel: str,
-    format_name: str,
-    asset_id: str,
-) -> str:
-    default_ext = _CREATIVE_ASSET_KINDS[kind]
-    output_path = str(args.get("output_path") or "").strip()
-    if output_path:
-        rel = _safe_relpath(output_path, field="output_path").as_posix()
-        if Path(rel).suffix:
-            return rel
-        return f"{rel}.{default_ext}"
-    campaign = _file_slug(str(args.get("campaign") or "default"), "default")
-    return f"distribution/{campaign}/creatives/{channel}-{format_name}/{asset_id}.{default_ext}"
-
-
-def _creative_asset_source_bytes(source: str) -> bytes:
-    raw = str(source or "").strip()
-    if not raw:
-        raise TakyonError("provider result did not include a generated asset path or URL")
-    if raw.startswith("data:"):
-        try:
-            _, payload = raw.split(",", 1)
-            return base64.b64decode(payload)
-        except Exception as exc:
-            raise TakyonError("provider returned an invalid data URL") from exc
-    parsed = urllib.parse.urlparse(raw)
-    if parsed.scheme in {"http", "https"}:
-        request = urllib.request.Request(raw, headers={"User-Agent": "Takyon/creative-asset"})
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return response.read()
-    path = Path(raw).expanduser()
-    if not path.exists() or not path.is_file():
-        raise TakyonError(f"provider asset file not found: {raw}")
-    return path.read_bytes()
-
-
-_CREATIVE_ASSET_ERROR_TYPES = {
-    "api_key_missing",
-    "budget_missing",
-    "model_error",
-    "provider_not_registered",
-    "provider_unavailable",
-}
-
-
-def _creative_asset_error_type(message: str) -> str:
-    prefix = str(message or "").split(":", 1)[0].strip()
-    return prefix if prefix in _CREATIVE_ASSET_ERROR_TYPES else "creative_asset_error"
-
-
-def _provider_failure_message(result: dict[str, Any], *, kind: str, expected_provider: str = "") -> str:
-    error_type = str(result.get("error_type") or "provider_error").strip() or "provider_error"
-    provider = str(result.get("provider") or expected_provider or "").strip()
-    model = str(result.get("model") or "").strip()
-    message = str(result.get("error") or f"{kind} generation failed").strip()
-    if error_type in {"provider_not_registered", "no_provider_configured"}:
-        label = "provider_not_registered"
-    elif error_type in {"auth_required", "missing_api_key", "missing_env"}:
-        label = "api_key_missing"
-    elif error_type in {"provider_unavailable"}:
-        label = "provider_unavailable"
-    else:
-        label = "model_error"
-    parts = [f"{label}: {kind} generation failed"]
-    if provider:
-        parts.append(f"provider={provider}")
-    if model:
-        parts.append(f"model={model}")
-    parts.append(message)
-    return "; ".join(parts)
-
-
-def _parse_provider_result(raw: str, *, kind: str, expected_provider: str = "") -> dict[str, Any]:
-    try:
-        result = json.loads(raw)
-    except Exception as exc:
-        raise TakyonError(f"{kind} generation returned invalid JSON") from exc
-    if not isinstance(result, dict):
-        raise TakyonError(f"{kind} generation returned a non-object result")
-    if not result.get("success"):
-        raise TakyonError(_provider_failure_message(result, kind=kind, expected_provider=expected_provider))
-    asset_value = result.get(kind) or result.get("url") or result.get("path")
-    if not asset_value:
-        raise TakyonError(f"{kind} generation result did not include {kind}, url, or path")
-    result["_asset_source"] = str(asset_value)
-    return result
+    record["slug"] = slug
+    record["path"] = path
+    return record
 
 
 def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -6941,184 +6871,66 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
-def handle_business_generate_creative_asset(args: dict, **_: Any) -> str:
+def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
     try:
         store = _store()
         business = _slugify(str(args.get("business") or ""))
-        kind = _normalize_creative_asset_choice(args.get("kind"), _CREATIVE_ASSET_KINDS.keys(), field="kind")
-        channel = _normalize_creative_asset_choice(args.get("channel"), _CREATIVE_ASSET_CHANNELS, field="channel")
-        format_name = _normalize_creative_asset_choice(args.get("format") or "ugc", _CREATIVE_ASSET_FORMATS, field="format")
-        prompt = _creative_asset_prompt(args)
-        if not prompt:
-            raise TakyonError("prompt, script, or shot_list is required")
+        if not business:
+            raise TakyonError("business is required")
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
-        budget_usd = float(args.get("budget_usd") or args.get("estimated_cost_usd") or 0)
-        if budget_usd <= 0:
-            raise TakyonError("budget_missing: business_generate_creative_asset requires budget_usd > 0 before provider-backed creative generation")
-        asset_id = _file_slug(str(args.get("asset_id") or idempotency_key), "asset")
-        rel = _creative_asset_relpath(
-            args=args,
-            kind=kind,
-            channel=channel,
-            format_name=format_name,
-            asset_id=asset_id,
-        )
-        receipt_rel = f"metrics/receipts/creative-assets/{asset_id}.json"
 
-        with store._connect() as conn:
-            business_row = store._ensure_business(conn, business)
-            business_mode = str(business_row.get("mode") or "live")
+        record = _ugc_ad_record(args)
+        asset_path = store._resolve_business_file(business, record["path"])
+        publication_dir = asset_path.parent
+        publication_rel = str(publication_dir.relative_to(store._business_root(business)))
+        if not asset_path.is_file():
+            raise TakyonError(f"ugc ad file not found: {record['path']}")
+        for filename in ("ad.mp4", "script.json", "reference.png"):
+            if not (publication_dir / filename).is_file():
+                raise TakyonError(f"ugc ad publication is incomplete; missing {publication_rel}/{filename}")
 
-        provider = str(args.get("provider") or "").strip()
-        requires_api = [str(item).strip() for item in _as_list(args.get("requires_api")) if str(item).strip()]
-        if provider:
-            requires_api.append(provider)
-        try:
-            _require_api_access(
-                {
-                    "action": "creative.asset.generate",
-                    "business": business,
-                    "provider": provider,
-                    "requires_api": requires_api,
-                    "requires_env": args.get("requires_env") or [],
-                },
-                business_mode=business_mode,
-            )
-        except TakyonError as exc:
-            message = str(exc)
-            if "missing API/env credential" in message:
-                raise TakyonError(f"api_key_missing: {message}") from exc
-            raise
-
-        asset_path = store._resolve_business_file(business, rel)
-        receipt_path = store._resolve_business_file(business, receipt_rel)
-        if asset_path.exists() and receipt_path.exists():
-            try:
-                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-            except Exception:
-                receipt = {}
-            return tool_result({
-                "success": True,
-                "action": "business_generate_creative_asset",
-                "business": business,
-                "idempotent": True,
-                "kind": kind,
-                "channel": channel,
-                "format": format_name,
-                "path": rel,
-                "receipt": receipt_rel,
-                "deliverable": {"kind": kind, "path": rel, "receipt": receipt_rel},
-                "provider_result": receipt.get("provider_result", {}),
-            })
-
-        store.commit(
-            scope=f"business:{business}",
-            operations=[
-                {
-                    "action": "ledger.allocate",
-                    "business": business,
-                    "amount": budget_usd,
-                    "currency": str(args.get("currency") or "USD"),
-                    "purpose": f"{channel} {format_name} {kind} creative asset generation",
-                    "kind": "creative_asset_generation",
-                    "status": "allocated",
-                    "requires_api": requires_api,
-                    "requires_env": args.get("requires_env") or [],
-                }
-            ],
-            idempotency_key=f"{idempotency_key}:budget",
-            reason=args.get("reason") or "generate local creative asset",
-            actor=args.get("actor") or "agent",
-        )
-
-        if kind == "video":
-            from tools.video_generation_tool import _handle_video_generate
-
-            provider_raw = _handle_video_generate(
-                {
-                    "prompt": prompt,
-                    "image_url": args.get("image_url"),
-                    "reference_image_urls": args.get("reference_image_urls"),
-                    "duration": args.get("duration"),
-                    "aspect_ratio": args.get("aspect_ratio"),
-                    "resolution": args.get("resolution"),
-                    "negative_prompt": args.get("negative_prompt"),
-                    "audio": args.get("audio"),
-                    "seed": args.get("seed"),
-                    "model": args.get("model"),
-                }
-            )
-        else:
-            from tools.image_generation_tool import _handle_image_generate
-
-            provider_raw = _handle_image_generate(
-                {
-                    "prompt": prompt,
-                    "aspect_ratio": args.get("aspect_ratio"),
-                    "model": args.get("model"),
-                }
-            )
-
-        provider_result = _parse_provider_result(provider_raw, kind=kind, expected_provider=provider)
-        _atomic_write_bytes(asset_path, _creative_asset_source_bytes(provider_result["_asset_source"]))
-
-        created_at = _now()
-        receipt = {
-            "id": asset_id,
-            "business": business,
-            "mode": business_mode,
-            "kind": kind,
-            "channel": channel,
-            "format": format_name,
-            "campaign": _file_slug(str(args.get("campaign") or "default"), "default"),
-            "path": rel,
-            "receipt": receipt_rel,
-            "prompt": prompt,
-            "script": str(args.get("script") or ""),
-            "shot_list": args.get("shot_list") or args.get("shots") or [],
-            "provider": provider or provider_result.get("provider") or "",
-            "model": args.get("model") or provider_result.get("model") or "",
-            "budget_usd": budget_usd,
-            "external_side_effects": "local_asset_only",
-            "posted": False,
-            "created_at": created_at,
-            "provider_result": {k: v for k, v in provider_result.items() if k != "_asset_source"},
-        }
-        _atomic_write_text(receipt_path, _json_dumps(receipt) + "\n")
-
-        store.commit(
-            scope=f"business:{business}/campaign:{receipt['campaign']}",
+        result = store.commit(
+            scope=f"business:{business}/product:ugc-ads/{record['slug']}",
             operations=[
                 {
                     "action": "event.record",
                     "business": business,
-                    "scope": f"business:{business}/campaign:{receipt['campaign']}",
-                    "event_type": "creative.asset.generated",
-                    "payload": receipt,
+                    "event_type": "ugc_ad.write",
+                    "payload": {
+                        "slug": record["slug"],
+                        "path": record["path"],
+                        "seconds": record.get("seconds"),
+                        "n_clips": record.get("n_clips"),
+                        "script": record.get("script"),
+                        "publication_dir": publication_rel,
+                    },
                 }
             ],
-            idempotency_key=f"{idempotency_key}:event",
-            reason=args.get("reason") or "generated local creative asset",
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record ugc video ad",
             actor=args.get("actor") or "agent",
         )
-        return tool_result({
-            "success": True,
-            "action": "business_generate_creative_asset",
-            "business": business,
-            "kind": kind,
-            "channel": channel,
-            "format": format_name,
-            "path": rel,
-            "receipt": receipt_rel,
-            "deliverable": {"kind": kind, "path": rel, "receipt": receipt_rel},
-            "external_side_effects": "local_asset_only",
-            "posted": False,
-        })
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_ugc_ad_write",
+                "business": business,
+                "slug": record["slug"],
+                "path": record["path"],
+                "publication_dir": publication_rel,
+                "files": [
+                    f"{publication_rel}/ad.mp4",
+                    f"{publication_rel}/script.json",
+                    f"{publication_rel}/reference.png",
+                ],
+                "event": result.get("event"),
+                "value": record,
+            }
+        )
     except Exception as exc:
-        message = str(exc)
-        return tool_error(message, success=False, error_type=_creative_asset_error_type(message))
+        return tool_error(str(exc), success=False)
 
 
 def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
@@ -7673,6 +7485,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         worker_instruction_parts = [instruction.rstrip()]
         if guidance_block:
             worker_instruction_parts.append(guidance_block)
+        if _workspace_needs_customer_ai_copy_contract(workspace_raw):
+            worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
         worker_instruction_parts.extend([workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
         worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
         payload = {
@@ -8146,41 +7960,25 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
-        "name": "business_generate_creative_asset",
-        "description": "Generate a provider-backed image or video creative as a local business-scoped asset with a receipt; posting and ad spend stay separate queued/gated work.",
-        "handler": handle_business_generate_creative_asset,
+        "name": "business_ugc_ad_write",
+        "description": "Record an already-built ugc-video-ad publication under product/ugc-ads/<slug>/ after the copied skill writes the files.",
+        "handler": handle_business_ugc_ad_write,
         "schema": _schema(
-            "business_generate_creative_asset",
-            "Generate a local business creative asset.",
+            "business_ugc_ad_write",
+            "Record a finished ugc-video-ad publication.",
             {
                 "business": _BUSINESS_PROP,
-                "kind": {"type": "string", "description": "video or image"},
-                "channel": {"type": "string", "description": "meta, tiktok, x, or linkedin"},
-                "format": {"type": "string", "description": "creative format, currently ugc"},
-                "campaign": {"type": "string", "description": "Campaign workspace name; default is default"},
-                "asset_id": {"type": "string", "description": "Optional stable asset id; defaults from idempotency_key"},
-                "prompt": {"type": "string", "description": "Generation prompt. If omitted, script and shot_list are combined."},
-                "script": {"type": "string", "description": "UGC script or voiceover text"},
-                "shot_list": {"type": "array", "items": {"type": "string"}, "description": "Ordered UGC shots or beats"},
-                "provider": {"type": "string", "description": "Provider credential alias to gate, e.g. fal, openai, or xai. The active generator backend still comes from Takyon tools config."},
-                "model": {"type": "string", "description": "Optional model override passed to the generator"},
-                "output_path": {"type": "string", "description": "Optional business-relative output path; default distribution/<campaign>/creatives/<channel>-ugc/<asset-id>.<ext>"},
-                "budget_usd": {"type": "number", "description": "Required spend allocation under the business budget cap before calling a provider"},
-                "image_url": {"type": "string", "description": "Optional source image URL for image-to-video"},
-                "reference_image_urls": {"type": "array", "items": {"type": "string"}},
-                "duration": {"type": "integer"},
-                "aspect_ratio": {"type": "string"},
-                "resolution": {"type": "string"},
-                "negative_prompt": {"type": "string"},
-                "audio": {"type": "boolean"},
-                "seed": {"type": "integer"},
-                "requires_api": _REQUIRES_API_PROP,
-                "requires_env": _REQUIRES_ENV_PROP,
+                "slug": {"type": "string", "description": "Optional fallback slug; the copied skill normally supplies this inside value.slug"},
+                "path": {"type": "string", "description": "Optional fallback publication path; the copied skill normally supplies this inside value.path"},
+                "value": {
+                    "type": "object",
+                    "description": "The exact payload printed by ugc-video-ad: slug, path, seconds, n_clips, and script.",
+                },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
             },
-            ["business", "kind", "channel", "format", "budget_usd", "idempotency_key"],
+            ["business", "value", "idempotency_key"],
         ),
     },
     {
@@ -8194,7 +7992,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design for product/site UI work"},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work"},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},

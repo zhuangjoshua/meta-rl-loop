@@ -69,7 +69,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - Use `business_read_file` and `business_list_files` to inspect `product/design-brief.md`, `product/surface.md`, and the current source tree before rewriting anything.
 - Use `business_upsert_app_surface_contract` to set or repair the canonical source path, routes, publish target, and done gate.
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially briefs, receipts, and small source fixes under `product/`.
-- Use `business_claude_agent_task` for non-trivial `product/site/` builds or multi-file source edits. When visual quality matters, pass `guidance_skills: ["claude-design"]`.
+- Use `business_claude_agent_task` for non-trivial `product/site/` builds or multi-file source edits. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 - Use `business_verify_product_surface` only when there is real source to verify or publish. Treat its blocker output as truth.
 - During bootstrap, once `product/site/` exists with real source, prefer the worker build plus `business_verify_product_surface` before later auth/customer/outreach follow-on work.
 
@@ -82,9 +82,21 @@ Use this skill to create or materially improve the business-owned product surfac
 5. Write or patch `product/design-brief.md` so it names the audience, offer, routes, constraints, and what evidence this product surface is supposed to create next.
 6. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, what works now, what is blocked, and what still depends on app-runtime or provider work.
 7. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification.
-8. If the source work is design-heavy or outward-facing, include `guidance_skills: ["claude-design"]` in the worker call so the Claude Agent SDK worker receives the distilled design guidance without changing the canonical ownership path.
+8. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
 9. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. During bootstrap, once `product/site/` exists with real source, do this before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
 10. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
+
+### Shared style skills
+
+Choose exactly one style skill for outward-facing `product/site/` work:
+
+- `claude-design-openai`: calm serious default for AI tools, research, prosumer, and productivity surfaces
+- `claude-design-stripe`: premium B2B, commercial, fintech, infra
+- `claude-design-superhuman`: premium productivity, focus, speed
+- `claude-design-vibrant`: fun consumer, creator, colorful prosumer
+- `claude-design-doodle`: whimsical playful consumer, pets, kids, deliberately silly products
+
+Default to `claude-design-openai` unless the product clearly wants a different tone.
 
 ## Output Format
 

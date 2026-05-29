@@ -33,7 +33,7 @@ provides_tools:
   - business_enqueue_job
   - business_publish_outreach
   - business_publish_test_outreach
-  - business_generate_creative_asset
+  - business_ugc_ad_write
   - business_claude_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message

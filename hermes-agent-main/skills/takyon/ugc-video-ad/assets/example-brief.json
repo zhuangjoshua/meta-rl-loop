@@ -1,0 +1,51 @@
+{
+  "business": "lumen-analytics",
+  "product": "Lumen",
+  "one_liner": "A dashboard that turns a small business's scattered spreadsheets into one daily view.",
+  "classification": {
+    "funnel": "cold",
+    "awareness": "problem-aware",
+    "strategy": "Replace the Monday-morning spreadsheet scramble with a two-minute glance.",
+    "format": "short-ugc"
+  },
+  "target_seconds": 17,
+
+  "subject": "a 28-year-old East Asian woman, genuinely pretty in a real everyday way, fair-to-medium skin with natural visible texture and a few small pores, faint redness around the nose, soft under-eye shadows, little to no makeup, dark hair worn down with a slight natural wave and a few loose flyaway strands, warm easy presence",
+  "wardrobe": "a soft cream knit sweater",
+  "setting": "at a tidy home desk in a softly lit room during the day; a large window is off to her left casting soft directional daylight onto the left side of her face while the right side falls into gentle natural shadow; an open laptop, a coffee mug, and a leafy plant softly out of focus behind her",
+  "expression": "talking warmly and casually to her phone like she is recommending something to a friend, relaxed genuine half-smile",
+  "framing": null,
+  "image_extra": null,
+
+  "persona": {
+    "accent": null,
+    "vibe": "warm, casual",
+    "eye_direction": "looking straight into the lens, with a small natural glance toward her laptop on the product line",
+    "camera_motion": null
+  },
+
+  "cta": "just try it",
+
+  "script": {
+    "hook_type": "Curiosity",
+    "structure": "HOOK -> PROBLEM -> MECHANISM -> RESULT/CTA",
+    "beats": [
+      {
+        "dialogue": "Okay, I have to show you this.",
+        "action": "a relaxed half-smile, leaning a little toward the camera"
+      },
+      {
+        "dialogue": "I used to drown in spreadsheets every single Monday.",
+        "action": "a small tired half-eye-roll, glancing off toward her laptop"
+      },
+      {
+        "dialogue": "Then we got Lumen, and now I check the whole business in like two minutes.",
+        "action": "tipping her head toward the open laptop beside her"
+      },
+      {
+        "dialogue": "Honestly, it's right here on my phone — just try it.",
+        "action": "a small easy shrug and a warm genuine smile"
+      }
+    ]
+  }
+}
