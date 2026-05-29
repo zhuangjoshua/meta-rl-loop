@@ -168,6 +168,8 @@ interface BusinessOverviewFile {
   type?: string;
 }
 
+const EMPTY_BUSINESS_FILES: BusinessOverviewFile[] = [];
+
 interface BusinessOverviewJob {
   id?: string;
   kind?: string;
@@ -1041,36 +1043,6 @@ function compactPath(path?: string): string {
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
 }
 
-function humanLabel(value?: string): string {
-  const text = (value || "").trim();
-  if (!text) return "";
-  const name = text.split("/").pop() || text;
-  const withoutExtension = name.replace(/\.[a-z0-9]+$/i, "");
-  return withoutExtension
-    .replace(/[._-]+/g, " ")
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function docTile(path?: string, label?: string, status?: string, detail?: string): SourceDocTile | null {
-  const cleanPath = (path || "").trim();
-  if (!cleanPath) return null;
-  return {
-    detail,
-    label: label || humanLabel(cleanPath) || compactPath(cleanPath),
-    path: cleanPath,
-    status,
-  };
-}
-
-function uniqueDocs(items: Array<SourceDocTile | null | undefined>): SourceDocTile[] {
-  const byPath = new Map<string, SourceDocTile>();
-  for (const item of items) {
-    if (!item?.path || byPath.has(item.path)) continue;
-    byPath.set(item.path, item);
-  }
-  return [...byPath.values()];
-}
-
 function researchOutputItems(overview?: BusinessOverview): BusinessOverviewResearchOutput[] {
   const rawItems = [
     ...((overview?.research_outputs || []) as BusinessOverviewResearchOutput[]),
@@ -1091,12 +1063,6 @@ function researchOutputItems(overview?: BusinessOverview): BusinessOverviewResea
 
 function normalizeBusinessPath(path?: string): string {
   return (path || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
-}
-
-function pathIsUnder(path: string, root?: string): boolean {
-  const cleanPath = normalizeBusinessPath(path);
-  const cleanRoot = normalizeBusinessPath(root);
-  return Boolean(cleanPath && cleanRoot && (cleanPath === cleanRoot || cleanPath.startsWith(`${cleanRoot}/`)));
 }
 
 function normalizeOpenableUrl(value?: string): string {
@@ -2452,9 +2418,8 @@ export default function ChatPage() {
 
           {inBusiness ? (
             <CompanyWorkspace
-              deliverables={deliverables}
-              historicalOutputs={scopedHistoricalOutputs}
               onCommand={runTakyonLine}
+              onListFiles={listBusinessFiles}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -3093,9 +3058,8 @@ function IntercomPanel({
 }
 
 function CompanyWorkspace({
-  deliverables,
-  historicalOutputs,
   onCommand,
+  onListFiles,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
@@ -3103,9 +3067,8 @@ function CompanyWorkspace({
   statusItems,
   tools,
 }: {
-  deliverables: Deliverable[];
-  historicalOutputs: Deliverable[];
   onCommand: (line: string) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
@@ -3113,11 +3076,6 @@ function CompanyWorkspace({
   statusItems: string[];
   tools: ToolEntry[];
 }) {
-  const outputs = useMemo(
-    () => mergeOutputs(deliverables, historicalOutputs),
-    [deliverables, historicalOutputs],
-  );
-
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
       <CompanyStatusHero
@@ -3129,10 +3087,11 @@ function CompanyWorkspace({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <CompanyOverview
+          onCommand={onCommand}
+          onListFiles={onListFiles}
           onReadFile={onReadFile}
           onResolveMedia={onResolveMedia}
           onResolveSitePreview={onResolveSitePreview}
-          outputs={outputs}
           scope={scope}
           statusItems={statusItems}
           tools={tools}
@@ -3253,18 +3212,20 @@ function relativeTime(ts: number): string {
 }
 
 function CompanyOverview({
+  onCommand,
+  onListFiles,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
-  outputs,
   scope,
   statusItems,
   tools,
 }: {
+  onCommand: (line: string) => void;
+  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  outputs: Deliverable[];
   scope: ScopeState;
   statusItems: string[];
   tools: ToolEntry[];
@@ -3273,8 +3234,6 @@ function CompanyOverview({
   const product = overview.product || {};
   const artifacts = overview.artifacts || {};
   const website = artifacts.website || {};
-  const outreach = artifacts.outreach || {};
-  const creativeAssets = artifacts.creative_assets || {};
   const tasks = overview.tasks || [];
   const registry = overview.registry;
   const [now, setNow] = useState(() => Date.now());
@@ -3283,82 +3242,13 @@ function CompanyOverview({
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [tools]);
-  const researchOutputs = researchOutputItems(overview);
-  const outreachItems = (Array.isArray(outreach.items) ? outreach.items : [])
-    .filter((item) => (item.path || "").trim());
-  const outreachRowsSource = outreachItems.length > 0
-    ? outreachItems
-    : outreach.path
-      ? [{
-          path: outreach.path,
-          receipt: outreach.receipt,
-          status: outreach.status,
-          updated_at: outreach.updated_at,
-        }]
-      : [];
   const previewPath = website.path || website.source_path || product.source_path || "product/site";
-  const sourcePath = website.source_path || product.source_path || "";
   const publicSiteUrl = customerWebsiteUrl({
     business: scope.business,
     product,
     website,
   });
-  const canonicalDocPaths = new Set(
-    [
-      sourcePath,
-      website.path,
-      ...outreachRowsSource.map((item) => item.path),
-      creativeAssets.path,
-    ]
-      .map((path) => normalizeBusinessPath(path))
-      .filter(Boolean),
-  );
-  const proofOutputs = outputs
-    .filter((item) => {
-      const path = item.path || "";
-      return (
-        item.kind === "image" ||
-        item.kind === "video" ||
-        path.startsWith("distribution/") ||
-        path.startsWith("outreach/local-published/")
-      );
-    })
-    .filter((item) => {
-      const path = normalizeBusinessPath(item.path);
-      if (!path || canonicalDocPaths.has(path)) return false;
-      if (pathIsUnder(path, sourcePath || website.path) && item.kind !== "image" && item.kind !== "video") return false;
-      return true;
-    })
-    .slice(0, 6);
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const outputDocs = proofOutputs
-    .filter((item) => item.path)
-    .map((item) => ({
-      detail: item.detail,
-      label: item.title || compactPath(item.path),
-      path: item.path || "",
-      status: item.kind === "video" ? "Video" : item.kind === "image" ? "Image" : "File",
-    }));
-  const deliverableDocs = uniqueDocs([
-    creativeAssets.path ? docTile(creativeAssets.path, "Creative asset", "Generated") : null,
-    ...outputDocs,
-  ]);
-  const deliverableRows = [
-    ...outreachRowsSource.map((item, index) => ({
-      detail: item.path,
-      id: `outreach-${index}-${item.path}`,
-      label: outreachLabelForPath(item.path || ""),
-      status: humanizeArtifactStatus(item.status || outreach.status),
-      tone: "done",
-    })),
-    creativeAssets.path && {
-      detail: creativeAssets.path,
-      id: "creative",
-      label: "Creative asset",
-      status: humanizeArtifactStatus(creativeAssets.status),
-      tone: "done",
-    },
-  ].filter(Boolean) as Array<{ detail?: string; id: string; label: string; status: string; tone?: string }>;
   const latestActivity: Array<ActivityTraceItem | null> = [
     ...(activeTool && !isWorkerTool(activeTool, registry) ? [activityFromTool(activeTool, registry, now)] : []),
     ...tools
@@ -3378,6 +3268,40 @@ function CompanyOverview({
   ];
   const visibleActivity = compactActivityItems(latestActivity).slice(0, 8);
   const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
+  const canonicalRootCards = [
+    {
+      root: "research",
+      label: "Research",
+      icon: <Search className="h-4 w-4" />,
+      empty: "No research files visible yet.",
+    },
+    {
+      root: "product",
+      label: "Product",
+      icon: <Globe2 className="h-4 w-4" />,
+      empty: "No product files visible yet.",
+      primary: publicSiteUrl || website.path ? (
+        <ProductPreviewHero
+          onResolveSitePreview={onResolveSitePreview}
+          previewPath={previewPath}
+          publicSiteUrl={publicSiteUrl}
+          websitePath={website.path}
+        />
+      ) : undefined,
+    },
+    {
+      root: "distribution",
+      label: "Distribution",
+      icon: <MessageCircle className="h-4 w-4" />,
+      empty: "No distribution files visible yet.",
+    },
+    {
+      root: "metrics",
+      label: "Metrics",
+      icon: <Activity className="h-4 w-4" />,
+      empty: "No metrics files visible yet.",
+    },
+  ];
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -3432,65 +3356,26 @@ function CompanyOverview({
   const workspaceColumn = (
     <div className="grid content-start gap-3">
       <section className="grid gap-3">
-        <SourceCard
-          empty="No research files are visible yet."
-          icon={<Search className="h-4 w-4" />}
-          label="Research"
-          onOpenDoc={openDocument}
-          status={researchOutputs.length ? `${researchOutputs.length} files` : ""}
-          tone={researchOutputs.length ? "done" : "neutral"}
-        >
-          {researchOutputs.length > 0 && (
-            <ResearchFileList
-              items={researchOutputs}
-              onOpenFile={(path) => openDocument({ label: compactPath(path), path })}
+        {canonicalRootCards.map((card) => (
+          <SourceCard
+            icon={card.icon}
+            key={card.root}
+            label={card.label}
+            onOpenDoc={openDocument}
+            primary={card.primary}
+            status=""
+            tone="neutral"
+          >
+            <BusinessFileBrowser
+              initialFiles={EMPTY_BUSINESS_FILES}
+              initialPath={card.root}
+              onCommand={onCommand}
+              onListFiles={onListFiles}
+              onReadFile={onReadFile}
+              onResolveMedia={onResolveMedia}
             />
-          )}
-        </SourceCard>
-        <SourceCard
-          docs={deliverableDocs}
-          empty={
-            deliverableRows.length > 0
-              ? undefined
-              : sourcePath
-                ? "Product source exists, but no public or previewable website was recorded."
-                : "No deliverables yet."
-          }
-          icon={<FileText className="h-4 w-4" />}
-          label="Deliverables"
-          onOpenDoc={openDocument}
-          primary={
-            publicSiteUrl || website.path ? (
-              <ProductPreviewHero
-                onResolveSitePreview={onResolveSitePreview}
-                previewPath={previewPath}
-                publicSiteUrl={publicSiteUrl}
-                websitePath={website.path}
-              />
-            ) : undefined
-          }
-          status=""
-          tone={deliverableRows.length > 0 ? "done" : "neutral"}
-        >
-          {deliverableRows.length > 0 && (
-            <div className="grid gap-1.5">
-              {deliverableRows.map((item) => (
-                <TaskRow
-                  detail={item.detail}
-                  key={item.id}
-                  label={item.label}
-                  onClick={
-                    item.detail
-                      ? () => openDocument({ label: item.label, path: item.detail })
-                      : undefined
-                  }
-                  status={item.status}
-                  tone={item.tone}
-                />
-              ))}
-            </div>
-          )}
-        </SourceCard>
+          </SourceCard>
+        ))}
       </section>
     </div>
   );
@@ -3735,13 +3620,6 @@ function prettyChannel(channel: string): string {
   return key
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function outreachLabelForPath(path: string): string {
-  const destination = parseOutreachDestination(path);
-  if (!destination) return "Outreach";
-  const channel = prettyChannel(destination.channel);
-  return destination.target ? `${channel} · ${destination.target}` : channel;
 }
 
 function parseOutreachDestination(path: string): {
@@ -4364,18 +4242,20 @@ function BusinessSnapshot({
 
 function BusinessFileBrowser({
   initialFiles,
+  initialPath = ".",
   onCommand,
   onListFiles,
   onReadFile,
   onResolveMedia,
 }: {
   initialFiles: BusinessOverviewFile[];
+  initialPath?: string;
   onCommand: (line: string) => void;
   onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onReadFile?: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
 }) {
-  const [path, setPath] = useState(".");
+  const [path, setPath] = useState(initialPath);
   const [files, setFiles] = useState(initialFiles);
   const [preview, setPreview] = useState<BusinessMediaResponse | null>(null);
   const [textPreview, setTextPreview] = useState<BusinessFileReadResponse | null>(null);
@@ -4407,12 +4287,23 @@ function BusinessFileBrowser({
     parts.pop();
     return parts.length ? parts.join("/") : ".";
   }, [path]);
+  const showParentButton = Boolean(parentPath && path !== initialPath);
+
+  useEffect(() => {
+    const normalizedPath = initialPath || ".";
+    setPath(normalizedPath);
+    if (normalizedPath === "." && initialFiles.length > 0) {
+      setFiles(initialFiles);
+      return;
+    }
+    void openPath(normalizedPath);
+  }, [initialFiles, initialPath, openPath]);
 
   return (
     <div className="space-y-2">
       <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-600">
         <span className="truncate">/{path === "." ? "" : path}</span>
-        {parentPath && (
+        {showParentButton && (
           <button
             className="ml-auto rounded-md border border-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-500 transition-colors hover:border-zinc-800 hover:text-zinc-200"
             onClick={() => void openPath(parentPath)}
@@ -4429,7 +4320,7 @@ function BusinessFileBrowser({
         <EmptyPanelLine text="No business files visible here." />
       ) : (
         <div className="grid gap-1.5">
-          {files.slice(0, 10).map((item) => {
+          {files.map((item) => {
             const itemPath = item.path || ".";
             const isDir = item.type === "dir";
             const mediaKind = mediaKindForPath(itemPath);
@@ -4769,7 +4660,7 @@ function FilesPanel({
         </div>
         <BusinessFileBrowser
           key={scope.business}
-          initialFiles={scope.overview?.files || []}
+          initialFiles={scope.overview?.files || EMPTY_BUSINESS_FILES}
           onCommand={onCommand}
           onListFiles={onListFiles}
           onReadFile={onReadFile}
