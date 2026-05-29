@@ -1990,7 +1990,7 @@ def _product_publish_root() -> Path | None:
         or os.getenv("PUBLIC_COMPANY_SITE_ROOT", "").strip()
         or os.getenv("TAKYON_STATIC_SITE_ROOT", "").strip()
     )
-    return Path(raw).expanduser().resolve() if raw else None
+    return Path(raw).expanduser().resolve() if raw else get_takyon_home() / "product-sites"
 
 
 def _product_local_public_url(slug: str) -> str:

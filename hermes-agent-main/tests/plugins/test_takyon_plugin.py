@@ -1218,7 +1218,7 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_verification(
     assert captured["install"] is True
 
 
-def test_product_verification_records_publish_blocker_when_hosting_root_missing(tmp_path, monkeypatch):
+def test_product_verification_defaults_publish_root_to_takyon_home_product_sites(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", "")
     monkeypatch.setenv("PUBLIC_COMPANY_SITE_ROOT", "")
@@ -1247,11 +1247,13 @@ def test_product_verification_records_publish_blocker_when_hosting_root_missing(
 
     assert verification["success"] is True
     assert verification["verification"]["status"] == "passed"
-    assert verification["verification"]["done_gate_status"] == "blocked"
-    assert "TAKYON_PRODUCT_SITE_ROOT" in verification["verification"]["blocker"]
+    assert verification["verification"]["done_gate_status"] == "passed"
+    assert verification["verification"]["publish"]["status"] == "published"
+    assert verification["verification"]["publish"]["publish_root"] == str(tmp_path / "product-sites" / "latexflow")
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["status"] == "publish_blocked"
-    assert app["surface_contract"]["publish_status"] == "blocked"
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert (tmp_path / "product-sites" / "latexflow" / "index.html").exists()
 
 
 def test_product_inventory_is_nonfatal_for_unreadable_source_file(tmp_path, monkeypatch):
