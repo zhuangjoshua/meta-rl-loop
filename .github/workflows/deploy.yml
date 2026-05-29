@@ -75,7 +75,8 @@ jobs:
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$TAKYON_VPS_SSH_KEY" > "$HOME/.ssh/takyon_argon_alpha14"
           chmod 600 "$HOME/.ssh/takyon_argon_alpha14"
-          ssh-keyscan -H "$TAKYON_VPS_HOST" >> "$HOME/.ssh/known_hosts"
+          ssh-keyscan -T 10 -H "$TAKYON_VPS_HOST" >> "$HOME/.ssh/known_hosts" || \
+            echo "ssh-keyscan failed for $TAKYON_VPS_HOST; continuing because deploy commands use StrictHostKeyChecking=accept-new" >&2
           echo "TAKYON_VPS_HOST=${TAKYON_VPS_USER:-root}@$TAKYON_VPS_HOST" >> "$GITHUB_ENV"
           echo "TAKYON_VPS_KEY=$HOME/.ssh/takyon_argon_alpha14" >> "$GITHUB_ENV"
 
