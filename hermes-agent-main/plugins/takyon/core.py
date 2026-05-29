@@ -3489,25 +3489,14 @@ class TakyonStore:
             (slug, budget["current_period_start"]),
         ).fetchone()
         checkout_count = conn.execute("SELECT COUNT(*) AS count FROM app_checkout_intents WHERE business_slug = ?", (slug,)).fetchone()
-
-        index = [
-            "# App Runtime Source Of Truth",
-            "",
-            f"Business: {slug}",
-            "",
-            "This business uses Hermes Takyon app rails for product customer auth, sessions, plan policy, Stripe checkout, entitlements, subscription reconciliation, revenue events, and app usage budget.",
-            "",
-            "Do not store magic-link tokens, session tokens, Stripe secrets, or customer payment data in business files.",
-            "",
-            "## Files",
-            "",
-            "- [Plans](plans.md)",
-            "- [Customers](customers.md)",
-            "- [Billing](billing.md)",
-            "- [Usage Budget](usage.md)",
-            "- [Surface Contract](surface.md)",
-        ]
-        _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
+        has_real_surface = bool(surface_evidence.get("source_path")) and bool(surface_evidence.get("has_source_files"))
+        has_runtime_state = bool(
+            plans
+            or users
+            or int(revenue["count"] or 0)
+            or int(checkout_count["count"] or 0)
+            or int(usage["count"] or 0)
+        )
 
         surface_lines = [
             "# App Surface Contract",
@@ -3587,6 +3576,38 @@ class TakyonStore:
                         f"- {item.get('path')}:{item.get('line') or '?'} {_markdown_scalar(item.get('snippet'))}"
                     )
         _atomic_write_text(root / "surface.md", "\n".join(surface_lines).rstrip() + "\n")
+
+        runtime_files = [
+            root / "runtime.md",
+            root / "plans.md",
+            root / "customers.md",
+            root / "billing.md",
+            root / "usage.md",
+        ]
+        if not has_real_surface and not has_runtime_state:
+            for path in runtime_files:
+                if path.exists():
+                    path.unlink()
+            return
+
+        index = [
+            "# App Runtime Source Of Truth",
+            "",
+            f"Business: {slug}",
+            "",
+            "This business uses Hermes Takyon app rails for product customer auth, sessions, plan policy, Stripe checkout, entitlements, subscription reconciliation, revenue events, and app usage budget.",
+            "",
+            "Do not store magic-link tokens, session tokens, Stripe secrets, or customer payment data in business files.",
+            "",
+            "## Files",
+            "",
+            "- [Plans](plans.md)",
+            "- [Customers](customers.md)",
+            "- [Billing](billing.md)",
+            "- [Usage Budget](usage.md)",
+            "- [Surface Contract](surface.md)",
+        ]
+        _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
 
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
         if not plans:

@@ -118,6 +118,78 @@ def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
     assert "Do not expand product/runtime.md" in prompt
 
 
+def test_bootstrap_prompt_orders_surface_before_distribution_before_runtime():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    surface_index = prompt.index("Then normally use takyon-build-product")
+    distribution_index = prompt.index("then create or continue distribution/campaign/")
+    runtime_index = prompt.index("Do not expand product/runtime.md")
+
+    assert surface_index < distribution_index < runtime_index
+
+
+def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-runtime-guard",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.budget.set", "business": "latexflow", "hard_limit_microusd": 7_500_000}],
+        "budget-before-surface",
+    )
+
+    product_root = tmp_path / "businesses" / "latexflow" / "product"
+    assert (product_root / "surface.md").exists()
+    assert not (product_root / "runtime.md").exists()
+    assert not (product_root / "plans.md").exists()
+    assert not (product_root / "customers.md").exists()
+    assert not (product_root / "billing.md").exists()
+    assert not (product_root / "usage.md").exists()
+
+
+def test_runtime_mirror_files_resume_once_real_public_surface_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-runtime-after-surface",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "source_path": "product/site"}],
+        "surface-with-source",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.budget.set", "business": "latexflow", "hard_limit_microusd": 7_500_000}],
+        "budget-after-surface",
+    )
+
+    product_root = tmp_path / "businesses" / "latexflow" / "product"
+    assert (product_root / "runtime.md").exists()
+    assert (product_root / "plans.md").exists()
+    assert (product_root / "customers.md").exists()
+    assert (product_root / "billing.md").exists()
+    assert (product_root / "usage.md").exists()
+
+
 def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
     store = TakyonStore(tmp_path)
     prompt = store._ceo_cron_prompt("demo")
