@@ -6101,6 +6101,150 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def _finalize_product_surface_verification(
+    *,
+    store: "TakyonStore",
+    business: str,
+    surface: dict[str, Any],
+    source_path: str,
+    publish_target: str,
+    requested_publish_policy: str,
+    publish_policy: str,
+    install: bool,
+    timeout_seconds: int,
+    receipt_path: str,
+    verification_source: str,
+) -> dict[str, Any]:
+    verification = _verify_product_surface_path(
+        store._business_root(business),
+        source_path,
+        surface=surface,
+        install=install,
+        timeout_seconds=timeout_seconds,
+    )
+    if requested_publish_policy and _is_shared_renderer_publish_policy(requested_publish_policy):
+        warnings = list(verification.get("warnings") or [])
+        warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
+        verification = {
+            **verification,
+            "requested_publish_policy": requested_publish_policy,
+            "effective_publish_policy": publish_policy,
+            "warnings": warnings,
+        }
+    if verification.get("status") == "passed":
+        publish = _publish_product_surface_path(
+            business_root=store._business_root(business),
+            slug=business,
+            source_path=str(verification.get("source_path") or source_path),
+            publish_target=publish_target,
+        )
+    else:
+        publish = {
+            "status": "blocked",
+            "publish_target": publish_target,
+            "public_url": "",
+            "published_at": "",
+            "publish_root": "",
+            "publish_source_path": "",
+            "blocker": f"product source check did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
+        }
+    done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
+    inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
+    if not inventory:
+        inventory = _product_inventory(store._business_root(business), str(verification.get("source_path") or source_path), surface=surface)
+    inventory = {
+        **inventory,
+        "public_url": publish.get("public_url") or inventory.get("public_url") or "",
+        "publish_receipt_path": receipt_path,
+    }
+    return {
+        **verification,
+        "business": business,
+        "receipt_path": receipt_path,
+        "publish": publish,
+        "inventory": inventory,
+        "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
+        "done_gate_status": done_gate_status,
+        "blocker": "" if done_gate_status == "passed" else (publish.get("blocker") or verification.get("error") or "product surface is not published"),
+        "source": verification_source,
+    }
+
+
+def _product_surface_verification_operations(
+    *,
+    business: str,
+    verification: dict[str, Any],
+    surface: dict[str, Any],
+    publish_target: str,
+    publish_policy: str,
+    requested_publish_policy: str,
+    activate_on_success: bool,
+) -> list[dict[str, Any]]:
+    publish = verification.get("publish") if isinstance(verification.get("publish"), dict) else {}
+    operations: list[dict[str, Any]] = [
+        {
+            "action": "artifact.write",
+            "business": business,
+            "path": str(verification["receipt_path"]),
+            "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
+        },
+        {
+            "action": "event.record",
+            "business": business,
+            "event_type": "product.surface.verify",
+            "payload": {
+                "source_path": verification.get("source_path"),
+                "status": verification.get("status"),
+                "kind": verification.get("kind"),
+                "publish_policy": publish_policy,
+                "requested_publish_policy": requested_publish_policy,
+                "error": verification.get("error"),
+                "warnings": verification.get("warnings") or [],
+                "inventory": verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {},
+                "receipt_path": verification.get("receipt_path"),
+                "publish": publish,
+                "done_gate_status": verification.get("done_gate_status"),
+                "blocker": verification.get("blocker") or "",
+            },
+        },
+    ]
+    if activate_on_success and verification.get("status") == "passed":
+        next_status = "active" if publish.get("status") == "published" else "publish_blocked"
+        operations.append(
+            {
+                "action": "app.surface.upsert",
+                "business": business,
+                "status": next_status,
+                "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
+                "source_path": verification.get("source_path"),
+                "runtime_api_base": surface.get("runtime_api_base"),
+                "routes": surface.get("routes") or [],
+                "theme": surface.get("theme") or {"source": "business design brief"},
+                "constraints": surface.get("constraints") or {},
+                "publish_target": publish_target,
+                "publish_policy": publish_policy,
+                "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
+                "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
+                "notes": surface.get("notes") or "",
+                "metadata": {**(surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}), "verification_receipt": verification.get("receipt_path")},
+            }
+        )
+        operations.append(
+            {
+                "action": "app.surface.publish_result",
+                "business": business,
+                "publish_status": publish.get("status") or "blocked",
+                "publish_target": publish_target,
+                "public_url": publish.get("public_url") or "",
+                "published_at": publish.get("published_at") or "",
+                "receipt_path": verification.get("receipt_path"),
+                "publish_source_path": publish.get("publish_source_path") or verification.get("source_path") or "",
+                "blocker": publish.get("blocker") or "",
+            }
+        )
+    return operations
+
+
 def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -6124,124 +6268,31 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         publish_policy = "publish_after_verify" if legacy_shared_renderer else requested_publish_policy
         install = bool(args.get("install", True))
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=60, minimum=15, maximum=900)
-        verification = _verify_product_surface_path(
-            store._business_root(business),
-            source_path,
+        receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
+        verification = _finalize_product_surface_verification(
+            store=store,
+            business=business,
             surface=surface,
+            source_path=source_path,
+            publish_target=publish_target,
+            requested_publish_policy=requested_publish_policy,
+            publish_policy=publish_policy,
             install=install,
             timeout_seconds=timeout_seconds,
+            receipt_path=receipt_path,
+            verification_source="business_verify_product_surface",
         )
-        if legacy_shared_renderer:
-            warnings = list(verification.get("warnings") or [])
-            warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
-            verification = {
-                **verification,
-                "requested_publish_policy": requested_publish_policy,
-                "effective_publish_policy": publish_policy,
-                "warnings": warnings,
-            }
-        if verification.get("status") == "passed":
-            publish = _publish_product_surface_path(
-                business_root=store._business_root(business),
-                slug=business,
-                source_path=str(verification.get("source_path") or source_path),
-                publish_target=publish_target,
-            )
-        else:
-            publish = {
-                "status": "blocked",
-                "publish_target": publish_target,
-                "public_url": "",
-                "published_at": "",
-                "publish_root": "",
-                "publish_source_path": "",
-                "blocker": f"product source check did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
-            }
-        receipt_id = uuid.uuid4().hex
-        receipt_path = f"metrics/receipts/product-surface/{receipt_id}.json"
-        done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
-        inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
-        if not inventory:
-            inventory = _product_inventory(store._business_root(business), str(verification.get("source_path") or source_path), surface=surface)
-        inventory = {
-            **inventory,
-            "public_url": publish.get("public_url") or inventory.get("public_url") or "",
-            "publish_receipt_path": receipt_path,
-        }
-        verification = {
-            **verification,
-            "business": business,
-            "receipt_path": receipt_path,
-            "publish": publish,
-            "inventory": inventory,
-            "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
-            "done_gate_status": done_gate_status,
-            "blocker": "" if done_gate_status == "passed" else (publish.get("blocker") or verification.get("error") or "product surface is not published"),
-        }
-        operations: list[dict[str, Any]] = [
-            {
-                "action": "artifact.write",
-                "business": business,
-                "path": receipt_path,
-                "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
-            },
-            {
-                "action": "event.record",
-                "business": business,
-                "event_type": "product.surface.verify",
-                "payload": {
-                    "source_path": verification.get("source_path"),
-                    "status": verification.get("status"),
-                    "kind": verification.get("kind"),
-                    "publish_policy": publish_policy,
-                    "requested_publish_policy": requested_publish_policy,
-                    "error": verification.get("error"),
-                    "warnings": verification.get("warnings") or [],
-                    "inventory": inventory,
-                    "receipt_path": receipt_path,
-                    "publish": publish,
-                    "done_gate_status": done_gate_status,
-                    "blocker": verification.get("blocker") or "",
-                },
-            },
-        ]
-        if bool(args.get("activate_on_success", True)) and verification.get("status") == "passed":
-            next_status = "active" if publish.get("status") == "published" else "publish_blocked"
-            operations.append(
-                {
-                    "action": "app.surface.upsert",
-                    "business": business,
-                    "status": next_status,
-                    "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
-                    "source_path": verification.get("source_path"),
-                    "runtime_api_base": surface.get("runtime_api_base"),
-                    "routes": surface.get("routes") or [],
-                    "theme": surface.get("theme") or {"source": "business design brief"},
-                    "constraints": surface.get("constraints") or {},
-                    "publish_target": publish_target,
-                    "publish_policy": publish_policy,
-                    "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
-                    "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
-                    "notes": surface.get("notes") or "",
-                    "metadata": {**(surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}), "verification_receipt": receipt_path},
-                }
-            )
-            operations.append(
-                {
-                    "action": "app.surface.publish_result",
-                    "business": business,
-                    "publish_status": publish.get("status") or "blocked",
-                    "publish_target": publish_target,
-                    "public_url": publish.get("public_url") or "",
-                    "published_at": publish.get("published_at") or "",
-                    "receipt_path": receipt_path,
-                    "publish_source_path": publish.get("publish_source_path") or verification.get("source_path") or "",
-                    "blocker": publish.get("blocker") or "",
-                }
-            )
         result = store.commit(
             scope=f"business:{business}",
-            operations=operations,
+            operations=_product_surface_verification_operations(
+                business=business,
+                verification=verification,
+                surface=surface,
+                publish_target=publish_target,
+                publish_policy=publish_policy,
+                requested_publish_policy=requested_publish_policy,
+                activate_on_success=bool(args.get("activate_on_success", True)),
+            ),
             idempotency_key=idempotency_key,
             reason=args.get("reason") or "product surface publication",
             actor=args.get("actor") or "agent",
@@ -7603,47 +7654,43 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             normalized_workspace = workspace_raw.strip("/").lower()
             verify_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
         if sdk_result.get("success") and verify_surface:
-            verification = _verify_product_surface_path(
-                business_root,
-                workspace_raw,
+            summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
+            app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+            surface = app.get("surface") or app.get("surface_contract") or {}
+            if not isinstance(surface, dict):
+                surface = {}
+            requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+            publish_policy = "publish_after_verify" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_raw}".encode("utf-8")).hexdigest()[:32]
+            verification = _finalize_product_surface_verification(
+                store=store,
+                business=business,
+                surface=surface,
+                source_path=workspace_raw,
+                publish_target=_product_publish_target(business, surface.get("publish_target")),
+                requested_publish_policy=requested_publish_policy,
+                publish_policy=publish_policy,
                 install=bool(args.get("install", True)),
                 timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=60, minimum=15, maximum=900),
+                receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
+                verification_source="business_claude_agent_task",
             )
-            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_raw}".encode("utf-8")).hexdigest()[:32]
-            verification = {
-                **verification,
-                "business": business,
-                "receipt_path": f"metrics/receipts/product-surface/{receipt_id}.json",
-                "source": "business_claude_agent_task",
-            }
         status = "completed" if sdk_result.get("success") else "failed"
-        if verification and verification.get("status") != "passed":
+        if verification and verification.get("done_gate_status") != "passed":
             status = "blocked"
 
         record_operations: list[dict[str, Any]] = []
         if verification:
             record_operations.extend(
-                [
-                    {
-                        "action": "artifact.write",
-                        "business": business,
-                        "path": verification["receipt_path"],
-                        "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
-                    },
-                    {
-                        "action": "event.record",
-                        "business": business,
-                        "event_type": "product.surface.verify",
-                        "payload": {
-                            "source_path": verification.get("source_path"),
-                            "status": verification.get("status"),
-                            "kind": verification.get("kind"),
-                            "error": verification.get("error"),
-                            "warnings": verification.get("warnings") or [],
-                            "receipt_path": verification.get("receipt_path"),
-                        },
-                    },
-                ]
+                _product_surface_verification_operations(
+                    business=business,
+                    verification=verification,
+                    surface=surface,
+                    publish_target=_product_publish_target(business, surface.get("publish_target")),
+                    publish_policy=publish_policy,
+                    requested_publish_policy=requested_publish_policy,
+                    activate_on_success=True,
+                )
             )
         record_operations.append(
             {

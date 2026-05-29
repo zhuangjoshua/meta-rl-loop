@@ -3852,7 +3852,7 @@ function ProductPreviewHero({
   if (websitePath) {
     return (
       <OpenSitePreviewButton
-        label="Open website"
+        label="Open preview"
         onResolveSitePreview={onResolveSitePreview}
         path={previewPath}
         variant="hero"
@@ -4272,22 +4272,34 @@ function BusinessFileBrowser({
   const [preview, setPreview] = useState<BusinessMediaResponse | null>(null);
   const [textPreview, setTextPreview] = useState<BusinessFileReadResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
   const openPath = useCallback(
-    async (nextPath: string) => {
-      setLoading(true);
-      setError("");
+    async (nextPath: string, options?: { background?: boolean }) => {
+      const background = Boolean(options?.background);
+      if (background) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+        setError("");
+      }
       try {
         const nextFiles = await onListFiles(nextPath || ".");
         setPath(nextPath || ".");
         setFiles(nextFiles);
-        setPreview(null);
-        setTextPreview(null);
+        if (!background) {
+          setPreview(null);
+          setTextPreview(null);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
+        if (background) {
+          setRefreshing(false);
+        } else {
+          setLoading(false);
+        }
       }
     },
     [onListFiles],
@@ -4314,15 +4326,25 @@ function BusinessFileBrowser({
   useEffect(() => {
     if (!autoRefreshIntervalMs || preview || textPreview) return;
     const timer = window.setInterval(() => {
-      if (!loading) void openPath(path);
+      if (!loading && !refreshing) void openPath(path, { background: true });
     }, autoRefreshIntervalMs);
     return () => window.clearInterval(timer);
-  }, [autoRefreshIntervalMs, loading, openPath, path, preview, textPreview]);
+  }, [autoRefreshIntervalMs, loading, openPath, path, preview, refreshing, textPreview]);
 
   return (
-    <div className="space-y-2">
+    <div
+      className={cn(
+        "space-y-2 rounded-lg transition-shadow",
+        refreshing && "ring-1 ring-sky-400/25",
+      )}
+    >
       <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-600">
         <span className="truncate">/{path === "." ? "" : path}</span>
+        {refreshing && (
+          <span className="rounded-full border border-sky-400/30 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-[0.14em] text-sky-200">
+            updating
+          </span>
+        )}
         {showParentButton && (
           <button
             className="ml-auto rounded-md border border-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-500 transition-colors hover:border-zinc-800 hover:text-zinc-200"
