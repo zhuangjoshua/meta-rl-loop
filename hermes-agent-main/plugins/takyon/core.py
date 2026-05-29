@@ -64,6 +64,7 @@ NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - If no browser endpoint exists for auth, billing, entitlements, usage, or outreach, build the screen as unavailable/blocking, not fake.
 - If a runtime endpoint or provider path is unavailable in this workspace, show a visible DEBUG/blocked state that says the feature is not wired yet.
 - Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
+- In customer-facing product copy, describe capabilities instead of naming upstream foundation model vendors or snapshot ids unless the operator explicitly wants model-led positioning.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -2508,12 +2509,43 @@ def _hash_operation(value: Any) -> str:
     return hashlib.sha256(_json_dumps(value).encode("utf-8")).hexdigest()
 
 
+def _normalize_budget_spec(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    aliases = (
+        ("amount", None),
+        ("cap", None),
+        ("limit", None),
+        ("monthly_cap", None),
+        ("cap_usd", "USD"),
+        ("amount_usd", "USD"),
+        ("budget_usd", "USD"),
+    )
+    if "amount" not in normalized:
+        for key, implied_currency in aliases:
+            if key not in normalized:
+                continue
+            try:
+                normalized["amount"] = float(normalized[key])
+            except (TypeError, ValueError):
+                normalized["amount"] = normalized[key]
+            if implied_currency and not normalized.get("currency"):
+                normalized["currency"] = implied_currency
+            break
+    currency = normalized.get("currency")
+    if isinstance(currency, str) and currency.strip():
+        normalized["currency"] = currency.strip().upper()
+    return normalized
+
+
 def _budget_amount(value: Any) -> float | None:
-    if isinstance(value, dict):
-        for key in ("amount", "cap", "limit", "monthly_cap"):
-            if key in value:
+    normalized = _normalize_budget_spec(value)
+    if isinstance(normalized, dict):
+        for key in ("amount", "cap", "limit", "monthly_cap", "cap_usd", "amount_usd", "budget_usd"):
+            if key in normalized:
                 try:
-                    return float(value[key])
+                    return float(normalized[key])
                 except (TypeError, ValueError):
                     return None
     return None
@@ -3057,7 +3089,10 @@ class TakyonStore:
 
     def _business(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM businesses WHERE slug = ?", (_slugify(slug),)).fetchone()
-        return self._row_to_dict(row)
+        business = self._row_to_dict(row)
+        if business and "budget" in business:
+            business["budget"] = _normalize_budget_spec(business.get("budget"))
+        return business
 
     def _ensure_business(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
         business = self._business(conn, slug)
@@ -4578,7 +4613,7 @@ class TakyonStore:
             slug = _slugify(str(op.get("business") or op.get("slug") or parsed_scope.get("business") or op.get("name") or ""))
             name = str(op.get("name") or slug)
             goal = str(op.get("goal") or "")
-            budget = op.get("budget")
+            budget = _normalize_budget_spec(op.get("budget"))
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
@@ -5056,7 +5091,7 @@ class TakyonStore:
             rel = Path(path_text)
             kind = str(op.get("kind") or "workspace")
             status = str(op.get("status") or "active")
-            budget = op.get("budget")
+            budget = _normalize_budget_spec(op.get("budget"))
             metadata = op.get("metadata") or {}
             now = _now()
             workspace_id = op.get("id") or uuid.uuid4().hex

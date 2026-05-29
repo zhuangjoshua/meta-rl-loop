@@ -121,6 +121,7 @@ Use this skill to create or materially improve the business-owned product surfac
 3. Keep the surface business-owned and honest.
 4. Use app-runtime rails when the product needs shared backend behavior.
 5. For substantial `product/site/` implementation, prefer `business_claude_agent_task` over inline multi-file source edits.
+6. In customer-facing design and copy, do not name upstream foundation model vendors, product model families, or snapshot ids unless the operator explicitly wants model-led positioning.
 
 ## Troubleshooting
 

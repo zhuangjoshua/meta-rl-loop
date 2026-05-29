@@ -1098,6 +1098,38 @@ def test_budget_cap_is_enforced(tmp_path):
         )
 
 
+def test_legacy_cap_usd_budget_alias_is_honored(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.upsert",
+                "business": "latexflow",
+                "name": "Latexflow",
+                "budget": {"cap_usd": 10, "currency": "usd"},
+            }
+        ],
+        "init-legacy-budget",
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "ledger.allocate", "amount": 7, "purpose": "test"}],
+        "alloc-7-legacy",
+    )
+
+    with pytest.raises(TakyonError, match="exceed budget"):
+        _commit(
+            store,
+            "business:latexflow",
+            [{"action": "ledger.allocate", "amount": 4, "purpose": "too much"}],
+            "alloc-4-legacy",
+        )
+
+
 def test_required_env_must_exist(tmp_path, monkeypatch):
     monkeypatch.delenv("TAKYON_TEST_MISSING_API_KEY", raising=False)
     store = TakyonStore(tmp_path)
