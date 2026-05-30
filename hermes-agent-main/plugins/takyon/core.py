@@ -75,6 +75,7 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 """
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
+- Call ONLY the exact runtime endpoints listed below. Use each path verbatim, including the full Runtime API base prefix. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
 - If a declared runtime feature is not wired yet, keep the blocked state visible and name the missing runtime step.
 - Do not claim undeclared runtime-backed features without first updating the app surface contract.
@@ -105,6 +106,11 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "auth": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_request_app_magic_link", "business_verify_app_magic_link", "business_read_app_account"],
+        "endpoints": [
+            ("POST", "auth/request"),
+            ("GET", "auth/verify"),
+            ("GET", "session"),
+        ],
         "worker_contract": [
             "Use Takyon magic-link and session rails instead of browser-only auth state.",
             "If auth is not wired yet, keep sign-in blocked and name the missing runtime step.",
@@ -113,6 +119,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "account": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_read_app_account"],
+        "endpoints": [("GET", "account")],
         "worker_contract": [
             "Read account/session state from the shared Takyon account runtime route.",
             "Do not invent a local current-user object.",
@@ -121,6 +128,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "checkout": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_create_app_checkout", "business_record_stripe_webhook"],
+        "endpoints": [("POST", "checkout")],
         "worker_contract": [
             "Use Takyon checkout rails instead of fake payment links or browser-only purchase state.",
             "If checkout is not wired yet, keep upgrade or pay actions visibly blocked.",
@@ -129,6 +137,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "billing": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_upsert_app_plan", "business_create_app_checkout", "business_record_stripe_webhook"],
+        "endpoints": [("POST", "checkout"), ("GET", "account")],
         "worker_contract": [
             "Plan, billing, and paid-state UI must reflect Takyon billing rails, not local assumptions.",
             "Do not claim a paid tier without real runtime entitlement or checkout truth.",
@@ -137,6 +146,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "entitlements": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_upsert_app_customer", "business_grant_app_entitlement", "business_record_stripe_webhook"],
+        "endpoints": [("GET", "account")],
         "worker_contract": [
             "Feature gating must come from Takyon entitlements, not hardcoded client flags.",
             "If entitlements are not wired yet, keep gated actions blocked.",
@@ -145,6 +155,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "usage": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_configure_app_budget", "business_record_app_usage"],
+        "endpoints": [("GET", "usage")],
         "worker_contract": [
             "Usage meters and budget warnings should reflect Takyon usage rails, not fake counters.",
             "If usage tracking is not wired yet, say so instead of simulating quotas.",
@@ -153,6 +164,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "generate": {
         "owner_skill": "takyon-app-runtime",
         "tools": [],
+        "endpoints": [("POST", "generate")],
         "worker_contract": [
             "AI actions should proxy the shared Takyon runtime generate route.",
             "If generation is not wired yet, keep the action visible but clearly blocked.",
@@ -320,6 +332,7 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     runtime_api_base = ""
     if isinstance(surface, dict):
         runtime_api_base = str(surface.get("runtime_api_base") or "").strip()
+    base = runtime_api_base.rstrip("/")
     lines = [RUNTIME_UI_CONTRACT_INTRO.rstrip(), ""]
     lines.append(f"- Declared runtime-backed features: {', '.join(runtime_features)}")
     if runtime_api_base:
@@ -329,6 +342,13 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
         spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
         owner = str(spec.get("owner_skill") or "unknown")
         lines.append(f"- {rail} (owner: {owner})")
+        endpoints = spec.get("endpoints") or []
+        if endpoints and base:
+            rendered = ", ".join(f"{method} {base}/{route}" for method, route in endpoints)
+            lines.append(f"  - Exact runtime endpoints: {rendered}")
+        elif endpoints:
+            rendered = ", ".join(f"{method} <runtime_api_base>/{route}" for method, route in endpoints)
+            lines.append(f"  - Exact runtime endpoints: {rendered}")
         tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
         if tools:
             lines.append(f"  - Canonical tools: {', '.join(tools)}")
@@ -1160,14 +1180,21 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/api/takyon/apps/"),
     re.compile(r"\bHermes\b.*\bruntime\b", re.IGNORECASE),
 )
+# Rail integrations count only when the call targets the canonical, reachable
+# runtime base (/api/takyon/apps/<slug>/ or /api/generated-apps/<slug>/). A bare
+# rail path such as /auth/request is NOT proxied to the shared runtime, so it is
+# unreachable; requiring the canonical prefix here makes the verification gate
+# reject drifted/unreachable front-ends and route them back through the normal
+# worker retry loop instead of shipping a broken "rail not wired" surface.
+_RUNTIME_BASE_PREFIX = r"/api/(?:takyon/apps|generated-apps)/[^'\"`\s)]+/"
 _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("runtime_api", re.compile(r"/api/takyon/apps/|/api/generated-apps/", re.IGNORECASE)),
-    ("auth", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?auth/(?:request|verify)\b", re.IGNORECASE)),
-    ("session", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?session\b", re.IGNORECASE)),
-    ("account", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?account\b", re.IGNORECASE)),
-    ("checkout", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?checkout\b", re.IGNORECASE)),
-    ("usage", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?usage\b", re.IGNORECASE)),
-    ("generate", re.compile(r"/(?:api/takyon/apps/[^'\"`\s)]*/)?generate\b", re.IGNORECASE)),
+    ("auth", re.compile(_RUNTIME_BASE_PREFIX + r"auth/(?:request|verify)\b", re.IGNORECASE)),
+    ("session", re.compile(_RUNTIME_BASE_PREFIX + r"session\b", re.IGNORECASE)),
+    ("account", re.compile(_RUNTIME_BASE_PREFIX + r"account\b", re.IGNORECASE)),
+    ("checkout", re.compile(_RUNTIME_BASE_PREFIX + r"checkout\b", re.IGNORECASE)),
+    ("usage", re.compile(_RUNTIME_BASE_PREFIX + r"usage\b", re.IGNORECASE)),
+    ("generate", re.compile(_RUNTIME_BASE_PREFIX + r"generate\b", re.IGNORECASE)),
 )
 _PRODUCT_WORKFLOW_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("form", re.compile(r"<form\b", re.IGNORECASE)),
@@ -1580,15 +1607,16 @@ def _validate_product_surface_contract(
         return False, "app-like product surface must contain a real product workflow, not only marketing sections"
 
     integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
+    base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
     if kind["ai"]:
         if "generate" not in integrations:
-            return False, "AI-backed product surface must call the shared /api/takyon/apps/<business>/generate runtime route"
+            return False, f"AI-backed product surface must call the canonical runtime route {base_hint}/generate verbatim (a bare /generate path is not proxied to the runtime and will 404)"
         if not ({"auth", "session", "account"} & integrations):
-            return False, "AI-backed product surface must include the shared app-session auth/account runtime route used by /generate"
+            return False, f"AI-backed product surface must call the canonical app-session route {base_hint}/session or {base_hint}/auth/request used by generate (use the full runtime base prefix, not a bare path)"
     if kind["auth"] and not ({"auth", "session", "account"} & integrations):
-        return False, "auth/session product surface must call the shared /api/takyon/apps/<business>/auth or session runtime routes"
+        return False, f"auth/session product surface must call the canonical runtime routes {base_hint}/auth/request and {base_hint}/session verbatim (a bare /auth or /session path is not proxied to the runtime and will 404)"
     if kind["checkout"] and "checkout" not in integrations:
-        return False, "checkout/billing product surface must call the shared /api/takyon/apps/<business>/checkout runtime route or mark checkout unavailable"
+        return False, f"checkout/billing product surface must call the canonical runtime route {base_hint}/checkout verbatim or mark checkout unavailable (a bare /checkout path is not proxied to the runtime and will 404)"
     return True, ""
 
 

@@ -1068,6 +1068,9 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Runtime API base: /api/takyon/apps/latexflow" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
+    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/auth/request, GET /api/takyon/apps/latexflow/auth/verify, GET /api/takyon/apps/latexflow/session" in instruction
+    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/checkout" in instruction
+    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/generate" in instruction
 
 
 def test_runtime_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
