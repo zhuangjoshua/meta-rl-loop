@@ -713,7 +713,7 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
     assert verification["publish"]["status"] == "published"
     assert verification["publish"]["caddyfile"] == str(tmp_path / "Caddyfile")
     assert "latexflow.fourmanifold.com" in caddyfile
-    assert "@takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe" in caddyfile
+    assert "@takyon_app_runtime path /api/*" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
     assert f"root * {tmp_path / 'published-sites' / 'latexflow'}" in caddyfile
     assert "try_files {path} {path}/ /index.html" in caddyfile
@@ -1475,7 +1475,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert "latexflow.fourmanifold.com" in caddyfile
-    assert "@takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe" in caddyfile
+    assert "@takyon_app_runtime path /api/*" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
 
 

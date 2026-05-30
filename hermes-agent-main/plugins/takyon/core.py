@@ -2395,9 +2395,16 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
             return None, "caddy is unavailable; cannot validate product route"
     caddyfile.parent.mkdir(parents=True, exist_ok=True)
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
+    # Reserve the whole /api/* namespace on the product host for the shared
+    # Hermes app runtime. The hostname identifies the business, so the runtime
+    # resolves any rail call (auth/session/account/checkout/usage/generate) to
+    # this host's business regardless of the exact path the generated
+    # front-end used. This removes the recurring "rail not wired" 404 when a
+    # site calls /api/auth/request instead of /api/takyon/apps/<slug>/...; a
+    # static product export never serves real pages under /api/.
     block = (
         f"{host} {{\n"
-        "    @takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe\n"
+        "    @takyon_app_runtime path /api/*\n"
         "    handle @takyon_app_runtime {\n"
         "        reverse_proxy 127.0.0.1:9119 {\n"
         "            header_up Host {host}\n"
@@ -2448,7 +2455,7 @@ def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
     block = (
         f"{host} {{\n"
-        "    @takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe\n"
+        "    @takyon_app_runtime path /api/*\n"
         "    handle @takyon_app_runtime {\n"
         "        reverse_proxy 127.0.0.1:9119 {\n"
         "            header_up Host {host}\n"
