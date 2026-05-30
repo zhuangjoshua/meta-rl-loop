@@ -2395,7 +2395,20 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
             return None, "caddy is unavailable; cannot validate product route"
     caddyfile.parent.mkdir(parents=True, exist_ok=True)
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
-    block = f"{host} {{\n    reverse_proxy 127.0.0.1:{port}\n}}\n"
+    block = (
+        f"{host} {{\n"
+        "    @takyon_app_runtime path /api/takyon/apps/* /api/generated-apps/* /api/webhooks/stripe\n"
+        "    handle @takyon_app_runtime {\n"
+        "        reverse_proxy 127.0.0.1:9119 {\n"
+        "            header_up Host {host}\n"
+        "            header_up X-Forwarded-Proto https\n"
+        "        }\n"
+        "    }\n"
+        "    handle {\n"
+        f"        reverse_proxy 127.0.0.1:{port}\n"
+        "    }\n"
+        "}\n"
+    )
     pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
     if pattern.search(existing):
         updated = pattern.sub(block + "\n", existing).rstrip() + "\n"
