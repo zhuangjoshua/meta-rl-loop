@@ -1,0 +1,106 @@
+"""FastAPI Control API — the opaque Takyon-user boundary (Phase 1 read path).
+
+Bearer auth: `Authorization: Bearer tk_...` is the only user-provided input. It is
+resolved (`resolve_api_key`) to a small `ResolvedPrincipal`; endpoints then return
+only the deliberately-exposed projection (identity + owned business slugs / their
+read-only fields). Provider keys, other tenants, billing internals, and
+control-plane handles are never reachable through this surface.
+
+DB-agnostic by design: endpoints depend on `get_control_conn`, which the host app
+overrides — tests with a throwaway-DB connection, production with a pooled one.
+Mounting this router into the live dashboard app is a separate, deliberate step; the
+module is standalone so the boundary can be verified without disturbing the current
+SQLite dashboard runtime.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException
+
+from .control_plane import ResolvedPrincipal, resolve_api_key
+
+_BEARER_PREFIX = "Bearer "
+_UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
+
+
+def get_control_conn():
+    """Dependency seam for the per-request control-plane connection.
+
+    Unconfigured by default — the host app MUST override it
+    (`app.dependency_overrides[get_control_conn] = ...`). This keeps the router free
+    of any connection/pool strategy so the same code serves tests and production.
+    """
+    raise RuntimeError("control-plane connection not configured")
+
+
+def _resolve_principal(
+    authorization: str | None = Header(default=None),
+    conn=Depends(get_control_conn),
+) -> ResolvedPrincipal:
+    """Turn the presented bearer token into a principal, or refuse with one
+    undifferentiated 401. Malformed, unknown, revoked, and non-active all look
+    identical from outside — the boundary never reveals which, nor whether any key
+    or user exists."""
+    if not authorization or not authorization.startswith(_BEARER_PREFIX):
+        raise HTTPException(
+            status_code=401, detail="missing_bearer_token", headers=_UNAUTH_HEADERS
+        )
+    raw = authorization[len(_BEARER_PREFIX) :].strip()
+    principal = resolve_api_key(conn, raw)
+    if principal is None:
+        raise HTTPException(
+            status_code=401, detail="invalid_api_key", headers=_UNAUTH_HEADERS
+        )
+    return principal
+
+
+def build_control_router() -> APIRouter:
+    """Build the `/v1` Control API router. Call `app.include_router(...)` on it and
+    override `get_control_conn` to supply connections."""
+    router = APIRouter(prefix="/v1")
+
+    @router.get("/me")
+    def get_me(
+        principal: ResolvedPrincipal = Depends(_resolve_principal),
+    ) -> dict[str, Any]:
+        # Identity projection only. Topup balance (money) + allowance (opaque
+        # "included usage") join here once the billing/custody ledgers exist; we do
+        # NOT fabricate them in the meantime.
+        return {"user_id": principal.user_id, "status": principal.status}
+
+    @router.get("/businesses")
+    def list_businesses(
+        principal: ResolvedPrincipal = Depends(_resolve_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        rows = conn.execute(
+            "select slug, name, mode from businesses "
+            "where owner_user_id = %s order by slug",
+            (principal.user_id,),
+        ).fetchall()
+        return {
+            "businesses": [{"slug": r[0], "name": r[1], "mode": r[2]} for r in rows]
+        }
+
+    @router.get("/businesses/{slug}")
+    def get_business(
+        slug: str,
+        principal: ResolvedPrincipal = Depends(_resolve_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        # Consult ONLY the caller's owned set. A slug the caller doesn't own returns
+        # 404 (not 403): revealing "exists but not yours" would make this surface a
+        # cross-tenant existence oracle, and "other tenants are unreachable" outranks
+        # the plan's looser 403 wording.
+        if slug not in principal.business_slugs:
+            raise HTTPException(status_code=404, detail="not_found")
+        row = conn.execute(
+            "select slug, name, mode from businesses where slug = %s", (slug,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        return {"slug": row[0], "name": row[1], "mode": row[2]}
+
+    return router
