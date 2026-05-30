@@ -1408,16 +1408,24 @@ def _validate_product_surface_contract(
 
     source_routes = set(str(route) for route in inventory.get("routes") or [])
     declared_routes = set(str(route) for route in inventory.get("declared_routes") or [])
-    effective_routes = source_routes | declared_routes
-    app_routes = {
+    contract_routes = set(_surface_routes(surface))
+    source_app_routes = {
         route
-        for route in effective_routes
+        for route in source_routes
+        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route)
+    }
+    declared_app_routes = {
+        route
+        for route in (declared_routes | contract_routes)
         if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route)
     }
     if "/" not in source_routes:
         return False, "app-like product surface must include a homepage route at /"
-    if not app_routes:
-        return False, "app-like product surface must include and link a working app subroute such as /app, or mark the surface landing_page_only"
+    if not source_app_routes:
+        if declared_app_routes:
+            claimed = ", ".join(sorted(declared_app_routes)[:3])
+            return False, f"app-like product surface claims {claimed} but generated source does not include a working app subroute; add the route or mark the surface landing_page_only"
+        return False, "app-like product surface must include a working app subroute such as /app, or mark the surface landing_page_only"
 
     workflow_markers = set(str(marker) for marker in inventory.get("workflow_markers") or [])
     if not ({"form", "input"} & workflow_markers) and "runtime_fetch" not in workflow_markers:
@@ -6128,6 +6136,15 @@ def _finalize_product_surface_verification(
         install=install,
         timeout_seconds=timeout_seconds,
     )
+    if verification.get("status") == "passed":
+        inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
+        valid_surface, surface_error = _validate_product_surface_contract(inventory, surface)
+        if not valid_surface:
+            verification = {
+                **verification,
+                "status": "blocked",
+                "error": surface_error,
+            }
     if requested_publish_policy and _is_shared_renderer_publish_policy(requested_publish_policy):
         warnings = list(verification.get("warnings") or [])
         warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")

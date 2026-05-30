@@ -115,6 +115,7 @@ def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
     assert "product/site/" in prompt
+    assert "default bootstrap surface mode is app_shell" in prompt
     assert "product/surface.md records that source_path truthfully" in prompt
     assert "Do not expand product/runtime.md" in prompt
 
@@ -480,7 +481,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
-def test_app_like_surface_publish_is_not_blocked_by_app_shape(tmp_path, monkeypatch):
+def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -518,18 +519,19 @@ def test_app_like_surface_publish_is_not_blocked_by_app_shape(tmp_path, monkeypa
                 "business": "briefpilot",
                 "source_path": "product/site",
                 "install": False,
-                "idempotency_key": "verify-app-like-landing",
+                "idempotency_key": "verify-app-like-claim-only",
             }
         )
     )["verification"]
 
-    assert verification["status"] == "passed"
-    assert verification["done_gate_status"] == "passed"
-    assert verification["publish"]["status"] == "published"
-    assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
+    assert verification["status"] == "blocked"
+    assert verification["done_gate_status"] == "blocked"
+    assert verification["publish"]["status"] == "blocked"
+    assert "generated source does not include a working app subroute" in verification["blocker"]
+    assert not (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
 
 
-def test_static_spa_app_surface_with_shared_runtime_routes_passes(tmp_path, monkeypatch):
+def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -564,6 +566,14 @@ def test_static_spa_app_surface_with_shared_runtime_routes_passes(tmp_path, monk
         """
         <h1>BriefPilot</h1>
         <a href="/app">Open app</a>
+        """,
+        encoding="utf-8",
+    )
+    app_dir = site / "app"
+    app_dir.mkdir()
+    (app_dir / "index.html").write_text(
+        """
+        <h1>BriefPilot App</h1>
         <form id="signin"><input name="email" type="email"></form>
         <form id="workspace"><textarea name="brief"></textarea><button>Generate</button></form>
         <script>
@@ -595,11 +605,12 @@ def test_static_spa_app_surface_with_shared_runtime_routes_passes(tmp_path, monk
     assert verification["status"] == "passed"
     assert verification["done_gate_status"] == "passed"
     inventory = verification["inventory"]
-    assert inventory["routes"] == ["/"]
+    assert inventory["routes"] == ["/", "/app"]
     assert inventory["declared_routes"] == ["/app"]
     assert {"auth", "generate", "session"}.issubset(set(inventory["runtime_integrations"]))
     assert {"form", "input", "runtime_fetch"}.issubset(set(inventory["workflow_markers"]))
     assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
+    assert (tmp_path / "published-sites" / "briefpilot" / "app" / "index.html").exists()
 
 
 def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_path, monkeypatch):
