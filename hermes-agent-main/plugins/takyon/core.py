@@ -3502,7 +3502,7 @@ class TakyonStore:
             else:
                 end = start.replace(month=start.month + 1)
             conn.execute(
-                "INSERT INTO app_budgets (business_slug, status, hard_limit_microusd, current_period_start, current_period_end, created_at, updated_at) VALUES (?, 'active', ?, ?, ?, ?, ?)",
+                "INSERT INTO app_budgets (business_slug, status, hard_limit_microusd, current_period_start, current_period_end, created_at, updated_at) VALUES (?, 'active', ?, ?, ?, ?, ?) ON CONFLICT(business_slug) DO NOTHING",
                 (slug, 5_000_000, start.isoformat(), end.isoformat(), now, now),
             )
             row = conn.execute("SELECT * FROM app_budgets WHERE business_slug = ?", (slug,)).fetchone()
