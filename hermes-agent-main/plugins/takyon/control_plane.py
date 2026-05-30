@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .billing import open_billing_account
+from .custody import open_custody_account
 from .user_api_keys import (
     generate_api_key,
     hash_api_key,
@@ -72,12 +74,17 @@ def provision_user_on_first_login(
     later login. Idempotent and race-safe — a concurrent first login yields
     created=False and does not mint a second key.
 
-    Phase-1 scope: the full plan also opens billing/custody accounts here, but those
-    tables land in later migrations; this provisions identity + key only.
+    On first creation, the same transaction also opens the user's two money accounts
+    (billing + custody, both at zero) so a half-provisioned user — identity without
+    ledgers — can never be observed. Both opens are idempotent on their own.
     """
     with conn.transaction():
         user_id, created = get_or_create_user(conn, auth0_sub, email)
-        raw = mint_api_key(conn, user_id) if created else None
+        raw = None
+        if created:
+            raw = mint_api_key(conn, user_id)
+            open_billing_account(conn, user_id)
+            open_custody_account(conn, user_id)
     return user_id, created, raw
 
 

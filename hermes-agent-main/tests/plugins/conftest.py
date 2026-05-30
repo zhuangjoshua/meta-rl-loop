@@ -2,31 +2,32 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-# Shared fixture for Postgres control-plane integration tests. Importing psycopg
-# is done lazily inside the fixture (never at conftest import time) so the rest of
+# Shared fixtures for Postgres control-plane integration tests. Importing psycopg
+# is done lazily inside the fixtures (never at conftest import time) so the rest of
 # the tests/plugins suite still collects in environments without psycopg.
 _DSN = os.environ.get("TAKYON_TEST_PG_DSN")
-_MIGRATIONS_DIR = (
-    Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db" / "migrations"
-)
+_DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
+_MIGRATIONS_DIR = _DB_DIR / "migrations"
+# Manual, gated polsia2 teardown — lives OUTSIDE migrations/ so it is never swept.
+RETIRE_POLSIA2_SQL = _DB_DIR / "retire_polsia2_public.sql"
 
 
-@pytest.fixture(scope="module")
-def pg_conn(worker_id):
-    """A connection to a fresh, per-worker throwaway database with all control-plane
-    migrations applied. Skips unless TAKYON_TEST_PG_DSN points at a Postgres server.
+def _apply_migrations(conn) -> None:
+    """Apply every db/migrations/*.sql in sorted (0001, 0002, …) order."""
+    for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        conn.execute(sql_path.read_text())
 
-    Per-worker isolation keeps concurrent pytest-xdist workers from racing on
-    shared-catalog DDL, and mirrors how migrations run for real: once, on a clean
-    database.
-    """
-    if not _DSN:
-        pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
 
+@contextmanager
+def _throwaway_db(worker_id):
+    """Create a fresh, per-test, per-worker uuid-named database; drop it on exit.
+    Yields an autocommit psycopg connection to it. psycopg is imported lazily so the
+    rest of the suite still collects where psycopg is absent."""
     import psycopg
 
     dbname = f"takyon_test_{worker_id}_{uuid.uuid4().hex[:8]}"
@@ -34,10 +35,38 @@ def pg_conn(worker_id):
         admin.execute(f'create database "{dbname}"')
     conn = psycopg.connect(_DSN, dbname=dbname, autocommit=True)
     try:
-        for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
-            conn.execute(sql_path.read_text())
         yield conn
     finally:
         conn.close()
         with psycopg.connect(_DSN, autocommit=True) as admin:
             admin.execute(f'drop database if exists "{dbname}" with (force)')
+
+
+@pytest.fixture
+def pg_conn(worker_id):
+    """A connection to a fresh, per-TEST throwaway database with all control-plane
+    migrations applied. Skips unless TAKYON_TEST_PG_DSN points at a Postgres server.
+
+    Function scope (NOT module): every test gets a pristine database. The ledger
+    engines treat idempotency keys as GLOBALLY unique (a replayed key is one effect),
+    so a fixed literal like "pay-1" or "t" reused across tests would otherwise leak
+    between them on a shared DB and be silently swallowed as a replay. A clean DB per
+    test makes each test's keys independent. The per-worker name segment keeps
+    concurrent pytest-xdist workers from colliding on the database name.
+    """
+    if not _DSN:
+        pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
+    with _throwaway_db(worker_id) as conn:
+        _apply_migrations(conn)
+        yield conn
+
+
+@pytest.fixture
+def pg_conn_raw(worker_id):
+    """Like pg_conn but with NO migrations applied — a pristine empty database. For
+    tests that exercise migration application itself (e.g. the polsia2 REPLACE cutover:
+    stand up a simulated legacy schema, then apply the takyon SQL by hand)."""
+    if not _DSN:
+        pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
+    with _throwaway_db(worker_id) as conn:
+        yield conn

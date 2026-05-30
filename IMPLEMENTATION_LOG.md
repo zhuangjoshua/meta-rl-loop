@@ -286,3 +286,169 @@ column is unindexed so the write was already a cheap HOT update, but throttling
 collapses a hot key to ~1 write/min with no behavior cost (a coarse last_used_at is
 fine). Verified: control-plane + control-API suites → **19 passed**. Revert = drop
 the `and (...)` clause to restore the unconditional stamp.
+
+---
+
+## Increment — Governance rules added to mediationplan.md (inspect-before-build + surface-credential-needs); Ground Truth corrected
+
+**Why:** Phases 1–2 were first cut greenfield against the SQLite trunk; only afterward
+did the survey show the target Supabase (`DATABASE_URL`) still hosts polsia2's
+*populated* control schema — `public.businesses` (~32 rows) and `public.billing_accounts`
+(~15 rows, Stripe-subscription shape) already exist and would have been silently shadowed
+by the new `create table public.<name>` migrations. Operator directive: encode a standing
+rule that every remaining phase must FIRST check what already exists (repo + backend), and
+a rule that any new secret/API-key/provider need is surfaced to the operator, never
+bandaided around.
+
+**Changed (docs only — no code, no schema, no DB connection):**
+- `mediationplan.md` → **Ground Truth** corrected: retracted the false "no real data to
+  migrate / trivial backfill" and "polsia2 … not a live dependency" claims. Recorded that
+  the Supabase is NOT greenfield (populated polsia2 schema, profile-based identity), named
+  the real collisions (`businesses`, `billing_accounts`), and listed the confirmed-FREE
+  names (`users`, `user_api_keys`, `billing_entries`, `custody_accounts`, `custody_entries`).
+- `mediationplan.md` → new **Build Discipline (applies to every phase)** section, two gates:
+  Gate 1 inspect-what-exists (repo `TakyonStore`/migrations + backend `information_schema`)
+  → decide **replace / extend / isolate**, never a parallel `public.<name>`; Gate 2 surface
+  every new credential/provider need (record env var, provider, side effect, test/live gate)
+  — never stub/fake/bandaid; missing-credential path is `blocked`, not fake-`completed`.
+  Recorded "Outstanding new-credential needs: none for Phases 0–2."
+- `mediationplan.md` → **Phased Rollout** prefaced: every phase begins by running both gates.
+
+**Not done / honest state:** No live DB connection this turn (operator declined a read-only
+introspection). The row counts above come from this session's earlier survey and are marked
+approximate in the plan, pending a re-verified table-by-table inventory before any Phase 1–2
+DDL. Phase 2 ledger tests remain RED and are intentionally NOT the next step — the gating
+work is the replace/extend/isolate decision for the colliding tables (Gate 1), which must
+precede reworking 0001/0002.
+
+**Verification:** docs-only; no tests run/affected.
+
+**Revert:**
+```sh
+git checkout -- mediationplan.md   # outer workspace repo; restores pre-rule version
+# (this log entry is additive; trim it back to the previous increment if reverting)
+```
+
+---
+
+## Increment — REPLACE decision recorded; Phase 2 ledger tests turned green (reconcile cast fix + per-test DB isolation)
+
+**Why:** Two things resolved here. (1) The prior increment left the colliding-table
+decision (Gate 1: replace / extend / isolate) open. The operator answered it on
+2026-05-30 via AskUserQuestion → **REPLACE polsia2's `public` control tables**; that is
+now recorded in `mediationplan.md` Ground Truth (line 11). (2) The Phase 2 ledger
+integration tests were RED; diagnosis showed the **engines are correct** and the failures
+were two non-engine defects — one query bug and one test-fixture isolation bug.
+
+**Changed (code + docs):**
+- `mediationplan.md` → Ground Truth gained the **REPLACE decision** bullet (2026-05-30,
+  operator): takyon owns `public`; Phase 1–2 migrations deliberately drop/replace polsia2's
+  overlapping objects (`businesses`, `billing_accounts`, and their FK-dependents) in
+  dependency order; polsia2 live rows are **disposable**. Guardrail: design+verify the
+  replace on **LOCAL Postgres first**; the live Supabase apply is a *separate* step gated on
+  (a) a fresh Supabase backup/snapshot and (b) explicit operator go-ahead — `drop` is
+  irreversible. Migrations stay idempotent/re-runnable. (Resolves the "Not done" gating item
+  from the previous increment.)
+- `plugins/takyon/billing.py` → `reconcile_billing`: fixed a psycopg3 **AmbiguousParameter**
+  (`could not determine data type of parameter $1`). The named param `%(ps)s` (period start)
+  appeared only inside `%(ps)s is null or created_at >= %(ps)s`, which gives the planner no
+  inferable type. Added explicit `::timestamptz` casts on all three `filter (...)` clauses
+  for the allowance reserve/settle/refund sums. No semantic change — same NULL-means-all-time
+  behavior, now type-resolvable.
+- `tests/plugins/conftest.py` → `pg_conn` fixture **`scope="module"` → function scope**.
+  The ledger engines treat `billing_entries.idempotency_key` / `custody_entries.idempotency_key`
+  as **globally UNIQUE** (a replayed key is one effect — correct). Module scope shared ONE DB
+  across a file's tests, so tests reusing fixed literal keys (`"pay-1"`, `"r1"`, `"t"`) had the
+  2nd+ test's op silently swallowed as a replay (e.g. `test_settle_*` saw `topup_balance == 0`
+  because `topup(...,"t")` replayed an earlier test's `"t"`; `test_concurrent_accruals_*` got
+  `15200 == 19×800` because one worker's `"pay-1"` was already consumed). Function scope gives
+  every test a pristine uuid-named DB, so keys are independent. Per-worker name segment still
+  prevents pytest-xdist collisions. Docstring updated to explain the why.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=postgresql://postgres@127.0.0.1:54329/takyon_test`,
+all five PG suites together (billing, custody, identity_spine, control_plane, control_api),
+`-n 4` → **54 passed**. No regression in the three suites that share `pg_conn`.
+
+**Not done / honest state:** No live DB this turn. The REPLACE is designed/verified on LOCAL
+Postgres only; migrations 0001/0002 still need the explicit polsia2-retirement drop step
+(dependency-ordered, since `businesses` roots the polsia2 schema) authored + local-tested
+before any live apply. Live Supabase apply remains blocked on backup + explicit operator
+go-ahead. Task #6 (JIT into Auth0 `/auth/callback`) still deferred to the Supabase cutover.
+
+**Revert:**
+```sh
+git checkout -- hermes-agent-main/tests/plugins/conftest.py  # restores module scope (re-breaks ledger isolation)
+git checkout -- mediationplan.md                             # drops the REPLACE decision bullet
+# billing.py is untracked; to undo only the cast, remove the three `::timestamptz` casts
+#   in reconcile_billing's allowance reserve/settle/refund `filter (...)` clauses.
+```
+
+---
+
+## Increment — polsia2 REPLACE cutover: fail-loud forward guards + separate gated teardown, verified on local PG
+
+**Why:** The previous increment closed the REPLACE *decision* but left the *mechanism* as
+the next step. Reading the migrations confirmed the concrete trap: BOTH 0001 (`businesses`)
+and 0002 (`billing_accounts`) use `create table if not exists` — on the live Supabase, where
+polsia2's differently-shaped versions already exist, `if not exists` would silently bind
+takyon to polsia2's incompatible table (or fail later with a cryptic FK/index error). The
+destructive drop, meanwhile, must NOT ride along in the idempotent forward set the test
+conftest sweeps. So the cutover is split into a loud guard (in the forward migrations) plus a
+separate, gated teardown — designed and verified entirely on local PG, with the live apply
+still gated on backup + operator go-ahead.
+
+**Changed (code + tests + docs):**
+- `db/migrations/0001_identity_spine.sql` → fail-fast **REPLACE guard** at the very top
+  (before any object is created): if `public.businesses` exists but lacks `owner_user_id`,
+  `raise exception … 'not the takyon shape … run retire_polsia2_public.sql first'`
+  (errcode `feature_not_supported`). Trivial pass on a clean DB / re-run. Header's stale
+  "Greenfield: no backfill" line rewritten to the REPLACE reality.
+- `db/migrations/0002_ledgers.sql` → twin guard for `public.billing_accounts` (signature
+  column `allowance_included_cents`). Header's "(greenfield … no backfill)" line corrected.
+- `plugins/takyon/db/retire_polsia2_public.sql` → **NEW**, deliberately OUTSIDE `db/migrations/`
+  so neither the test sweep nor a forward-migrate ever runs it. Idempotent named drops of the
+  two takyon-colliding roots — `billing_accounts` then `businesses` — each `drop … cascade`
+  (clears dependents' FK constraints, not their tables). Each drop is guarded by the INVERSE
+  of the migration guards: it fires ONLY when a table of that name exists AND is not already
+  the takyon shape, so on a clean DB it is a no-op and AFTER takyon owns the table it is ALSO a
+  no-op — a re-run can never destroy takyon data. Heavy header: DESTRUCTIVE, run once on live
+  only after backup + explicit go-ahead; documents that a FULL `public` wipe (profiles,
+  agent_runs, orphaned dependents) is a separate gated step needing a live inventory + Supabase
+  role/grant review.
+- `tests/plugins/conftest.py` → factored the throwaway-DB lifecycle into `_throwaway_db(worker_id)`
+  + `_apply_migrations(conn)`; `pg_conn` now composes them (unchanged semantics). Added
+  **`pg_conn_raw`** (fresh DB, NO migrations) for tests that apply migration SQL by hand, and
+  exported `RETIRE_POLSIA2_SQL`. No behavior change to existing PG tests.
+- `tests/plugins/test_takyon_retire_polsia2_pg.py` → **NEW**, 5 tests proving the four cutover
+  properties on real PG: (1) 0001/0002 RAISE on a simulated polsia2 shadow (and create nothing);
+  (2) retire→migrate drops the colliders, leaves the dependent table (only its FK cascaded),
+  and yields the takyon shape with a working user→business→billing_entry insert chain;
+  (3) teardown is a no-op on a clean DB; (4) re-running teardown on a takyon-owned DB preserves
+  all takyon rows.
+- `mediationplan.md` → Ground Truth gained a **"Cutover mechanics (built + locally verified)"**
+  bullet: the guard+teardown design, the live cutover ORDER (`retire_polsia2_public.sql` → 0001
+  → 0002 → …), the local verification, and the still-gated full-`public` retirement (records it
+  as an *authorization-to-connect* gap, not a new-credential need).
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`,
+all six PG control-plane suites together, `-n 4` → **59 passed** (54 prior + 5 new). The broader
+`tests/plugins/` run shows 2 failures (`test_business_work_focus_…` expecting `outreach/test.md`
+vs current `distribution/outreach/test.md`; web-search registry expecting 7 providers, `xai`
+makes 8) — **confirmed pre-existing**: both fail identically with this turn's tracked edits
+stashed, and neither touches the control plane, migrations, ledgers, or the PG fixtures.
+
+**Not done / honest state:** No live DB this turn — the REPLACE is verified on LOCAL PG only.
+Live apply (retire → 0001 → 0002) remains blocked on a fresh Supabase backup + explicit operator
+go-ahead. Full polsia2 `public` retirement (beyond the two colliding roots) is a separate gated
+step needing a live inventory + Supabase grant review. Task #6 (JIT into Auth0 `/auth/callback`)
+still deferred to the Supabase cutover.
+
+**Revert:**
+```sh
+git checkout -- hermes-agent-main/tests/plugins/conftest.py   # restores pre-refactor fixture
+git checkout -- mediationplan.md                              # drops the cutover-mechanics bullet
+rm hermes-agent-main/plugins/takyon/db/retire_polsia2_public.sql
+rm hermes-agent-main/tests/plugins/test_takyon_retire_polsia2_pg.py
+# 0001/0002 guards are additive DO-blocks at the top of each file (untracked); delete the
+#   `do $$ begin if to_regclass(...) ... end $$;` block to remove a guard.
+```

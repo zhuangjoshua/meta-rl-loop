@@ -6,8 +6,34 @@
 -- for the eventual Postgres control plane; the current SQLite control plane in
 -- plugins/takyon/core.py (TakyonStore) is being superseded per mediationplan.md.
 --
--- Idempotent: safe to run repeatedly. Greenfield: no backfill — on the Postgres
--- plane there is no pre-existing ownerless business data.
+-- Idempotent: safe to run repeatedly. On a clean `public` (local test DB, or the
+-- live Supabase AFTER the polsia2 teardown) every object below creates cleanly.
+--
+-- REPLACE guard (robustness #1 — mediationplan.md Ground Truth, 2026-05-30): takyon
+-- OWNS public.businesses. The live Supabase still hosts polsia2's differently-shaped
+-- `businesses` (id-PK, owner_profile_id). `create table if not exists` would SILENTLY
+-- bind takyon to that incompatible table instead of failing. So before touching
+-- anything, fail loud if a non-takyon `businesses` is present and point the operator
+-- at the one-time, backup-gated teardown. Trivial pass on a clean DB and on re-runs
+-- (takyon's own businesses has owner_user_id, so the guard does not trip).
+do $$
+begin
+    if to_regclass('public.businesses') is not null
+       and not exists (
+           select 1 from information_schema.columns
+           where table_schema = 'public'
+             and table_name   = 'businesses'
+             and column_name  = 'owner_user_id'
+       )
+    then
+        raise exception
+            'public.businesses exists but is not the takyon shape (no owner_user_id). '
+            'Run plugins/takyon/db/retire_polsia2_public.sql first (one-time, '
+            'backup-gated polsia2 teardown), then re-apply takyon migrations. '
+            'See mediationplan.md > Ground Truth (REPLACE decision, 2026-05-30).'
+            using errcode = 'feature_not_supported';
+    end if;
+end $$;
 
 create extension if not exists citext;
 
