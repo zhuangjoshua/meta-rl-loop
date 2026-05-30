@@ -73,6 +73,12 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 - Never mix vendors accidentally. Do not describe Claude-backed behavior with GPT names or stale model labels like GPT-4o-mini.
 - Prefer customer-visible claims like analyze feedback, cluster themes, rank opportunities, explain why, and export insights.
 """
+RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
+- Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
+- Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
+- If a declared runtime feature is not wired yet, keep the blocked state visible and name the missing runtime step.
+- Do not claim undeclared runtime-backed features without first updating the app surface contract.
+"""
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
 - Write files relative to the current working directory.
@@ -94,6 +100,64 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+}
+PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
+    "auth": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_request_app_magic_link", "business_verify_app_magic_link", "business_read_app_account"],
+        "worker_contract": [
+            "Use Takyon magic-link and session rails instead of browser-only auth state.",
+            "If auth is not wired yet, keep sign-in blocked and name the missing runtime step.",
+        ],
+    },
+    "account": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_read_app_account"],
+        "worker_contract": [
+            "Read account/session state from the shared Takyon account runtime route.",
+            "Do not invent a local current-user object.",
+        ],
+    },
+    "checkout": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_create_app_checkout", "business_record_stripe_webhook"],
+        "worker_contract": [
+            "Use Takyon checkout rails instead of fake payment links or browser-only purchase state.",
+            "If checkout is not wired yet, keep upgrade or pay actions visibly blocked.",
+        ],
+    },
+    "billing": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_upsert_app_plan", "business_create_app_checkout", "business_record_stripe_webhook"],
+        "worker_contract": [
+            "Plan, billing, and paid-state UI must reflect Takyon billing rails, not local assumptions.",
+            "Do not claim a paid tier without real runtime entitlement or checkout truth.",
+        ],
+    },
+    "entitlements": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_upsert_app_customer", "business_grant_app_entitlement", "business_record_stripe_webhook"],
+        "worker_contract": [
+            "Feature gating must come from Takyon entitlements, not hardcoded client flags.",
+            "If entitlements are not wired yet, keep gated actions blocked.",
+        ],
+    },
+    "usage": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_configure_app_budget", "business_record_app_usage"],
+        "worker_contract": [
+            "Usage meters and budget warnings should reflect Takyon usage rails, not fake counters.",
+            "If usage tracking is not wired yet, say so instead of simulating quotas.",
+        ],
+    },
+    "generate": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": [],
+        "worker_contract": [
+            "AI actions should proxy the shared Takyon runtime generate route.",
+            "If generation is not wired yet, keep the action visible but clearly blocked.",
+        ],
+    },
 }
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
@@ -187,6 +251,90 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
         seen.add(key)
         normalized.append(text)
     return normalized
+
+
+def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
+    if raw is None:
+        return []
+    values: list[Any]
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, dict):
+        values = [key for key, enabled in raw.items() if enabled]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+        if not text or not re.match(r"^[a-z0-9][a-z0-9_]{0,63}$", text):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    unknown = [item for item in normalized if item not in PRODUCT_RUNTIME_RAILS]
+    if strict and unknown:
+        raise TakyonError(
+            "unknown runtime_features: "
+            + ", ".join(unknown)
+            + f". Known rails: {', '.join(sorted(PRODUCT_RUNTIME_RAILS))}"
+        )
+    return [item for item in normalized if item in PRODUCT_RUNTIME_RAILS]
+
+
+def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
+    if not isinstance(surface, dict):
+        return []
+    direct = _normalize_runtime_features(surface.get("runtime_features"))
+    if direct:
+        return direct
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    return _normalize_runtime_features(metadata.get("runtime_features"))
+
+
+def _runtime_rails_for_owner(surface: dict[str, Any] | None, owner_skill: str) -> list[tuple[str, dict[str, Any]]]:
+    owner = str(owner_skill or "").strip().lower()
+    selected = _surface_runtime_features(surface)
+    rails: list[tuple[str, dict[str, Any]]] = []
+    for key in selected:
+        spec = PRODUCT_RUNTIME_RAILS.get(key)
+        if not spec:
+            continue
+        if str(spec.get("owner_skill") or "").strip().lower() == owner:
+            rails.append((key, spec))
+    return rails
+
+
+def _workspace_needs_runtime_ui_contract(workspace_raw: str) -> bool:
+    normalized = workspace_raw.strip("/").lower()
+    return normalized == "product/site" or normalized.startswith("product/site/")
+
+
+def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
+    runtime_features = _surface_runtime_features(surface)
+    if not runtime_features:
+        return ""
+    runtime_api_base = ""
+    if isinstance(surface, dict):
+        runtime_api_base = str(surface.get("runtime_api_base") or "").strip()
+    lines = [RUNTIME_UI_CONTRACT_INTRO.rstrip(), ""]
+    lines.append(f"- Declared runtime-backed features: {', '.join(runtime_features)}")
+    if runtime_api_base:
+        lines.append(f"- Runtime API base: {runtime_api_base}")
+    lines.extend(["", "Selected runtime rails:"])
+    for rail in runtime_features:
+        spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
+        owner = str(spec.get("owner_skill") or "unknown")
+        lines.append(f"- {rail} (owner: {owner})")
+        tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
+        if tools:
+            lines.append(f"  - Canonical tools: {', '.join(tools)}")
+        for item in spec.get("worker_contract") or []:
+            lines.append(f"  - {str(item).strip()}")
+    return "\n".join(lines).strip()
 
 
 def _find_guidance_skill_file(identifier: str) -> Path | None:
@@ -2867,6 +3015,7 @@ class TakyonStore:
               design_brief_path TEXT NOT NULL DEFAULT 'product/design-brief.md',
               source_path TEXT,
               runtime_api_base TEXT,
+              runtime_features_json TEXT,
               routes_json TEXT,
               theme_json TEXT,
               constraints_json TEXT,
@@ -3068,6 +3217,7 @@ class TakyonStore:
             conn.execute("CREATE INDEX businesses_work_focus_idx ON businesses(work_focus, updated_at DESC)")
         surface_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_surface_contracts)").fetchall()}
         surface_additions = {
+            "runtime_features_json": "TEXT",
             "publish_target": "TEXT",
             "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_verify'",
             "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
@@ -3371,6 +3521,7 @@ class TakyonStore:
             "design_brief_path": "product/design-brief.md",
             "source_path": None,
             "runtime_api_base": f"/api/takyon/apps/{slug}",
+            "runtime_features": [],
             "routes": [],
             "theme": {"source": "business design brief"},
             "constraints": {
@@ -3542,6 +3693,7 @@ class TakyonStore:
             f"- Design brief path: {surface.get('design_brief_path') or 'product/design-brief.md'}",
             f"- Source path: {surface.get('source_path') or 'not set'}",
             f"- Runtime API base: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
+            f"- Runtime features: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
             f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
             f"- Publish policy: {surface.get('publish_policy') or _DEFAULT_PRODUCT_PUBLISH_POLICY}",
             f"- Mode behavior: {surface.get('mode_behavior') or _DEFAULT_PRODUCT_MODE_BEHAVIOR}",
@@ -3619,6 +3771,15 @@ class TakyonStore:
                     path.unlink()
             return
 
+        selected_runtime_rails = _surface_runtime_features(surface)
+        rails_by_owner: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        for rail in selected_runtime_rails:
+            spec = PRODUCT_RUNTIME_RAILS.get(rail)
+            if not spec:
+                continue
+            owner = str(spec.get("owner_skill") or "unknown").strip() or "unknown"
+            rails_by_owner.setdefault(owner, []).append((rail, spec))
+
         index = [
             "# App Runtime Source Of Truth",
             "",
@@ -3636,6 +3797,30 @@ class TakyonStore:
             "- [Usage Budget](usage.md)",
             "- [Surface Contract](surface.md)",
         ]
+        index.extend(["", "## Selected Runtime Rails", ""])
+        if not selected_runtime_rails:
+            index.append("- No runtime rails declared.")
+        else:
+            for rail in selected_runtime_rails:
+                spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
+                owner = str(spec.get("owner_skill") or "unknown")
+                tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
+                index.append(f"- {rail} — owner: {owner}")
+                if tools:
+                    index.append(f"  - Tools: {', '.join(tools)}")
+        index.extend(["", "## Rails By Owner", ""])
+        if not rails_by_owner:
+            index.append("- No runtime rail ownership is currently declared.")
+        else:
+            for owner, items in rails_by_owner.items():
+                index.extend(["", f"### {owner}", ""])
+                for rail, spec in items:
+                    tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
+                    index.append(f"- {rail}")
+                    if tools:
+                        index.append(f"  - Tools: {', '.join(tools)}")
+                    for item in spec.get("worker_contract") or []:
+                        index.append(f"  - UI contract: {str(item).strip()}")
         _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
 
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
@@ -4792,11 +4977,18 @@ class TakyonStore:
             status = str(op.get("status") or "draft").strip().lower()
             if not status:
                 raise TakyonError("surface status is required")
+            existing = self._app_surface_contract(conn, slug)
             design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
             if op.get("source_path"):
                 source_path = _safe_relpath(str(op.get("source_path")), field="source_path").as_posix()
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
+            runtime_features_raw = op.get("runtime_features")
+            runtime_features = (
+                _normalize_runtime_features(runtime_features_raw, strict=True)
+                if runtime_features_raw is not None
+                else _surface_runtime_features(existing)
+            )
             routes = op.get("routes") if op.get("routes") is not None else []
             theme = op.get("theme") if op.get("theme") is not None else {"source": "business design brief"}
             constraints = op.get("constraints") if op.get("constraints") is not None else {}
@@ -4824,15 +5016,16 @@ class TakyonStore:
                 """
                 INSERT INTO app_surface_contracts (
                   business_slug, status, design_brief_path, source_path, runtime_api_base,
-                  routes_json, theme_json, constraints_json, publish_target, publish_policy,
+                  runtime_features_json, routes_json, theme_json, constraints_json, publish_target, publish_policy,
                   mode_behavior, done_gate, notes, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_slug) DO UPDATE SET
                   status = excluded.status,
                   design_brief_path = excluded.design_brief_path,
                   source_path = excluded.source_path,
                   runtime_api_base = excluded.runtime_api_base,
+                  runtime_features_json = excluded.runtime_features_json,
                   routes_json = excluded.routes_json,
                   theme_json = excluded.theme_json,
                   constraints_json = excluded.constraints_json,
@@ -4850,6 +5043,7 @@ class TakyonStore:
                     design_brief_path,
                     source_path,
                     runtime_api_base,
+                    _json_dumps(runtime_features),
                     _json_dumps(routes),
                     _json_dumps(theme),
                     _json_dumps(constraints),
@@ -4864,7 +5058,7 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
         if action == "app.surface.publish_result":
@@ -6102,6 +6296,7 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "design_brief_path": args.get("design_brief_path") or "product/design-brief.md",
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
+        "runtime_features": args.get("runtime_features"),
         "routes": args.get("routes") or [],
         "theme": args.get("theme") or {"source": "business design brief"},
         "constraints": args.get("constraints") or {},
@@ -7435,7 +7630,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             )
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
-        store.read(scope=f"business:{business}", query="summary", limit=20)
+        app_summary = store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
+        app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
+        surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
 
         business_root = store._business_root(business).resolve()
         workspace_path = business_root if workspace_raw in {".", ""} else store._resolve_business_file(business, workspace_raw).resolve()
@@ -7504,6 +7701,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             worker_instruction_parts.append(guidance_block)
         if _workspace_needs_customer_ai_copy_contract(workspace_raw):
             worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
+        if _workspace_needs_runtime_ui_contract(workspace_raw):
+            runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
+            if runtime_ui_contract:
+                worker_instruction_parts.append(runtime_ui_contract)
         worker_instruction_parts.extend([workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
         worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
         payload = {
@@ -7856,6 +8057,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "design_brief_path": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, checkout, billing, usage, generate, or entitlements."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},

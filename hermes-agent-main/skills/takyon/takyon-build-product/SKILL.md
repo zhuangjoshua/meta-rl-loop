@@ -67,7 +67,7 @@ Use this skill to create or materially improve the business-owned product surfac
 
 - Call `business_read_business` first to inspect the current business summary, product surface, and publication state.
 - Use `business_read_file` and `business_list_files` to inspect `product/design-brief.md`, `product/surface.md`, and the current source tree before rewriting anything.
-- Use `business_upsert_app_surface_contract` to set or repair the canonical source path, routes, publish target, and done gate.
+- Use `business_upsert_app_surface_contract` to set or repair the canonical source path, routes, runtime_features, publish target, and done gate.
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially briefs, receipts, and small source fixes under `product/`.
 - Use `business_claude_agent_task` for non-trivial `product/site/` builds or multi-file source edits. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 - Use `business_verify_product_surface` only when there is real source to verify or publish. Treat its blocker output as truth.
@@ -77,15 +77,16 @@ Use this skill to create or materially improve the business-owned product surfac
 
 1. Call `business_read_business` and identify the current offer, source path, publish target, and blocker state. If `product/design-brief.md` or `product/surface.md` exist, load them with `business_read_file`.
 2. If there is no canonical surface contract or the source path is wrong, call `business_upsert_app_surface_contract` first. Default to a real source path under `product/site/`; do not invent a publish target without recording it.
-3. If `product/site/` or the expected source directory does not exist, create it with `business_create_workspace` and write the initial structure there before claiming product work is underway.
-4. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
-5. Write or patch `product/design-brief.md` so it names the audience, offer, routes, constraints, and what evidence this product surface is supposed to create next.
-6. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface.
-7. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, what works now, what is blocked, and what still depends on app-runtime or provider work.
-8. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification.
-9. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
-10. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. During bootstrap, once `product/site/` exists with real source, do this before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
-11. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
+3. If the product will claim runtime-backed behavior such as auth, checkout, billing, usage, entitlements, account, or generate, record those as `runtime_features` on the surface contract before delegating source work.
+4. If `product/site/` or the expected source directory does not exist, create it with `business_create_workspace` and write the initial structure there before claiming product work is underway.
+5. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
+6. Write or patch `product/design-brief.md` so it names the audience, offer, routes, constraints, and what evidence this product surface is supposed to create next.
+7. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface.
+8. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, what works now, what is blocked, and what still depends on app-runtime or provider work. The selected runtime_features are the backend rails the worker will receive as product-site UI contract.
+9. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification.
+10. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
+11. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface`. During bootstrap, once `product/site/` exists with real source, do this before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop claiming the surface is published.
+12. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
 
 ### Shared style skills
 
@@ -102,7 +103,7 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 ## Output Format
 
 - `product/design-brief.md` should describe audience, offer, routes, and constraints.
-- `product/surface.md` should describe what is actually wired and what is blocked.
+- `product/surface.md` should describe what is actually wired, what is blocked, and which `runtime_features` the app-runtime lane must reconcile.
 - `product/site/` should contain real source, not placeholder notes pretending to be source.
 
 ## Publication

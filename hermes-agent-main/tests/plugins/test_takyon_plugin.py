@@ -29,6 +29,7 @@ from plugins.takyon.core import (
     handle_business_set_work_focus,
     handle_business_list_conversation_messages,
     handle_business_read_conversation_thread,
+    handle_business_upsert_app_surface_contract,
     handle_business_upsert_business,
     handle_business_verify_product_surface,
 )
@@ -955,6 +956,153 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Customer-facing AI product copy contract" in instruction
     assert "Claude Opus 4.7, Claude Sonnet 4.6, and Claude Haiku 4.5" in instruction
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
+
+
+def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "checkout", "generate"],
+                "idempotency_key": "surface-runtime-features",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["runtime_features"] == ["auth", "checkout", "generate"]
+    surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
+    assert "Runtime features: auth, checkout, generate" in surface_md
+
+
+def test_app_surface_contract_rejects_unknown_runtime_features(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "made_up_rail"],
+                "idempotency_key": "surface-runtime-features-invalid",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "unknown runtime_features" in result["error"]
+
+
+def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "checkout", "generate"],
+            }
+        ],
+        "surface-contract-runtime-features",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the product shell.",
+                "idempotency_key": "workspace-runtime-contract",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = captured["payload"]["instruction"]
+    assert result["success"] is True
+    assert "Hermes runtime UI contract" in instruction
+    assert "Declared runtime-backed features: auth, checkout, generate" in instruction
+    assert "Runtime API base: /api/takyon/apps/latexflow" in instruction
+    assert "checkout (owner: takyon-app-runtime)" in instruction
+    assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
+
+
+def test_runtime_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "checkout"],
+            }
+        ],
+        "surface-runtime-md-rails",
+    )
+
+    runtime_md = (tmp_path / "businesses" / "latexflow" / "product" / "runtime.md").read_text(encoding="utf-8")
+    assert "## Selected Runtime Rails" in runtime_md
+    assert "- auth — owner: takyon-app-runtime" in runtime_md
+    assert "- checkout — owner: takyon-app-runtime" in runtime_md
+    assert "## Rails By Owner" in runtime_md
+    assert "### takyon-app-runtime" in runtime_md
+    assert "Tools: business_create_app_checkout, business_record_stripe_webhook" in runtime_md
 
 
 def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):

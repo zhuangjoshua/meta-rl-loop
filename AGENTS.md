@@ -56,6 +56,8 @@ The shared Hermes app runtime owns backend rails only: auth/session protocol, pa
 
 Do not hardcode the final product's look, layout, copy, theme, or information architecture in the runtime. Store that per business with the `business_upsert_app_surface_contract` tool, mirrored at `product/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
 
+Backend rails for a product app should be declared once on the surface contract as `runtime_features`, not rediscovered separately in UI code or copied across skills. The canonical registry of known rails lives in `hermes-agent-main/plugins/takyon/core.py` (`PRODUCT_RUNTIME_RAILS`). Claude product-site work should receive the selected rails as injected worker contract guidance, and backend-owning skills should read the same selected rails from `product/runtime.md` under `Rails By Owner`. When adding a new rail, extend the registry, then select it through `runtime_features`; do not create a second per-skill rail list.
+
 When implementing custom backend or own-runtime product capability later, update the authoritative Takyon discovery surfaces the CEO can actually see: the stable CEO prompt at `hermes-agent-main/plugins/takyon/prompts/ceo.md`, the owning Hermes skill under `hermes-agent-main/skills/takyon/`, and the guarded product verification/deploy tool behavior. Do not add a hidden backend path that the CEO cannot see through skill frontmatter/body, tool schemas/results, or business receipts.
 
 ## Operating Model
