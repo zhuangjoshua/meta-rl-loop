@@ -168,6 +168,92 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch):
     assert missing_response.json()["error"] == "product site file not found"
 
 
+def test_normalize_product_rail_route_handles_path_variants():
+    import takyon_cli.web_server as web_server
+
+    norm = web_server._normalize_product_rail_route
+    # Bare, /api/-prefixed, and slug-embedded forms all map to the canonical rail.
+    assert norm("/auth/request") == "auth/request"
+    assert norm("/api/auth/request") == "auth/request"
+    assert norm("/api/takyon/apps/mathflow/auth/request") == "auth/request"
+    assert norm("/api/generated-apps/mathflow/auth/verify") == "auth/verify"
+    assert norm("/api/takyon/apps/otherslug/generate") == "generate"
+    assert norm("session") == "session"
+    assert norm("/account") == "account"
+    assert norm("/checkout") == "checkout"
+    assert norm("/usage") == "usage"
+    # Non-rail paths and static pages must not be claimed.
+    assert norm("/") is None
+    assert norm("/pricing") is None
+    assert norm("/api/status") is None
+    assert norm("/auth/login") is None
+
+
+def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monkeypatch):
+    """A generated front-end that calls a bare/short rail path on a product
+    host resolves to the host's business instead of 404'ing ("rail not
+    wired"). The embedded slug, if any, is ignored in favour of the host."""
+    from starlette.testclient import TestClient
+    from starlette.responses import JSONResponse
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[tuple[str, str, str]] = []
+
+    async def _fake_post(request, business, route):
+        calls.append(("POST", business, route))
+        return JSONResponse({"ok": True, "business": business, "route": route})
+
+    async def _fake_get(request, business, route):
+        calls.append(("GET", business, route))
+        return JSONResponse({"ok": True, "business": business, "route": route})
+
+    monkeypatch.setattr(web_server, "_takyon_app_post", _fake_post)
+    monkeypatch.setattr(web_server, "_takyon_app_get", _fake_get)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        # Bare POST on the product host — previously 404 "rail not wired".
+        bare = client.post(
+            "/auth/request",
+            json={"email": "a@b.com"},
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
+        # /api/-prefixed bare rail (would otherwise be 401'd by the auth gate).
+        api_pref = client.post(
+            "/api/generate",
+            json={"prompt": "hi"},
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
+        # Wrong embedded slug is overridden by the host business.
+        wrong_slug = client.get(
+            "/api/takyon/apps/someoneelse/account",
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
+        # Dashboard host must NOT be treated as a rail call.
+        dash = client.post(
+            "/auth/request",
+            json={"email": "a@b.com"},
+            headers={"Host": "localhost:9119"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert bare.status_code == 200
+    assert bare.json() == {"ok": True, "business": "mathflow", "route": "auth/request"}
+    assert api_pref.json()["business"] == "mathflow"
+    assert api_pref.json()["route"] == "generate"
+    assert wrong_slug.json()["business"] == "mathflow"
+    assert wrong_slug.json()["route"] == "account"
+    assert ("POST", "mathflow", "auth/request") in calls
+    assert ("POST", "mathflow", "generate") in calls
+    assert ("GET", "mathflow", "account") in calls
+    # The dashboard host did not dispatch to a product rail.
+    assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
+
+
 def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 

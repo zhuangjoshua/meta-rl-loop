@@ -765,6 +765,34 @@ async def auth0_middleware(request: Request, call_next):
     return RedirectResponse(_auth0_login_path(request), status_code=302)
 
 
+@app.middleware("http")
+async def product_app_rail_middleware(request: Request, call_next):
+    """Resolve product-app rail calls to the host's business.
+
+    On a product host the business is identified by the hostname, so any
+    recognised rail request (bare, ``/api/``-prefixed, or with an embedded
+    slug) is dispatched to the canonical shared-runtime handler for that
+    business. This prevents "rail not wired" 404s when a generated front-end
+    guesses the wrong API base, and scopes every rail call to the host's
+    business so a product page cannot reach another business's rails.
+
+    Defined last so it runs outermost: a matched rail short-circuits before
+    the dashboard auth gates, which otherwise 401 bare ``/api/`` paths that
+    are not in the public allowlist.
+    """
+    business = _business_slug_from_product_host(
+        _host_without_port(request.headers.get("host", ""))
+    )
+    if business:
+        route = _normalize_product_rail_route(request.url.path)
+        if route:
+            if request.method == "GET":
+                return await _takyon_app_get(request, business, route)
+            if request.method == "POST":
+                return await _takyon_app_post(request, business, route)
+    return await call_next(request)
+
+
 @app.get("/auth/login")
 async def auth0_login(request: Request):
     cfg = _auth0_config()
@@ -984,6 +1012,44 @@ async def _takyon_app_read_json(request: Request) -> dict[str, Any]:
 
 def _takyon_app_route_parts(route: str) -> list[str]:
     return [part for part in route.split("/") if part]
+
+
+# Canonical product-app rail sub-routes served by the shared Hermes app
+# runtime. On a product host (<slug>.<company-base-domain>) the business is
+# fixed by the hostname, so a generated front-end can call these rails at any
+# reasonable path — bare ("/auth/request"), "/api/"-prefixed, or with an
+# embedded slug ("/api/takyon/apps/<slug>/...") — and the runtime resolves
+# them to the host's business. This removes the recurring "rail not wired"
+# 404 when a generated site guesses the wrong API base. See CLAUDE.md: the
+# shared app runtime owns auth/session/account/checkout/usage/generate.
+_PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
+    "auth/request",
+    "auth/verify",
+    "session",
+    "account",
+    "checkout",
+    "usage",
+    "generate",
+})
+
+
+def _normalize_product_rail_route(path: str) -> Optional[str]:
+    """Map any reasonable product-app rail path to its canonical sub-route.
+
+    Returns the canonical rail route (e.g. ``auth/request``) when ``path`` is
+    a recognised rail call, else ``None``. Strips an optional ``api/`` prefix
+    and an optional ``takyon/apps/<slug>/`` or ``generated-apps/<slug>/``
+    segment so the embedded slug (if any) is ignored in favour of the host.
+    """
+    candidate = (path or "").strip("/").lower()
+    if candidate.startswith("api/"):
+        candidate = candidate[len("api/"):]
+    for prefix in ("takyon/apps/", "generated-apps/"):
+        if candidate.startswith(prefix):
+            _slug, _, tail = candidate[len(prefix):].partition("/")
+            candidate = tail
+            break
+    return candidate if candidate in _PRODUCT_APP_RAIL_ROUTES else None
 
 
 async def _takyon_app_get(request: Request, business: str, route: str) -> Response:
