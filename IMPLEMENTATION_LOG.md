@@ -452,3 +452,114 @@ rm hermes-agent-main/tests/plugins/test_takyon_retire_polsia2_pg.py
 # 0001/0002 guards are additive DO-blocks at the top of each file (untracked); delete the
 #   `do $$ begin if to_regclass(...) ... end $$;` block to remove a guard.
 ```
+
+---
+
+## Increment — Phase 3: Control API topup checkout + webhook (flow A) + per-user rate limiting
+
+**Date:** 2026-05-30
+
+**What:** Built the three remaining Phase-3 pieces on top of the Phase-1 opaque-key
+read boundary: (1) a self-contained control-plane Stripe helper module; (2) the
+flow-A **topup** path — `POST /v1/billing/topup/checkout` to create a Stripe Checkout
+session that tops up the *caller's own* balance, and a dedicated `POST /v1/billing/webhook`
+that credits the billing ledger when that payment completes; (3) a Postgres-backed
+**per-user fixed-window rate limiter** gating the authenticated endpoints.
+
+**Why:** The opaque API key is the entire per-user surface, so abuse control and
+money-in both live at the user grain. Flow A (user→platform) is genuinely new vs. the
+SQLite trunk's product/sub-user webhook (flow B), as the Gate-1 finding in
+`mediationplan.md` established. The ledger primitive `billing.topup(...)` already
+existed (idempotent on the Stripe event id); this increment is the HTTP + Stripe
+plumbing that drives it, plus the rate limiter the plan called for (line 100: "Postgres
+fixed-window now; Upstash Redis at scale").
+
+**Decisions (resolve the plan's open questions):**
+- **Webhook topology — SEPARATE control-plane endpoint** (not the shared SQLite product
+  dispatcher), so flow A carries its OWN per-endpoint signing secret
+  `STRIPE_BILLING_WEBHOOK_SECRET` and stays cleanly isolated from the product webhook.
+  This resolves the "open decision" flagged in the Phase-3 gate finding.
+- **Caller supplies `success_url`/`cancel_url`** on the checkout body, mirroring the
+  existing trunk convention (`handle_business_create_app_checkout`) — the server never
+  invents or open-redirects to a base URL it picked.
+- **Stripe helpers are a second, self-contained copy** (`stripe_util.py`), NOT an import
+  of core.py's: core's helpers sit inside the large SQLite trunk, raise `TakyonError`,
+  and call `load_takyon_env()`; importing them would couple the Postgres control plane to
+  that trunk and risk an import cycle. The wire format is byte-for-byte identical.
+- **Rate limiter is one atomic SQL upsert** (fixed window, not a token bucket): the
+  increment-and-return is a single statement, so concurrent requests for one user cannot
+  race past the cap. The window is epoch-aligned in the DATABASE, so every stateless
+  worker agrees on "which window now is" without a shared clock — the reason it must be
+  PG-backed (workers are stateless), exactly as the plan noted (no credential needed).
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/stripe_util.py` — `stripe_request` (form-encoded REST
+  POST, drops None params, `Bearer` auth, raises `StripeError` if `STRIPE_SECRET_KEY`
+  absent — never fakes), `verify_stripe_signature` (`t=…,v1=…` HMAC-SHA256 over
+  `"{ts}.{body}"`, 300s tolerance, `hmac.compare_digest`), `build_signature_header`
+  (test/local signing only). Pure stdlib; reads config from `os.environ` like custody.py.
+- `hermes-agent-main/plugins/takyon/rate_limit.py` — `RateLimitResult` dataclass +
+  `check_rate_limit(conn, user_id, *, limit, window_seconds)` (atomic upsert-increment,
+  429-shaped result with `retry_after_seconds`) + `prune_rate_limits(conn, *,
+  older_than_seconds)`. Pure (no psycopg import), opens its own `conn.transaction()`.
+- `hermes-agent-main/plugins/takyon/db/migrations/0003_rate_limits.sql` — `api_rate_limits`
+  table (PK `(user_id, window_start)` → that key is both the lock and the dedupe;
+  FK→users on delete cascade; index on `window_start` for prune). Net-new, so plain
+  create-if-not-exists — but carries the same fail-loud REPLACE guard pattern as 0001/0002
+  (fires only if a non-takyon `api_rate_limits` lacking `window_start` is ever present).
+- `hermes-agent-main/tests/plugins/test_takyon_stripe_util.py` — **13** hermetic unit tests
+  (no network/psycopg/live keys; signature tests round-trip via `build_signature_header`).
+- `hermes-agent-main/tests/plugins/test_takyon_rate_limit_pg.py` — **7** PG integration tests
+  (first request allowed; allows up to limit then blocks; users independent; an old window's
+  count never bleeds into the current one; window rolls over with wall-clock time; rejects
+  non-positive limit/window; prune removes only expired windows).
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/control_api.py` — added the `TopupCheckoutRequest`
+  model and the two billing endpoints; added `_positive_int_env`, `_rate_limit_config`
+  (env `TAKYON_CONTROL_RATE_LIMIT` default 120, `TAKYON_CONTROL_RATE_WINDOW_SECONDS`
+  default 60 — non-secret config with safe defaults), and a `_rate_limited_principal`
+  dependency (429 + `Retry-After` over the cap) now applied to `/me`, `/businesses`,
+  `/businesses/{slug}`, and the topup checkout. The webhook is deliberately EXEMPT
+  (signature-authenticated, no bearer principal, Stripe retries must not be throttled).
+- `hermes-agent-main/tests/plugins/test_takyon_control_api_pg.py` — added the flow-A topup
+  tests (checkout requires bearer / rejects non-positive amount / blocked-without-key 503 /
+  returns url + tags user; webhook blocked-without-secret 503 / bad-signature 400 / credits
+  + idempotent replay / ignores non-topup / ignores unpaid) and 2 rate-limit tests
+  (429 after cap with Retry-After; limit is per-user). Now **21** tests in this file.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`,
+via `scripts/run_tests.sh` (`-n 4`, hermetic): the three Phase-3 suites together →
+**41 passed** (13 stripe_util + 21 control_api + 7 rate_limit). Full `tests/plugins/` →
+**920 passed, 3 failed** — all 3 are **confirmed pre-existing change-detectors** untouched by
+this work: `test_business_work_focus_…` (path drift), web-search registry (expects 7 providers,
+`xai` makes 8), and `test_bundled_takyon_skills_exist` (hardcoded skill-set assertion that omits
+the already-present `takyon-meta-ads` skill). None touch the control plane, ledgers, migrations,
+or PG fixtures; my additions are confined to `plugins/takyon/{stripe_util,rate_limit,control_api}`
+and `tests/plugins/`.
+
+**Not done / honest state:**
+- The Control API router is still **NOT mounted** into the live dashboard app — `get_control_conn`
+  is an unconfigured dependency seam the host overrides (tests override it with the throwaway-DB
+  `pg_conn`). Mounting it is a separate, deliberate step.
+- The webhook handler is `async` but calls the synchronous psycopg `billing.topup` inline.
+  This is fine pre-mount; the **production connection-execution strategy** (sync-in-threadpool
+  vs. an async pool) is **deliberately deferred** until the router is mounted and the prod
+  connection provider is chosen.
+- **`STRIPE_BILLING_WEBHOOK_SECRET` is still required for LIVE topup crediting** and remains
+  unprovisioned (operator action — recorded in `mediationplan.md` Gate 2). Absent → the webhook
+  returns 503 `billing_webhook_unconfigured` (Stripe retries); a missing `STRIPE_SECRET_KEY` →
+  checkout returns 503 `topup_unconfigured`. Neither path ever fakes a credit or a URL
+  (invariant #8). The rate-limit knobs are non-secret env config with safe defaults — no new
+  credential.
+
+**Revert:**
+```sh
+git checkout -- hermes-agent-main/plugins/takyon/control_api.py          # back to read-path only
+git checkout -- hermes-agent-main/tests/plugins/test_takyon_control_api_pg.py
+rm hermes-agent-main/plugins/takyon/stripe_util.py
+rm hermes-agent-main/plugins/takyon/rate_limit.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0003_rate_limits.sql
+rm hermes-agent-main/tests/plugins/test_takyon_stripe_util.py
+rm hermes-agent-main/tests/plugins/test_takyon_rate_limit_pg.py
+```

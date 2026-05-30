@@ -10,6 +10,7 @@ importable and TAKYON_TEST_PG_DSN is set.
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -20,11 +21,13 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from plugins.takyon import billing, stripe_util  # noqa: E402
 from plugins.takyon.control_api import build_control_router, get_control_conn  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     provision_user_on_first_login,
     resolve_api_key,
 )
+from plugins.takyon.stripe_util import build_signature_header  # noqa: E402
 
 
 def _sub() -> str:
@@ -38,6 +41,37 @@ def _add_business(conn, owner_id, name="Acme") -> str:
         (slug, name, owner_id),
     )
     return slug
+
+
+def _topup_event(
+    user_id, *, amount=2000, event_id=None, purpose="takyon_topup", payment_status="paid"
+) -> dict:
+    """A Stripe checkout.session.completed shaped exactly like what the topup checkout
+    session produces — client_reference_id + metadata.purpose are how the webhook maps the
+    payment back to the user."""
+    return {
+        "id": event_id or f"evt_{uuid.uuid4().hex}",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": f"cs_{uuid.uuid4().hex}",
+                "client_reference_id": user_id,
+                "amount_total": amount,
+                "payment_status": payment_status,
+                "metadata": {"purpose": purpose, "user_id": user_id},
+            }
+        },
+    }
+
+
+def _post_webhook(client, event: dict, secret: str):
+    """POST a locally-signed event to the topup webhook (no Stripe, no network)."""
+    body = json.dumps(event)
+    return client.post(
+        "/v1/billing/webhook",
+        content=body,
+        headers={"stripe-signature": build_signature_header(body, secret)},
+    )
 
 
 @pytest.fixture
@@ -152,3 +186,157 @@ def test_read_path_runs_resolver_and_stamps_last_used(client, pg_conn):
         "select last_used_at from user_api_keys where user_id = %s", (uid,)
     ).fetchone()[0]
     assert after is not None
+
+
+# --- Phase 3: flow-A topup checkout + webhook -------------------------------------
+
+def test_topup_checkout_requires_bearer(client):
+    # Valid body, no auth -> the boundary refuses before any Stripe work.
+    resp = client.post(
+        "/v1/billing/topup/checkout",
+        json={"amount_cents": 1000, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
+    )
+    assert resp.status_code == 401
+
+
+def test_topup_checkout_rejects_nonpositive_amount(client, pg_conn):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    resp = client.post(
+        "/v1/billing/topup/checkout",
+        headers=_auth(raw),
+        json={"amount_cents": 0, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
+    )
+    assert resp.status_code == 422  # pydantic gt=0
+
+
+def test_topup_checkout_blocked_without_stripe_key(client, pg_conn, monkeypatch):
+    # Missing STRIPE_SECRET_KEY must block (503) with a reason, never fake a URL.
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    resp = client.post(
+        "/v1/billing/topup/checkout",
+        headers=_auth(raw),
+        json={"amount_cents": 1000, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "topup_unconfigured"
+
+
+def test_topup_checkout_returns_url_and_tags_user(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    captured: dict = {}
+
+    def _fake_request(path, params):
+        captured["path"] = path
+        captured["params"] = params
+        return {"id": "cs_test_1", "url": "https://checkout.stripe.com/c/cs_test_1"}
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        "/v1/billing/topup/checkout",
+        headers=_auth(raw),
+        json={
+            "amount_cents": 2500,
+            "success_url": "https://app.example.com/ok",
+            "cancel_url": "https://app.example.com/no",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["checkout_url"] == "https://checkout.stripe.com/c/cs_test_1"
+    assert body["amount_cents"] == 2500
+    # The session is tagged so the webhook can credit the right user, once.
+    assert captured["path"] == "checkout/sessions"
+    p = captured["params"]
+    assert p["client_reference_id"] == uid
+    assert p["metadata[purpose]"] == "takyon_topup"
+    assert p["metadata[user_id]"] == uid
+    assert p["line_items[0][price_data][unit_amount]"] == 2500
+    assert p["success_url"] == "https://app.example.com/ok"
+
+
+def test_billing_webhook_blocked_without_secret(client, monkeypatch):
+    monkeypatch.delenv("STRIPE_BILLING_WEBHOOK_SECRET", raising=False)
+    resp = client.post(
+        "/v1/billing/webhook", content="{}", headers={"stripe-signature": "t=1,v1=deadbeef"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "billing_webhook_unconfigured"
+
+
+def test_billing_webhook_rejects_bad_signature(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    body = json.dumps(_topup_event("u-irrelevant"))
+    # signed with the WRONG secret -> verification fails -> 400 (Stripe won't retry)
+    bad = build_signature_header(body, "whsec_wrong")
+    resp = client.post(
+        "/v1/billing/webhook", content=body, headers={"stripe-signature": bad}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_signature"
+
+
+def test_billing_webhook_credits_user_and_is_idempotent(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    event = _topup_event(uid, amount=2000)
+
+    resp = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["credited_cents"] == 2000
+    assert body["topup_balance_cents"] == 2000
+    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+
+    # Replay the SAME Stripe event id -> credited exactly once (idempotent).
+    resp2 = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp2.status_code == 200
+    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+
+
+def test_billing_webhook_ignores_non_topup(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    resp = _post_webhook(client, _topup_event(uid, purpose="product_subscription"), "whsec_test_xyz")
+    assert resp.status_code == 200
+    assert resp.json()["ignored"] == "not_a_topup"
+    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 0
+
+
+def test_billing_webhook_ignores_unpaid(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    resp = _post_webhook(client, _topup_event(uid, payment_status="unpaid"), "whsec_test_xyz")
+    assert resp.status_code == 200
+    assert resp.json()["ignored"] == "unpaid"
+    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 0
+
+
+# --- Phase 3: per-user rate limiting on the authenticated boundary ----------------
+
+def test_authenticated_endpoint_rate_limited_after_cap(client, pg_conn, monkeypatch):
+    # Drive the cap low via env so a few real requests cross it. The first `limit`
+    # requests pass; the next is refused with 429 + a Retry-After hint. window=60s keeps
+    # all calls in one window.
+    monkeypatch.setenv("TAKYON_CONTROL_RATE_LIMIT", "2")
+    monkeypatch.setenv("TAKYON_CONTROL_RATE_WINDOW_SECONDS", "60")
+    _, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    assert client.get("/v1/me", headers=_auth(raw)).status_code == 200
+    assert client.get("/v1/me", headers=_auth(raw)).status_code == 200
+    resp = client.get("/v1/me", headers=_auth(raw))
+    assert resp.status_code == 429
+    assert resp.json()["detail"] == "rate_limited"
+    assert int(resp.headers["Retry-After"]) >= 1
+
+
+def test_rate_limit_is_per_user(client, pg_conn, monkeypatch):
+    # One user hitting the cap must not lock out a different key-holder.
+    monkeypatch.setenv("TAKYON_CONTROL_RATE_LIMIT", "1")
+    monkeypatch.setenv("TAKYON_CONTROL_RATE_WINDOW_SECONDS", "60")
+    _, _, raw_a = provision_user_on_first_login(pg_conn, _sub())
+    _, _, raw_b = provision_user_on_first_login(pg_conn, _sub())
+    assert client.get("/v1/me", headers=_auth(raw_a)).status_code == 200
+    assert client.get("/v1/me", headers=_auth(raw_a)).status_code == 429
+    # user b still has a full allowance
+    assert client.get("/v1/me", headers=_auth(raw_b)).status_code == 200

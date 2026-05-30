@@ -15,14 +15,30 @@ SQLite dashboard runtime.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, Field
 
+from . import billing, rate_limit, stripe_util
 from .control_plane import ResolvedPrincipal, resolve_api_key
 
 _BEARER_PREFIX = "Bearer "
 _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
+
+
+class TopupCheckoutRequest(BaseModel):
+    """Body for POST /v1/billing/topup/checkout. `amount_cents` is exact money the user
+    pays in (flow A — topups ARE money, unlike allowance). success_url/cancel_url are
+    where Stripe returns the user after hosted checkout; the caller supplies them, mirroring
+    the product-checkout convention, so the server never invents or open-redirects to a
+    target it picked."""
+
+    amount_cents: int = Field(..., gt=0)
+    success_url: str = Field(..., min_length=1)
+    cancel_url: str = Field(..., min_length=1)
 
 
 def get_control_conn():
@@ -56,6 +72,52 @@ def _resolve_principal(
     return principal
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive-int knob from the environment, falling back to `default` when
+    unset, empty, non-integer, or non-positive. Config (not a secret), so it is read
+    straight from os.environ like the rest of the control plane."""
+    raw = os.environ.get(name)
+    if not raw or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _rate_limit_config() -> tuple[int, int]:
+    """Per-user control-plane rate limit: (max requests, window seconds). Defaults to
+    120 requests / 60s; override via TAKYON_CONTROL_RATE_LIMIT and
+    TAKYON_CONTROL_RATE_WINDOW_SECONDS."""
+    return (
+        _positive_int_env("TAKYON_CONTROL_RATE_LIMIT", 120),
+        _positive_int_env("TAKYON_CONTROL_RATE_WINDOW_SECONDS", 60),
+    )
+
+
+def _rate_limited_principal(
+    principal: ResolvedPrincipal = Depends(_resolve_principal),
+    conn=Depends(get_control_conn),
+) -> ResolvedPrincipal:
+    """Resolve the bearer principal, then count this request against the caller's own
+    fixed window. Over the cap → 429 with a Retry-After hint. Applied to the
+    authenticated read/checkout endpoints; the Stripe webhook is deliberately exempt
+    (it is signature-authenticated, carries no bearer principal, and Stripe's retries
+    must not be throttled)."""
+    limit, window_seconds = _rate_limit_config()
+    result = rate_limit.check_rate_limit(
+        conn, principal.user_id, limit=limit, window_seconds=window_seconds
+    )
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="rate_limited",
+            headers={"Retry-After": str(max(1, result.retry_after_seconds))},
+        )
+    return principal
+
+
 def build_control_router() -> APIRouter:
     """Build the `/v1` Control API router. Call `app.include_router(...)` on it and
     override `get_control_conn` to supply connections."""
@@ -63,7 +125,7 @@ def build_control_router() -> APIRouter:
 
     @router.get("/me")
     def get_me(
-        principal: ResolvedPrincipal = Depends(_resolve_principal),
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
     ) -> dict[str, Any]:
         # Identity projection only. Topup balance (money) + allowance (opaque
         # "included usage") join here once the billing/custody ledgers exist; we do
@@ -72,7 +134,7 @@ def build_control_router() -> APIRouter:
 
     @router.get("/businesses")
     def list_businesses(
-        principal: ResolvedPrincipal = Depends(_resolve_principal),
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
         conn=Depends(get_control_conn),
     ) -> dict[str, Any]:
         rows = conn.execute(
@@ -87,7 +149,7 @@ def build_control_router() -> APIRouter:
     @router.get("/businesses/{slug}")
     def get_business(
         slug: str,
-        principal: ResolvedPrincipal = Depends(_resolve_principal),
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
         conn=Depends(get_control_conn),
     ) -> dict[str, Any]:
         # Consult ONLY the caller's owned set. A slug the caller doesn't own returns
@@ -102,5 +164,84 @@ def build_control_router() -> APIRouter:
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
         return {"slug": row[0], "name": row[1], "mode": row[2]}
+
+    @router.post("/billing/topup/checkout")
+    def create_topup_checkout(
+        body: TopupCheckoutRequest,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+    ) -> dict[str, Any]:
+        """Create a Stripe Checkout session that tops up the CALLER's own balance (flow A).
+        client_reference_id + metadata.purpose=takyon_topup let the billing webhook credit
+        the right user exactly once when payment completes. Requires STRIPE_SECRET_KEY; if
+        it is absent the call is blocked (503) with a reason — never a faked URL."""
+        params = {
+            "mode": "payment",
+            "client_reference_id": principal.user_id,
+            "success_url": body.success_url,
+            "cancel_url": body.cancel_url,
+            "line_items[0][quantity]": 1,
+            "line_items[0][price_data][currency]": "usd",
+            "line_items[0][price_data][unit_amount]": body.amount_cents,
+            "line_items[0][price_data][product_data][name]": "Takyon balance top-up",
+            "metadata[purpose]": "takyon_topup",
+            "metadata[user_id]": principal.user_id,
+            "payment_intent_data[metadata][purpose]": "takyon_topup",
+            "payment_intent_data[metadata][user_id]": principal.user_id,
+        }
+        try:
+            session = stripe_util.stripe_request("checkout/sessions", params)
+        except stripe_util.StripeError as exc:
+            msg = str(exc)
+            if "STRIPE_SECRET_KEY" in msg:
+                raise HTTPException(status_code=503, detail="topup_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
+        return {
+            "checkout_url": session.get("url"),
+            "session_id": session.get("id"),
+            "amount_cents": body.amount_cents,
+        }
+
+    @router.post("/billing/webhook")
+    async def billing_webhook(
+        request: Request,
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        """Dedicated control-plane webhook for flow-A topups — SEPARATE from the product
+        (flow B) webhook so it carries its OWN signing secret. Verifies the raw body with
+        STRIPE_BILLING_WEBHOOK_SECRET; if that secret is absent the event is NOT trusted and
+        we return 503 so Stripe retries — crediting is never faked around a missing
+        credential. A paid checkout.session.completed bearing metadata.purpose=takyon_topup
+        credits the user once, idempotent on the Stripe event id."""
+        secret = os.environ.get("STRIPE_BILLING_WEBHOOK_SECRET")
+        if not secret:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
+        raw = (await request.body()).decode("utf-8")
+        signature = request.headers.get("stripe-signature", "")
+        try:
+            stripe_util.verify_stripe_signature(raw, signature, secret)
+        except stripe_util.StripeError:
+            raise HTTPException(status_code=400, detail="invalid_signature")
+        event = json.loads(raw)
+        event_id = str(event.get("id") or "")
+        event_type = str(event.get("type") or "")
+        if event_type != "checkout.session.completed":
+            return {"ok": True, "ignored": event_type or "unknown_event"}
+        session = (event.get("data") or {}).get("object") or {}
+        metadata = session.get("metadata") or {}
+        if metadata.get("purpose") != "takyon_topup":
+            return {"ok": True, "ignored": "not_a_topup"}
+        if session.get("payment_status") not in ("paid", "no_payment_required"):
+            return {"ok": True, "ignored": "unpaid"}
+        user_id = session.get("client_reference_id") or metadata.get("user_id")
+        amount = int(session.get("amount_total") or 0)
+        if not user_id or amount <= 0 or not event_id:
+            return {"ok": True, "ignored": "incomplete_session"}
+        new_balance = billing.topup(conn, user_id, amount, idempotency_key=event_id)
+        return {
+            "ok": True,
+            "credited_cents": amount,
+            "topup_balance_cents": new_balance,
+            "event_id": event_id,
+        }
 
     return router
