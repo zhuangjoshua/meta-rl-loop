@@ -85,7 +85,7 @@ def _anthropic_model(body: dict) -> str:
         body.get("model")
         or _env("TAKYON_APP_ANTHROPIC_MODEL")
         or _env("ANTHROPIC_MODEL")
-        or "claude-haiku-4.5"
+        or "claude-sonnet-4-6"
     ).strip()
 
 
