@@ -563,3 +563,109 @@ rm hermes-agent-main/plugins/takyon/db/migrations/0003_rate_limits.sql
 rm hermes-agent-main/tests/plugins/test_takyon_stripe_util.py
 rm hermes-agent-main/tests/plugins/test_takyon_rate_limit_pg.py
 ```
+
+## Increment — Phase 4: Execution-policy engine (route the CEO's own compute under flow-A budget pressure)
+
+**Date:** 2026-05-30
+
+**What:** Built the Phase-4 execution-policy engine: a per-business `app_execution_policies`
+table plus a pure leaf module `policy.py` whose `decide_execution(...)` recommends how a
+unit of the CEO's *own* work should run — **inline**, downgraded to a **cheaper** model
+tier, pushed to a background **job**, or **blocked** with a precise reason — from the
+business's routing knobs, the owner's flow-A balances, and a caller-supplied cost estimate.
+
+**Why:** The plan's Phase-4 acceptance is that features *degrade gracefully under budget
+pressure instead of hard-failing* (mediationplan.md line 226). The two ledgers (Phase 2)
+can already say "no money" by raising; Phase 4 adds the judgment *above* that gate — pick a
+cheaper tier, defer to a job, or block cleanly — so a budget-constrained business keeps
+running at reduced capability rather than erroring out.
+
+**Gate-1 finding (extend / replace / isolate → ISOLATE, net-new):** the SQLite trunk
+already has a per-business budget (`app_budgets` core.py:3026 + `app_plan_policies`
+core.py:3036, enforced in the product `/generate` path app_api.py:379). **That is the
+PRODUCT / sub-user budget — how much a business spends serving ITS customers, in
+microUSD.** Phase-4's `app_execution_policies` governs a *different* thing: the per-business
+ROUTING knobs for the CEO's own compute against the USER's flow-A budget (cents), plus an
+OPTIONAL monthly sub-cap. So it is **ADD-on-top, not a replacement** — `app_budgets` is
+ported as-is in Phase 5. New table + new module, distinct from both the ledgers and the
+product budget. Full finding recorded in mediationplan.md ("Phase 4 gate finding").
+
+**Gate-2 finding (credentials):** none. The engine moves no money and calls no provider.
+One OPTIONAL non-secret tuning knob `TAKYON_EXECUTION_EXPENSIVE_THRESHOLD_CENTS` (default
+100 = $1.00, clamps to ≥ 0). Recorded in mediationplan.md Gate 2.
+
+**Decisions:**
+- **ADVISORY, not a second money gate.** `decide_execution` only *reads* — it never reserves
+  or settles. `billing.reserve` (the FOR UPDATE row lock) stays the one atomic money gate.
+  A decision moving no money is an explicit, test-proven invariant
+  (`test_decision_moves_no_money_and_inserts_no_policy`). This avoids a parallel spend path.
+- **Owner resolved from the business, not passed in.** `decide_execution` looks up
+  `businesses.owner_user_id` from `business_slug` (single source of truth) so a caller can't
+  pass a user/business mismatch; an unknown business raises `NoBusiness` rather than guessing.
+- **Per-business monthly sub-cap nets via the reservation_key set, NOT a business_slug filter.**
+  billing's `settle`/`refund` write entries with `business_slug=NULL` (only `reserve` is
+  tagged), so `Σreserve − Σrefund WHERE business_slug=X` would *miss every refund* and
+  overcount. `_business_period_spend_cents` instead sums `Σreserve − Σrefund` over the set of
+  reservation_keys the business reserved this period → outstanding holds + settled actuals.
+  Pinned by three tests (cap-exhaust, refund-restores-headroom, settled-actual-counts).
+- **Inline-vs-job is tier-independent.** The runtime/output ceilings describe the *work*, so
+  the inline→job→blocked check applies to whichever tier was chosen (requested or a
+  downgrade); `detail['downgraded']` records the downgrade either way.
+- **Absent policy row → conservative documented defaults, never an auto-insert** (reading a
+  policy is a pure read); defaults mirror the DDL exactly.
+- **Bad inputs / broken preconditions raise; only budget/policy outcomes are decisions.**
+  Negative estimate, unknown business, or missing billing account raise — they are NOT
+  laundered into a budget `blocked` (which would mask a provisioning bug as "out of money").
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0004_execution_policies.sql` —
+  `app_execution_policies` (PK `business_slug` → FK businesses on delete cascade; CHECKs keep a
+  misconfigured row from inverting a decision; `monthly_app_budget_cents` nullable = no sub-cap).
+  Net-new, plain create-if-not-exists, carrying the same fail-loud REPLACE guard as 0001–0003
+  (fires only if a non-takyon `app_execution_policies` lacking `preferred_model_tier` exists).
+- `hermes-agent-main/plugins/takyon/policy.py` — pure leaf (takes a psycopg conn, imports no
+  psycopg, reads config from `os.environ`; imports `billing` for balance reads only → no cycle):
+  `ExecutionPolicy`/`PolicyDecision` dataclasses; `get_execution_policy` (defaults on miss, no
+  insert); `upsert_execution_policy` (read-merge-write under a row lock, preserves unspecified
+  fields, FK makes an unknown business fail loud); `decide_execution` (the four-outcome engine);
+  `expensive_threshold_cents` (env knob, clamps like custody's `app_fee_bps`);
+  `_business_period_spend_cents` (the reservation_key netting).
+- `hermes-agent-main/tests/plugins/test_takyon_policy_pg.py` — **19** tests: env-knob clamp/default;
+  policy storage (defaults-without-insert, partial-update preservation, unknown-field + bad-value
+  rejection, unknown-business FK fail-loud); all four outcomes (inline, cheaper-downgrade-to-closest
+  -affordable, job-on-runtime-overflow, blocked-insufficient); escalation-disabled → blocked;
+  expensive-branch-disallowed → blocked; zero-estimate always inline; per-business cap blocks before
+  flow-A; refund restores cap headroom; settled actual (not the reservation) counts toward the cap;
+  unknown-business + negative-estimate raise; advisory no-write invariant.
+
+**Files changed:** none — purely additive (new migration + new module + new test file). No
+existing source touched, so nothing in Phases 1–3 can regress from this increment.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`,
+via `scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-4 suite → **19 passed**. Full
+`tests/plugins/` → **945 passed, 2 failed** — both failures are **confirmed pre-existing
+change-detectors**, a subset of the three the Phase-3 increment already documented:
+`test_business_work_focus_…` (in `test_takyon_plugin.py`, which carries unrelated uncommitted
+edits) and the web-search registry test (expects 7 providers; `xai`, committed in `63cd4b5`,
+makes 8). The third Phase-3 failure (the skill-set assertion) now passes. Neither failure
+imports `policy.py` or touches the PG migrations; my additions are confined to the three new
+files above.
+
+**Not done / honest state:**
+- The engine is **NOT mounted / not called by anything live.** It is a standalone module like
+  billing/custody/rate_limit. The actual call site — the internal **AI gateway** that resolves
+  business → policy → `reserve` → `settle` (mediationplan.md line 116) — is **Phase 5** work.
+- The **'job' outcome only recommends deferral**; there is no queue yet. The worker plane that
+  drains jobs is **Phase 6**; until then a 'job' decision is advice the (future) caller acts on.
+- `decide_execution` reads balances + period spend in separate statements (no enclosing
+  transaction) — fine because it is advisory and `reserve` re-checks atomically; if a future
+  caller needs a consistent snapshot it can wrap the call, but the money truth is always `reserve`.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/policy.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0004_execution_policies.sql
+rm hermes-agent-main/tests/plugins/test_takyon_policy_pg.py
+# and revert the two mediationplan.md additions (Phase 4 Gate-2 entry + "Phase 4 gate finding"
+#   paragraph); this log entry is additive — trim it back to the Phase-3 increment if reverting.
+```
