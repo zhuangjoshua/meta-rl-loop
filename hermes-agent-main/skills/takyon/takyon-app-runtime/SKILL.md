@@ -43,7 +43,7 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 
 - Primary root: `product/`
 - Publication paths: `product/runtime.md`, `product/plans.md`, `product/customers.md`, `product/billing.md`, `product/usage.md`
-- Best call points: auth, billing, entitlements, checkout, usage wiring
+- Best call points: auth, billing, entitlements, checkout, usage wiring, AI generation gateway
 - Publication location: `product/runtime.md`, `product/plans.md`, `product/customers.md`, `product/billing.md`, `product/usage.md`
 - Tool names used by this skill: `business_read_business`, `business_read_file`, `business_upsert_app_surface_contract`, `business_configure_app_budget`, `business_upsert_app_plan`, `business_upsert_app_customer`, `business_grant_app_entitlement`, `business_request_app_magic_link`, `business_verify_app_magic_link`, `business_read_app_account`, `business_create_app_checkout`, `business_record_stripe_webhook`, `business_record_app_usage`, `business_write_file`, `business_patch_file`
 
@@ -72,6 +72,7 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 - Use `business_upsert_app_customer`, `business_grant_app_entitlement`, `business_request_app_magic_link`, `business_verify_app_magic_link`, and `business_read_app_account` for customer, session, and entitlement flows.
 - Use `business_create_app_checkout` and `business_record_stripe_webhook` for paid checkout and reconciliation.
 - Use `business_record_app_usage` for real usage metering.
+- For product AI generation, the generated app calls the shared Takyon AI gateway (`POST /internal/ai-gateway/messages`) authenticated by the business `tkg_` gateway key — never the platform provider key. The gateway meters spend against the same budget set by `business_configure_app_budget`. Select it by including `generate` in the surface contract `runtime_features`.
 - After tool-backed changes, mirror the truth into the canonical `product/` files with `business_write_file` or `business_patch_file`.
 
 ## Procedure
@@ -83,7 +84,7 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 5. For plan and budget work, call `business_configure_app_budget` and `business_upsert_app_plan` before editing any mirror files. Expect those tools to define the real limits and pricing state.
 6. For customer and auth work, use `business_upsert_app_customer`, `business_grant_app_entitlement`, `business_request_app_magic_link`, `business_verify_app_magic_link`, and `business_read_app_account` in the order needed by the flow. If a provider or credential is missing, keep the blocker visible instead of faking a session.
 7. For paid flows, call `business_create_app_checkout` to create the checkout intent and `business_record_stripe_webhook` when real Stripe events arrive. Do not claim paid entitlement or revenue until webhook reconciliation has happened.
-8. For usage metering, call `business_record_app_usage` and reflect the resulting truth in `product/usage.md` and `product/billing.md`.
+8. For usage metering, call `business_record_app_usage` and reflect the resulting truth in `product/usage.md` and `product/billing.md`. Product AI generation is metered the same way: the generated app calls the shared Takyon AI gateway (`POST /internal/ai-gateway/messages`) with the business `tkg_` gateway key, and the gateway reserves then settles against the budget set by `business_configure_app_budget`. Surface its `402` (over budget) and `503` (generation not configured) honestly, and never embed the platform provider key in the app.
 9. After real tool-backed changes, write or patch `product/runtime.md`, `product/plans.md`, `product/customers.md`, `product/billing.md`, and `product/usage.md` so they mirror actual runtime state and blockers.
 10. If a feature is blocked by credentials, providers, or missing runtime setup, leave that path explicitly blocked in the publication files instead of inventing success.
 
@@ -103,6 +104,7 @@ Use this skill when the business app needs real customer auth, sessions, plans, 
 - Letting UI claims run ahead of actual runtime wiring
 - Mixing top-level Takyon users with product customers
 - Recording aspirational provider state as if it already exists
+- Embedding the platform provider key in the generated app instead of using the business `tkg_` gateway key
 
 ## Verification Checklist
 

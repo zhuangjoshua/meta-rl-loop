@@ -166,8 +166,10 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "tools": [],
         "endpoints": [("POST", "generate")],
         "worker_contract": [
-            "AI actions should proxy the shared Takyon runtime generate route.",
-            "If generation is not wired yet, keep the action visible but clearly blocked.",
+            "AI generation goes through the shared Takyon AI gateway: POST /internal/ai-gateway/messages on the runtime host, body {messages|prompt, model?, system?, max_tokens?, temperature?}.",
+            "Authenticate with the business's own tkg_ gateway key via `Authorization: Bearer tkg_...`. The generated app holds ONLY that gateway key, never the platform provider key (e.g. ANTHROPIC_API_KEY) — the gateway calls the shared provider key server-side and never returns it.",
+            "The gateway meters each call against the business product budget: treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as generation-not-configured (keep the action visible but clearly blocked; never fake a completion).",
+            "Use the returned {text, content, model, usage} as the only source of truth for output and spend; do not invent token counts or cost.",
         ],
     },
 }

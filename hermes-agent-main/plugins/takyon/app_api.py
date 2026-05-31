@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
-import urllib.error
-import urllib.request
-from decimal import Decimal, ROUND_CEILING
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+# Provider call + cost logic now lives in the shared ai_provider leaf (one implementation for both
+# this SQLite route and the Postgres AI gateway). Bound to the original private names so this
+# module's body — and its test — are unchanged.
+from .ai_provider import (
+    anthropic_key as _anthropic_key,
+    anthropic_payload as _anthropic_payload,
+    anthropic_rates_microusd_per_token as _anthropic_rates_microusd_per_token,
+    anthropic_text as _anthropic_text,
+    call_anthropic as _call_anthropic,
+    microusd_cost as _microusd_cost,
+)
 from .core import (
     TakyonStore,
     handle_business_create_app_checkout,
@@ -26,8 +33,6 @@ from .core import (
 
 
 SESSION_COOKIE = "takyon_app_session"
-ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_VERSION = "2023-06-01"
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -59,120 +64,6 @@ def _tool(raw: str) -> tuple[int, dict]:
     return HTTPStatus.OK, payload
 
 
-def _env(name: str, default: str = "") -> str:
-    return str(os.getenv(name) or default).strip()
-
-
-def _anthropic_key() -> str:
-    try:
-        from takyon_cli.auth import get_anthropic_key
-
-        return str(get_anthropic_key() or "").strip()
-    except Exception:
-        return _env("ANTHROPIC_API_KEY") or _env("ANTHROPIC_TOKEN")
-
-
-def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(float(value))
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
-def _anthropic_model(body: dict) -> str:
-    return str(
-        body.get("model")
-        or _env("TAKYON_APP_ANTHROPIC_MODEL")
-        or _env("ANTHROPIC_MODEL")
-        or "claude-sonnet-4-6"
-    ).strip()
-
-
-def _anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, str]:
-    input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
-    output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
-    if input_override or output_override:
-        return (
-            Decimal(input_override or "3"),
-            Decimal(output_override or "15"),
-            "env",
-        )
-
-    lowered = model.lower()
-    if "opus" in lowered:
-        return Decimal("15"), Decimal("75"), "default-opus-estimate"
-    if "haiku" in lowered:
-        return Decimal("1"), Decimal("5"), "default-haiku-estimate"
-    return Decimal("3"), Decimal("15"), "default-sonnet-estimate"
-
-
-def _microusd_cost(model: str, input_tokens: int, output_tokens: int) -> int:
-    input_rate, output_rate, _source = _anthropic_rates_microusd_per_token(model)
-    total = input_rate * Decimal(max(0, input_tokens)) + output_rate * Decimal(max(0, output_tokens))
-    return int(total.to_integral_value(rounding=ROUND_CEILING))
-
-
-def _estimate_input_tokens(messages: list[dict], system: str) -> int:
-    text_parts = [system]
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str):
-            text_parts.append(content)
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(str(item.get("text") or ""))
-    return max(1, sum(len(part) for part in text_parts) // 4)
-
-
-def _anthropic_payload(body: dict) -> tuple[dict, str, int]:
-    model = _anthropic_model(body)
-    max_tokens = _bounded_int(
-        body.get("max_tokens") or body.get("maxTokens"),
-        default=1024,
-        minimum=1,
-        maximum=_bounded_int(_env("TAKYON_APP_ANTHROPIC_MAX_TOKENS", "4096"), default=4096, minimum=1, maximum=200_000),
-    )
-    raw_messages = body.get("messages")
-    messages: list[dict] = []
-    if isinstance(raw_messages, list):
-        for item in raw_messages:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip()
-            if role not in {"user", "assistant"}:
-                role = "user"
-            content = item.get("content")
-            if isinstance(content, str):
-                messages.append({"role": role, "content": content})
-            elif isinstance(content, list):
-                text_items = [
-                    {"type": "text", "text": str(part.get("text") or "")}
-                    for part in content
-                    if isinstance(part, dict) and str(part.get("text") or "").strip()
-                ]
-                if text_items:
-                    messages.append({"role": role, "content": text_items})
-    if not messages:
-        prompt = str(body.get("prompt") or body.get("input") or "").strip()
-        if not prompt:
-            raise ValueError("prompt or messages is required")
-        messages = [{"role": "user", "content": prompt}]
-
-    system = str(body.get("system") or "").strip()
-    payload: dict = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-    }
-    if system:
-        payload["system"] = system
-    if body.get("temperature") is not None:
-        payload["temperature"] = max(0.0, min(1.0, float(body.get("temperature") or 0)))
-    return payload, model, _estimate_input_tokens(messages, system)
-
-
 def _app_budget_remaining_microusd(business: str) -> dict:
     app = TakyonStore().read(scope=f"business:{business}", query="app", limit=20).get("app") or {}
     budget = app.get("budget") or {}
@@ -187,34 +78,6 @@ def _app_budget_remaining_microusd(business: str) -> dict:
         "used_microusd": used,
         "remaining_microusd": hard_limit - used,
     }
-
-
-def _call_anthropic(payload: dict, api_key: str) -> dict:
-    request = urllib.request.Request(
-        ANTHROPIC_MESSAGES_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "anthropic-version": ANTHROPIC_VERSION,
-            "x-api-key": api_key,
-        },
-        method="POST",
-    )
-    timeout = _bounded_int(_env("TAKYON_APP_ANTHROPIC_TIMEOUT_SECONDS", "60"), default=60, minimum=5, maximum=300)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Anthropic API returned {exc.code}: {body[:500]}") from exc
-
-
-def _anthropic_text(response: dict) -> str:
-    parts: list[str] = []
-    for item in response.get("content") or []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            parts.append(str(item.get("text") or ""))
-    return "\n".join(part for part in parts if part)
 
 
 def _cookie_session(handler: BaseHTTPRequestHandler) -> str:

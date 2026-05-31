@@ -12,15 +12,18 @@ import pytest
 # the tests/plugins suite still collects in environments without psycopg.
 _DSN = os.environ.get("TAKYON_TEST_PG_DSN")
 _DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
-_MIGRATIONS_DIR = _DB_DIR / "migrations"
 # Manual, gated polsia2 teardown — lives OUTSIDE migrations/ so it is never swept.
 RETIRE_POLSIA2_SQL = _DB_DIR / "retire_polsia2_public.sql"
 
 
 def _apply_migrations(conn) -> None:
-    """Apply every db/migrations/*.sql in sorted (0001, 0002, …) order."""
-    for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
-        conn.execute(sql_path.read_text())
+    """Apply every db/migrations/*.sql in order via the canonical production runner, so the test
+    schema and the production schema come from ONE definition (no second, drifting copy) — and the
+    suite validates the real runner for free. Imported lazily (like psycopg below) to keep conftest
+    side-effect-free at collection time."""
+    from plugins.takyon.db.runner import run_migrations
+
+    run_migrations(conn)
 
 
 @contextmanager

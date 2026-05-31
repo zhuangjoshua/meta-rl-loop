@@ -1360,3 +1360,259 @@ rm hermes-agent-main/plugins/takyon/db/migrations/0009_app_gateway_keys.sql
 rm hermes-agent-main/tests/plugins/test_takyon_app_gateway_keys_pg.py
 # this log entry is additive — trim it back to the Phase-5d increment if reverting.
 ```
+
+## Increment — Runtime Cutover connection layer (Phase 0 realized): migration runner + host app that actually serves on real Postgres
+
+**Date:** 2026-05-30
+
+**What:** Built the two modules the routers had deliberately omitted as "a separate, deliberate
+step." (1) The migration runner `plugins/takyon/db/runner.py` — `run_migrations(conn)` applies every
+`db/migrations/*.sql` in lexical (0001…0009) order; idempotent by construction; the SINGLE production
+path that brings a database to current schema. (2) The host app `plugins/takyon/runtime_app.py` —
+`build_runtime_app(database_url?)` opens a per-request autocommit psycopg connection and overrides
+the existing control router's `get_control_conn` seam, so a presented bearer key resolves end-to-end
+through the SAME seam production uses, against real Postgres. Plus the shared provider leaf
+`plugins/takyon/ai_provider.py` (extracted from `app_api.py`) so the SQLite `/generate` route and the
+next-increment Postgres gateway share ONE provider+cost implementation, and `conftest.py` now
+delegates to `run_migrations` so the schema tests run against and the schema production runs against
+come from ONE definition.
+
+**Why (mediationplan Phase 0 — "DB layer: Postgres access layer + migration runner; *Accept:* runtime
+reads/writes Postgres; migrations idempotent"):** Phases 1–5 built the leaves + the routers
+(`control_api.build_control_router()` + a `get_control_conn` seam that "raises until a host overrides
+it"), but nothing ever opened a Postgres connection and served — each router's docstring said
+mounting was a deliberate later step, and this is that step. Separately, migration application existed
+ONLY as a private inline loop inside `tests/plugins/conftest.py` — a second, drift-prone copy of
+"apply the migrations" with no production counterpart.
+
+**Gate-1 finding (inspect-before-build):**
+- *Migration application:* `grep` confirmed the only "apply every `*.sql` in sorted order" lived in
+  `conftest._apply_migrations` (`for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")): conn.execute(…)`)
+  — no production runner existed. *Decision:* **EXTRACT** the canonical `run_migrations` into
+  `db/runner.py` and have conftest **DELEGATE** to it (not a third copy — the fixture now calls the
+  exact code production will), so test/prod schema can never diverge and the suite validates the real
+  runner for free. `migration_files()` is scoped to `migrations/` so the manually-gated
+  `retire_polsia2_public.sql` teardown (kept deliberately OUTSIDE that dir) is never swept in.
+- *Mounting:* the control router already existed and was never mounted. *Decision:* **ADD**
+  `runtime_app.py` as the ONE module that knows the production connection strategy (per-request
+  `psycopg.connect(url, autocommit=True)`), overriding the seam — routers stay strategy-free and
+  identically testable.
+- *Provider call + cost:* lived as private functions inside `app_api.py` (the SQLite surface); the
+  coming gateway needs the same logic. *Decision:* **EXTRACT** to `ai_provider.py` (one
+  implementation) and **REBIND** `app_api`'s private names to it (module body + its existing test
+  unchanged) — not a second copy that can drift. When Phase 8 deletes the SQLite path, the leaf is the
+  survivor.
+
+**Gate-2 finding (credentials/providers):** **none new.** The host reads `DATABASE_URL` /
+`POSTGRES_URL` / `POSTGRES_PRISMA_URL` — already the platform-managed aliases, kept identical to
+`core.py`'s "database" provider aliases on purpose. `ai_provider.anthropic_key()` resolves the
+already-present shared platform Anthropic key (takyon_cli auth helper, then `ANTHROPIC_API_KEY` /
+`ANTHROPIC_TOKEN`). No external account, no operator action. **Invariant #8:** `build_runtime_app()`
+with NO database URL configured raises `RuntimeNotConfigured` **loudly** — never a half-live server
+that 500s every request, never a silent SQLite fallback. The one still-outstanding credential remains
+`STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3), untouched here.
+
+**Decisions (and the deliberate divergences):**
+- **Per-request connection, `autocommit=True`, yield, close.** Read paths need no transaction; each
+  mutating leaf opens its own `with conn.transaction():`. FastAPI caches the dependency per-request
+  (`use_cache`), so the SAME connection is reused across principal-resolution → endpoint within one
+  request, then closed when the request ends. ONE connection factory serves both seams (control now,
+  the gateway next increment) since both want the same per-request connection to the same DB.
+- **`/healthz` is liveness only** — deliberately does NOT touch Postgres; a DB round-trip belongs in a
+  separately-gateable readiness probe, not the hot liveness path.
+- **`run_migrations` is a pure leaf** — takes a `conn`, never opens/closes one; the caller owns the
+  mode. Idempotent (every migration is `create … if not exists` / guarded REPLACE), so it is the
+  intended "bring DB to current" op; a genuinely wrong-shaped pre-existing table makes a guard RAISE
+  loudly (robustness #1) rather than bind silently.
+- **Building/serving this app does NOT retire SQLite.** Flipping the live runtime onto it is the
+  separate, operator-gated Runtime Cutover step.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/__init__.py` — db package marker.
+- `hermes-agent-main/plugins/takyon/db/runner.py` — `run_migrations(conn)` + `migration_files()`; the
+  single idempotent production path to current schema; pure leaf.
+- `hermes-agent-main/plugins/takyon/runtime_app.py` — `build_runtime_app(database_url?)`,
+  `resolve_database_url()`, `RuntimeNotConfigured`; per-request autocommit conn factory; mounts the
+  control router; `/healthz`.
+- `hermes-agent-main/plugins/takyon/ai_provider.py` — Anthropic provider leaf: `anthropic_key` /
+  `anthropic_model` / `anthropic_payload` / `anthropic_text`, `anthropic_rates_microusd_per_token`,
+  `microusd_cost`, `estimate_input_tokens`, `call_anthropic`. One implementation for SQLite + gateway.
+- `hermes-agent-main/tests/plugins/test_takyon_db_runner_pg.py` — **3** tests (empty→current applies
+  the full ordered set incl. 0001 spine + 0009; idempotent re-run; pure path-order check, no DB).
+- `hermes-agent-main/tests/plugins/test_takyon_runtime_app_pg.py` — **6** tests (healthz; `/v1/me` +
+  `/v1/businesses` resolve through the REAL per-request seam on real PG; missing bearer 401; unknown
+  well-formed key 401; build-without-DB → `RuntimeNotConfigured` (invariant #8, runs without a DB)).
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/app_api.py` — replaced the inline Anthropic/cost helpers with
+  imports from `ai_provider` bound to the original private names (`_anthropic_key`,
+  `_anthropic_payload`, `_microusd_cost`, …); module body + existing test unchanged. Net −148/+11
+  (deletion of the now-shared logic).
+- `hermes-agent-main/tests/plugins/conftest.py` — `_apply_migrations` now delegates to
+  `plugins.takyon.db.runner.run_migrations` (one definition, no drifting copy; the suite validates the
+  real runner for free). Imported lazily to keep conftest side-effect-free at collection.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the connection-layer suites (db_runner + runtime_app) →
+**9 passed** (3 + 6). `py_compile` of all four Python files clean. Because conftest now routes through
+`run_migrations`, the ENTIRE existing `tests/plugins/` PG suite already exercises the production
+runner (no separate proof needed). CI (no `TAKYON_TEST_PG_DSN`) SKIPS the PG-gated tests; the one
+no-DB test (`test_build_without_database_url_raises`) runs everywhere.
+
+**Not done / honest state:**
+- **NOT the live runtime.** `build_runtime_app` serves the control router against PG, but the
+  operator-gated Runtime Cutover (flip serving + live Supabase apply) has NOT happened. The live
+  product/CEO paths still run on SQLite.
+- **Only the CONTROL router is mounted here;** the Internal AI Gateway mount is the next increment (it
+  reuses this host + conn factory).
+- **Live Supabase apply remains blocked** on polsia2 teardown + backup + operator go-ahead. The runner
+  has only touched local throwaway test DBs.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/runtime_app.py
+rm hermes-agent-main/plugins/takyon/db/runner.py
+rm hermes-agent-main/plugins/takyon/db/__init__.py
+rm hermes-agent-main/plugins/takyon/ai_provider.py
+rm hermes-agent-main/tests/plugins/test_takyon_db_runner_pg.py
+rm hermes-agent-main/tests/plugins/test_takyon_runtime_app_pg.py
+git checkout -- hermes-agent-main/plugins/takyon/app_api.py    # undo the ai_provider rebind
+git checkout -- hermes-agent-main/tests/plugins/conftest.py    # restore the inline migration loop
+# The AI-gateway increment below depends on ai_provider.py + runtime_app.py — revert THAT one first.
+# this log entry is additive — trim it back to the Phase-5e increment if reverting.
+```
+
+## Increment — Internal AI Gateway mounted (Phase 5 `/internal/ai-gateway/messages`): the broker a generated app spends through without ever holding the provider key
+
+**Date:** 2026-05-30
+
+**What:** Built `plugins/takyon/ai_gateway.py` — the `/internal/ai-gateway` router (POST `/messages`)
+— and mounted it into `runtime_app.py`. A generated app presents its OWN `tkg_` gateway key as
+`Authorization: Bearer`; the gateway resolves it to a `business_slug` (and to **nothing else** —
+never another tenant, never the provider key), meters the spend through THE ONE `app_usage`
+reserve→settle/release gate, and only then calls the SHARED platform provider key server-side via a
+closure seam. The provider key is resolved here and **never appears in any response**. Also registered
+the `generate` rail's concrete wiring in `core.py` `PRODUCT_RUNTIME_RAILS` (its `worker_contract`) and
+reflected it in the `takyon-app-runtime` SKILL.md — so Hermes builds products that correctly connect,
+with **no hidden backend path** the CEO can't see. This is the deferred live mount that Phase 5e's
+"Not done" section explicitly named.
+
+**Why (mediationplan Phase 5 acceptance — "generated app never holds provider key" + Phase 5 / Runtime
+Cutover — "Gateway resolves business → policy → reserves billing → calls the shared provider key →
+settles"):** 5e built the `tkg_` boundary primitive (mint/resolve); 5c built the one usage gate; the
+prior increment extracted the provider leaf. This **composes** them into the actual broker. It is the
+Postgres successor to the SQLite `/generate` route (`app_api.py`).
+
+**Gate-1 finding (inspect-before-build):** the SQLite `/generate` (`app_api.py:395`, calling the
+platform key directly via `_anthropic_key()`) is the predecessor; the gateway-key boundary
+(`app_gateway_keys.resolve_gateway_key`, 5e), the one usage gate (`app_usage.reserve/settle/release`,
+5c), and the provider leaf (`ai_provider.py`, prior increment) all already exist. *Decision:*
+**COMPOSE** them in a new strategy-free router (house style mirrors `control_api.py`: a
+`build_*_router()` factory + `get_gateway_conn` / `get_provider_caller` seams the host overrides) —
+**not** a new gate, **not** a second provider impl. Two deliberate hardenings over the SQLite path:
+(1) spend is gated by the **atomic reserve-under-row-lock**, not the old read-then-act budget mirror
+that N concurrent calls could all slip past; (2) the cost estimate the cap is checked against is
+computed **SERVER-SIDE** from the request payload — a caller can no longer under-declare
+`estimated_cost_microusd` to duck the cap. For the `generate` rail: **UPDATED the existing rail's
+`worker_contract`** in the canonical `PRODUCT_RUNTIME_RAILS` registry rather than adding a parallel
+`ai_gateway` rail (CLAUDE.md: one canonical rail registry; do not create a second per-skill list).
+
+**Gate-2 finding (credentials/providers):** **none new.** The gateway calls the already-present SHARED
+platform Anthropic key, resolved server-side by `ai_provider.anthropic_key()` and bound into a closure
+— never an argument the app supplies, never returned. The app side holds only its internally-minted
+`tkg_` key (5e, no external account). **Invariant #8:** when no provider key is configured
+`get_provider_caller()` returns `None` → the endpoint BLOCKS with **503 `provider_unconfigured`** and
+**nothing reserved**; it never calls keyless and never fabricates a completion. The one outstanding
+credential remains `STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3), untouched.
+
+**Decisions (and the deliberate choices):**
+- **THE gate, once.** `reserve_usage` holds the server-side estimate atomically under the budget row
+  lock (the only refusal points: `AppBudgetInactive` → 402, `AppBudgetExceeded` → 402). A **fresh
+  `uuid4` reservation_key per request** — an internal reserve↔settle correlation id, NOT a client
+  retry key — so there is no replay path that calls the provider twice against one settle.
+- **Failure releases, success settles at TRUE cost.** On ANY provider failure → `release_usage`
+  (recorded `failed`, zero spend, committed drops back to 0) + **502**; on success → `settle_usage` at
+  the true provider cost. Settle never re-checks the cap — the money is already spent and recording
+  truth is mandatory (invariant #8).
+- **Never-leak-key projection.** The response is built ONLY from the provider response + computed costs
+  — exactly `{success, text, content, model, usage}` — so no key, no business slug, no internal id can
+  appear.
+- **Ordering of refusals.** 503 (provider unconfigured) is checked AFTER auth (an unauthenticated
+  caller can't probe provider config) and BEFORE reserve (a config gap never churns the budget). Bad/
+  empty body → 400 before reserve. Unknown `app_user_id` → 400 (`AppUserNotFound`). Malformed /
+  unknown / revoked / wrong-keyspace key → one undifferentiated **401** (a per-user `tk_` key is in a
+  disjoint keyspace and is rejected before any DB lookup).
+- **`get_provider_caller` left at its production default** in `runtime_app.py` (resolves the real
+  shared key); only tests override it. The control conn factory serves the gateway seam too.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/ai_gateway.py` — `build_ai_gateway_router()` (POST
+  `/internal/ai-gateway/messages`), the `get_gateway_conn` + `get_provider_caller` seams,
+  `_gateway_principal` (Bearer → `resolve_gateway_key` → 401), `ProviderCaller` type.
+- `hermes-agent-main/tests/plugins/test_takyon_ai_gateway_pg.py` — **12** tests on real PG through the
+  SAME `build_runtime_app` mount production uses: resolves/reserves/settles (response keyset exact;
+  ledger event `completed`, actual==600, `route==internal_ai_gateway`; committed==600); provider key
+  never in response (secret-in-closure → `secret not in resp.text`); 503 blocks with nothing reserved
+  + the default seam returns `None` keyless; 402 budget exceeded / inactive (paused); 502 provider
+  error releases (event `failed`, committed back to 0); 400 bad body / unknown app_user; 401 missing
+  bearer / unknown well-formed key / per-user `tk_` key rejected.
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/runtime_app.py` — `include_router(build_ai_gateway_router())` +
+  `dependency_overrides[get_gateway_conn] = control_conn`; `get_provider_caller` deliberately NOT
+  overridden (production default). Docstring updated to note the gateway is now mounted.
+- `hermes-agent-main/plugins/takyon/core.py` — the `generate` rail's `worker_contract` in
+  `PRODUCT_RUNTIME_RAILS` now states the concrete wiring (POST `/internal/ai-gateway/messages`;
+  `Authorization: Bearer tkg_…`; the app holds ONLY the gateway key, never the platform provider key;
+  402 = out-of-credit, 503 = generation-not-configured, never fake a completion; treat the returned
+  `{text, content, model, usage}` as the only source of truth for output + spend). **Surgical edit on
+  the rail block only — `core.py` also carries the operator's unrelated uncommitted meta-ads hunks, so
+  any commit must stage ONLY the generate-rail hunk via `git add -p`, never `git add core.py`.**
+- `hermes-agent-main/skills/takyon/takyon-app-runtime/SKILL.md` — 4 targeted additions documenting the
+  gateway-backed, budget-metered generation rail, the 402/503 semantics, and the never-hold-provider-
+  key discipline; selected by including `generate` in the surface contract `runtime_features`.
+  Frontmatter untouched (YAML still parses).
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the gateway suite → **12 passed**; all three wiring suites
+together (gateway + runtime_app + db_runner) → **21 passed**. Full `tests/plugins/` → **1081 passed,
+2 failed**. The 2 failures are the **same pre-existing, unrelated** pair as 5c–5e —
+`test_business_work_focus_persists_and_blocks_cross_lane_writes` (core.py artifact-path, from the
+operator's separate uncommitted `distribution/meta-ads` working-tree edits) and the web-search
+`test_all_seven_plugins_present_in_registry` (a change-detector snapshot expecting 7; committed `xai`
+makes 8 — the failure literally prints "Left contains one more item: 'xai'"). Proven not-mine: neither
+test imports `ai_gateway` / `runtime_app` / `ai_provider` or the PG `pg_conn` fixture.
+`_runtime_ui_contract_block({"runtime_features": ["generate"], …})` renders the gateway lines
+(confirmed output contains `/internal/ai-gateway/messages`, `tkg_`, "never returns it"). SKILL.md
+frontmatter parses (takyon-app-runtime v1.0.0). `py_compile` of ai_gateway / runtime_app / core clean.
+
+**Not done / honest state:**
+- **NOT the live product path.** The gateway serves on `build_runtime_app`, but the operator-gated
+  Runtime Cutover (flip serving + live Supabase apply) has NOT happened. The SQLite `/generate`
+  (`app_api.py`) still serves live product AI until the product surface is re-pointed.
+- **No `tkg_` key is injected into a generated app yet** — minting a business key and wiring it into a
+  generated product app's runtime config belongs to the build-product surface, done at cutover. This
+  increment proves the broker; the CEO-visible rail contract tells the product-site worker HOW to call
+  it.
+- **Per-user sub-budgets not enforced here.** `app_user_id` / `app_user_tier` are passed through to
+  the reserve for per-user attribution, but the business-level budget is the cap; per-user limits are
+  out of scope for this increment.
+- **Live Supabase apply remains blocked** on polsia2 teardown + backup + operator go-ahead.
+
+**Phase 5 live broker complete.** The credential boundary (5e) + the one usage gate (5c) + the shared
+provider leaf now compose into a mounted `/internal/ai-gateway/messages` that a generated app reaches
+with only its `tkg_` key — and the CEO sees exactly how to build against it (rail `worker_contract` +
+the owning skill). The remaining transitional steps are the operator-gated serving flip + live
+Supabase apply, before Phase 8 retires SQLite.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/ai_gateway.py
+rm hermes-agent-main/tests/plugins/test_takyon_ai_gateway_pg.py
+# remove the gateway import + the 2 mount lines from runtime_app.py
+#   (include_router(build_ai_gateway_router()) and dependency_overrides[get_gateway_conn] = control_conn);
+#   this leaves the connection-layer increment (control router on PG) intact.
+git checkout -p hermes-agent-main/plugins/takyon/core.py   # drop ONLY the generate-rail hunk (keep operator meta-ads hunks)
+git checkout -- hermes-agent-main/skills/takyon/takyon-app-runtime/SKILL.md
+# this log entry is additive — trim it back to the connection-layer increment if reverting.
+```
