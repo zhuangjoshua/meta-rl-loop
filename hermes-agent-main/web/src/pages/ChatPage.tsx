@@ -1,6 +1,7 @@
 import {
   ArrowUp,
   ExternalLink,
+  Lightbulb,
   PanelRight,
   Plus,
   RefreshCw,
@@ -833,7 +834,7 @@ export default function ChatPage() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__TAKYON_SESSION_TOKEN__
-      ? "Session token unavailable. Open this page through the Takyon dashboard server."
+      ? "Session token unavailable. Open this page through the Litebulb dashboard server."
       : null,
   );
   const [rightOpen, setRightOpen] = useState(false);
@@ -1911,8 +1912,10 @@ function BizSidebar({
   return (
     <aside className="td-side">
       <div className="td-brand">
-        <span className="td-mark">T</span>
-        <span className="td-name">Takyon</span>
+        <span className="td-mark">
+          <Lightbulb className="h-4 w-4" strokeWidth={2} />
+        </span>
+        <span className="td-name">Litebulb</span>
       </div>
 
       <div className="min-h-0">
@@ -2357,7 +2360,7 @@ function SlashPalette({
               {item.display || item.text}
             </span>
             <span className="block min-w-0 flex-1 truncate text-xs text-[var(--td-muted)]">
-              {item.description || item.meta || "Takyon command"}
+              {item.description || item.meta || "Litebulb command"}
             </span>
           </button>
         ))}
@@ -2431,7 +2434,9 @@ function IntercomPanel({
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--td-surface)]">
       <header className="td-rail-head">
-        <span className="td-av">C</span>
+        <span className="td-av">
+          <Lightbulb className="h-[18px] w-[18px]" strokeWidth={2} />
+        </span>
         <span className="min-w-0">
           <span className="td-t" style={{ display: "block" }}>
             CEO
