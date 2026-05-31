@@ -175,10 +175,11 @@
 .tk-dash .td-scroll { overflow-y: auto; padding: 22px 28px 28px; min-height: 0; }
 
 /* momentum line — bold grotesque headline */
-.tk-dash .td-momentum { margin: 2px 0 24px; max-width: 30ch; }
+.tk-dash .td-momentum { margin: 2px 0 24px; max-width: 52ch; }
 .tk-dash .td-momentum .td-lead {
-  font-family: var(--td-font-display); font-size: 30px; font-weight: 800;
-  line-height: 1.12; letter-spacing: -.025em; color: var(--td-fg); margin: 0;
+  font-family: var(--td-font-display); font-size: 22px; font-weight: 800;
+  line-height: 1.28; letter-spacing: -.018em; color: var(--td-fg); margin: 0;
+  text-wrap: balance;
 }
 .tk-dash .td-momentum .td-lead b { color: var(--td-fg); font-weight: 800; }
 
