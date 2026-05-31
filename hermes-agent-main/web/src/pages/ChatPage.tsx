@@ -23,7 +23,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
-import { api } from "@/lib/api";
+import { api, type TakyonOperatorAccountResponse } from "@/lib/api";
 import {
   GatewayClient,
   type ConnectionState,
@@ -393,6 +393,13 @@ const STATE_LABEL: Record<ConnectionState, string> = {
   error: "Offline, retrying",
 };
 
+const BUDGET_FORMATTER = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 const EMPTY_SCOPE_STATE: ScopeState = {
   scope: "global",
   business: "",
@@ -422,6 +429,23 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`;
+}
+
+function formatBudgetCents(value?: number | null): string {
+  const cents = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return BUDGET_FORMATTER.format(cents / 100);
+}
+
+function operatorSpendableCents(
+  account?: TakyonOperatorAccountResponse | null,
+): number | null {
+  if (!account?.available) return null;
+  const cents = Number(account.spendable_cents ?? 0);
+  return Number.isFinite(cents) ? Math.max(0, cents) : 0;
+}
+
+function businessCountLabel(count: number): string {
+  return `${count} business${count === 1 ? "" : "es"}`;
 }
 
 function makeMessage(role: ChatRole, content: string): ChatMessage {
@@ -826,6 +850,8 @@ export default function ChatPage() {
   }>({ business: "", items: [] });
   const [statusItems, setStatusItems] = useState<string[]>([]);
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
+  const [operatorAccount, setOperatorAccount] =
+    useState<TakyonOperatorAccountResponse | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
@@ -843,9 +869,21 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
 
+  const refreshOperatorAccount = useCallback(async () => {
+    try {
+      setOperatorAccount(await api.getTakyonOperatorAccount());
+    } catch {
+      setOperatorAccount((prev) => prev || { available: false, reason: "request_failed" });
+    }
+  }, []);
+
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    void refreshOperatorAccount();
+  }, [refreshOperatorAccount]);
 
   useEffect(() => {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
@@ -973,6 +1011,7 @@ export default function ChatPage() {
             setStatusItems((prev) => [ev.payload!.warning!, ...prev].slice(0, 5));
           }
           refreshScope();
+          void refreshOperatorAccount();
         },
       ),
     );
@@ -1201,7 +1240,7 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, initialBusinessParam, resumeParam]);
+  }, [gw, initialBusinessParam, refreshOperatorAccount, resumeParam]);
 
   useEffect(() => {
     if (state === "open") {
@@ -1560,6 +1599,7 @@ export default function ChatPage() {
       );
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
+      void refreshOperatorAccount();
       if (/^\s*\/?(?:create|build|init)(?:\s|$)/i.test(effectiveText) && nextScope.business) {
         setPendingBusinessSlug(nextScope.business);
         const params = new URLSearchParams(searchParams);
@@ -1569,7 +1609,15 @@ export default function ChatPage() {
       const output = cleanText(res.output || "").trim();
       if (output) appendSystem(output);
     },
-    [appendSystem, createInTestMode, gw, searchParams, sessionId, setSearchParams],
+    [
+      appendSystem,
+      createInTestMode,
+      gw,
+      refreshOperatorAccount,
+      searchParams,
+      sessionId,
+      setSearchParams,
+    ],
   );
 
   const runTakyonLine = useCallback(
@@ -1769,6 +1817,7 @@ export default function ChatPage() {
           onCreate={() => {
             void setTakyonScope("");
           }}
+          operatorAccount={operatorAccount}
           onSelect={setTakyonScope}
           scope={scopeState}
           state={state}
@@ -1835,6 +1884,7 @@ export default function ChatPage() {
               error={error}
               onCreate={runTakyonLine}
               onEnterPendingBusiness={enterPendingBusiness}
+              operatorAccount={operatorAccount}
               running={running}
               state={state}
               statusItems={statusItems}
@@ -1897,18 +1947,37 @@ export default function ChatPage() {
 function BizSidebar({
   canInteract,
   onCreate,
+  operatorAccount,
   onSelect,
   scope,
   state,
 }: {
   canInteract: boolean;
   onCreate: () => void;
+  operatorAccount: TakyonOperatorAccountResponse | null;
   onSelect: (business: string) => Promise<void>;
   scope: ScopeState;
   state: ConnectionState;
 }) {
   const businesses = scope.businesses;
   const ready = canUseConnection(state) && canInteract;
+  const spendableCents = operatorSpendableCents(operatorAccount);
+  const reservedCents = operatorAccount?.available
+    ? Math.max(0, Number(operatorAccount.reserved_cents ?? 0))
+    : 0;
+  const ownedBusinessCount =
+    typeof operatorAccount?.owned_business_count === "number"
+      ? operatorAccount.owned_business_count
+      : businesses.length;
+  const budgetStatus = !operatorAccount
+    ? "loading budget state"
+    : !operatorAccount.available
+      ? "per-user budget unavailable"
+      : spendableCents === 0
+        ? "spendful turns blocked at 0"
+        : reservedCents > 0
+          ? `${formatBudgetCents(reservedCents)} reserved`
+          : "spendful turns enabled";
   return (
     <aside className="td-side">
       <div className="td-brand">
@@ -1966,13 +2035,41 @@ function BizSidebar({
 
       <div className="td-side-foot">
         <div className="td-card td-portfolio">
-          <p className="td-eyebrow">Portfolio MRR</p>
+          <p className="td-eyebrow">Operator budget</p>
           <div className="td-defer">
-            <span className="td-dash">—</span>
+            <span className="td-dash">
+              {spendableCents === null ? "—" : formatBudgetCents(spendableCents)}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-1 text-[11px] text-[var(--td-muted)]">
+            <div className="flex items-center justify-between gap-3">
+              <span>Included remaining</span>
+              <span>
+                {operatorAccount?.available
+                  ? formatBudgetCents(operatorAccount.allowance_remaining_cents)
+                  : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Top-up balance</span>
+              <span>
+                {operatorAccount?.available
+                  ? formatBudgetCents(operatorAccount.topup_balance_cents)
+                  : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Reserved</span>
+              <span>
+                {operatorAccount?.available
+                  ? formatBudgetCents(operatorAccount.reserved_cents)
+                  : "—"}
+              </span>
+            </div>
           </div>
           <span className="td-defer-note">
             <span className="td-dotline" />
-            not wired yet
+            {budgetStatus}
           </span>
         </div>
         <button
@@ -1987,7 +2084,7 @@ function BizSidebar({
               Operator
             </span>
             <span className="td-role" style={{ display: "block" }}>
-              account · global scope
+              global scope · {businessCountLabel(ownedBusinessCount)}
             </span>
           </span>
         </button>
@@ -2023,6 +2120,7 @@ function GlobalLaunchpad({
   error,
   onCreate,
   onEnterPendingBusiness,
+  operatorAccount,
   running,
   state,
   statusItems,
@@ -2031,6 +2129,7 @@ function GlobalLaunchpad({
   error: string | null;
   onCreate: (line: string) => Promise<void>;
   onEnterPendingBusiness: (business: string, mode: "test" | "live", goal?: string) => void;
+  operatorAccount: TakyonOperatorAccountResponse | null;
   running: boolean;
   state: ConnectionState;
   statusItems: string[];
@@ -2039,12 +2138,17 @@ function GlobalLaunchpad({
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<"test" | "live">("test");
-  const [budget, setBudget] = useState("25");
-  const [schedule, setSchedule] = useState("every 6h");
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
   const latestStatus = activeTool?.name || statusItems[0] || "";
   const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
   const displayError = friendlyError(error);
+  const spendableCents = operatorSpendableCents(operatorAccount);
+  const operatorBudgetNote =
+    spendableCents === null
+      ? "Auto wake follows Takyon's default cadence. Operator budget state is unavailable in this dashboard mode."
+      : spendableCents === 0
+        ? "Auto wake follows Takyon's default cadence. Business creation still works, but CEO turns and wakes will block until budget is added."
+        : `Auto wake follows Takyon's default cadence. Operator budget: ${formatBudgetCents(spendableCents)} spendable for CEO turns and wakes.`;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -2052,13 +2156,6 @@ function GlobalLaunchpad({
     const slug = normalizeBusinessLookup(rawName);
     if (!slug) return;
     const parts = ["/create", mode === "test" ? "--test" : "--live"];
-    const budgetValue = Number.parseFloat(budget);
-    if (Number.isFinite(budgetValue) && budgetValue >= 0) {
-      parts.push("--budget", String(budgetValue));
-    }
-    if (schedule.trim()) {
-      parts.push("--schedule", quoteTakyonArg(schedule));
-    }
     parts.push(slug);
     if (goal.trim()) parts.push(quoteTakyonArg(goal));
     onEnterPendingBusiness(slug, mode, goal.trim());
@@ -2105,7 +2202,7 @@ function GlobalLaunchpad({
             </label>
           </div>
 
-          <div className="mt-3 grid gap-3 sm:grid-cols-[1.2fr_0.8fr_1fr]">
+          <div className="mt-3 grid gap-3 sm:grid-cols-[1.2fr]">
             <div>
               <div className="td-meta" style={{ marginBottom: 6 }}>
                 Mode
@@ -2128,24 +2225,10 @@ function GlobalLaunchpad({
                 ))}
               </div>
             </div>
-            <label className="grid gap-1.5">
-              <span className="td-meta">Budget</span>
-              <input
-                className="h-8 min-w-0 rounded-md border border-[var(--td-border)] bg-[var(--td-surface)] px-2 text-xs text-[var(--td-fg)] outline-none focus:border-[var(--td-accent)]"
-                inputMode="decimal"
-                onChange={(event) => setBudget(event.target.value)}
-                value={budget}
-              />
-            </label>
-            <label className="grid gap-1.5">
-              <span className="td-meta">Wake</span>
-              <input
-                className="h-8 min-w-0 rounded-md border border-[var(--td-border)] bg-[var(--td-surface)] px-2 text-xs text-[var(--td-fg)] outline-none focus:border-[var(--td-accent)]"
-                onChange={(event) => setSchedule(event.target.value)}
-                value={schedule}
-              />
-            </label>
           </div>
+          <p className="td-defer-note" style={{ marginTop: 10 }}>
+            {operatorBudgetNote}
+          </p>
 
           <div className="mt-4 flex items-center justify-end">
             <button className="td-btn td-btn-primary" disabled={!canCreate} type="submit">

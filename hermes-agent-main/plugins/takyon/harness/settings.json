@@ -42,7 +42,7 @@
       "requiresBusiness": false,
       "priorityBand": "p1_ceo",
       "palette": "default",
-      "usage": "/create [--test|--live] [--budget <usd>] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
+      "usage": "/create [--test|--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
       "summary": "Use one shell command: `/create`. By default it creates the business, schedules the CEO, and starts one bootstrap turn.",
       "examples": [
         {
@@ -60,7 +60,6 @@
       ],
       "flags": [
         {"name": "--test", "description": "allow product/website publish; suppress outreach, spend, and money movement"},
-        {"name": "--budget", "description": "set the business bootstrap budget cap in USD"},
         {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
         {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
         {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
@@ -70,7 +69,6 @@
     {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
     {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
     {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
-    {"name": "budget", "description": "Show or set business budget cap", "requiresBusiness": true, "priorityBand": "p0_control", "palette": "advanced"},
     {
       "name": "test",
       "description": "Set current business test mode",

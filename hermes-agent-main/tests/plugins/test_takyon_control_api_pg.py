@@ -21,7 +21,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from plugins.takyon import billing, stripe_util  # noqa: E402
+from plugins.takyon import billing, business_credits, stripe_util  # noqa: E402
 from plugins.takyon.control_api import build_control_router, get_control_conn  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     provision_user_on_first_login,
@@ -59,6 +59,37 @@ def _topup_event(
                 "amount_total": amount,
                 "payment_status": payment_status,
                 "metadata": {"purpose": purpose, "user_id": user_id},
+            }
+        },
+    }
+
+
+def _creative_credit_event(
+    business_slug,
+    *,
+    user_id="user-test",
+    amount=5000,
+    credits=50,
+    pack_id="starter",
+    event_id=None,
+    payment_status="paid",
+) -> dict:
+    return {
+        "id": event_id or f"evt_{uuid.uuid4().hex}",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": f"cs_{uuid.uuid4().hex}",
+                "client_reference_id": business_slug,
+                "amount_total": amount,
+                "payment_status": payment_status,
+                "metadata": {
+                    "purpose": "creative_credit_pack",
+                    "user_id": user_id,
+                    "business_slug": business_slug,
+                    "pack_id": pack_id,
+                    "credits": str(credits),
+                },
             }
         },
     }
@@ -155,6 +186,58 @@ def test_business_detail_cross_tenant_is_404(client, pg_conn):
     other_uid, _, other_raw = provision_user_on_first_login(pg_conn, _sub())
     resp = client.get(f"/v1/businesses/{secret_slug}", headers=_auth(other_raw))
     assert resp.status_code == 404
+
+
+def test_creative_credit_balance_happy_path(client, pg_conn):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    business_credits.grant_credits(pg_conn, slug, 12, "grant-1")
+
+    resp = client.get(f"/v1/businesses/{slug}/creative-credits", headers=_auth(raw))
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "business_slug": slug,
+        "balance_credits": 12,
+        "reserved_credits": 0,
+    }
+
+
+def test_creative_credit_packs_list_configured_catalog(client, pg_conn, monkeypatch):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    monkeypatch.setenv(
+        "TAKYON_CREATIVE_CREDIT_PACKS_JSON",
+        json.dumps(
+            [
+                {"id": "starter", "name": "Starter", "credits": 10, "amount_cents": 2500},
+                {"id": "pro", "credits": 50, "amount_cents": 10000},
+            ]
+        ),
+    )
+
+    resp = client.get(f"/v1/businesses/{slug}/creative-credits/packs", headers=_auth(raw))
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "business_slug": slug,
+        "packs": [
+            {
+                "id": "starter",
+                "name": "Starter",
+                "description": "",
+                "credits": 10,
+                "amount_cents": 2500,
+                "currency": "usd",
+            },
+            {
+                "id": "pro",
+                "name": "pro",
+                "description": "",
+                "credits": 50,
+                "amount_cents": 10000,
+                "currency": "usd",
+            },
+        ],
+    }
 
 
 def test_jit_provision_is_idempotent_and_mints_once(pg_conn):
@@ -256,6 +339,50 @@ def test_topup_checkout_returns_url_and_tags_user(client, pg_conn, monkeypatch):
     assert p["success_url"] == "https://app.example.com/ok"
 
 
+def test_creative_credit_checkout_returns_url_and_tags_business(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    monkeypatch.setenv(
+        "TAKYON_CREATIVE_CREDIT_PACKS_JSON",
+        json.dumps([{"id": "starter", "credits": 10, "amount_cents": 2500}]),
+    )
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    captured: dict = {}
+
+    def _fake_request(path, params):
+        captured["path"] = path
+        captured["params"] = params
+        return {"id": "cs_credit_1", "url": "https://checkout.stripe.com/c/cs_credit_1"}
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        f"/v1/businesses/{slug}/creative-credits/checkout",
+        headers=_auth(raw),
+        json={
+            "pack_id": "starter",
+            "success_url": "https://app.example.com/ok",
+            "cancel_url": "https://app.example.com/no",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "checkout_url": "https://checkout.stripe.com/c/cs_credit_1",
+        "session_id": "cs_credit_1",
+        "business_slug": slug,
+        "pack_id": "starter",
+        "credits": 10,
+        "amount_cents": 2500,
+    }
+    p = captured["params"]
+    assert captured["path"] == "checkout/sessions"
+    assert p["client_reference_id"] == slug
+    assert p["metadata[purpose]"] == "creative_credit_pack"
+    assert p["metadata[business_slug]"] == slug
+    assert p["metadata[user_id]"] == uid
+    assert p["metadata[pack_id]"] == "starter"
+    assert p["metadata[credits]"] == 10
+
+
 def test_billing_webhook_blocked_without_secret(client, monkeypatch):
     monkeypatch.delenv("STRIPE_BILLING_WEBHOOK_SECRET", raising=False)
     resp = client.post(
@@ -293,6 +420,32 @@ def test_billing_webhook_credits_user_and_is_idempotent(client, pg_conn, monkeyp
     resp2 = _post_webhook(client, event, "whsec_test_xyz")
     assert resp2.status_code == 200
     assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+
+
+def test_billing_webhook_credits_business_creative_pack_and_is_idempotent(
+    client, pg_conn, monkeypatch
+):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    event = _creative_credit_event(slug, user_id=uid, credits=25, amount=7500)
+
+    resp = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "ok": True,
+        "business_slug": slug,
+        "credited_credits": 25,
+        "balance_credits": 25,
+        "reserved_credits": 0,
+        "event_id": event["id"],
+    }
+    balances = business_credits.get_business_credit_balances(pg_conn, slug)
+    assert balances.balance_credits == 25
+
+    resp2 = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp2.status_code == 200
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 25
 
 
 def test_billing_webhook_ignores_non_topup(client, pg_conn, monkeypatch):

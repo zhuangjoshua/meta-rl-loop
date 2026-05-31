@@ -73,7 +73,8 @@ def test_takyon_wake_shell_exec_returns_before_background_run(server, monkeypatc
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
     class FakeStore:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
 
     def fake_handle_shell_line(*_args, **_kwargs):
         ran.set()
@@ -86,11 +87,22 @@ def test_takyon_wake_shell_exec_returns_before_background_run(server, monkeypatc
     fake_cli._handle_shell_line = fake_handle_shell_line
     fake_cli._record_shell_turn = fake_record_shell_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
-    monkeypatch.setattr(
-        server.subprocess,
-        "run",
-        lambda args, **_kwargs: (ran.set() or types.SimpleNamespace(returncode=0, stdout="{}")),
-    )
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            ran.set()
+            self.stdout = iter(["wake finished\n"])
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(server, "_takyon_require_business_access", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
@@ -111,11 +123,14 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
     class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def read(self, *_args, **_kwargs):
             return {"businesses": []}
 
     def fake_parse_business_start_args(*_args, **_kwargs):
-        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False, 25)
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False)
 
     def fake_handle_shell_line(*_args, **_kwargs):
         ran.set()
@@ -129,11 +144,21 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     fake_cli._handle_shell_line = fake_handle_shell_line
     fake_cli._record_shell_turn = fake_record_shell_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
-    monkeypatch.setattr(
-        server.subprocess,
-        "run",
-        lambda args, **_kwargs: (ran.set() or types.SimpleNamespace(returncode=0, stdout="{}")),
-    )
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            ran.set()
+            self.stdout = iter(["create finished\n"])
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
@@ -144,7 +169,7 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
         "create-1",
         {
             "session_id": sid,
-            "line": '/create --test --budget 25 --schedule "every 6h" latexflow "overleaf competitor"',
+            "line": '/create --test --schedule "every 6h" latexflow "overleaf competitor"',
         },
     )
 
@@ -162,11 +187,14 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
     class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def read(self, *_args, **_kwargs):
             return {"businesses": [{"slug": "latexflow"}]}
 
     def fake_parse_business_start_args(*_args, **_kwargs):
-        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False, 25)
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False)
 
     def fake_handle_shell_line(*_args, **_kwargs):
         return "unexpected", None
@@ -174,10 +202,22 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
     def fake_record_shell_turn(history, line, output):
         history.append({"line": line, "output": output})
 
-    def fake_run(args, **_kwargs):
-        captured["args"] = args
-        ran.set()
-        return types.SimpleNamespace(returncode=0, stdout="{}")
+    class FakeProcess:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            ran.set()
+            self.stdout = iter(["create finished\n"])
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(server.subprocess, "Popen", FakeProcess)
 
     fake_cli.TakyonStore = FakeStore
     fake_cli._parse_business_start_args = fake_parse_business_start_args
@@ -185,7 +225,6 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
     fake_cli._record_shell_turn = fake_record_shell_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server.time, "strftime", lambda *_args, **_kwargs: "05262217")
-    monkeypatch.setattr(server.subprocess, "run", fake_run)
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
@@ -196,7 +235,7 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
         "create-unique-1",
         {
             "session_id": sid,
-            "line": '/create --test --budget 25 --schedule "every 6h" latexflow "overleaf competitor"',
+            "line": '/create --test --schedule "every 6h" latexflow "overleaf competitor"',
         },
     )
 
@@ -213,10 +252,11 @@ def test_takyon_create_no_auto_stays_synchronous(server, monkeypatch):
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
     class FakeStore:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
 
     def fake_parse_business_start_args(*_args, **_kwargs):
-        return ("latexflow", "latexflow", "overleaf competitor", "test", "", False, True, None)
+        return ("latexflow", "latexflow", "overleaf competitor", "test", "", False, True)
 
     def fake_handle_shell_line(*_args, **_kwargs):
         ran.set()

@@ -12,7 +12,6 @@ takyon read latexflow research/index.md
 takyon show latexflow
 takyon files latexflow
 takyon wake latexflow "every 6h"
-takyon budget set latexflow 100
 takyon delete latexflow
 takyon delete latexflow --confirm
 takyon "for latexflow, improve the pricing strategy and create the next distribution campaign"

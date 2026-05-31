@@ -607,11 +607,10 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool, float | None]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
-    budget: float | None = None
     auto_start = auto_default
     no_auto = False
     clean: list[str] = []
@@ -633,16 +632,6 @@ def _parse_business_start_args(
             if index >= len(tokens):
                 raise SystemExit(usage)
             schedule = tokens[index]
-        elif token == "--budget":
-            index += 1
-            if index >= len(tokens):
-                raise SystemExit(usage)
-            try:
-                budget = float(tokens[index])
-            except ValueError as exc:
-                raise SystemExit(f"--budget must be a number\n{usage}") from exc
-            if budget < 0:
-                raise SystemExit(f"--budget must be non-negative\n{usage}")
         elif token in {"-h", "--help", "help"}:
             raise SystemExit(usage)
         elif token.startswith("--"):
@@ -655,7 +644,7 @@ def _parse_business_start_args(
     raw_name = clean[0]
     slug = _slugify(raw_name)
     goal = " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, budget
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto
 
 
 def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
@@ -760,6 +749,130 @@ def _idempotency_key(prefix: str, *parts: Any, max_length: int = 180) -> str:
     return f"{human}{suffix}"
 
 
+def _resolved_operator_user_id(operator_user_id: str | None = None) -> str:
+    return str(operator_user_id or os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
+
+
+def _operator_turn_estimate_cents() -> int:
+    raw = str(os.getenv("TAKYON_OPERATOR_TURN_ESTIMATE_CENTS") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    try:
+        from .policy import expensive_threshold_cents
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon.policy import expensive_threshold_cents
+
+    return max(0, int(expensive_threshold_cents() or 0))
+
+
+def _operator_budget_reserve(
+    *,
+    operator_user_id: str,
+    business_slug: str | None,
+    reservation_key: str,
+    estimate_cents: int | None = None,
+) -> tuple[str, int]:
+    from .core import _db_backend
+
+    user_id = _resolved_operator_user_id(operator_user_id)
+    if not user_id or _db_backend() != "postgres":
+        return ("", 0)
+
+    import psycopg
+
+    try:
+        from . import billing
+        from .runtime_app import resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+        from plugins.takyon.runtime_app import resolve_database_url
+
+    amount = _operator_turn_estimate_cents() if estimate_cents is None else max(0, int(estimate_cents))
+    if amount <= 0:
+        return ("", 0)
+
+    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    try:
+        res = billing.reserve(
+            conn,
+            user_id,
+            amount,
+            reservation_key,
+            business_slug=business_slug or None,
+        )
+    except billing.InsufficientBalance as exc:
+        raise TakyonError(
+            "operator budget exhausted: "
+            f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c "
+            f"+ topup {exc.topup_available_cents}c"
+        ) from exc
+    finally:
+        conn.close()
+    return res.key, int(res.allowance_cents + res.topup_cents)
+
+
+def _operator_budget_finalize(
+    *,
+    operator_user_id: str,
+    business_slug: str | None,
+    reservation_key: str,
+    reserved_cents: int,
+    actual_cents: int,
+) -> str:
+    from .core import _db_backend
+
+    user_id = _resolved_operator_user_id(operator_user_id)
+    if not user_id or not reservation_key or reserved_cents <= 0 or _db_backend() != "postgres":
+        return ""
+
+    import psycopg
+
+    try:
+        from . import billing
+        from .runtime_app import resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+        from plugins.takyon.runtime_app import resolve_database_url
+
+    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    warning = ""
+    try:
+        actual = max(0, int(actual_cents or 0))
+        if actual <= 0:
+            billing.refund(conn, reservation_key)
+            return ""
+        if actual <= reserved_cents:
+            billing.settle(conn, reservation_key, actual)
+            return ""
+
+        overflow = actual - reserved_cents
+        overflow_key = f"{reservation_key}:overflow"
+        overflow_reserved = 0
+        try:
+            overflow_res = billing.reserve(
+                conn,
+                user_id,
+                overflow,
+                overflow_key,
+                business_slug=business_slug or None,
+            )
+            overflow_reserved = int(overflow_res.allowance_cents + overflow_res.topup_cents)
+        except billing.InsufficientBalance:
+            warning = (
+                f"turn cost exceeded the reserved budget by {overflow}c; "
+                "future spend is blocked until the account is topped up."
+            )
+        billing.settle(conn, reservation_key, reserved_cents)
+        if overflow_reserved > 0:
+            billing.settle(conn, overflow_key, overflow_reserved)
+        return warning
+    finally:
+        conn.close()
+
+
 def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
     lines = [
@@ -836,6 +949,53 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
             "metrics/receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
         ])
     return "\n".join(lines)
+
+
+def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
+    try:
+        from . import jobs, worker
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import jobs, worker
+
+    worker_id = f"cli-wake-{os.getpid()}"
+    job_key = _idempotency_key("operator-wake-now", slug, uuid.uuid4().hex)
+
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            job = jobs.enqueue(
+                raw,
+                slug,
+                "ceo_wake",
+                idempotency_key=job_key,
+                payload={"estimate_cents": _operator_turn_estimate_cents()},
+                max_attempts=1,
+            )
+            outcome = None
+            record = jobs.get_job(raw, job.id)
+            for _ in range(20):
+                if record is not None and record.status in {"completed", "blocked", "failed"}:
+                    break
+                outcome = jobs.run_one(
+                    raw,
+                    worker_id=worker_id,
+                    handlers=worker.HANDLERS,
+                    kinds=["ceo_wake"],
+                )
+                record = jobs.get_job(raw, job.id)
+                if outcome is None and record is not None and record.status in {"queued", "running"}:
+                    continue
+            record = jobs.get_job(raw, job.id)
+
+    return {
+        "action": "ceo_wake.run",
+        "business": slug,
+        "job_id": str(job.id),
+        "status": str((record.status if record else "") or "queued"),
+        "result": (record.result if record else None),
+        "error": (record.error if record else None),
+        "reserved_cents": int((outcome.reserved_cents if outcome else 0) or 0),
+        "actual_cents": int((outcome.actual_cents if outcome else 0) or 0),
+    }
 
 
 def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[str, Any]:
@@ -1690,8 +1850,6 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
     shell_enhanced_input = ""
     auto_schedule_ceo_on_create = ""
     default_ceo_schedule = ""
-    default_bootstrap_budget_usd = ""
-    test_bootstrap_budget_usd = ""
     if path.exists():
         try:
             import yaml  # type: ignore
@@ -1716,8 +1874,6 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
             if isinstance(business_data, dict):
                 auto_schedule_ceo_on_create = str(business_data.get("auto_schedule_ceo_on_create") or "")
                 default_ceo_schedule = str(business_data.get("default_ceo_schedule") or "")
-                default_bootstrap_budget_usd = str(business_data.get("default_bootstrap_budget_usd") or "")
-                test_bootstrap_budget_usd = str(business_data.get("test_bootstrap_budget_usd") or "")
         except Exception:
             for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 stripped = line.strip()
@@ -1737,10 +1893,6 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
                     auto_schedule_ceo_on_create = stripped.split(":", 1)[1].strip()
                 if stripped.startswith("default_ceo_schedule:"):
                     default_ceo_schedule = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("default_bootstrap_budget_usd:"):
-                    default_bootstrap_budget_usd = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("test_bootstrap_budget_usd:"):
-                    test_bootstrap_budget_usd = stripped.split(":", 1)[1].strip()
     return {
         "provider": provider,
         "model": model,
@@ -1750,8 +1902,6 @@ def _read_model_config(store: TakyonStore) -> dict[str, str]:
         "shell_enhanced_input": shell_enhanced_input,
         "auto_schedule_ceo_on_create": auto_schedule_ceo_on_create,
         "default_ceo_schedule": default_ceo_schedule,
-        "default_bootstrap_budget_usd": default_bootstrap_budget_usd,
-        "test_bootstrap_budget_usd": test_bootstrap_budget_usd,
         "path": str(path),
     }
 
@@ -1767,21 +1917,6 @@ def _config_bool(value: Any, *, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
     return default
-
-
-def _config_float(value: Any, *, default: float) -> float:
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _bootstrap_budget_cap(config: dict[str, str], mode: str | None) -> float:
-    if str(mode or "").strip().lower() == "test":
-        return max(0.0, _config_float(config.get("test_bootstrap_budget_usd"), default=25.0))
-    return max(0.0, _config_float(config.get("default_bootstrap_budget_usd"), default=25.0))
 
 
 def _require_agent_model_config(config: dict[str, str], *, model_override: str | None = None) -> str:
@@ -1991,6 +2126,7 @@ def _handle_shell_line(
     model: str,
     max_turns: int,
     shell_history: list[dict[str, str]] | None = None,
+    operator_user_id: str | None = None,
 ) -> tuple[str, str | None]:
     is_slash = line.startswith("/")
     raw = line.lstrip("/") if is_slash else line
@@ -2020,11 +2156,11 @@ def _handle_shell_line(
 
     if command in {"create", "build", "init"}:
         if len(tokens) < 2:
-            raise SystemExit('usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]')
+            raise SystemExit('usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
         command_argv = ["create", *tokens[1:]]
-        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _budget = _parse_business_start_args(
+        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+            usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -2034,6 +2170,7 @@ def _handle_shell_line(
             show_activity=False,
             show_indicator=True,
             shell_history=shell_history,
+            operator_user_id=operator_user_id,
         )
         return _format_cli_value(result), slug
 
@@ -2050,6 +2187,8 @@ def _handle_shell_line(
             show_activity=False,
             show_indicator=True,
             shell_history=shell_history,
+            operator_user_id=operator_user_id,
+            current_business=business,
         ), current_business
 
     if command in _local_command_names() and command != "ceo":
@@ -2061,6 +2200,7 @@ def _handle_shell_line(
             show_activity=False,
             show_indicator=True,
             shell_history=shell_history,
+            operator_user_id=operator_user_id,
         )
         next_business = current_business
         if normalized and normalized[0].lower() == "delete":
@@ -2098,6 +2238,8 @@ def _handle_shell_line(
                 show_activity=False,
                 show_indicator=True,
                 shell_history=shell_history,
+                operator_user_id=operator_user_id,
+                current_business=current_business,
             ), current_business
         return f"Unknown slash command: /{command}. Use /commands.", current_business
 
@@ -2109,6 +2251,8 @@ def _handle_shell_line(
         show_activity=False,
         show_indicator=True,
         shell_history=shell_history,
+        operator_user_id=operator_user_id,
+        current_business=current_business,
     ), current_business
 
 
@@ -2268,7 +2412,7 @@ def _silence_process_stdio():
             os.close(devnull_fd)
 
 
-def _run_agent(
+def _run_agent_with_meta(
     message: str,
     *,
     model: str,
@@ -2276,7 +2420,9 @@ def _run_agent(
     show_activity: bool | None = None,
     show_indicator: bool = False,
     shell_history: list[dict[str, str]] | None = None,
-) -> str:
+    operator_user_id: str | None = None,
+    current_business: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
     from run_agent import AIAgent
 
@@ -2311,8 +2457,14 @@ def _run_agent(
     )
 
     progress = _ShellProgress(show_indicator and not show_agent_activity)
+    resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
+    reservation_key = ""
+    reserved_cents = 0
+    billing_warning = ""
+    agent_box: dict[str, Any] = {}
+    session_context_tokens: list[Any] = []
 
-    def invoke() -> dict[str, Any]:
+    def invoke() -> tuple[dict[str, Any], int]:
         agent = AIAgent(
             provider=provider or None,
             model=resolved_model,
@@ -2329,22 +2481,123 @@ def _run_agent(
             tool_gen_callback=progress.tool_generating if progress.enabled else None,
             tool_complete_callback=progress.tool_completed if progress.enabled else None,
         )
+        agent_box["agent"] = agent
         agent._memory_nudge_interval = 0
         agent._skill_nudge_interval = 0
         agent.activity_callback = progress.activity if progress.enabled else None
         agent.suppress_status_output = not show_agent_activity
-        return agent.run_conversation(prompt, stream_callback=None if show_agent_activity else (lambda _delta: None))
+        result = agent.run_conversation(
+            prompt,
+            stream_callback=None if show_agent_activity else (lambda _delta: None),
+        )
+        actual_cents = max(
+            0,
+            int(round(float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0) * 100)),
+        )
+        return result, actual_cents
 
     try:
+        if resolved_operator_user_id:
+            try:
+                from gateway.session_context import set_session_vars
+
+                session_context_tokens = set_session_vars(
+                    session_key="",
+                    user_id=resolved_operator_user_id,
+                )
+            except Exception:
+                session_context_tokens = []
+        if resolved_operator_user_id:
+            reservation_key, reserved_cents = _operator_budget_reserve(
+                operator_user_id=resolved_operator_user_id,
+                business_slug=current_business,
+                reservation_key=_idempotency_key(
+                    "operator-turn",
+                    current_business or "global",
+                    uuid.uuid4().hex,
+                ),
+            )
         if show_agent_activity:
-            result = invoke()
+            result, actual_cents = invoke()
         else:
             with _thinking_indicator(show_indicator and not progress.enabled):
                 with _silence_process_stdio():
-                    result = invoke()
-        return str(result.get("final_response") or "")
+                    result, actual_cents = invoke()
+        if reservation_key:
+            billing_warning = _operator_budget_finalize(
+                operator_user_id=resolved_operator_user_id,
+                business_slug=current_business,
+                reservation_key=reservation_key,
+                reserved_cents=reserved_cents,
+                actual_cents=actual_cents,
+            )
+        final_response = str(result.get("final_response") or "")
+        if billing_warning:
+            final_response = (
+                final_response.rstrip()
+                + ("\n\n" if final_response.strip() else "")
+                + f"[Budget warning] {billing_warning}"
+            )
+        return final_response, {
+            "actual_cost_cents": actual_cents,
+            "reserved_cents": reserved_cents,
+            "billing_warning": billing_warning,
+        }
+    except Exception:
+        actual_cents = max(
+            0,
+            int(
+                round(
+                    float(
+                        getattr(agent_box.get("agent"), "session_estimated_cost_usd", 0.0)
+                        or 0.0
+                    )
+                    * 100
+                )
+            ),
+        )
+        if reservation_key:
+            billing_warning = _operator_budget_finalize(
+                operator_user_id=resolved_operator_user_id,
+                business_slug=current_business,
+                reservation_key=reservation_key,
+                reserved_cents=reserved_cents,
+                actual_cents=actual_cents,
+            )
+        raise
     finally:
+        if session_context_tokens:
+            try:
+                from gateway.session_context import clear_session_vars
+
+                clear_session_vars(session_context_tokens)
+            except Exception:
+                pass
         progress.close()
+
+
+def _run_agent(
+    message: str,
+    *,
+    model: str,
+    max_turns: int,
+    show_activity: bool | None = None,
+    show_indicator: bool = False,
+    shell_history: list[dict[str, str]] | None = None,
+    operator_user_id: str | None = None,
+    current_business: str | None = None,
+) -> str:
+    response, _meta = _run_agent_with_meta(
+        message,
+        model=model,
+        max_turns=max_turns,
+        show_activity=show_activity,
+        show_indicator=show_indicator,
+        shell_history=shell_history,
+        operator_user_id=operator_user_id,
+        current_business=current_business,
+    )
+    return response
 
 
 def _load_ceo_prompt() -> str:
@@ -2360,8 +2613,10 @@ def run_takyon_command(
     show_activity: bool | None = None,
     show_indicator: bool = False,
     shell_history: list[dict[str, str]] | None = None,
+    operator_user_id: str | None = None,
 ) -> Any:
-    store = TakyonStore()
+    resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
+    store = TakyonStore(operator_user_id=resolved_operator_user_id)
 
     if not argv:
         return store.read(scope="global", query="list_businesses")
@@ -2606,7 +2861,13 @@ def run_takyon_command(
             "triggered": False,
             "tick_ran": 0,
         }
-        if cron_job:
+        if store._work_requests_table() == "business_work_requests":
+            wake_result = _run_pg_ceo_wake_once(store, slug)
+            trigger_result["triggered"] = wake_result.get("status") in {"completed", "blocked", "failed", "running", "queued"}
+            trigger_result["job"] = wake_result
+            if wake_result.get("status") not in {"completed", "queued", "running"} and wake_result.get("error"):
+                trigger_result["error"] = wake_result.get("error")
+        elif cron_job:
             from cron.jobs import trigger_job
             from cron.scheduler import tick
 
@@ -2641,9 +2902,9 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, explicit_budget = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         config = _read_model_config(store)
@@ -2652,22 +2913,11 @@ def run_takyon_command(
         auto_wake = _config_bool(config.get("auto_schedule_ceo_on_create"), default=False)
         schedule = schedule_arg or (config.get("default_ceo_schedule") or "every 6h").strip()
         should_schedule = bool(schedule_arg) or (not no_auto and (auto_start or auto_wake))
-        existing_budget = None
-        try:
-            existing = store.read(scope=_scope_for_business(slug), query="summary")
-            existing_budget = (existing.get("business") or {}).get("budget")
-        except Exception:
-            existing_budget = None
-        budget_cap = explicit_budget
-        if budget_cap is None and auto_start and not no_auto and not existing_budget:
-            budget_cap = _bootstrap_budget_cap(config, mode)
         upsert_op: dict[str, Any] = {"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}
-        if budget_cap is not None:
-            upsert_op["budget"] = {"amount": budget_cap, "currency": "USD"}
         business_result = store.commit(
             scope=_scope_for_business(slug),
             operations=[upsert_op],
-            idempotency_key=_idempotency_key("operator-init-v5", slug, mode or "keep", goal, budget_cap if budget_cap is not None else "keep-budget"),
+            idempotency_key=_idempotency_key("operator-init-v6", slug, mode or "keep", goal),
             reason="operator initialized business",
             actor="operator",
         )
@@ -2691,6 +2941,8 @@ def run_takyon_command(
                 show_activity=show_activity,
                 show_indicator=show_indicator,
                 shell_history=shell_history,
+                operator_user_id=resolved_operator_user_id,
+                current_business=slug,
             )
             return {
                 "success": True,
@@ -2710,37 +2962,9 @@ def run_takyon_command(
         }
 
     if command == "budget":
-        if len(argv) < 2:
-            raise SystemExit("usage: takyon budget <business> | takyon budget set <business> <amount> | takyon budget <business> <amount>")
-        if argv[1] == "set" or (len(argv) >= 3 and argv[1] not in {"show", "status"}):
-            if argv[1] == "set":
-                if len(argv) < 4:
-                    raise SystemExit("usage: takyon budget set <business> <amount>")
-                slug = _slugify(argv[2])
-                raw_amount = argv[3]
-            else:
-                slug = _slugify(argv[1])
-                raw_amount = argv[2]
-            amount = float(raw_amount)
-            return store.commit(
-                scope=_scope_for_business(slug),
-                operations=[{"action": "business.upsert", "business": slug, "budget": {"amount": amount, "currency": "USD"}}],
-                idempotency_key=_idempotency_key("operator-budget-set", slug, amount),
-                reason="operator set business budget cap",
-                actor="operator",
-            )
-        if argv[1] in {"show", "status"}:
-            if len(argv) < 3:
-                raise SystemExit("usage: takyon budget show <business>")
-            slug = _slugify(argv[2])
-        else:
-            slug = _slugify(argv[1])
-        data = store.read(scope=_scope_for_business(slug), query="summary")
-        return {
-            "success": True,
-            "business": data.get("business"),
-            "ledger": data.get("ledger", []),
-        }
+        raise SystemExit(
+            "legacy business budget caps were removed. Use the product usage budget rail instead."
+        )
 
     if command == "memory":
         subcommand = argv[1] if len(argv) >= 2 else "list"
@@ -2778,6 +3002,8 @@ def run_takyon_command(
             show_activity=show_activity,
             show_indicator=show_indicator,
             shell_history=shell_history,
+            operator_user_id=resolved_operator_user_id,
+            current_business=slug,
         )
 
     if command in {"run", "goal", "/goal"}:
@@ -2792,6 +3018,8 @@ def run_takyon_command(
             show_activity=show_activity,
             show_indicator=show_indicator,
             shell_history=shell_history,
+            operator_user_id=resolved_operator_user_id,
+            current_business=slug,
         )
 
     if command == "gc":
@@ -2815,6 +3043,7 @@ def run_takyon_command(
         show_activity=show_activity,
         show_indicator=show_indicator,
         shell_history=shell_history,
+        operator_user_id=resolved_operator_user_id,
     )
 
 

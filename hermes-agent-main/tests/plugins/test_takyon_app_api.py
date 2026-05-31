@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from plugins.takyon.app_api import (
     _anthropic_payload,
     _app_budget_remaining_microusd,
     _microusd_cost,
 )
+from plugins.takyon.ai_provider import AnthropicPricingUnavailable
 from plugins.takyon.core import TakyonStore
 
 
@@ -19,10 +22,15 @@ def test_anthropic_payload_accepts_prompt_and_estimates_tokens():
     assert estimated_input_tokens > 0
 
 
-def test_microusd_cost_uses_model_rates():
+def test_microusd_cost_uses_exact_model_catalog():
     assert _microusd_cost("claude-haiku-4.5", 100, 20) == 200
-    assert _microusd_cost("claude-sonnet-4.6", 100, 20) == 600
-    assert _microusd_cost("claude-opus-4.6", 100, 20) == 3000
+    assert _microusd_cost("anthropic/claude-sonnet-4.6", 100, 20) == 600
+    assert _microusd_cost("claude-opus-4.6", 100, 20) == 1000
+
+
+def test_microusd_cost_blocks_unknown_anthropic_model():
+    with pytest.raises(AnthropicPricingUnavailable):
+        _microusd_cost("claude-imaginary-99", 100, 20)
 
 
 def test_app_budget_remaining_counts_recorded_usage(tmp_path, monkeypatch):

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 # this SQLite route and the Postgres AI gateway). Bound to the original private names so this
 # module's body — and its test — are unchanged.
 from .ai_provider import (
+    AnthropicPricingUnavailable,
     anthropic_key as _anthropic_key,
     anthropic_payload as _anthropic_payload,
     anthropic_rates_microusd_per_token as _anthropic_rates_microusd_per_token,
@@ -234,11 +235,14 @@ class TakyonAppApiHandler(BaseHTTPRequestHandler):
                     _json_response(self, HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
                     return
                 estimated_output_tokens = int(anthropic_payload.get("max_tokens") or 0)
-                estimated_cost = int(
-                    body.get("estimated_cost_microusd")
-                    or body.get("estimatedCostMicrousd")
-                    or _microusd_cost(model, estimated_input_tokens, estimated_output_tokens)
-                )
+                try:
+                    estimated_cost = _microusd_cost(
+                        model, estimated_input_tokens, estimated_output_tokens
+                    )
+                    rate_source = _anthropic_rates_microusd_per_token(model)[2]
+                except AnthropicPricingUnavailable as exc:
+                    _json_response(self, HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
+                    return
                 budget = _app_budget_remaining_microusd(business)
                 if budget["status"] != "active":
                     _json_response(self, HTTPStatus.PAYMENT_REQUIRED, {"success": False, "error": "app budget is not active", "budget": budget})
@@ -282,7 +286,7 @@ class TakyonAppApiHandler(BaseHTTPRequestHandler):
                         "provider": "anthropic",
                         "model": model,
                         "metadata": {
-                            "cost_rate_source": _anthropic_rates_microusd_per_token(model)[2],
+                            "cost_rate_source": rate_source,
                             "request_metadata": body.get("metadata") or {},
                         },
                         "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate:{business}:{user.get('id')}:{provider_request_id or uuid.uuid4().hex}",

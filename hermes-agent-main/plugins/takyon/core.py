@@ -3000,13 +3000,35 @@ class _PGConn:
 class TakyonStore:
     """File + SQLite store for isolated business state and scoped workspaces."""
 
-    def __init__(self, root: str | os.PathLike[str] | None = None, *, database_url: str | None = None):
+    def __init__(
+        self,
+        root: str | os.PathLike[str] | None = None,
+        *,
+        database_url: str | None = None,
+        operator_user_id: str | None = None,
+    ):
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
         self.root = base.resolve()
         self.db_path = self.root / "state.sqlite3"
         # Explicit Postgres DSN for the postgres backend (tests point this at a throwaway DB). When
         # None, the postgres path resolves DATABASE_URL/POSTGRES_URL via runtime_app. Unused on SQLite.
         self._database_url = database_url
+        session_user_id = ""
+        if operator_user_id is None:
+            try:
+                from gateway.session_context import get_session_env
+
+                session_user_id = str(
+                    get_session_env("TAKYON_SESSION_USER_ID", "") or ""
+                ).strip()
+            except Exception:
+                session_user_id = ""
+        self._operator_user_id = str(
+            operator_user_id
+            or session_user_id
+            or os.getenv("TAKYON_OPERATOR_USER_ID")
+            or ""
+        ).strip()
 
     def _connect(self) -> "sqlite3.Connection | _PGConn":
         # The per-business filesystem half of the store is used on both backends, so make root first.
@@ -3070,6 +3092,27 @@ class TakyonStore:
             with self._leaf_conn(conn) as raw:
                 return control_plane.ensure_platform_owner(raw)
 
+    def _active_operator_user_id(self) -> str:
+        return self._operator_user_id if _db_backend() == "postgres" else ""
+
+    def _enforce_operator_business_access(
+        self,
+        conn: sqlite3.Connection,
+        business_slug: str,
+    ) -> None:
+        operator_user_id = self._active_operator_user_id()
+        if not operator_user_id:
+            return
+        row = conn.execute(
+            "SELECT owner_user_id FROM businesses WHERE slug = ?",
+            (business_slug,),
+        ).fetchone()
+        if row is None:
+            raise TakyonError(f"business:{business_slug} does not exist")
+        owner_user_id = str(row["owner_user_id"] or "").strip()
+        if owner_user_id != operator_user_id:
+            raise TakyonError(f"access denied for business:{business_slug}")
+
     def _work_requests_table(self) -> str:
         """Physical table name for the operator's *work-request record* store. On SQLite that is the
         historical ``jobs`` table (bootstrapped by ``_init_db``). On Postgres it is ``business_work_requests``
@@ -3111,13 +3154,13 @@ class TakyonStore:
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
         """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
-        store delegates to on the Postgres backend (identity/entitlements/usage). Imported lazily and only
+        store delegates to on the Postgres backend (identity/entitlements/payments/usage). Imported lazily and only
         on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
         try:
-            from . import app_entitlements, app_identity, app_usage
+            from . import app_entitlements, app_identity, app_payments, app_usage
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-            from plugins.takyon import app_entitlements, app_identity, app_usage
-        return {"identity": app_identity, "entitlements": app_entitlements, "usage": app_usage}
+            from plugins.takyon import app_entitlements, app_identity, app_payments, app_usage
+        return {"identity": app_identity, "entitlements": app_entitlements, "payments": app_payments, "usage": app_usage}
 
     def _init_db(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -4839,17 +4882,45 @@ class TakyonStore:
 
         with self._connect() as conn:
             if query in {"businesses", "list_businesses"} or parsed["kind"] == "global":
-                businesses = [
-                    self._row_to_dict(row)
-                    for row in conn.execute("SELECT * FROM businesses ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
-                ]
-                controls = [
-                    self._row_to_dict(row)
-                    for row in conn.execute("SELECT * FROM control_states ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
-                ]
+                operator_user_id = self._active_operator_user_id()
+                if operator_user_id:
+                    business_rows = conn.execute(
+                        "SELECT * FROM businesses WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                        (operator_user_id, limit),
+                    ).fetchall()
+                else:
+                    business_rows = conn.execute(
+                        "SELECT * FROM businesses ORDER BY updated_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                businesses = [self._row_to_dict(row) for row in business_rows]
+                if operator_user_id:
+                    owned_scopes = {
+                        f"business:{str(item.get('slug') or '').strip()}"
+                        for item in businesses
+                        if isinstance(item, dict) and str(item.get("slug") or "").strip()
+                    }
+                    controls = [
+                        self._row_to_dict(row)
+                        for row in conn.execute(
+                            "SELECT * FROM control_states ORDER BY updated_at DESC LIMIT ?",
+                            (limit,),
+                        ).fetchall()
+                        if str(row["scope"] or "") in owned_scopes
+                        or any(
+                            str(row["scope"] or "").startswith(f"{scope}/")
+                            for scope in owned_scopes
+                        )
+                    ]
+                else:
+                    controls = [
+                        self._row_to_dict(row)
+                        for row in conn.execute("SELECT * FROM control_states ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+                    ]
                 return {"success": True, "scope": "global", "businesses": businesses, "controls": controls}
 
             slug = str(parsed["business"])
+            self._enforce_operator_business_access(conn, slug)
             business = self._ensure_business(conn, slug)
 
             if query in {"file", "read_file"}:
@@ -5080,12 +5151,17 @@ class TakyonStore:
                 raise TakyonError(f"legacy fixed-stage request kind is not allowed: {kind}")
 
         if action != "business.upsert" and business_slug:
+            self._enforce_operator_business_access(conn, business_slug)
             self._ensure_business(conn, business_slug)
         business_mode = "live"
         if business_slug and action != "business.upsert":
             business = self._ensure_business(conn, business_slug)
             business_mode = str(business.get("mode") or "live")
             _enforce_business_work_focus(op, str(business.get("work_focus") or "all"))
+        if action == "business.upsert" and business_slug:
+            existing = self._business(conn, business_slug)
+            if existing:
+                self._enforce_operator_business_access(conn, business_slug)
         credential_gate = _require_api_access(op, business_mode=business_mode)
         if action not in {"business.delete", "control.set"}:
             blocker = self._control_blocker(conn, target_scope)
@@ -5147,14 +5223,16 @@ class TakyonStore:
                     from . import control_plane
                 except ImportError:  # pragma: no cover - alternate load path as a top-level package
                     from plugins.takyon import control_plane
+                owner_user_id = self._active_operator_user_id()
                 with self._leaf_conn(conn) as raw:
-                    owner_user_id = control_plane.resolve_platform_owner_id(raw)
-                if not owner_user_id:
-                    raise TakyonError(
-                        "cannot create business on Postgres: platform owner is not provisioned. "
-                        "Seed it once at startup (control_plane.ensure_platform_owner) or set "
-                        "TAKYON_PLATFORM_OWNER_SUB to a provisioned user's Auth0 sub."
-                    )
+                    if not owner_user_id:
+                        owner_user_id = control_plane.resolve_platform_owner_id(raw)
+                    if not owner_user_id:
+                        raise TakyonError(
+                            "cannot create business on Postgres: platform owner is not provisioned. "
+                            "Seed it once at startup (control_plane.ensure_platform_owner) or set "
+                            "TAKYON_PLATFORM_OWNER_SUB to a provisioned user's Auth0 sub."
+                        )
                 conn.execute(
                     "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
                     (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), owner_user_id, now, now),
@@ -6235,6 +6313,42 @@ class TakyonStore:
             blocker = self._control_blocker(conn, f"business:{slug}")
         if blocker:
             raise TakyonError(f"cannot schedule CEO wakeup; business:{slug} is {blocker['state']}")
+
+        if _db_backend() == "postgres":
+            from cron.jobs import parse_schedule
+
+            try:
+                from . import wakes
+                from .policy import expensive_threshold_cents
+            except ImportError:  # pragma: no cover - alternate load path as a top-level package
+                from plugins.takyon import wakes
+                from plugins.takyon.policy import expensive_threshold_cents
+
+            parsed = parse_schedule(schedule)
+            if str(parsed.get("kind") or "") != "interval":
+                raise TakyonError(
+                    "Postgres CEO wake schedules currently require an interval cadence like "
+                    "'every 6h'."
+                )
+            interval_seconds = max(60, int(parsed.get("minutes") or 0) * 60)
+            with self._connect() as conn:
+                with self._leaf_conn(conn) as raw:
+                    existing = wakes.get_wake_schedule(raw, slug)
+                    wakes.upsert_wake_schedule(
+                        raw,
+                        slug,
+                        interval_seconds=interval_seconds,
+                        kind="ceo_wake",
+                        enabled=True,
+                        payload={"estimate_cents": expensive_threshold_cents()},
+                    )
+            return {
+                "wake_schedule": slug,
+                "schedule": str(parsed.get("display") or schedule),
+                "updated": existing is not None,
+                "interval_seconds": interval_seconds,
+                "reason": reason,
+            }
 
         from cron.jobs import create_job, list_jobs, update_job
 
@@ -7322,6 +7436,31 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
             raise TakyonError("Stripe event payload is required")
         event_id = str(event.get("id") or uuid.uuid4().hex)
         event_type = str(event.get("type") or "")
+        if _db_backend() == "postgres":
+            # Canonical Postgres reconciliation. app_payments.record_webhook_and_process owns the
+            # webhook_events dedup, the checkout/subscription dispatch, AND the net-new owner custody
+            # accrual (gross minus the STRIPE_CONNECT_APPLICATION_FEE_BPS app fee) that the legacy
+            # SQLite path below never performed — closing the flow-B hole where a sub-user payment
+            # reconciled but never showed in the owner's custody balance. Delegated over the raw psycopg
+            # connection lent by _leaf_conn, the same store->leaf pattern as seed_platform_owner: the
+            # leaf's `with conn.transaction()` is the atomic unit and _PGConn commits/closes on exit.
+            leaves = store._app_leaves()
+            try:
+                with store._connect() as conn:
+                    with store._leaf_conn(conn) as raw:
+                        outcome = leaves["payments"].record_webhook_and_process(raw, event)
+            except leaves["payments"].AppPaymentError as exc:
+                raise TakyonError(str(exc)) from exc
+            # Flatten the leaf envelope ({provider_event_id, type, deduplicated, processed}) to the
+            # SAME tool shape the SQLite path returns: top-level ids + `processed` = the inner
+            # reconciliation dict (which is None on a deduplicated replay).
+            return tool_result({
+                "success": True,
+                "provider_event_id": outcome.get("provider_event_id", event_id),
+                "type": outcome.get("type", event_type),
+                "deduplicated": outcome.get("deduplicated", False),
+                "processed": outcome.get("processed"),
+            })
         with store._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO webhook_events (id, provider, provider_event_id, payload_json, created_at) VALUES (?, 'stripe', ?, ?, ?)",

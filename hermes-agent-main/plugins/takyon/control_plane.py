@@ -37,6 +37,16 @@ class ResolvedPrincipal:
     business_slugs: tuple[str, ...]
 
 
+def _business_slugs_for_user(conn, user_id: str) -> tuple[str, ...]:
+    return tuple(
+        str(r[0])
+        for r in conn.execute(
+            "select slug from businesses where owner_user_id = %s order by slug",
+            (user_id,),
+        ).fetchall()
+    )
+
+
 def get_or_create_user(conn, auth0_sub: str, email: str | None = None) -> tuple[str, bool]:
     """JIT-provision a top-level Takyon user keyed by the Auth0 OIDC `sub`.
 
@@ -142,6 +152,42 @@ def ensure_platform_owner(conn) -> tuple[str, str | None]:
     return user_id, raw
 
 
+def resolve_user_principal(
+    conn,
+    user_id: str,
+    *,
+    key_id: str = "dashboard-session",
+) -> ResolvedPrincipal | None:
+    """Resolve a known user id to the same small principal shape as API-key auth."""
+    row = conn.execute(
+        "select status from users where id = %s",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    status = str(row[0] or "")
+    if status != "active":
+        return None
+    return ResolvedPrincipal(
+        user_id=str(user_id),
+        key_id=key_id,
+        status=status,
+        business_slugs=_business_slugs_for_user(conn, str(user_id)),
+    )
+
+
+def resolve_auth0_principal(
+    conn,
+    auth0_sub: str,
+    email: str | None = None,
+    *,
+    key_id: str = "dashboard-session",
+) -> ResolvedPrincipal | None:
+    """Resolve an Auth0-backed dashboard identity to the canonical principal shape."""
+    user_id, _created, _raw_key = provision_user_on_first_login(conn, auth0_sub, email)
+    return resolve_user_principal(conn, user_id, key_id=key_id)
+
+
 def mint_api_key(conn, user_id: str) -> str:
     """Mint THE single active key for a user. Raises if one is already active —
     callers rotate instead. The raw key is returned exactly once; only its hash
@@ -191,13 +237,7 @@ def resolve_api_key(conn, raw_key: str) -> ResolvedPrincipal | None:
     key_id, user_id, status = str(row[0]), str(row[1]), row[2]
     if status != "active":
         return None
-    slugs = tuple(
-        r[0]
-        for r in conn.execute(
-            "select slug from businesses where owner_user_id = %s order by slug",
-            (user_id,),
-        ).fetchall()
-    )
+    slugs = _business_slugs_for_user(conn, user_id)
     # Throttle the stamp: skip the write when it was touched in the last minute, so
     # one hot key can't serialize every request on this row's write lock (and to keep
     # WAL volume down). A coarse last_used_at is good enough; the no-match case is a

@@ -82,16 +82,6 @@ Creative-credit payment rules:
 - New billing-sensitive model/provider integrations should extend `hermes-agent-main/agent/usage_pricing.py`; do not add a second hardcoded pricing table in a skill or channel tool.
 - Normal app AI runtime pricing should resolve exact model pricing from `hermes-agent-main/agent/usage_pricing.py`, not heuristic family matching.
 
-## Operator Budget Rails
-
-For the operator/dashboard path, the canonical spend gate is the top-level Takyon user billing rail, not a create-time business cap:
-
-- Public dashboard/operator turns should resolve to one Postgres-backed Takyon user principal and reserve/settle against that user's control-plane budget.
-- `/create`, `/wake`, and normal operator chat must use that same per-user budget gate and ownership boundary.
-- Do not reintroduce legacy create-time bootstrap caps or `--budget` as a normal operator path. The old `business.budget_json` cap is legacy compatibility state, not the intended budgeting model.
-- Do not expose user-editable wake cadence or legacy budget fields in the dashboard create UI. The operator UI may show read-only budget state and can rely on backend/default wake policy, but should not present those as normal editable setup knobs.
-- For business/product runtime spend, use the real downstream rail instead: `app_usage.py` for product usage budgets, and the creative-credit rail for fixed-price creative/ad actions.
-
 ## Operating Model
 
 Takyon should be a skill-based Hermes CEO system, not a fixed workflow cockpit.

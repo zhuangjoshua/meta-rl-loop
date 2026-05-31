@@ -497,6 +497,90 @@ def test_concurrent_identical_webhook_processes_exactly_once(pg_conn):
     assert custody.reconcile_custody(pg_conn, owner)["ok"] is True
 
 
+# ── the LIVE tool entrypoint (core handler), not just the leaf ──────────────────────────
+# Regression for the flow-B wiring hole: business_record_stripe_webhook (core.handle_business_
+# record_stripe_webhook) is the serving-path entry the CEO/skills and the product webhook route
+# actually call. On the SQLite era it routed to an accrual-free handler, so a sub-user payment
+# reconciled but NEVER reached the owner's custody. This drives the real tool against Postgres and
+# proves the owner custody balance moves through the tool — not only through a direct leaf call.
+
+
+def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, monkeypatch):
+    import json
+
+    from psycopg.conninfo import make_conninfo
+
+    from plugins.takyon import core as takyon_core
+
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    intent = app_payments.create_checkout_intent(
+        pg_conn, slug, plan_key="pro", client_reference_id="ref-tool", customer_email="t@x.com"
+    )
+
+    # The tool calls _store() internally; point that store at THIS test's throwaway DB (the rows we
+    # just committed over the autocommit pg_conn are visible to the store's own connection). Neutralize
+    # the on-disk .env load and pin the backend, mirroring the worker/store PG tests.
+    dsn = make_conninfo(os.environ["TAKYON_TEST_PG_DSN"], dbname=pg_conn.info.dbname)
+    store = takyon_core.TakyonStore(root=tmp_path, database_url=dsn)
+    monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+
+    raw = takyon_core.handle_business_record_stripe_webhook(
+        {
+            "event": _checkout_event(
+                event_id="evt_tool", session_id="cs_tool", intent_id=intent.id,
+                email="t@x.com", amount_total=4000, subscription="sub_tool",
+            )
+        }
+    )
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert payload["type"] == "checkout.session.completed"
+    proc = payload["processed"]
+    assert proc["accrued_to_owner"] is True
+    assert proc["owner_user_id"] == owner
+
+    # The headline: the owner's custody balance actually moved THROUGH THE TOOL (gross - app fee),
+    # and revenue was recorded — the exact thing the legacy SQLite tool path never did.
+    assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net(4000)
+    assert app_payments.get_revenue_summary(pg_conn, slug)["amount_paid_cents"] == 4000
+
+
+def test_record_stripe_webhook_tool_dedups_on_replay(pg_conn, tmp_path, monkeypatch):
+    # The tool inherits the leaf's at-most-once processing: a replayed event id accrues exactly once.
+    import json
+
+    from psycopg.conninfo import make_conninfo
+
+    from plugins.takyon import core as takyon_core
+
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    intent = app_payments.create_checkout_intent(
+        pg_conn, slug, plan_key="pro", client_reference_id="ref-tool-rp", customer_email="rp@x.com"
+    )
+    dsn = make_conninfo(os.environ["TAKYON_TEST_PG_DSN"], dbname=pg_conn.info.dbname)
+    store = takyon_core.TakyonStore(root=tmp_path, database_url=dsn)
+    monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+
+    event = _checkout_event(
+        event_id="evt_tool_rp", session_id="cs_tool_rp", intent_id=intent.id,
+        email="rp@x.com", amount_total=3000,
+    )
+    first = json.loads(takyon_core.handle_business_record_stripe_webhook({"event": event}))
+    second = json.loads(takyon_core.handle_business_record_stripe_webhook({"event": event}))
+    assert first["success"] is True and second["success"] is True
+    assert first["processed"]["accrued_to_owner"] is True
+    assert second["processed"] is None  # deduplicated → leaf returned processed=None
+    # accrued exactly once despite two tool calls
+    assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net(3000)
+    assert app_payments.get_revenue_summary(pg_conn, slug)["events"] == 1
+
+
 def _processed_at(conn, event_id: str):
     row = conn.execute(
         "select processed_at from webhook_events where provider = 'stripe' and provider_event_id = %s",

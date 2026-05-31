@@ -61,10 +61,17 @@ class WSTransport:
     should use :meth:`write_async` from the loop thread.
     """
 
-    def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        ws: Any,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        operator_principal: Any | None = None,
+    ) -> None:
         self._ws = ws
         self._loop = loop
         self._closed = False
+        self.operator_principal = operator_principal
 
     def write(self, obj: dict) -> bool:
         if self._closed:
@@ -113,11 +120,15 @@ class WSTransport:
         self._closed = True
 
 
-async def handle_ws(ws: Any) -> None:
+async def handle_ws(ws: Any, *, principal: Any | None = None) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
     await ws.accept()
 
-    transport = WSTransport(ws, asyncio.get_running_loop())
+    transport = WSTransport(
+        ws,
+        asyncio.get_running_loop(),
+        operator_principal=principal,
+    )
 
     await transport.write_async(
         {

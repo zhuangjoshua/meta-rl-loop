@@ -22,8 +22,15 @@ import urllib.error
 import urllib.request
 from decimal import ROUND_CEILING, Decimal
 
+from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, get_pricing_entry
+
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
+_ONE_MILLION = Decimal("1000000")
+
+
+class AnthropicPricingUnavailable(ValueError):
+    """Raised when the requested Anthropic model has no exact known pricing."""
 
 
 def _env(name: str, default: str = "") -> str:
@@ -59,6 +66,18 @@ def anthropic_model(body: dict) -> str:
     ).strip()
 
 
+def _anthropic_pricing_source_label(model: str) -> str:
+    entry = get_pricing_entry(model, provider="anthropic")
+    if entry is None:
+        raise AnthropicPricingUnavailable(
+            f"no exact Anthropic pricing is configured for model {model!r}"
+        )
+    parts = [entry.source]
+    if entry.pricing_version:
+        parts.append(entry.pricing_version)
+    return ":".join(part for part in parts if part)
+
+
 def anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, str]:
     input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
     output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
@@ -68,19 +87,48 @@ def anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, st
             Decimal(output_override or "15"),
             "env",
         )
-
-    lowered = model.lower()
-    if "opus" in lowered:
-        return Decimal("15"), Decimal("75"), "default-opus-estimate"
-    if "haiku" in lowered:
-        return Decimal("1"), Decimal("5"), "default-haiku-estimate"
-    return Decimal("3"), Decimal("15"), "default-sonnet-estimate"
+    entry = get_pricing_entry(model, provider="anthropic")
+    if (
+        entry is None
+        or entry.input_cost_per_million is None
+        or entry.output_cost_per_million is None
+    ):
+        raise AnthropicPricingUnavailable(
+            f"no exact Anthropic pricing is configured for model {model!r}"
+        )
+    return (
+        entry.input_cost_per_million / _ONE_MILLION,
+        entry.output_cost_per_million / _ONE_MILLION,
+        _anthropic_pricing_source_label(model),
+    )
 
 
 def microusd_cost(model: str, input_tokens: int, output_tokens: int) -> int:
-    input_rate, output_rate, _source = anthropic_rates_microusd_per_token(model)
-    total = input_rate * Decimal(max(0, input_tokens)) + output_rate * Decimal(max(0, output_tokens))
-    return int(total.to_integral_value(rounding=ROUND_CEILING))
+    input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
+    output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
+    if input_override or output_override:
+        input_rate, output_rate, _source = anthropic_rates_microusd_per_token(model)
+        total = (
+            input_rate * Decimal(max(0, input_tokens))
+            + output_rate * Decimal(max(0, output_tokens))
+        )
+        return int(total.to_integral_value(rounding=ROUND_CEILING))
+
+    result = estimate_usage_cost(
+        model,
+        CanonicalUsage(
+            input_tokens=max(0, input_tokens),
+            output_tokens=max(0, output_tokens),
+        ),
+        provider="anthropic",
+    )
+    if result.amount_usd is None:
+        raise AnthropicPricingUnavailable(
+            f"no exact Anthropic pricing is configured for model {model!r}"
+        )
+    return int(
+        (result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING)
+    )
 
 
 def estimate_input_tokens(messages: list[dict], system: str) -> int:

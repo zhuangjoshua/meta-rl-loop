@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import billing, rate_limit, stripe_util
+from . import billing, business_credits, rate_limit, stripe_util
 from .control_plane import ResolvedPrincipal, resolve_api_key
 
 _BEARER_PREFIX = "Bearer "
@@ -37,6 +37,14 @@ class TopupCheckoutRequest(BaseModel):
     target it picked."""
 
     amount_cents: int = Field(..., gt=0)
+    success_url: str = Field(..., min_length=1)
+    cancel_url: str = Field(..., min_length=1)
+
+
+class CreativeCreditCheckoutRequest(BaseModel):
+    """Body for POST /v1/businesses/{slug}/creative-credits/checkout."""
+
+    pack_id: str = Field(..., min_length=1)
     success_url: str = Field(..., min_length=1)
     cancel_url: str = Field(..., min_length=1)
 
@@ -94,6 +102,60 @@ def _rate_limit_config() -> tuple[int, int]:
         _positive_int_env("TAKYON_CONTROL_RATE_LIMIT", 120),
         _positive_int_env("TAKYON_CONTROL_RATE_WINDOW_SECONDS", 60),
     )
+
+
+def _creative_credit_packs() -> list[dict[str, Any]]:
+    """Configured creative-credit packs from `TAKYON_CREATIVE_CREDIT_PACKS_JSON`.
+
+    Shape: a JSON array of objects carrying `id`, `credits`, and `amount_cents`, plus
+    optional `name` / `description`. Invalid or missing config yields an empty catalog
+    rather than crashing the whole boundary.
+    """
+    raw = os.environ.get("TAKYON_CREATIVE_CREDIT_PACKS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    packs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        pack_id = str(item.get("id") or "").strip()
+        if not pack_id or pack_id in seen:
+            continue
+        try:
+            credits = int(item.get("credits") or 0)
+            amount_cents = int(item.get("amount_cents") or 0)
+        except (TypeError, ValueError):
+            continue
+        if credits <= 0 or amount_cents <= 0:
+            continue
+        seen.add(pack_id)
+        pack = {
+            "id": pack_id,
+            "name": str(item.get("name") or pack_id),
+            "description": str(item.get("description") or ""),
+            "credits": credits,
+            "amount_cents": amount_cents,
+            "currency": "usd",
+        }
+        packs.append(pack)
+    return packs
+
+
+def _creative_credit_pack(pack_id: str) -> dict[str, Any] | None:
+    target = str(pack_id or "").strip()
+    if not target:
+        return None
+    for pack in _creative_credit_packs():
+        if pack["id"] == target:
+            return pack
+    return None
 
 
 def _rate_limited_principal(
@@ -165,6 +227,95 @@ def build_control_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="not_found")
         return {"slug": row[0], "name": row[1], "mode": row[2]}
 
+    @router.get("/businesses/{slug}/creative-credits")
+    def get_creative_credits(
+        slug: str,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        if slug not in principal.business_slugs:
+            raise HTTPException(status_code=404, detail="not_found")
+        row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        balances = business_credits.get_business_credit_balances(conn, slug)
+        return {
+            "business_slug": slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    @router.get("/businesses/{slug}/creative-credits/packs")
+    def list_creative_credit_packs(
+        slug: str,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        if slug not in principal.business_slugs:
+            raise HTTPException(status_code=404, detail="not_found")
+        row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        return {"business_slug": slug, "packs": _creative_credit_packs()}
+
+    @router.post("/businesses/{slug}/creative-credits/checkout")
+    def create_creative_credit_checkout(
+        slug: str,
+        body: CreativeCreditCheckoutRequest,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        if slug not in principal.business_slugs:
+            raise HTTPException(status_code=404, detail="not_found")
+        row = conn.execute(
+            "select slug, name from businesses where slug = %s",
+            (slug,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        pack = _creative_credit_pack(body.pack_id)
+        if pack is None:
+            raise HTTPException(status_code=404, detail="unknown_credit_pack")
+        params = {
+            "mode": "payment",
+            "client_reference_id": slug,
+            "success_url": body.success_url,
+            "cancel_url": body.cancel_url,
+            "line_items[0][quantity]": 1,
+            "line_items[0][price_data][currency]": pack["currency"],
+            "line_items[0][price_data][unit_amount]": pack["amount_cents"],
+            "line_items[0][price_data][product_data][name]": (
+                f"Takyon creative credit pack ({pack['credits']} credits)"
+            ),
+            "metadata[purpose]": "creative_credit_pack",
+            "metadata[user_id]": principal.user_id,
+            "metadata[business_slug]": slug,
+            "metadata[pack_id]": pack["id"],
+            "metadata[credits]": pack["credits"],
+            "payment_intent_data[metadata][purpose]": "creative_credit_pack",
+            "payment_intent_data[metadata][user_id]": principal.user_id,
+            "payment_intent_data[metadata][business_slug]": slug,
+            "payment_intent_data[metadata][pack_id]": pack["id"],
+            "payment_intent_data[metadata][credits]": pack["credits"],
+        }
+        try:
+            session = stripe_util.stripe_request("checkout/sessions", params)
+        except stripe_util.StripeError as exc:
+            msg = str(exc)
+            if "STRIPE_SECRET_KEY" in msg:
+                raise HTTPException(
+                    status_code=503, detail="creative_credit_checkout_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
+        return {
+            "checkout_url": session.get("url"),
+            "session_id": session.get("id"),
+            "business_slug": slug,
+            "pack_id": pack["id"],
+            "credits": pack["credits"],
+            "amount_cents": pack["amount_cents"],
+        }
+
     @router.post("/billing/topup/checkout")
     def create_topup_checkout(
         body: TopupCheckoutRequest,
@@ -228,10 +379,44 @@ def build_control_router() -> APIRouter:
             return {"ok": True, "ignored": event_type or "unknown_event"}
         session = (event.get("data") or {}).get("object") or {}
         metadata = session.get("metadata") or {}
-        if metadata.get("purpose") != "takyon_topup":
-            return {"ok": True, "ignored": "not_a_topup"}
         if session.get("payment_status") not in ("paid", "no_payment_required"):
             return {"ok": True, "ignored": "unpaid"}
+        purpose = str(metadata.get("purpose") or "")
+        if purpose == "creative_credit_pack":
+            business_slug = str(
+                metadata.get("business_slug") or session.get("client_reference_id") or ""
+            ).strip()
+            pack_id = str(metadata.get("pack_id") or "").strip()
+            try:
+                credits = int(metadata.get("credits") or 0)
+            except (TypeError, ValueError):
+                credits = 0
+            if not business_slug or credits <= 0 or not event_id:
+                return {"ok": True, "ignored": "incomplete_session"}
+            balances = business_credits.grant_credits(
+                conn,
+                business_slug,
+                credits,
+                idempotency_key=event_id,
+                metadata={
+                    "purpose": purpose,
+                    "pack_id": pack_id,
+                    "user_id": metadata.get("user_id"),
+                    "stripe_checkout_session_id": session.get("id"),
+                    "amount_cents": int(session.get("amount_total") or 0),
+                },
+                stripe_ref=str(session.get("id") or ""),
+            )
+            return {
+                "ok": True,
+                "business_slug": business_slug,
+                "credited_credits": credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "event_id": event_id,
+            }
+        if purpose != "takyon_topup":
+            return {"ok": True, "ignored": "not_a_topup"}
         user_id = session.get("client_reference_id") or metadata.get("user_id")
         amount = int(session.get("amount_total") or 0)
         if not user_id or amount <= 0 or not event_id:

@@ -32,6 +32,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
 from .ai_provider import (
+    AnthropicPricingUnavailable,
     anthropic_key,
     anthropic_payload,
     anthropic_rates_microusd_per_token,
@@ -135,11 +136,16 @@ def build_ai_gateway_router() -> APIRouter:
         # Cost estimate is computed SERVER-SIDE (the caller cannot declare its own) and is what the
         # budget cap is checked against at reserve.
         estimated_output_tokens = int(payload.get("max_tokens") or 0)
-        estimated_cost = microusd_cost(model, estimated_input_tokens, estimated_output_tokens)
+        try:
+            estimated_cost = microusd_cost(
+                model, estimated_input_tokens, estimated_output_tokens
+            )
+            rate_source = anthropic_rates_microusd_per_token(model)[2]
+        except AnthropicPricingUnavailable as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         app_user_id = body.get("app_user_id") or body.get("appUserId") or None
         app_user_tier = body.get("app_user_tier") or body.get("appUserTier") or None
-        rate_source = anthropic_rates_microusd_per_token(model)[2]
 
         # THE gate: hold the estimate atomically under the budget row lock. A FRESH reservation_key
         # per request — an internal reserve↔settle correlation id, not a client retry key — so there

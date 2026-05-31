@@ -707,11 +707,11 @@ def _save_cfg(cfg: dict):
             _cfg_mtime = None
 
 
-def _set_session_context(session_key: str) -> list:
+def _set_session_context(session_key: str, *, operator_user_id: str = "") -> list:
     try:
         from gateway.session_context import set_session_vars
 
-        return set_session_vars(session_key=session_key)
+        return set_session_vars(session_key=session_key, user_id=operator_user_id or "")
     except Exception:
         return []
 
@@ -2130,6 +2130,13 @@ def _(rid, params: dict) -> dict:
     key = _new_session_key()
     cols = int(params.get("cols", 80))
     _enable_gateway_prompts()
+    transport = current_transport() or _stdio_transport
+    operator_user_id = str(params.get("_takyon_operator_user_id") or "").strip()
+    if not operator_user_id:
+        principal = getattr(transport, "operator_principal", None)
+        operator_user_id = str(getattr(principal, "user_id", "") or "").strip()
+    if not operator_user_id:
+        operator_user_id = str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
 
     ready = threading.Event()
 
@@ -2149,9 +2156,10 @@ def _(rid, params: dict) -> dict:
         "session_key": key,
         "show_reasoning": _load_show_reasoning(),
         "slash_worker": None,
+        "takyon_operator_user_id": operator_user_id,
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
-        "transport": current_transport() or _stdio_transport,
+        "transport": transport,
     }
 
     # Return the lightweight session immediately so Ink can paint the composer
@@ -3178,14 +3186,27 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         approval_token = None
         session_tokens = []
         goal_followup = None  # set by the post-turn goal hook below
+        reservation_key = ""
+        reserved_cents = 0
+        turn_cost_before_usd = 0.0
+        billing_warning = ""
+        resolved_operator_user_id = ""
         try:
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
             )
+            from plugins.takyon.cli import (
+                _operator_budget_finalize,
+                _operator_budget_reserve,
+                _resolved_operator_user_id,
+            )
 
             approval_token = set_current_session_key(session["session_key"])
-            session_tokens = _set_session_context(session["session_key"])
+            session_tokens = _set_session_context(
+                session["session_key"],
+                operator_user_id=_takyon_operator_user_id(session),
+            )
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
@@ -3275,6 +3296,19 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         run_message = _enrich_with_attached_images(prompt, images)
                 else:
                     run_message = _enrich_with_attached_images(prompt, images)
+
+            resolved_operator_user_id = _resolved_operator_user_id(
+                _takyon_operator_user_id(session)
+            )
+            if resolved_operator_user_id:
+                reservation_key, reserved_cents = _operator_budget_reserve(
+                    operator_user_id=resolved_operator_user_id,
+                    business_slug=str(session.get("takyon_current_business") or "").strip() or None,
+                    reservation_key=f"tui-turn:{sid}:{uuid.uuid4().hex}",
+                )
+                turn_cost_before_usd = float(
+                    getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0
+                )
 
             def _stream(delta):
                 payload = {"text": delta}
@@ -3489,6 +3523,31 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             )
             _emit("error", sid, {"message": str(e)})
         finally:
+            turn_actual_cents = max(
+                0,
+                int(
+                    round(
+                        (
+                            float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+                            - float(turn_cost_before_usd or 0.0)
+                        )
+                        * 100
+                    )
+                ),
+            )
+            if reservation_key:
+                try:
+                    billing_warning = _operator_budget_finalize(
+                        operator_user_id=resolved_operator_user_id,
+                        business_slug=str(session.get("takyon_current_business") or "").strip() or None,
+                        reservation_key=reservation_key,
+                        reserved_cents=reserved_cents,
+                        actual_cents=turn_actual_cents,
+                    )
+                except Exception as exc:
+                    _emit("error", sid, {"message": f"budget settlement failed: {exc}"})
+                if billing_warning:
+                    _emit("status.update", sid, {"kind": "budget", "text": billing_warning})
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
@@ -4616,8 +4675,6 @@ def _takyon_prompt_mentions_budget(text: str) -> bool:
     compact = " ".join(str(text or "").strip().split()).lower()
     if not compact:
         return False
-    if re.search(r"(?:^|\s)--budget(?:\s|=|$)", compact):
-        return True
     if re.search(r"\b(?:budget|cap|spend limit|spend cap|runway|limit)\b", compact):
         return True
     return bool(re.search(r"(?:\$|usd\s*)\d+(?:[,.]\d+)?|\d+(?:[,.]\d+)?\s*(?:usd|dollars?)\b", compact))
@@ -5594,7 +5651,7 @@ def _takyon_session(params: dict) -> dict | None:
     return _sessions.get(str(params.get("session_id") or ""))
 
 
-_TAKYON_CREATE_VALUE_FLAGS = {"--budget", "--schedule"}
+_TAKYON_CREATE_VALUE_FLAGS = {"--schedule"}
 
 
 def _takyon_create_business_arg_index(tokens: list[str]) -> int | None:
@@ -5661,9 +5718,9 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
 
             # Match the interactive shell path, which normalizes create/build/init
             # through the canonical /create parser before running the business start.
-            slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto, _budget = _parse_business_start_args(
+            slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
                 ["create", *tokens[1:]],
-                usage='usage: /create [--test|--live] [--budget <usd>] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+                usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
                 auto_default=True,
             )
         except Exception:
@@ -5783,15 +5840,56 @@ def _takyon_get_background_run(business: str) -> dict[str, Any] | None:
         return dict(run)
 
 
+def _takyon_operator_user_id(session: dict | None) -> str:
+    return str((session or {}).get("takyon_operator_user_id") or "").strip()
+
+
+def _takyon_store(session: dict | None):
+    from plugins.takyon.cli import TakyonStore
+
+    return TakyonStore(operator_user_id=_takyon_operator_user_id(session) or None)
+
+
+def _takyon_businesses_for_session(
+    session: dict | None,
+    store=None,
+) -> list[dict[str, Any]]:
+    active_store = store or _takyon_store(session)
+    data = active_store.read(scope="global", query="list_businesses")
+    businesses = data.get("businesses") if isinstance(data, dict) else []
+    if not isinstance(businesses, list):
+        return []
+    return [item for item in businesses if isinstance(item, dict)]
+
+
+def _takyon_can_access_business(session: dict | None, business: str) -> bool:
+    slug = str(business or "").strip()
+    if not slug:
+        return False
+    return any(
+        str(item.get("slug") or "").strip() == slug
+        for item in _takyon_businesses_for_session(session)
+    )
+
+
+def _takyon_require_business_access(
+    session: dict | None,
+    business: str,
+) -> str | None:
+    slug = str(business or "").strip()
+    if not slug:
+        return "business scope required"
+    if _takyon_can_access_business(session, slug) or _takyon_get_background_run(slug):
+        return None
+    return f"access denied for business:{slug}"
+
+
 def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
     try:
-        from plugins.takyon.cli import TakyonStore, _slugify
+        from plugins.takyon.cli import _slugify
 
-        store = TakyonStore()
-        data = store.read(scope="global", query="list_businesses")
-        businesses = data.get("businesses") if isinstance(data, dict) else []
-        if not isinstance(businesses, list):
-            businesses = []
+        store = _takyon_store(session)
+        businesses = _takyon_businesses_for_session(session, store=store)
         auto_slug, auto_warning = _takyon_maybe_auto_enter_created_business(session, businesses)
         raw_business = str((session or {}).get("takyon_current_business") or "").strip()
         current_business = _slugify(raw_business) if raw_business else ""
@@ -5894,17 +5992,12 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, _takyon_scope_payload(session))
 
     try:
-        from plugins.takyon.cli import TakyonStore, _slugify
+        from plugins.takyon.cli import _slugify
 
         slug = _slugify(business)
-        data = TakyonStore().read(scope="global", query="list_businesses")
-        businesses = data.get("businesses") if isinstance(data, dict) else []
-        exists = any(
-            isinstance(item, dict) and str(item.get("slug") or "") == slug
-            for item in (businesses if isinstance(businesses, list) else [])
-        )
+        exists = _takyon_can_access_business(session, slug)
         if not exists and not _takyon_get_background_run(slug):
-            return _err(rid, 4041, f"business:{slug} does not exist")
+            return _err(rid, 4041, f"access denied for business:{slug}")
         session["takyon_current_business"] = slug
         return _ok(rid, _takyon_scope_payload(session))
     except Exception as e:
@@ -5954,13 +6047,17 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     business = str(session.get("takyon_current_business") or "").strip()
-    if not business:
-        return _err(rid, 4004, "business scope required")
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
     path = str(params.get("path") or ".").strip() or "."
     try:
-        from plugins.takyon.cli import TakyonStore
-
-        data = TakyonStore().read(scope=f"business:{business}", query="list_files", path=path, limit=100)
+        data = _takyon_store(session).read(
+            scope=f"business:{business}",
+            query="list_files",
+            path=path,
+            limit=100,
+        )
         return _ok(rid, {**data, **_takyon_scope_payload(session)})
     except Exception as e:
         return _err(rid, 5045, str(e))
@@ -5972,15 +6069,14 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     business = str(session.get("takyon_current_business") or "").strip()
-    if not business:
-        return _err(rid, 4004, "business scope required")
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
     path = str(params.get("path") or "").strip()
     if not path:
         return _err(rid, 4004, "path required")
     try:
-        from plugins.takyon.cli import TakyonStore
-
-        store = TakyonStore()
+        store = _takyon_store(session)
         file_path = store._resolve_business_file(business, path)
         if not file_path.exists() or not file_path.is_file():
             return _err(rid, 4044, f"file not found: {path}")
@@ -6008,15 +6104,14 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     business = str(session.get("takyon_current_business") or "").strip()
-    if not business:
-        return _err(rid, 4004, "business scope required")
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
     path = str(params.get("path") or "").strip()
     if not path:
         return _err(rid, 4004, "path required")
     try:
-        from plugins.takyon.cli import TakyonStore
-
-        store = TakyonStore()
+        store = _takyon_store(session)
         file_path = store._resolve_business_file(business, path)
         if not file_path.exists() or not file_path.is_file():
             return _err(rid, 4044, f"file not found: {path}")
@@ -6048,13 +6143,12 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     business = str(session.get("takyon_current_business") or "").strip()
-    if not business:
-        return _err(rid, 4004, "business scope required")
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
     requested_path = str(params.get("path") or "").strip()
     try:
-        from plugins.takyon.cli import TakyonStore
-
-        store = TakyonStore()
+        store = _takyon_store(session)
         if not requested_path:
             overview = _takyon_business_overview_payload(store, business)
             artifacts = overview.get("artifacts") if isinstance(overview, dict) else {}
@@ -6105,11 +6199,12 @@ def _(rid, params: dict) -> dict:
     business = str(session.get("takyon_current_business") or "").strip()
     if not business:
         return _ok(rid, {"outputs": [], **_takyon_scope_payload(session)})
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
     try:
-        from plugins.takyon.cli import TakyonStore
-
         outputs = _takyon_historical_outputs_payload(
-            TakyonStore(),
+            _takyon_store(session),
             business,
             limit=int(params.get("limit") or 40),
         )
@@ -6137,12 +6232,17 @@ def _(rid, params: dict) -> dict:
 
         history = session.setdefault("takyon_shell_history", [])
         current_business = str(session.get("takyon_current_business") or "") or None
+        operator_user_id = _takyon_operator_user_id(session) or None
         detached_target = _takyon_detached_shell_target(line, current_business)
         if detached_target:
             detached_kind, target_business, detached_line = detached_target
+            if target_business and detached_kind != "create":
+                access_error = _takyon_require_business_access(session, target_business)
+                if access_error:
+                    return _err(rid, 4041, access_error)
             if detached_kind == "create" and target_business:
                 try:
-                    data = TakyonStore().read(scope="global", query="list_businesses", limit=200)
+                    data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
                     session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
                 except Exception:
                     session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
@@ -6190,7 +6290,14 @@ def _(rid, params: dict) -> dict:
                             *shlex.split(raw),
                         ],
                         cwd=str(Path(__file__).resolve().parents[1]),
-                        env=os.environ.copy(),
+                        env={
+                            **os.environ.copy(),
+                            **(
+                                {"TAKYON_OPERATOR_USER_ID": operator_user_id}
+                                if operator_user_id
+                                else {}
+                            ),
+                        },
                         text=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
@@ -6343,10 +6450,11 @@ def _(rid, params: dict) -> dict:
         output, next_business = _handle_shell_line(
             line,
             current_business=current_business,
-            store=TakyonStore(),
+            store=TakyonStore(operator_user_id=operator_user_id),
             model=os.getenv("TAKYON_MODEL", ""),
             max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),
             shell_history=history if isinstance(history, list) else None,
+            operator_user_id=operator_user_id,
         )
         session["takyon_current_business"] = next_business or ""
         if isinstance(history, list):
@@ -6377,9 +6485,7 @@ def _(rid, params: dict) -> dict:
         prompt_text = _operator_context_message(text, current_business)
         if _takyon_prompt_may_create_business(text):
             try:
-                from plugins.takyon.cli import TakyonStore
-
-                data = TakyonStore().read(scope="global", query="list_businesses", limit=200)
+                data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
                 session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
                 session["takyon_pending_business_create"] = True
                 session["takyon_pending_business_create_at"] = time.time()

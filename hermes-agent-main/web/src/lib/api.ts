@@ -63,6 +63,8 @@ async function getSessionToken(): Promise<string> {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getTakyonOperatorAccount: () =>
+    fetchJSON<TakyonOperatorAccountResponse>("/api/takyon/operator/account"),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
@@ -380,6 +382,20 @@ export interface StatusResponse {
   latest_config_version: number;
   release_date: string;
   version: string;
+}
+
+export interface TakyonOperatorAccountResponse {
+  available: boolean;
+  user_id?: string;
+  status?: string;
+  owned_business_count?: number;
+  allowance_included_cents?: number;
+  allowance_used_cents?: number;
+  allowance_remaining_cents?: number;
+  topup_balance_cents?: number;
+  reserved_cents?: number;
+  spendable_cents?: number;
+  reason?: string;
 }
 
 export interface SessionInfo {

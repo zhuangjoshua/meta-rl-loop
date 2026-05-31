@@ -56,6 +56,7 @@ from takyon_cli.config import (
 )
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.app_api import (
+    AnthropicPricingUnavailable as _takyon_app_AnthropicPricingUnavailable,
     SESSION_COOKIE as TAKYON_APP_SESSION_COOKIE,
     _anthropic_key as _takyon_app_anthropic_key,
     _anthropic_payload as _takyon_app_anthropic_payload,
@@ -898,6 +899,38 @@ def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
         _log.error("JIT provisioning for dashboard login failed (login still allowed): %s", exc)
 
 
+def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
+    """Resolve the logged-in dashboard user to the canonical PG principal."""
+    if not user:
+        return None
+    try:
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return None
+        import psycopg
+
+        from plugins.takyon.control_plane import resolve_auth0_principal
+        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+
+        try:
+            url = resolve_database_url()
+        except RuntimeNotConfigured:
+            return None
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            return resolve_auth0_principal(
+                conn,
+                str(user.get("sub") or ""),
+                str(user.get("email") or "") or None,
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - auth stays cookie-based if principal resolution hiccups
+        _log.warning("dashboard principal resolution failed: %s", exc)
+        return None
+
+
 def _seed_platform_owner_if_postgres() -> None:
     """Serving-flip startup seed for the dashboard server (Phase 8, mediationplan.md owner-wiring
     finding). The shell-side twin of this runs in ``cli.py``; both call the SAME idempotent
@@ -1254,11 +1287,15 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         except Exception as exc:
             return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
         estimated_output_tokens = int(anthropic_payload.get("max_tokens") or 0)
-        estimated_cost = int(
-            body.get("estimated_cost_microusd")
-            or body.get("estimatedCostMicrousd")
-            or _takyon_app_microusd_cost(model, estimated_input_tokens, estimated_output_tokens)
-        )
+        try:
+            estimated_cost = _takyon_app_microusd_cost(
+                model, estimated_input_tokens, estimated_output_tokens
+            )
+            rate_source = _takyon_app_anthropic_rates_microusd_per_token(model)[2]
+        except _takyon_app_AnthropicPricingUnavailable as exc:
+            return _takyon_app_json(
+                HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)}
+            )
         budget = _takyon_app_budget_remaining_microusd(business)
         if budget["status"] != "active":
             return _takyon_app_json(HTTPStatus.PAYMENT_REQUIRED, {"success": False, "error": "app budget is not active", "budget": budget})
@@ -1298,7 +1335,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
                 "provider": "anthropic",
                 "model": model,
                 "metadata": {
-                    "cost_rate_source": _takyon_app_anthropic_rates_microusd_per_token(model)[2],
+                    "cost_rate_source": rate_source,
                     "request_metadata": body.get("metadata") or {},
                 },
                 "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate:{business}:{user.get('id')}:{provider_request_id or uuid.uuid4().hex}",
@@ -1769,6 +1806,76 @@ async def get_status():
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
     }
+
+
+@app.get("/api/takyon/operator/account")
+async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
+    """Read-only operator billing snapshot for the dashboard UI."""
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        return {
+            "available": False,
+            "reason": "operator_principal_unavailable",
+        }
+
+    try:
+        from plugins.takyon import billing
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return {
+                "available": False,
+                "reason": "postgres_required",
+                "owned_business_count": len(principal.business_slugs),
+                "status": principal.status,
+                "user_id": str(principal.user_id),
+            }
+
+        import psycopg
+
+        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+
+        try:
+            url = resolve_database_url()
+        except RuntimeNotConfigured:
+            return {
+                "available": False,
+                "reason": "database_unconfigured",
+                "owned_business_count": len(principal.business_slugs),
+                "status": principal.status,
+                "user_id": str(principal.user_id),
+            }
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            balances = billing.get_billing_balances(conn, str(principal.user_id))
+        finally:
+            conn.close()
+
+        allowance_remaining = max(0, int(balances.allowance_remaining_cents))
+        topup_balance = max(0, int(balances.topup_balance_cents))
+        reserved = max(0, int(balances.reserved_cents))
+        return {
+            "available": True,
+            "allowance_included_cents": int(balances.allowance_included_cents),
+            "allowance_remaining_cents": allowance_remaining,
+            "allowance_used_cents": int(balances.allowance_used_cents),
+            "owned_business_count": len(principal.business_slugs),
+            "reserved_cents": reserved,
+            "spendable_cents": allowance_remaining + topup_balance,
+            "status": principal.status,
+            "topup_balance_cents": topup_balance,
+            "user_id": str(principal.user_id),
+        }
+    except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
+        _log.warning("dashboard operator account read failed: %s", exc)
+        return {
+            "available": False,
+            "reason": "read_failed",
+            "owned_business_count": len(principal.business_slugs),
+            "status": principal.status,
+            "user_id": str(principal.user_id),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -4720,6 +4827,11 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
+    cfg = _auth0_config()
+    principal = _resolve_dashboard_principal(
+        _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
+    )
+
     await ws.accept()
 
     # On native Windows, the POSIX PTY bridge can't be imported.  Tell the
@@ -4746,6 +4858,9 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
         await ws.close(code=1011)
         return
+
+    if principal is not None:
+        env["TAKYON_OPERATOR_USER_ID"] = str(principal.user_id)
 
 
     try:
@@ -4849,11 +4964,16 @@ async def gateway_ws(ws: WebSocket) -> None:
 
     from tui_gateway.ws import handle_ws
 
-    await handle_ws(ws)
+    cfg = _auth0_config()
+    principal = _resolve_dashboard_principal(
+        _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
+    )
+
+    await handle_ws(ws, principal=principal)
 
 
 @app.post("/api/tui/rpc")
-async def tui_rpc(body: TuiRpcRequest) -> dict:
+async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
     """HTTP fallback for the dashboard chat JSON-RPC transport.
 
     The WebSocket path remains the live stream. This endpoint intentionally
@@ -4870,6 +4990,15 @@ async def tui_rpc(body: TuiRpcRequest) -> dict:
         "method": body.method,
         "params": body.params or {},
     }
+
+    if req["method"] == "session.create":
+        principal = _resolve_dashboard_principal(
+            getattr(request.state, "auth0_user", None)
+        )
+        if principal is not None:
+            params = dict(req.get("params") or {})
+            params.setdefault("_takyon_operator_user_id", str(principal.user_id))
+            req["params"] = params
 
     from tui_gateway import server as tui_server
 

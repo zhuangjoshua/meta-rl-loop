@@ -2779,3 +2779,39 @@ rm deploy/argon-alpha-14/takyon-worker.service
 git checkout HEAD -- hermes-agent-main/takyon_cli/main.py   # drops cmd_worker + the worker subparser/registrations
 # this log entry is additive — trim it if reverting.
 ```
+
+---
+
+## Flow-B fix: wire the live `business_record_stripe_webhook` tool to the Postgres accrual leaf
+
+**Why (the hole this closes):** flow B's payment→accrual engine (`plugins/takyon/app_payments.py::record_webhook_and_process`) was built and unit-tested but had **no non-test caller in the serving path**. The live tool `business_record_stripe_webhook` → `core.handle_business_record_stripe_webhook` routed *unconditionally* through the legacy SQLite handler `core._process_checkout_completed`, which performs **zero owner custody accrual**. Net effect: a sub-user payment reconciled (revenue + entitlement) but the gross-minus-app-fee net **never reached the owner's custody balance** — exactly the Phase-5(d) acceptance ("sub-user payment shows in owner custody") silently regressed at the live entrypoint. The usage-metering half of flow B (ai_gateway → app_usage) was already correctly wired; only the payment→accrual half was dead.
+
+**The fix (parsimonious — no new operation action, no new HTTP route):** on the Postgres backend the handler now delegates to the canonical leaf over the raw psycopg connection, using the **same store→leaf pattern already proven by `seed_platform_owner`** (`with store._connect() as conn: with store._leaf_conn(conn) as raw: app_payments.record_webhook_and_process(raw, event)`). The leaf already owns the `webhook_events` dedup, the checkout/subscription dispatch, AND the `custody.accrue(gross, fee)` net accrual in one transaction. The legacy SQLite branch is preserved verbatim for the SQLite backend (`_db_backend() != "postgres"`), so `test_takyon_app_api.py`'s SQLite webhook route is untouched.
+
+- **Why NOT the `_commit_tool` seam** (my first proposed mechanism): `_normalize_operation` *requires a business scope* for every action (core.py:5172) and applies per-business work-focus + kill-switch gating. A Stripe webhook is **global** — it carries no business slug; the business is discovered from the checkout intent *inside* the leaf — and the leaf already does its own dedup. Forcing it through the business-scoped operator seam would mean a fake scope, double dedup, and a conceptual mismatch. The direct store→leaf delegation (mirroring `seed_platform_owner`) is the smaller, truthful fit.
+- **Envelope flattening:** the leaf returns `{provider_event_id, type, deduplicated, processed}`; the tool flattens that to the SAME shape the SQLite path returned — top-level ids + `processed` = the inner reconciliation dict (`None` on a deduplicated replay) — so no caller/skill/UI reading `processed` changes.
+
+**Discovery surface (so the CEO can see it):** `skills/takyon/takyon-app-runtime/SKILL.md` now states in How-to-Run + Procedure step 7 that paid reconciliation accrues gross minus the platform application fee (`STRIPE_CONNECT_APPLICATION_FEE_BPS`, default 2000 bps = 20%) into the business owner's custody balance (flow B, distinct from the top-level user billing ledger), and that payout of that custody balance is **deferred** (no Stripe Connect transfer yet) — report it as owed/accrued, never as paid out.
+
+**Tests (real engine, real Postgres):** two new tests in `tests/plugins/test_takyon_app_payments_pg.py` drive the **tool** (not just the leaf) against Postgres:
+- `test_record_stripe_webhook_tool_accrues_to_owner_custody` — a paid `checkout.session.completed` through the tool moves the owner's custody `owed_balance_cents` to `gross − app fee` and records revenue.
+- `test_record_stripe_webhook_tool_dedups_on_replay` — a replayed event id accrues exactly once (`processed` is `None` the second time).
+- Regression sweep green: `app_payments + store + custody + worker + app_api` = **72 passed** (store suite proves the `_app_leaves()` `payments` addition didn't disturb the existing identity/entitlements/usage delegations; app_api proves the SQLite path still works).
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/core.py` — `handle_business_record_stripe_webhook` gains a Postgres branch that delegates to `app_payments.record_webhook_and_process`; `TakyonStore._app_leaves()` now also returns the `payments` leaf (docstring updated).
+- `hermes-agent-main/skills/takyon/takyon-app-runtime/SKILL.md` — names the owner custody accrual, the app-fee env var, and the deferred payout.
+- `hermes-agent-main/tests/plugins/test_takyon_app_payments_pg.py` — two new tool-level PG tests.
+
+**Not done / honest state:**
+- **Payout is still deferred** — accrual lands in `custody_accounts.owed_balance_cents`; no Stripe Connect transfer is performed. Unchanged by this step (per the account/money model: per-user Connect payout is deferred).
+- The webhook tool verifies product webhooks with `STRIPE_WEBHOOK_SECRET` (separate from the flow-A `STRIPE_BILLING_WEBHOOK_SECRET`, still outstanding).
+- No new HTTP webhook route was added on the Postgres serving surface; the tool is the reconciliation entrypoint. If/when a product webhook HTTP endpoint is mounted on the Postgres runtime, point it at this same handler rather than re-implementing accrual.
+
+**Revert (local only — nothing irreversible; pure code+docs+tests):**
+```sh
+git checkout HEAD -- hermes-agent-main/plugins/takyon/core.py \
+  hermes-agent-main/skills/takyon/takyon-app-runtime/SKILL.md \
+  hermes-agent-main/tests/plugins/test_takyon_app_payments_pg.py
+# this log entry is additive — trim it if reverting.
+```

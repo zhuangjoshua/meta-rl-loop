@@ -246,6 +246,20 @@ def test_gateway_bad_body_is_400(gateway_client, pg_conn):
     assert list_usage_events(pg_conn, slug) == []
 
 
+def test_gateway_unknown_pricing_is_400(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json={"messages": [{"role": "user", "content": "Hello"}], "model": "claude-imaginary-99"},
+        headers=_auth(raw),
+    )
+    assert resp.status_code == 400
+    assert "no exact Anthropic pricing" in resp.json()["detail"]
+    assert list_usage_events(pg_conn, slug) == []
+
+
 def test_gateway_unknown_app_user_is_400(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
     client = gateway_client(_canned_caller)
