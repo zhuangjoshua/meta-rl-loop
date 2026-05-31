@@ -13,6 +13,7 @@ transaction/connection-pool strategy the caller chooses.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from .billing import open_billing_account
@@ -86,6 +87,59 @@ def provision_user_on_first_login(
             open_billing_account(conn, user_id)
             open_custody_account(conn, user_id)
     return user_id, created, raw
+
+
+# --------------------------------------------------------------------------- platform owner
+#
+# The local Takyon CEO/shell creates businesses with no Auth0/login context, but PG
+# `businesses.owner_user_id` is NOT NULL (0001 spine). So every shell-created business is owned by a
+# single platform/operator user, keyed by an `auth0_sub` read from config. Set TAKYON_PLATFORM_OWNER_SUB
+# to your real Auth0 `sub` to unify the businesses the shell creates with the set your dashboard login
+# sees (control_api's /v1/businesses scopes by owner_user_id). It is a NON-secret identifier with a
+# working default — never a credential that gates onboarding.
+
+_PLATFORM_OWNER_SUB_ENV = "TAKYON_PLATFORM_OWNER_SUB"
+_PLATFORM_OWNER_EMAIL_ENV = "TAKYON_PLATFORM_OWNER_EMAIL"
+_DEFAULT_PLATFORM_OWNER_SUB = "takyon|platform-owner"
+
+
+def platform_owner_sub() -> str:
+    """The configured platform-owner Auth0 `sub` (default `takyon|platform-owner`). Config, not a
+    secret, so it is read straight from the environment like the rest of the control plane."""
+    raw = os.environ.get(_PLATFORM_OWNER_SUB_ENV)
+    return raw.strip() if raw and raw.strip() else _DEFAULT_PLATFORM_OWNER_SUB
+
+
+def platform_owner_email() -> str | None:
+    """Optional email stamped on the platform owner at first provisioning; None when unset."""
+    raw = os.environ.get(_PLATFORM_OWNER_EMAIL_ENV)
+    return raw.strip() if raw and raw.strip() else None
+
+
+def resolve_platform_owner_id(conn) -> str | None:
+    """Read-only: the platform owner's `user_id` if already provisioned, else None.
+
+    Used by the operator store's `business.upsert` so creating a business NEVER mints or surfaces an
+    API key as a side effect (the one-time key is surfaced only by the explicit `ensure_platform_owner`
+    bootstrap). Reads positionally, so the caller must lend a tuple-row psycopg connection."""
+    row = conn.execute(
+        "select id from users where auth0_sub = %s", (platform_owner_sub(),)
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
+def ensure_platform_owner(conn) -> tuple[str, str | None]:
+    """Idempotently provision the single platform/operator owner (the explicit bootstrap seam).
+
+    Returns (user_id, raw_key): `raw_key` is the one-time API key minted on the very first creation
+    (surface it once, e.g. to the operator console / server log — it is never stored in clear) and
+    None on every later call. Full provisioning (key + billing + custody, one txn) via
+    `provision_user_on_first_login`, so the owner is never observed half-made. Call this at startup
+    (the serving flip) — NOT from inside the store's commit path, which must stay key-secret-free."""
+    user_id, _created, raw = provision_user_on_first_login(
+        conn, platform_owner_sub(), platform_owner_email()
+    )
+    return user_id, raw
 
 
 def mint_api_key(conn, user_id: str) -> str:

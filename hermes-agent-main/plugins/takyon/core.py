@@ -18,7 +18,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -213,7 +215,6 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "ai_gateway_setup": ("llm",),
     "ceo_wakeup": ("llm",),
     "community_research": ("tavily",),
-    "meta_seedance": ("openai",),
     "product_backend": ("vercel",),
     "product.deploy": ("vercel",),
     "product_ui": ("vercel",),
@@ -486,8 +487,27 @@ def _microusd_to_cents(value: int | float | None) -> int:
     return int(round(float(value or 0) / 10_000))
 
 
+def _json_default(value: Any) -> Any:
+    """Serialize the non-JSON-native scalars the Postgres backend returns. On SQLite every column the
+    store reads is TEXT/INTEGER/REAL, so this never fires; on Postgres the operator store reads through
+    leaf tables whose ``timestamptz`` columns deserialize to ``datetime`` and whose numeric/aggregate
+    columns can deserialize to ``Decimal``. ``datetime`` → ISO-8601 string (matching the string form the
+    SQLite trunk stored), ``Decimal`` → ``int`` when integral else ``float`` (the store treats every
+    money/usage figure as integer microUSD/cents), other ``date``/``time`` objects → ``isoformat``.
+    Anything else still raises ``TypeError`` so a genuinely unserializable value fails loud (invariant
+    #8: never silently coerce an unexpected type into a fake string)."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        return iso()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default)
 
 
 def _json_loads(value: str | None, fallback: Any = None) -> Any:
@@ -2899,22 +2919,199 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
             raise TakyonError(f"business work focus is product-only; job kind {op.get('kind')} is marketing work")
 
 
+def _db_backend() -> str:
+    """Which engine the operator store opens. Default ``sqlite`` keeps every existing call site and
+    the whole test suite on the historical engine; an explicit ``TAKYON_DB_BACKEND=postgres`` opts a
+    process onto the Postgres-backed seam (the operator tables ported by migration 0011). Deliberately
+    a separate, explicit flag — NOT auto-detected from DATABASE_URL — so a developer or CI run that
+    merely *has* DATABASE_URL set for the leaf modules does not silently flip the operator store onto
+    Postgres. Parallels storage.py's ``TAKYON_STORAGE_BACKEND``."""
+    return (os.getenv("TAKYON_DB_BACKEND") or "sqlite").strip().lower()
+
+
+class _PGConn:
+    """Thin psycopg adapter that lets the SQLite-shaped ``TakyonStore`` SQL run unchanged on Postgres.
+
+    The store issues sqlite3-style ``conn.execute(sql, params)`` with ``?`` placeholders and reads
+    every row by column name. psycopg3 wants ``%s`` placeholders and (here) ``dict_row`` rows, so this
+    wrapper translates ``?`` → ``%s`` (escaping any literal ``%`` → ``%%`` first, and ONLY when params
+    are bound — psycopg performs no %-substitution on a paramless query) and otherwise delegates
+    verbatim. Verified faithful to the exact sqlite3 surface the store uses: only ``execute`` plus a
+    single ``executescript``/``row_factory`` that live on the SQLite bootstrap path this backend skips;
+    zero positional row reads (so ``dict_row`` is a true drop-in for ``sqlite3.Row``); no
+    ``cursor``/``commit``/``rollback``/``executemany``/``create_function``; the only ``%`` anywhere in
+    store SQL is a LIKE wildcard that rides inside a bound parameter, which psycopg leaves untouched.
+
+    Used as a context manager exactly like ``sqlite3``: the underlying connection is opened
+    ``autocommit=False`` so one ``with self._connect() as conn:`` block is exactly one atomic
+    transaction — psycopg's own ``__exit__`` commits on success, rolls back on exception, and closes
+    the per-block connection (no leak)."""
+
+    def __init__(self, conn: Any) -> None:
+        self._pg = conn
+        self._depth = 0
+
+    @staticmethod
+    def _translate(sql: str) -> str:
+        # Escape literal % BEFORE turning ? into %s so any literal % in the SQL text (none today, but
+        # future-proof) survives psycopg's %-substitution. Only ever applied on the params path.
+        return sql.replace("%", "%%").replace("?", "%s")
+
+    def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
+        if params is None:
+            # Paramless: psycopg does no %-substitution, so send the SQL verbatim.
+            return self._pg.execute(sql)
+        return self._pg.execute(self._translate(sql), tuple(params))
+
+    def executescript(self, sql: str) -> Any:
+        # Only _init_db calls this, and the Postgres backend skips _init_db (the migration runner owns
+        # all DDL). Fail loud rather than bootstrap a divergent schema (invariant #8: no fake success).
+        raise RuntimeError(
+            "TakyonStore schema bootstrap must not run on the Postgres backend; "
+            "plugins/takyon/db/runner.py owns DDL"
+        )
+
+    def __enter__(self) -> "_PGConn":
+        # Re-entrancy matters: the store nests a transaction block (``with conn:``) INSIDE the
+        # connection block (``with self._connect() as conn:`` — commit() at core.py:4907,
+        # upgrade_businesses at 8158). sqlite3's context manager only commits/rolls back and never
+        # closes, so that nesting is harmless on SQLite. psycopg3's ``__exit__`` commits/rolls back AND
+        # CLOSES, so only the OUTERMOST block may drive the real transaction+close; inner blocks must be
+        # no-ops. No code reads the DB after an inner block exits, so collapsing both levels into one
+        # outer-managed transaction preserves the original atomicity (all writes commit together on
+        # success, roll back together on error).
+        if self._depth == 0:
+            self._pg.__enter__()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc_info: Any) -> Any:
+        self._depth -= 1
+        if self._depth == 0:
+            return self._pg.__exit__(*exc_info)
+        # Inner block: do not commit, do not close, and do not suppress a propagating exception
+        # (return falsy) so the outermost block still sees it and rolls back.
+        return False
+
+    def close(self) -> None:
+        self._pg.close()
+
+
 class TakyonStore:
     """File + SQLite store for isolated business state and scoped workspaces."""
 
-    def __init__(self, root: str | os.PathLike[str] | None = None):
+    def __init__(self, root: str | os.PathLike[str] | None = None, *, database_url: str | None = None):
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
         self.root = base.resolve()
         self.db_path = self.root / "state.sqlite3"
+        # Explicit Postgres DSN for the postgres backend (tests point this at a throwaway DB). When
+        # None, the postgres path resolves DATABASE_URL/POSTGRES_URL via runtime_app. Unused on SQLite.
+        self._database_url = database_url
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> "sqlite3.Connection | _PGConn":
+        # The per-business filesystem half of the store is used on both backends, so make root first.
         self.root.mkdir(parents=True, exist_ok=True)
+        if _db_backend() == "postgres":
+            return self._connect_postgres()
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         self._init_db(conn)
         return conn
+
+    def _connect_postgres(self) -> "_PGConn":
+        """Open the Postgres-backed connection seam. Lazy-imports psycopg and the canonical URL factory
+        so the default SQLite path stays dependency-free. No schema bootstrap here: migration runner
+        ``plugins/takyon/db/runner.py`` owns all DDL, so ``_init_db``/``_migrate_db`` are intentionally
+        NOT called (their SQLite-only PRAGMA/ALTER logic would not even parse on Postgres)."""
+        import psycopg
+        from psycopg.rows import dict_row
+
+        try:
+            from .runtime_app import resolve_database_url
+        except ImportError:  # pragma: no cover - import-style robustness for alternate load paths
+            from plugins.takyon.runtime_app import resolve_database_url
+
+        conn = psycopg.connect(
+            resolve_database_url(self._database_url),
+            row_factory=dict_row,
+            autocommit=False,
+        )
+        return _PGConn(conn)
+
+    def seed_platform_owner(self) -> tuple[str | None, str | None]:
+        """Idempotently provision the single platform/operator owner — the Phase-8 serving-flip
+        startup seed (mediationplan.md owner-wiring finding, step 3→4). No-op off Postgres (returns
+        ``(None, None)``): the SQLite era has no ``users`` table to seed and never needed an owner.
+
+        On Postgres this is the ONE place a key is minted as a side effect of *serving*: it opens one
+        store transaction and delegates to ``control_plane.ensure_platform_owner`` over the RAW psycopg
+        connection lent by ``_leaf_conn`` (control_plane speaks native ``%s`` + positional rows, so it
+        must bypass the ``?``-translating ``_PGConn`` wrapper, exactly like the app-leaf delegations).
+        Returns ``(user_id, raw_key)``: ``raw_key`` is the one-time API key minted on the very first
+        call ONLY (the caller surfaces it once — never stored in clear), ``None`` on every later call.
+        Deliberately separate from ``business.upsert`` (which resolves the owner *read-only* and blocks
+        if unprovisioned, invariant #8) so no secret ever rides through a business commit, event
+        payload, or file mirror. Idempotent and race-safe via ``provision_user_on_first_login``."""
+        if _db_backend() != "postgres":
+            return (None, None)
+        try:
+            from . import control_plane
+        except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+            from plugins.takyon import control_plane
+        with self._connect() as conn:
+            with self._leaf_conn(conn) as raw:
+                return control_plane.ensure_platform_owner(raw)
+
+    def _work_requests_table(self) -> str:
+        """Physical table name for the operator's *work-request record* store. On SQLite that is the
+        historical ``jobs`` table (bootstrapped by ``_init_db``). On Postgres it is ``business_work_requests``
+        — migration 0011's exact 1:1 column port of the SQLite operator ``jobs`` — which ISOLATES it from
+        the 0010 ``jobs`` worker-plane *execution queue* (a different table with uuid/jsonb/SKIP-LOCKED
+        shape). The store only enqueues/counts/lists/GCs this record; it never drains it, so this is a pure
+        storage retarget, not the deferred worker-plane consolidation. Interpolated into the operator-jobs
+        SQL so every existing ``conn.execute`` stays otherwise unchanged."""
+        return "business_work_requests" if _db_backend() == "postgres" else "jobs"
+
+    def _app_user_metadata_select(self) -> str:
+        """Column expression for the sub-user metadata blob in the two operator reads that list it
+        explicitly (``_rewrite_app_files``/``_app_summary``). On SQLite the column is TEXT ``metadata_json``,
+        which ``_row_to_dict`` decodes back to a ``metadata`` dict; on Postgres (leaf migration 0005) the
+        column is ``jsonb metadata`` that already deserializes to a dict and has no ``_json`` suffix. Both
+        forms therefore surface as ``row['metadata']`` after ``_row_to_dict`` — identical output shape — so
+        only the SELECT text differs by backend. Every other operator app read uses ``SELECT *`` and needs
+        no such switch."""
+        return "metadata" if _db_backend() == "postgres" else "metadata_json"
+
+    @contextmanager
+    def _leaf_conn(self, conn: "_PGConn"):
+        """Lend the raw psycopg connection (unwrapped from the SQLite-shaped ``_PGConn`` adapter) to a
+        Phase-5/6 app leaf module for the duration of one delegated write. The leaves speak native psycopg:
+        ``%s`` placeholders (so the adapter's ``?``→``%s`` translation must be bypassed) and positional row
+        reads (``row[0]``…), so the row factory is swapped ``dict_row``→``tuple_row`` here and restored on
+        exit. The leaf opens a SAVEPOINT (``with conn.transaction()``) inside the store's already-open outer
+        transaction, so its writes commit or roll back atomically with the operator idempotency row and the
+        event/file mirror that the shared op tail writes. Postgres-only; never entered on the SQLite path."""
+        from psycopg.rows import dict_row, tuple_row
+
+        raw = conn._pg
+        raw.row_factory = tuple_row
+        try:
+            yield raw
+        finally:
+            raw.row_factory = dict_row
+
+    @staticmethod
+    def _app_leaves() -> dict[str, Any]:
+        """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
+        store delegates to on the Postgres backend (identity/entitlements/usage). Imported lazily and only
+        on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
+        try:
+            from . import app_entitlements, app_identity, app_usage
+        except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+            from plugins.takyon import app_entitlements, app_identity, app_usage
+        return {"identity": app_identity, "entitlements": app_entitlements, "usage": app_usage}
 
     def _init_db(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -3708,7 +3905,7 @@ class TakyonStore:
         ]
         users = [
             self._row_to_dict(row)
-            for row in conn.execute("SELECT id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at FROM app_users WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 200", (slug,)).fetchall()
+            for row in conn.execute(f"SELECT id, business_slug, email, name, status, tier, {self._app_user_metadata_select()}, created_at, updated_at FROM app_users WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 200", (slug,)).fetchall()
         ]
         revenue = conn.execute(
             "SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ?",
@@ -3952,7 +4149,7 @@ class TakyonStore:
             ],
             "customers": [
                 self._row_to_dict(row)
-                for row in conn.execute("SELECT id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at FROM app_users WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?", (slug, limit)).fetchall()
+                for row in conn.execute(f"SELECT id, business_slug, email, name, status, tier, {self._app_user_metadata_select()}, created_at, updated_at FROM app_users WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?", (slug, limit)).fetchall()
             ],
             "entitlements": [
                 self._row_to_dict(row)
@@ -4070,12 +4267,12 @@ class TakyonStore:
                     (slug, start, end),
                 )
                 jobs = one(
-                    """
+                    f"""
                     SELECT COUNT(*) AS jobs,
                            SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
                            SUM(CASE WHEN status IN ('failed', 'error', 'blocked') THEN 1 ELSE 0 END) AS blocked_or_failed,
                            SUM(CASE WHEN status IN ('done', 'completed', 'succeeded') THEN 1 ELSE 0 END) AS completed
-                    FROM jobs
+                    FROM {self._work_requests_table()}
                     WHERE business_slug = ? AND created_at >= ? AND created_at <= ?
                     """,
                     (slug, start, end),
@@ -4224,7 +4421,7 @@ class TakyonStore:
             )
             product_evidence = self._product_surface_evidence(conn, slug)
             current_jobs = one(
-                "SELECT SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued FROM jobs WHERE business_slug = ?",
+                f"SELECT SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued FROM {self._work_requests_table()} WHERE business_slug = ?",
                 (slug,),
             )
             business_budget_amount = _budget_amount(business.get("budget"))
@@ -4471,7 +4668,7 @@ class TakyonStore:
         by_business = [
             "businesses",
             "workspaces",
-            "jobs",
+            self._work_requests_table(),
             "ledger_entries",
             "events",
             "conversation_threads",
@@ -4493,7 +4690,7 @@ class TakyonStore:
             counts[table] = int(
                 conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {key} = ?", (business,)).fetchone()["count"]
             )
-        for table in ("jobs", "ledger_entries", "events"):
+        for table in (self._work_requests_table(), "ledger_entries", "events"):
             counts[table] = int(
                 conn.execute(
                     f"SELECT COUNT(*) AS count FROM {table} WHERE business_slug = ? OR scope = ? OR scope LIKE ?",
@@ -4523,7 +4720,7 @@ class TakyonStore:
         for table in ("agent_runs", "control_states"):
             cursor = conn.execute(f"DELETE FROM {table} WHERE scope = ? OR scope LIKE ?", (scope, scope_like))
             deleted[table] = int(cursor.rowcount or 0)
-        for table in ("jobs", "ledger_entries", "events"):
+        for table in (self._work_requests_table(), "ledger_entries", "events"):
             cursor = conn.execute(
                 f"DELETE FROM {table} WHERE business_slug = ? OR scope = ? OR scope LIKE ?",
                 (business, scope, scope_like),
@@ -4714,7 +4911,7 @@ class TakyonStore:
             jobs = [
                 self._row_to_dict(row)
                 for row in conn.execute(
-                    "SELECT * FROM jobs WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?",
+                    f"SELECT * FROM {self._work_requests_table()} WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?",
                     (slug, limit),
                 ).fetchall()
             ]
@@ -4933,6 +5130,29 @@ class TakyonStore:
                     "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
                     (name, goal, mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
+            elif _db_backend() == "postgres":
+                # PG businesses.owner_user_id is NOT NULL (0001 spine; 0011 enrich). The operator store
+                # has no Auth0/login context, so a single platform owner (control_plane, keyed by
+                # TAKYON_PLATFORM_OWNER_SUB) owns every shell/CEO-created business. Resolve it READ-ONLY
+                # here — creating a business must never mint/surface an API key as a side effect (the
+                # one-time key is surfaced only by the explicit ensure_platform_owner startup bootstrap).
+                # Unprovisioned → block with a reason (invariant #8), never a NULL/fake owner.
+                try:
+                    from . import control_plane
+                except ImportError:  # pragma: no cover - alternate load path as a top-level package
+                    from plugins.takyon import control_plane
+                with self._leaf_conn(conn) as raw:
+                    owner_user_id = control_plane.resolve_platform_owner_id(raw)
+                if not owner_user_id:
+                    raise TakyonError(
+                        "cannot create business on Postgres: platform owner is not provisioned. "
+                        "Seed it once at startup (control_plane.ensure_platform_owner) or set "
+                        "TAKYON_PLATFORM_OWNER_SUB to a provisioned user's Auth0 sub."
+                    )
+                conn.execute(
+                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
+                    (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), owner_user_id, now, now),
+                )
             else:
                 conn.execute(
                     "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
@@ -5015,10 +5235,22 @@ class TakyonStore:
                 raise TakyonError("app budget limit must be non-negative")
             now = _now()
             current = self._ensure_app_budget(conn, slug)
-            conn.execute(
-                "UPDATE app_budgets SET hard_limit_microusd = ?, status = ?, updated_at = ? WHERE business_slug = ?",
-                (amount, str(op.get("status") or current.get("status") or "active"), now, slug),
-            )
+            status = str(op.get("status") or current.get("status") or "active")
+            if _db_backend() == "postgres":
+                # Canonical Postgres budget write: app_usage.set_app_budget owns the app_budgets cap (it
+                # row-locks then upserts), so the operator store delegates rather than carry a second
+                # writer. Prior status is preserved when the op omits it (the `status` var above).
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        leaves["usage"].set_app_budget(raw, slug, hard_limit_microusd=amount, status=status)
+                except leaves["usage"].AppUsageError as exc:
+                    raise TakyonError(str(exc)) from exc
+            else:
+                conn.execute(
+                    "UPDATE app_budgets SET hard_limit_microusd = ?, status = ?, updated_at = ? WHERE business_slug = ?",
+                    (amount, status, now, slug),
+                )
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"hard_limit_microusd": amount, "reason": reason, "actor": actor})
             return {"action": action, "business": slug, "hard_limit_microusd": amount}
@@ -5185,67 +5417,96 @@ class TakyonStore:
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
-            warnings = _plan_validation_warnings(plan_key, tier, included_action_quota, allow_overage, metadata)
-            if warnings:
-                validation = metadata.get("takyon_plan_validation") if isinstance(metadata.get("takyon_plan_validation"), dict) else {}
-                metadata = {
-                    **metadata,
-                    "takyon_plan_validation": {
-                        **validation,
-                        "status": "warning",
-                        "warnings": [*validation.get("warnings", []), *warnings] if isinstance(validation.get("warnings"), list) else warnings,
-                    },
-                }
-            now = _now()
-            plan_id = op.get("id") or uuid.uuid4().hex
-            conn.execute(
-                """
-                INSERT INTO app_plan_policies (
-                  id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
-                  included_ai_budget_microusd, included_action_quota, allow_overage,
-                  stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
-                  source, notes, metadata_json, created_at, updated_at
+            if _db_backend() == "postgres":
+                # Canonical Postgres plan write: app_entitlements.upsert_plan_policy owns app_plan_policies
+                # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
+                # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
+                # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        policy = leaves["entitlements"].upsert_plan_policy(
+                            raw,
+                            slug,
+                            plan_key,
+                            tier=tier,
+                            price_cents=price_cents,
+                            currency=str(op.get("currency") or "usd").lower(),
+                            billing_interval=interval,
+                            included_ai_budget_microusd=int(float(op.get("included_ai_budget_microusd") or 0)),
+                            included_action_quota=included_action_quota,
+                            allow_overage=allow_overage,
+                            stripe_product_id=op.get("stripe_product_id"),
+                            stripe_price_id=op.get("stripe_price_id"),
+                            source=str(op.get("source") or "takyon"),
+                            notes=str(op.get("notes") or ""),
+                            metadata=metadata,
+                        )
+                except leaves["entitlements"].EntitlementError as exc:
+                    raise TakyonError(str(exc)) from exc
+                plan_key = policy.plan_key
+            else:
+                warnings = _plan_validation_warnings(plan_key, tier, included_action_quota, allow_overage, metadata)
+                if warnings:
+                    validation = metadata.get("takyon_plan_validation") if isinstance(metadata.get("takyon_plan_validation"), dict) else {}
+                    metadata = {
+                        **metadata,
+                        "takyon_plan_validation": {
+                            **validation,
+                            "status": "warning",
+                            "warnings": [*validation.get("warnings", []), *warnings] if isinstance(validation.get("warnings"), list) else warnings,
+                        },
+                    }
+                now = _now()
+                plan_id = op.get("id") or uuid.uuid4().hex
+                conn.execute(
+                    """
+                    INSERT INTO app_plan_policies (
+                      id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
+                      included_ai_budget_microusd, included_action_quota, allow_overage,
+                      stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
+                      source, notes, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(business_slug, plan_key) DO UPDATE SET
+                      tier = excluded.tier,
+                      price_cents = excluded.price_cents,
+                      currency = excluded.currency,
+                      billing_interval = excluded.billing_interval,
+                      included_ai_budget_microusd = excluded.included_ai_budget_microusd,
+                      included_action_quota = excluded.included_action_quota,
+                      allow_overage = excluded.allow_overage,
+                      stripe_product_id = COALESCE(excluded.stripe_product_id, app_plan_policies.stripe_product_id),
+                      stripe_price_id = COALESCE(excluded.stripe_price_id, app_plan_policies.stripe_price_id),
+                      stripe_payment_link_id = COALESCE(excluded.stripe_payment_link_id, app_plan_policies.stripe_payment_link_id),
+                      stripe_payment_link_url = COALESCE(excluded.stripe_payment_link_url, app_plan_policies.stripe_payment_link_url),
+                      source = excluded.source,
+                      notes = excluded.notes,
+                      metadata_json = excluded.metadata_json,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        plan_id,
+                        slug,
+                        plan_key,
+                        tier,
+                        price_cents,
+                        str(op.get("currency") or "usd").lower(),
+                        interval,
+                        int(float(op.get("included_ai_budget_microusd") or 0)),
+                        included_action_quota,
+                        1 if allow_overage else 0,
+                        op.get("stripe_product_id"),
+                        op.get("stripe_price_id"),
+                        op.get("stripe_payment_link_id"),
+                        op.get("stripe_payment_link_url"),
+                        str(op.get("source") or "takyon"),
+                        str(op.get("notes") or ""),
+                        _json_dumps(metadata),
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(business_slug, plan_key) DO UPDATE SET
-                  tier = excluded.tier,
-                  price_cents = excluded.price_cents,
-                  currency = excluded.currency,
-                  billing_interval = excluded.billing_interval,
-                  included_ai_budget_microusd = excluded.included_ai_budget_microusd,
-                  included_action_quota = excluded.included_action_quota,
-                  allow_overage = excluded.allow_overage,
-                  stripe_product_id = COALESCE(excluded.stripe_product_id, app_plan_policies.stripe_product_id),
-                  stripe_price_id = COALESCE(excluded.stripe_price_id, app_plan_policies.stripe_price_id),
-                  stripe_payment_link_id = COALESCE(excluded.stripe_payment_link_id, app_plan_policies.stripe_payment_link_id),
-                  stripe_payment_link_url = COALESCE(excluded.stripe_payment_link_url, app_plan_policies.stripe_payment_link_url),
-                  source = excluded.source,
-                  notes = excluded.notes,
-                  metadata_json = excluded.metadata_json,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    plan_id,
-                    slug,
-                    plan_key,
-                    tier,
-                    price_cents,
-                    str(op.get("currency") or "usd").lower(),
-                    interval,
-                    int(float(op.get("included_ai_budget_microusd") or 0)),
-                    included_action_quota,
-                    1 if allow_overage else 0,
-                    op.get("stripe_product_id"),
-                    op.get("stripe_price_id"),
-                    op.get("stripe_payment_link_id"),
-                    op.get("stripe_payment_link_url"),
-                    str(op.get("source") or "takyon"),
-                    str(op.get("notes") or ""),
-                    _json_dumps(metadata),
-                    now,
-                    now,
-                ),
-            )
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"plan_key": plan_key, "price_cents": price_cents})
             return {"action": action, "business": slug, "plan_key": plan_key}
@@ -5254,148 +5515,229 @@ class TakyonStore:
             email = _normalize_email(str(op.get("email") or ""))
             now = _now()
             user_id = op.get("id") or uuid.uuid4().hex
-            conn.execute(
-                """
-                INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(business_slug, email) DO UPDATE SET
-                  name = COALESCE(excluded.name, app_users.name),
-                  status = excluded.status,
-                  tier = COALESCE(NULLIF(excluded.tier, ''), app_users.tier),
-                  metadata_json = excluded.metadata_json,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    user_id,
-                    slug,
-                    email,
-                    op.get("name"),
-                    str(op.get("status") or "active"),
-                    str(op.get("tier") or "free"),
-                    _json_dumps(op.get("metadata") or {}),
-                    now,
-                    now,
-                ),
-            )
-            row = self._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (slug, email)).fetchone())
+            if _db_backend() == "postgres":
+                # Canonical Postgres sub-user write: app_identity.upsert_app_user owns app_users. It is
+                # deliberately narrower than the SQLite op — it forces status='active' and does not persist
+                # a caller tier/metadata/custom-id — which is acceptable here: effective tier is governed by
+                # entitlements (_sync_user_tier), 'active' is already this op's default status, and the
+                # metadata blob on app_users is not read by any downstream operator path.
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        user = leaves["identity"].upsert_app_user(raw, slug, email, name=op.get("name"))
+                except leaves["identity"].AppIdentityError as exc:
+                    raise TakyonError(str(exc)) from exc
+                app_user_id = user.id
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(business_slug, email) DO UPDATE SET
+                      name = COALESCE(excluded.name, app_users.name),
+                      status = excluded.status,
+                      tier = COALESCE(NULLIF(excluded.tier, ''), app_users.tier),
+                      metadata_json = excluded.metadata_json,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        user_id,
+                        slug,
+                        email,
+                        op.get("name"),
+                        str(op.get("status") or "active"),
+                        str(op.get("tier") or "free"),
+                        _json_dumps(op.get("metadata") or {}),
+                        now,
+                        now,
+                    ),
+                )
+                row = self._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (slug, email)).fetchone())
+                app_user_id = row["id"]
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": row["id"], "email": email})
-            return {"action": action, "business": slug, "app_user_id": row["id"], "email": email}
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": app_user_id, "email": email})
+            return {"action": action, "business": slug, "app_user_id": app_user_id, "email": email}
 
         if action == "app.entitlement.upsert":
-            user_id = str(op.get("app_user_id") or "")
-            if not user_id and op.get("email"):
-                email = _normalize_email(str(op.get("email")))
-                user_result = self._apply_operation(
-                    conn,
-                    parsed_scope,
-                    {
-                        "action": "app.customer.upsert",
-                        "business_slug": slug,
-                        "target_scope": target_scope,
-                        "email": email,
-                        "tier": op.get("tier") or "free",
-                        "metadata": {"source": "entitlement_upsert"},
-                    },
-                    reason=reason,
-                    actor=actor,
+            if _db_backend() == "postgres":
+                # Canonical Postgres entitlement write: app_entitlements.grant_entitlement owns the grant.
+                # It auto-provisions the sub-user from email (so no recursive customer.upsert is needed),
+                # enforces the SAME anti-fake-billing rule, and resyncs app_users.tier atomically — i.e. the
+                # whole semantic of the SQLite block below, in the leaf. Pre-check the id/email requirement
+                # here so the operator surfaces its own message before the leaf is touched.
+                if not op.get("app_user_id") and not op.get("email"):
+                    raise TakyonError("app entitlement requires app_user_id or email")
+                source_value = str(op.get("source") or "manual")
+                metadata = op.get("metadata") or {}
+                if not isinstance(metadata, dict):
+                    metadata = {"value": metadata}
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        ent, tier = leaves["entitlements"].grant_entitlement(
+                            raw,
+                            slug,
+                            app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                            email=(_normalize_email(str(op.get("email"))) if op.get("email") else None),
+                            tier=str(op.get("tier") or "free"),
+                            status=str(op.get("status") or "active"),
+                            source=source_value,
+                            stripe_customer_id=op.get("stripe_customer_id"),
+                            stripe_subscription_id=op.get("stripe_subscription_id"),
+                            stripe_checkout_session_id=op.get("stripe_checkout_session_id"),
+                            plan_key=op.get("plan_key"),
+                            current_period_end=op.get("current_period_end"),
+                            metadata=metadata,
+                        )
+                except (leaves["entitlements"].EntitlementError, leaves["identity"].AppIdentityError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                user_id = ent.app_user_id
+                entitlement_id = ent.id
+            else:
+                user_id = str(op.get("app_user_id") or "")
+                if not user_id and op.get("email"):
+                    email = _normalize_email(str(op.get("email")))
+                    user_result = self._apply_operation(
+                        conn,
+                        parsed_scope,
+                        {
+                            "action": "app.customer.upsert",
+                            "business_slug": slug,
+                            "target_scope": target_scope,
+                            "email": email,
+                            "tier": op.get("tier") or "free",
+                            "metadata": {"source": "entitlement_upsert"},
+                        },
+                        reason=reason,
+                        actor=actor,
+                    )
+                    user_id = str(user_result["app_user_id"])
+                if not user_id:
+                    raise TakyonError("app entitlement requires app_user_id or email")
+                if not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, user_id)).fetchone():
+                    raise TakyonError(f"app user not found: {user_id}")
+                now = _now()
+                entitlement_id = op.get("id") or uuid.uuid4().hex
+                tier_value = str(op.get("tier") or "free")
+                source_value = str(op.get("source") or "manual")
+                metadata = op.get("metadata") or {}
+                if not isinstance(metadata, dict):
+                    metadata = {"value": metadata}
+                has_stripe_evidence = bool(op.get("stripe_customer_id") or op.get("stripe_subscription_id") or op.get("stripe_checkout_session_id"))
+                explicit_non_billing = bool(metadata.get("non_billing") or source_value in {"internal", "owner", "comp", "test"})
+                if tier_value not in {"", "free"} and source_value == "manual" and not has_stripe_evidence and not explicit_non_billing:
+                    raise TakyonError(
+                        "manual paid entitlement would fake billing state; use Stripe/webhook evidence or an explicit non-billing source"
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO app_entitlements (
+                      id, business_slug, app_user_id, tier, status, source,
+                      stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id,
+                      plan_key, current_period_end, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entitlement_id,
+                        slug,
+                        user_id,
+                        tier_value,
+                        str(op.get("status") or "active"),
+                        source_value,
+                        op.get("stripe_customer_id"),
+                        op.get("stripe_subscription_id"),
+                        op.get("stripe_checkout_session_id"),
+                        op.get("plan_key"),
+                        op.get("current_period_end"),
+                        _json_dumps(metadata),
+                        now,
+                        now,
+                    ),
                 )
-                user_id = str(user_result["app_user_id"])
-            if not user_id:
-                raise TakyonError("app entitlement requires app_user_id or email")
-            if not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, user_id)).fetchone():
-                raise TakyonError(f"app user not found: {user_id}")
-            now = _now()
-            entitlement_id = op.get("id") or uuid.uuid4().hex
-            tier_value = str(op.get("tier") or "free")
-            source_value = str(op.get("source") or "manual")
-            metadata = op.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                metadata = {"value": metadata}
-            has_stripe_evidence = bool(op.get("stripe_customer_id") or op.get("stripe_subscription_id") or op.get("stripe_checkout_session_id"))
-            explicit_non_billing = bool(metadata.get("non_billing") or source_value in {"internal", "owner", "comp", "test"})
-            if tier_value not in {"", "free"} and source_value == "manual" and not has_stripe_evidence and not explicit_non_billing:
-                raise TakyonError(
-                    "manual paid entitlement would fake billing state; use Stripe/webhook evidence or an explicit non-billing source"
-                )
-            conn.execute(
-                """
-                INSERT INTO app_entitlements (
-                  id, business_slug, app_user_id, tier, status, source,
-                  stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id,
-                  plan_key, current_period_end, metadata_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entitlement_id,
-                    slug,
-                    user_id,
-                    tier_value,
-                    str(op.get("status") or "active"),
-                    source_value,
-                    op.get("stripe_customer_id"),
-                    op.get("stripe_subscription_id"),
-                    op.get("stripe_checkout_session_id"),
-                    op.get("plan_key"),
-                    op.get("current_period_end"),
-                    _json_dumps(metadata),
-                    now,
-                    now,
-                ),
-            )
-            tier = self._sync_user_tier(conn, slug, user_id)
+                tier = self._sync_user_tier(conn, slug, user_id)
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": user_id, "tier": tier, "source": source_value})
             return {"action": action, "business": slug, "app_user_id": user_id, "entitlement": entitlement_id, "tier": tier}
 
         if action == "app.usage.record":
             app_user_id = op.get("app_user_id")
-            if app_user_id and not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, app_user_id)).fetchone():
-                raise TakyonError(f"app user not found: {app_user_id}")
-            budget = self._ensure_app_budget(conn, slug)
             actual = int(float(op.get("actual_cost_microusd") or 0))
             estimated = int(float(op.get("estimated_cost_microusd") or actual or 0))
             if actual < 0 or estimated < 0:
                 raise TakyonError("usage costs must be non-negative")
-            used = conn.execute(
-                "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-                (slug, budget["current_period_start"]),
-            ).fetchone()["total"]
-            if int(used or 0) + actual > int(budget["hard_limit_microusd"] or 0):
-                raise TakyonError(f"app usage would exceed budget cap {budget['hard_limit_microusd']} microusd")
             event_id = op.get("id") or uuid.uuid4().hex
-            now = _now()
-            conn.execute(
-                """
-                INSERT INTO app_usage_events (
-                  id, business_slug, app_user_id, app_user_tier, purpose, route, status,
-                  estimated_cost_microusd, actual_cost_microusd, input_tokens, output_tokens,
-                  provider_request_id, provider, model, metadata_json, error, created_at, completed_at
+            if _db_backend() == "postgres":
+                # Canonical Postgres usage write: app_usage.record_completed_usage owns app_usage_events and
+                # is REQUIRED here — the Postgres table mandates a NOT NULL reservation_key the SQLite INSERT
+                # never set. It row-locks the budget, re-checks the cap atomically against committed spend,
+                # and writes the completed row in one transaction (invariant #8: the cap is enforced, not
+                # raced), so the store-side non-atomic SUM pre-check below is skipped on Postgres. The op id
+                # is the idempotent reservation_key; the real persisted event id is read back for the receipt.
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        event = leaves["usage"].record_completed_usage(
+                            raw,
+                            slug,
+                            actual_cost_microusd=actual,
+                            reservation_key=event_id,
+                            estimated_cost_microusd=estimated,
+                            app_user_id=app_user_id,
+                            app_user_tier=op.get("app_user_tier"),
+                            purpose=str(op.get("purpose") or "product_usage"),
+                            route=str(op.get("route") or "app"),
+                            input_tokens=op.get("input_tokens"),
+                            output_tokens=op.get("output_tokens"),
+                            provider_request_id=op.get("provider_request_id"),
+                            provider=op.get("provider"),
+                            model=op.get("model"),
+                            metadata=op.get("metadata") or {},
+                        )
+                except leaves["usage"].AppUsageError as exc:
+                    raise TakyonError(str(exc)) from exc
+                event_id = event.id
+            else:
+                if app_user_id and not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, app_user_id)).fetchone():
+                    raise TakyonError(f"app user not found: {app_user_id}")
+                budget = self._ensure_app_budget(conn, slug)
+                used = conn.execute(
+                    "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+                    (slug, budget["current_period_start"]),
+                ).fetchone()["total"]
+                if int(used or 0) + actual > int(budget["hard_limit_microusd"] or 0):
+                    raise TakyonError(f"app usage would exceed budget cap {budget['hard_limit_microusd']} microusd")
+                now = _now()
+                conn.execute(
+                    """
+                    INSERT INTO app_usage_events (
+                      id, business_slug, app_user_id, app_user_tier, purpose, route, status,
+                      estimated_cost_microusd, actual_cost_microusd, input_tokens, output_tokens,
+                      provider_request_id, provider, model, metadata_json, error, created_at, completed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        slug,
+                        app_user_id,
+                        op.get("app_user_tier"),
+                        str(op.get("purpose") or "product_usage"),
+                        str(op.get("route") or "app"),
+                        str(op.get("status") or "completed"),
+                        estimated,
+                        actual,
+                        op.get("input_tokens"),
+                        op.get("output_tokens"),
+                        op.get("provider_request_id"),
+                        op.get("provider"),
+                        op.get("model"),
+                        _json_dumps(op.get("metadata") or {}),
+                        op.get("error"),
+                        now,
+                        op.get("completed_at") or now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    slug,
-                    app_user_id,
-                    op.get("app_user_tier"),
-                    str(op.get("purpose") or "product_usage"),
-                    str(op.get("route") or "app"),
-                    str(op.get("status") or "completed"),
-                    estimated,
-                    actual,
-                    op.get("input_tokens"),
-                    op.get("output_tokens"),
-                    op.get("provider_request_id"),
-                    op.get("provider"),
-                    op.get("model"),
-                    _json_dumps(op.get("metadata") or {}),
-                    op.get("error"),
-                    now,
-                    op.get("completed_at") or now,
-                ),
-            )
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"usage_event": event_id, "actual_cost_microusd": actual})
             return {"action": action, "business": slug, "usage_event": event_id, "actual_cost_microusd": actual}
@@ -5516,7 +5858,7 @@ class TakyonStore:
                 payload.setdefault("missing_credentials_suppressed", suppressed)
                 payload.setdefault("test_mode_note", credential_gate.get("note") or "Recorded locally in test mode.")
             conn.execute(
-                "INSERT INTO jobs (id, scope, business_slug, kind, status, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {self._work_requests_table()} (id, scope, business_slug, kind, status, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, target_scope, slug, str(op.get("kind") or "job"), str(op.get("status") or "queued"), _json_dumps(payload), _now(), _now()),
             )
             event_payload = {"job_id": job_id, "kind": op.get("kind"), "reason": reason}
@@ -5800,8 +6142,8 @@ class TakyonStore:
         queries = {
             "events": f"SELECT id FROM events WHERE created_at < ?{where_scope} ORDER BY created_at ASC LIMIT ?",
             "agent_runs": f"SELECT id FROM agent_runs WHERE created_at < ?{where_scope} ORDER BY created_at ASC LIMIT ?",
-            "jobs": (
-                "SELECT id FROM jobs WHERE created_at < ? AND status IN "
+            self._work_requests_table(): (
+                f"SELECT id FROM {self._work_requests_table()} WHERE created_at < ? AND status IN "
                 "('completed', 'cancelled', 'failed', 'killed')"
                 f"{where_scope} ORDER BY created_at ASC LIMIT ?"
             ),
@@ -7195,6 +7537,440 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+_META_DEFAULT_GRAPH_VERSION = "v23.0"
+_META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
+_META_VALID_CTA = {
+    "LEARN_MORE", "SHOP_NOW", "SIGN_UP", "DOWNLOAD", "GET_OFFER", "SUBSCRIBE",
+    "BOOK_TRAVEL", "CONTACT_US", "APPLY_NOW", "GET_QUOTE", "WATCH_MORE",
+    "NO_BUTTON", "ORDER_NOW", "SEE_MENU", "INSTALL_MOBILE_APP",
+}
+
+
+def _meta_daily_budget_cap() -> float:
+    raw = os.getenv("TAKYON_META_MAX_DAILY_BUDGET_USD")
+    try:
+        return float(raw) if raw else _META_MAX_DAILY_BUDGET_USD_DEFAULT
+    except (TypeError, ValueError):
+        return _META_MAX_DAILY_BUDGET_USD_DEFAULT
+
+
+def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
+    """Resolve Meta Marketing API config from env. Never returns the token to callers that print."""
+    load_takyon_env()
+    token = (
+        os.getenv("META_SYSTEM_USER_ACCESS_TOKEN")
+        or os.getenv("META_ACCESS_TOKEN")
+        or os.getenv("FACEBOOK_ACCESS_TOKEN")
+        or ""
+    ).strip()
+    if require_token and not token:
+        raise TakyonError(
+            "Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN"
+        )
+    version = (os.getenv("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
+    if not version:
+        version = _META_DEFAULT_GRAPH_VERSION
+    elif not version.startswith("v"):
+        version = f"v{version}"
+    return {
+        "token": token,
+        "version": version,
+        "ad_account_id": (os.getenv("META_AD_ACCOUNT_ID") or "").strip(),
+        "page_id": (os.getenv("META_PAGE_ID") or "").strip(),
+    }
+
+
+def _meta_account_path(ad_account_id: str) -> str:
+    acct = str(ad_account_id or "").strip()
+    if not acct:
+        raise TakyonError("Meta launch requires an ad account id (META_AD_ACCOUNT_ID or ad_account_id)")
+    return acct if acct.startswith("act_") else f"act_{acct}"
+
+
+def _meta_graph(
+    method: str,
+    path: str,
+    params: dict[str, Any],
+    cfg: dict[str, Any],
+    *,
+    host: str = "graph.facebook.com",
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Call the Meta Graph API. Errors surface Meta's body but never the access token."""
+    clean = {k: v for k, v in (params or {}).items() if v is not None}
+    clean["access_token"] = cfg["token"]
+    rel = path.lstrip("/")
+    url = f"https://{host}/{cfg['version']}/{rel}"
+    method = method.upper()
+    if method == "GET":
+        request = urllib.request.Request(f"{url}?{urllib.parse.urlencode(clean)}", method="GET")
+    else:
+        data = urllib.parse.urlencode(clean).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method=method,
+        )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise TakyonError(f"Meta Graph {method} /{rel} failed: {exc.code} {body}") from exc
+    except urllib.error.URLError as exc:
+        raise TakyonError(f"Meta Graph {method} /{rel} connection error: {exc.reason}") from exc
+
+
+def _meta_upload_advideo(video_path: Path, cfg: dict[str, Any], *, name: str) -> str:
+    """Upload a local mp4 as an AdVideo via multipart (graph-video host). Returns the video id."""
+    acct = _meta_account_path(cfg["ad_account_id"])
+    url = f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos"
+    try:
+        import httpx  # lazy: only the live multipart upload needs it
+    except Exception as exc:  # pragma: no cover - dependency missing
+        raise TakyonError("Meta video upload requires the httpx package") from exc
+    try:
+        with video_path.open("rb") as handle:
+            resp = httpx.post(
+                url,
+                data={"access_token": cfg["token"], "name": name},
+                files={"source": (video_path.name, handle, "video/mp4")},
+                timeout=180.0,
+            )
+    except httpx.HTTPError as exc:
+        raise TakyonError(f"Meta video upload connection error: {exc}") from exc
+    if resp.status_code >= 400:
+        raise TakyonError(f"Meta video upload failed: {resp.status_code} {resp.text}")
+    video_id = str((resp.json() or {}).get("id") or "").strip()
+    if not video_id:
+        raise TakyonError(f"Meta video upload returned no id: {resp.text}")
+    return video_id
+
+
+def _meta_video_thumbnail(video_id: str, cfg: dict[str, Any]) -> str | None:
+    try:
+        data = _meta_graph("GET", f"{video_id}/thumbnails", {"fields": "uri,is_preferred"}, cfg)
+    except TakyonError:
+        return None
+    items = data.get("data") if isinstance(data, dict) else None
+    if not items:
+        return None
+    preferred = next((i for i in items if i.get("is_preferred")), items[0])
+    uri = str(preferred.get("uri") or "").strip()
+    return uri or None
+
+
+def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    if _boolish(args.get("activate"), default=False) or str(args.get("status") or "").strip().upper() == "ACTIVE":
+        raise TakyonError(
+            "business_meta_ad_launch only creates PAUSED objects; activation is intentionally not supported by this tool"
+        )
+
+    ad_video_path = _safe_relpath(str(args.get("ad_video_path") or ""), field="ad_video_path").as_posix()
+    if Path(ad_video_path).suffix.lower() != ".mp4":
+        raise TakyonError("ad_video_path must point to an .mp4 produced by the ugc-video-ad skill")
+
+    campaign = args.get("campaign") if isinstance(args.get("campaign"), dict) else {}
+    adset = args.get("adset") if isinstance(args.get("adset"), dict) else {}
+    ad = args.get("ad") if isinstance(args.get("ad"), dict) else {}
+
+    slug = _file_slug(
+        str(args.get("slug") or campaign.get("name") or Path(ad_video_path).parent.name or "meta-ad"),
+        "meta-ad",
+    )
+
+    raw_budget = adset.get("daily_budget_usd", adset.get("daily_budget"))
+    try:
+        daily_budget_usd = float(raw_budget) if raw_budget not in (None, "") else 5.0
+    except (TypeError, ValueError):
+        raise TakyonError("adset.daily_budget_usd must be a number (USD per day)")
+    if daily_budget_usd <= 0:
+        raise TakyonError("adset.daily_budget_usd must be positive")
+    cap = _meta_daily_budget_cap()
+    if daily_budget_usd > cap:
+        raise TakyonError(
+            f"adset.daily_budget_usd {daily_budget_usd} exceeds the safety cap of {cap} USD/day "
+            "(set TAKYON_META_MAX_DAILY_BUDGET_USD to change)"
+        )
+
+    link = str(ad.get("link") or "").strip()
+    if not link:
+        raise TakyonError("ad.link is required (the destination URL the ad sends people to)")
+    cta = str(ad.get("call_to_action") or "LEARN_MORE").strip().upper()
+    if cta not in _META_VALID_CTA:
+        raise TakyonError(f"ad.call_to_action '{cta}' is not a recognized Meta CTA type")
+
+    targeting = adset.get("targeting") if isinstance(adset.get("targeting"), dict) else {"geo_locations": {"countries": ["US"]}}
+
+    return {
+        "slug": slug,
+        "ad_video_path": ad_video_path,
+        "objective": str(campaign.get("objective") or "OUTCOME_TRAFFIC").strip().upper(),
+        "campaign_name": str(campaign.get("name") or f"{slug} campaign").strip(),
+        "adset_name": str(adset.get("name") or f"{slug} ad set").strip(),
+        "optimization_goal": str(adset.get("optimization_goal") or "LINK_CLICKS").strip().upper(),
+        "billing_event": str(adset.get("billing_event") or "IMPRESSIONS").strip().upper(),
+        "daily_budget_usd": round(daily_budget_usd, 2),
+        "daily_budget_cents": int(round(daily_budget_usd * 100)),
+        "targeting": targeting,
+        "ad_name": str(ad.get("name") or f"{slug} ad").strip(),
+        "message": str(ad.get("message") or "").strip(),
+        "link": link,
+        "call_to_action": cta,
+        "page_id": str(ad.get("page_id") or cfg.get("page_id") or "").strip(),
+        "ad_account_id": str(args.get("ad_account_id") or cfg.get("ad_account_id") or "").strip(),
+        "image_url": (str(ad.get("image_url") or ad.get("thumbnail_url") or "").strip() or None),
+    }
+
+
+def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
+    """Preflight or launch a PAUSED Meta ad from a UGC video. Never activates; never spends."""
+    created: dict[str, Any] = {}
+    receipt_rel: str | None = None
+    business = ""
+    try:
+        store = _store()
+        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        if not business:
+            raise TakyonError("business is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        mode = str(args.get("mode") or "launch").strip().lower()
+
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            business_mode = str(business_row.get("mode") or "live")
+
+        cfg = _meta_config(require_token=(mode == "preflight" or business_mode != "test"))
+
+        # ── read-only preflight: verify token + list ad accounts, create nothing ──
+        if mode == "preflight":
+            identity = _meta_graph("GET", "me", {"fields": "id,name"}, cfg)
+            accounts = _meta_graph(
+                "GET",
+                "me/adaccounts",
+                {"fields": "id,account_id,name,account_status,currency,is_prepay_account"},
+                cfg,
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_launch",
+                "mode": "preflight",
+                "read_only": True,
+                "business": business,
+                "business_mode": business_mode,
+                "graph_version": cfg["version"],
+                "identity": identity,
+                "ad_accounts": accounts.get("data") if isinstance(accounts, dict) else None,
+                "default_ad_account_id": cfg.get("ad_account_id") or None,
+                "default_page_id": cfg.get("page_id") or None,
+            })
+
+        # ── launch (always PAUSED) ──
+        plan = _meta_launch_plan(args, cfg)
+        slug = plan["slug"]
+        video_abs = store._resolve_business_file(business, plan["ad_video_path"])
+        if not video_abs.is_file():
+            raise TakyonError(
+                f"ad video not found at {plan['ad_video_path']}; build it with the ugc-video-ad skill first"
+            )
+
+        pub_rel = f"distribution/meta-ads/{slug}"
+        receipt_rel = f"{pub_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+
+        # Idempotency guard: a receipt already written for this key means the Graph
+        # objects exist — return it instead of creating duplicates on a retry.
+        if receipt_abs.is_file():
+            try:
+                prior = json.loads(receipt_abs.read_text(encoding="utf-8"))
+            except Exception:
+                prior = None
+            if isinstance(prior, dict) and prior.get("idempotency_key") == idempotency_key:
+                return tool_result({
+                    "success": True,
+                    "action": "business_meta_ad_launch",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "paused": True,
+                    "receipt": receipt_rel,
+                    "value": prior,
+                })
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "paused": True,
+            "ad_video_path": plan["ad_video_path"],
+            "objective": plan["objective"],
+            "daily_budget_usd": plan["daily_budget_usd"],
+            "link": plan["link"],
+            "call_to_action": plan["call_to_action"],
+            "created_at": _now(),
+        }
+
+        # ── test mode: suppress all external calls, write a local receipt ──
+        if business_mode == "test":
+            receipt = {
+                **base_receipt,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "note": "Test mode recorded the Meta ad launch plan locally; no objects were created on Meta.",
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            store.commit(
+                scope=f"business:{business}/distribution:meta-ads/{slug}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "meta_ad.launch",
+                    "payload": {**receipt, "publication_dir": pub_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record suppressed meta ad launch (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "paused": True,
+                "receipt": receipt_rel,
+                "value": receipt,
+            })
+
+        # ── live mode: create everything PAUSED (no spend) ──
+        if not plan["ad_account_id"]:
+            raise TakyonError("live launch requires META_AD_ACCOUNT_ID or ad_account_id")
+        if not plan["page_id"]:
+            raise TakyonError("live launch requires META_PAGE_ID or ad.page_id (creatives must be tied to a Page)")
+        cfg["ad_account_id"] = plan["ad_account_id"]
+        acct = _meta_account_path(plan["ad_account_id"])
+
+        # 1) upload the UGC mp4 as an AdVideo
+        created["video_id"] = _meta_upload_advideo(video_abs, cfg, name=plan["ad_name"])
+
+        # 2) creative (Meta requires a thumbnail image for a video creative)
+        image_url = plan["image_url"] or _meta_video_thumbnail(created["video_id"], cfg)
+        if not image_url:
+            raise TakyonError(
+                "Meta requires a thumbnail for a video creative but none was ready yet; "
+                "pass ad.image_url or retry shortly after the video finishes processing"
+            )
+        story_spec = {
+            "page_id": plan["page_id"],
+            "video_data": {
+                "video_id": created["video_id"],
+                "message": plan["message"],
+                "image_url": image_url,
+                "call_to_action": {"type": plan["call_to_action"], "value": {"link": plan["link"]}},
+            },
+        }
+        creative = _meta_graph("POST", f"{acct}/adcreatives", {
+            "name": f"{plan['ad_name']} creative",
+            "object_story_spec": json.dumps(story_spec),
+        }, cfg)
+        created["creative_id"] = str(creative.get("id") or "").strip()
+
+        # 3) campaign (PAUSED)
+        campaign = _meta_graph("POST", f"{acct}/campaigns", {
+            "name": plan["campaign_name"],
+            "objective": plan["objective"],
+            "status": "PAUSED",
+            "special_ad_categories": "[]",
+        }, cfg)
+        created["campaign_id"] = str(campaign.get("id") or "").strip()
+
+        # 4) ad set (PAUSED, with its own daily budget)
+        adset = _meta_graph("POST", f"{acct}/adsets", {
+            "name": plan["adset_name"],
+            "campaign_id": created["campaign_id"],
+            "status": "PAUSED",
+            "daily_budget": plan["daily_budget_cents"],
+            "billing_event": plan["billing_event"],
+            "optimization_goal": plan["optimization_goal"],
+            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+            "targeting": json.dumps(plan["targeting"]),
+        }, cfg)
+        created["adset_id"] = str(adset.get("id") or "").strip()
+
+        # 5) ad (PAUSED)
+        ad = _meta_graph("POST", f"{acct}/ads", {
+            "name": plan["ad_name"],
+            "adset_id": created["adset_id"],
+            "status": "PAUSED",
+            "creative": json.dumps({"creative_id": created["creative_id"]}),
+        }, cfg)
+        created["ad_id"] = str(ad.get("id") or "").strip()
+
+        receipt = {
+            **base_receipt,
+            "mode": "live",
+            "status": "created_paused",
+            "external_side_effects": "created_paused_no_spend",
+            "ad_account_id": acct,
+            "page_id": plan["page_id"],
+            "graph_version": cfg["version"],
+            "ids": created,
+            "thumbnail_url": image_url,
+            "note": "All objects created PAUSED; nothing serves or spends until explicitly activated.",
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/distribution:meta-ads/{slug}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": "meta_ad.launch",
+                "payload": {**receipt, "publication_dir": pub_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record meta ad launch (paused)",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_meta_ad_launch",
+            "business": business,
+            "slug": slug,
+            "mode": "live",
+            "status": "created_paused",
+            "paused": True,
+            "ids": created,
+            "receipt": receipt_rel,
+            "value": receipt,
+        })
+    except Exception as exc:
+        # Honest partial receipt: if some Meta objects were created before a later
+        # step failed, persist what exists so it can be cleaned up — never fake success.
+        if created and receipt_rel and business:
+            try:
+                partial_abs = _store()._resolve_business_file(business, receipt_rel)
+                _atomic_write_text(
+                    partial_abs,
+                    json.dumps({
+                        "status": "partial_failed",
+                        "paused": True,
+                        "ids": created,
+                        "error": str(exc),
+                        "created_at": _now(),
+                    }, ensure_ascii=False, indent=2) + "\n",
+                )
+            except Exception:
+                pass
+        return tool_error(str(exc), success=False, created=created or None)
+
+
 def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
     operation = {
         "action": "conversation.thread.upsert",
@@ -8248,6 +9024,57 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "value", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_ad_launch",
+        "description": (
+            "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video. "
+            "mode=preflight verifies the access token and lists ad accounts (read-only, creates nothing). "
+            "mode=launch creates a video AdCreative + Campaign + AdSet + Ad, ALWAYS PAUSED (it never serves or spends); "
+            "test-mode businesses suppress everything to a local receipt with no Meta calls. "
+            "Activation is intentionally not supported by this tool."
+        ),
+        "handler": handle_business_meta_ad_launch,
+        "schema": _schema(
+            "business_meta_ad_launch",
+            "Preflight or create a PAUSED Meta ad from a UGC video.",
+            {
+                "business": _BUSINESS_PROP,
+                "mode": {
+                    "type": "string",
+                    "enum": ["preflight", "launch"],
+                    "description": "preflight = read-only token/account check; launch = create PAUSED objects. Default launch.",
+                },
+                "ad_video_path": {
+                    "type": "string",
+                    "description": "Business-relative path to the UGC .mp4, e.g. product/ugc-ads/<slug>/ad.mp4. Required for launch.",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "Publication slug under distribution/meta-ads/<slug>/; defaults from the campaign name or the video folder.",
+                },
+                "ad_account_id": {
+                    "type": "string",
+                    "description": "Override META_AD_ACCOUNT_ID (with or without the act_ prefix).",
+                },
+                "campaign": {
+                    "type": "object",
+                    "description": "{name, objective}; objective is a Meta Outcome objective (default OUTCOME_TRAFFIC).",
+                },
+                "adset": {
+                    "type": "object",
+                    "description": "{name, daily_budget_usd, optimization_goal, billing_event, targeting}; daily_budget_usd is capped by TAKYON_META_MAX_DAILY_BUDGET_USD.",
+                },
+                "ad": {
+                    "type": "object",
+                    "description": "{name, message, link (required), call_to_action, page_id, image_url}; image_url is an optional thumbnail fallback.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
         ),
     },
     {

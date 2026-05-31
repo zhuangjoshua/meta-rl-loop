@@ -1910,8 +1910,31 @@ def _secret_command(store: TakyonStore, argv: list[str]) -> str:
     return f"Stored {key}=<redacted> in {path}"
 
 
+def _seed_platform_owner_at_startup(store: TakyonStore) -> None:
+    """Serving-flip startup seed for the interactive shell (Phase 8, mediationplan.md owner-wiring
+    finding). On the Postgres backend the shell/CEO owns every business it creates as the single
+    platform owner, but ``business.upsert`` resolves that owner READ-ONLY and blocks if it is
+    unprovisioned (invariant #8) — so seed it here, once, at shell start. Idempotent, and a guarded
+    no-op on SQLite (no ``users`` table to seed). Never blocks the shell from starting: a Postgres
+    hiccup is surfaced to stderr (a later ``/create`` would block with its own actionable reason)
+    rather than crashing the operator's session. The one-time raw API key is minted only on the very
+    first Postgres startup and shown exactly once."""
+    try:
+        _user_id, raw_key = store.seed_platform_owner()
+    except Exception as exc:  # noqa: BLE001 - never block the shell on a startup seed failure
+        sys.stderr.write(f"[takyon] platform-owner seed skipped: {exc}\n")
+        return
+    if raw_key:
+        sys.stderr.write(
+            "\n[takyon] Provisioned the platform owner on Postgres.\n"
+            "[takyon] One-time API key (shown ONCE — store it securely):\n"
+            f"[takyon]   {raw_key}\n\n"
+        )
+
+
 def _interactive_shell(*, initial_business: str | None, model: str, max_turns: int) -> None:
     store = TakyonStore()
+    _seed_platform_owner_at_startup(store)
     current_business = _slugify(initial_business) if initial_business else None
     if current_business and not _business_exists(store, current_business):
         print(f"[takyon] business:{current_business} is not initialized yet. /create {current_business} <goal> will create it.")

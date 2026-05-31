@@ -22,6 +22,7 @@ from plugins.takyon.core import (
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
+    handle_business_meta_ad_launch,
     handle_business_publish_outreach,
     handle_business_request_app_magic_link,
     handle_business_ugc_ad_write,
@@ -90,6 +91,7 @@ def test_bundled_takyon_skills_exist():
         "takyon-conversation-followup",
         "takyon-distribution",
         "takyon-market-research",
+        "takyon-meta-ads",
         "takyon-reddit",
         "takyon-x",
     }
@@ -2424,6 +2426,127 @@ def test_business_ugc_ad_write_records_existing_publication(tmp_path, monkeypatc
     payload = json.loads(row["payload_json"])
     assert payload["path"] == "product/ugc-ads/clipbook-demo/ad.mp4"
     assert payload["script"] == script
+
+
+def _meta_test_business(tmp_path, monkeypatch, *, slug="clipbook", mode="test"):
+    """Set up a temp TAKYON_HOME + a business for the Meta ad launch tests."""
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    upsert = {"action": "business.upsert", "business": slug, "name": slug.title()}
+    if mode:
+        upsert["mode"] = mode
+    _commit(store, f"business:{slug}", [upsert], f"init-{slug}")
+    return store
+
+
+def _meta_launch_args(**overrides):
+    args = {
+        "business": "clipbook",
+        "mode": "launch",
+        "ad_video_path": "product/ugc-ads/demo-meta/ad.mp4",
+        "slug": "demo-meta",
+        "campaign": {"objective": "OUTCOME_TRAFFIC"},
+        "adset": {"daily_budget_usd": 5.0, "optimization_goal": "LINK_CLICKS"},
+        "ad": {
+            "message": "Try Clipbook",
+            "link": "https://example.com/clipbook",
+            "call_to_action": "LEARN_MORE",
+        },
+        "idempotency_key": "clipbook-meta-demo-v1",
+    }
+    args.update(overrides)
+    return args
+
+
+def test_business_meta_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch)
+    video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+
+    result = json.loads(handle_business_meta_ad_launch(_meta_launch_args()))
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    assert result["external_side_effects"] == "suppressed"
+    assert result["paused"] is True
+    assert result["slug"] == "demo-meta"
+    assert result["receipt"] == "distribution/meta-ads/demo-meta/receipt.json"
+    assert "ids" not in result  # no Meta objects created in test mode
+
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert receipt_abs.is_file()
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["status"] == "suppressed_test_mode"
+    assert receipt["mode"] == "test"
+    assert receipt["paused"] is True
+    assert receipt["idempotency_key"] == "clipbook-meta-demo-v1"
+
+    with store._connect() as conn:
+        event = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert event["event_type"] == "meta_ad.launch"
+
+    # Re-running with the same idempotency key returns the existing receipt, not a duplicate.
+    repeat = json.loads(handle_business_meta_ad_launch(_meta_launch_args()))
+    assert repeat["success"] is True
+    assert repeat["idempotent"] is True
+    assert repeat["status"] == "suppressed_test_mode"
+    assert repeat["paused"] is True
+
+
+def test_business_meta_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+    video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+
+    result = json.loads(
+        handle_business_meta_ad_launch(_meta_launch_args(adset={"daily_budget_usd": 999.0}))
+    )
+
+    assert result["success"] is False
+    assert "exceeds the safety cap" in result["error"]
+    assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads").exists()
+
+
+def test_business_meta_ad_launch_refuses_activation(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(handle_business_meta_ad_launch(_meta_launch_args(activate=True)))
+
+    assert result["success"] is False
+    assert "PAUSED" in result["error"]
+    assert "activation" in result["error"].lower()
+
+
+def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+    # No ad.mp4 written: the plan validates but the video file is absent.
+
+    result = json.loads(handle_business_meta_ad_launch(_meta_launch_args()))
+
+    assert result["success"] is False
+    assert "ad video not found" in result["error"]
+    assert "ugc-video-ad" in result["error"]
+    assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads").exists()
+
+
+def test_business_meta_ad_launch_preflight_requires_token(tmp_path, monkeypatch):
+    for var in ("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            {"business": "clipbook", "mode": "preflight", "idempotency_key": "clipbook-meta-preflight"}
+        )
+    )
+
+    assert result["success"] is False
+    assert "META_ACCESS_TOKEN" in result["error"]
 
 
 def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):

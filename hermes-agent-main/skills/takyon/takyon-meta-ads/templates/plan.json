@@ -1,0 +1,36 @@
+{
+  "business": "<business-slug>",
+  "slug": "<campaign-slug>",
+  "ad_video_path": "product/ugc-ads/<slug>/ad.mp4",
+  "ad_account_id": "",
+  "campaign": {
+    "name": "<campaign-slug> campaign",
+    "objective": "OUTCOME_TRAFFIC"
+  },
+  "adset": {
+    "name": "<campaign-slug> ad set",
+    "daily_budget_usd": 5.0,
+    "optimization_goal": "LINK_CLICKS",
+    "billing_event": "IMPRESSIONS",
+    "targeting": { "geo_locations": { "countries": ["US"] } }
+  },
+  "ad": {
+    "name": "<campaign-slug> ad",
+    "message": "<one or two lines of ad copy that match the UGC video>",
+    "link": "https://<your-product-url>",
+    "call_to_action": "LEARN_MORE",
+    "page_id": "",
+    "image_url": ""
+  },
+  "idempotency_key": "meta-ad-<business-slug>-<campaign-slug>-v1",
+  "reason": "launch paused meta ad from ugc video",
+  "actor": "agent",
+  "_notes": {
+    "mode": "Call business_meta_ad_launch with mode='preflight' first (read-only), then mode='launch'.",
+    "paused": "Every object is created PAUSED. This tool never activates or spends.",
+    "budget": "daily_budget_usd is capped by TAKYON_META_MAX_DAILY_BUDGET_USD (default 50).",
+    "ad_account_id": "Blank = use META_AD_ACCOUNT_ID. Pass a sandbox account id here for a zero-risk live test.",
+    "page_id": "Blank = use META_PAGE_ID. Required for the video creative.",
+    "image_url": "Blank = use the uploaded video's auto thumbnail; set a public image URL if it is not ready."
+  }
+}

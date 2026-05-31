@@ -38,11 +38,13 @@ def test_run_migrations_brings_empty_db_to_current(pg_conn_raw):
     assert applied == sorted(applied)
     assert applied[0].startswith("0001")
 
-    # Spine (0001) + a Phase-5 table (0009) are now present — the run reached the latest migration.
+    # Spine (0001) + a Phase-5 table (0009) + a Phase-8 operator table (0011) are all present —
+    # the run reached the latest migration, not just an early one.
     assert _table_exists(pg_conn_raw, "users")
     assert _table_exists(pg_conn_raw, "user_api_keys")
     assert _table_exists(pg_conn_raw, "businesses")
     assert _table_exists(pg_conn_raw, "app_gateway_keys")
+    assert _table_exists(pg_conn_raw, "control_states")
 
 
 def test_run_migrations_is_idempotent(pg_conn_raw):

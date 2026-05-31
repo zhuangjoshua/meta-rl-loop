@@ -7,9 +7,11 @@ Proves four robustness properties of the replace, all on a real throwaway Postgr
   1. The forward migrations (0001/0002) FAIL LOUD — they do not silently bind via
      `create table if not exists` — when a differently-shaped polsia2 `businesses`
      or `billing_accounts` is already present.
-  2. The gated teardown (db/retire_polsia2_public.sql) drops exactly those two
-     colliding roots (cascade clears dependents' FK constraints, not their tables),
-     after which 0001/0002 install the takyon shape cleanly and its FKs resolve.
+  2. The gated teardown (db/retire_polsia2_public.sql) drops exactly the five
+     colliding roots (businesses + billing_accounts, plus the Phase-8 operator-port
+     collisions agent_runs/events/idempotency_keys) — cascade clears dependents' FK
+     constraints, not their tables — after which 0001/0002/0011 install the takyon
+     shape cleanly and their FKs resolve.
   3. The teardown is a pure no-op on a clean database.
   4. Re-running the teardown after takyon ALREADY owns the tables is a no-op that
      NEVER destroys takyon data (the guard is the inverse of 0001/0002's guards).
@@ -29,9 +31,11 @@ _DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
 _MIGRATIONS_DIR = _DB_DIR / "migrations"
 _RETIRE_SQL = _DB_DIR / "retire_polsia2_public.sql"
 
-# Minimal stand-ins for polsia2's real shapes: an id-PK / owner_profile_id businesses
-# (NO owner_user_id), a business_id-cascade dependent, and a Stripe-subscription-shaped
-# billing_accounts (NO allowance_included_cents). Enough to trip the takyon guards.
+# Minimal stand-ins for polsia2's real shapes, each missing the takyon-distinctive column so it
+# trips the matching REPLACE guard: an id-PK / owner_profile_id businesses (NO owner_user_id), a
+# Stripe-subscription-shaped billing_accounts (NO allowance_included_cents), and the three Phase-8
+# operator-port collisions live introspection found in public — agent_runs (NO scope), events
+# (kind, NO event_type), idempotency_keys (response, NO operation_hash).
 _POLSIA2_BUSINESSES = """
     create table public.businesses (
         id uuid primary key default gen_random_uuid(),
@@ -40,19 +44,45 @@ _POLSIA2_BUSINESSES = """
         created_at timestamptz not null default now()
     );
 """
-_POLSIA2_DEPENDENT = """
-    create table public.agent_runs (
-        id uuid primary key default gen_random_uuid(),
-        business_id uuid not null references public.businesses (id) on delete cascade,
-        note text
-    );
-"""
 _POLSIA2_BILLING_ACCOUNTS = """
     create table public.billing_accounts (
         id uuid primary key default gen_random_uuid(),
         stripe_customer_id text,
         stripe_subscription_id text,
         status text
+    );
+"""
+_POLSIA2_AGENT_RUNS = """
+    create table public.agent_runs (
+        id uuid primary key default gen_random_uuid(),
+        business_id uuid not null references public.businesses (id) on delete cascade,
+        status text,
+        note text
+    );
+"""
+_POLSIA2_EVENTS = """
+    create table public.events (
+        id uuid primary key default gen_random_uuid(),
+        business_id uuid references public.businesses (id) on delete cascade,
+        kind text not null,
+        subject_type text
+    );
+"""
+_POLSIA2_IDEMPOTENCY_KEYS = """
+    create table public.idempotency_keys (
+        key text primary key,
+        business_id uuid references public.businesses (id) on delete cascade,
+        response jsonb
+    );
+"""
+# An INNOCENT business_id-cascade dependent that is NOT itself a retire target: it must SURVIVE the
+# teardown — cascade clears only its FK constraint, the orphaned table itself remains (SCOPE note in
+# retire_polsia2_public.sql: the ~20 business_id dependents are left for a separate gated wipe).
+_POLSIA2_DEPENDENT = """
+    create table public.workflow_runs (
+        id uuid primary key default gen_random_uuid(),
+        business_id uuid not null references public.businesses (id) on delete cascade,
+        note text
     );
 """
 
@@ -105,26 +135,36 @@ def test_forward_migration_refuses_polsia2_billing_accounts_shadow(pg_conn_raw):
 
 
 def test_retire_then_migrate_yields_takyon_shape(pg_conn_raw):
-    # Stand up the legacy polsia2 control schema (root + dependent + billing).
+    # Stand up the legacy polsia2 control schema: the two original roots, the three Phase-8
+    # operator-name collisions, and one innocent business_id-cascade dependent (workflow_runs).
     pg_conn_raw.execute(_POLSIA2_BUSINESSES)
-    pg_conn_raw.execute(_POLSIA2_DEPENDENT)
     pg_conn_raw.execute(_POLSIA2_BILLING_ACCOUNTS)
-    assert _fk_count(pg_conn_raw, "agent_runs") == 1
+    pg_conn_raw.execute(_POLSIA2_AGENT_RUNS)
+    pg_conn_raw.execute(_POLSIA2_EVENTS)
+    pg_conn_raw.execute(_POLSIA2_IDEMPOTENCY_KEYS)
+    pg_conn_raw.execute(_POLSIA2_DEPENDENT)
+    assert _fk_count(pg_conn_raw, "workflow_runs") == 1
 
     _retire(pg_conn_raw)
 
-    # Colliding roots gone; the dependent TABLE survives (only its FK was cascaded).
-    assert not _table_exists(pg_conn_raw, "businesses")
-    assert not _table_exists(pg_conn_raw, "billing_accounts")
-    assert _table_exists(pg_conn_raw, "agent_runs")
-    assert _fk_count(pg_conn_raw, "agent_runs") == 0
+    # All five colliding roots are gone…
+    for root in ("businesses", "billing_accounts", "agent_runs", "events", "idempotency_keys"):
+        assert not _table_exists(pg_conn_raw, root), f"{root} should have been retired"
+    # …but the innocent dependent TABLE survives — only its FK constraint was cleared by cascade.
+    assert _table_exists(pg_conn_raw, "workflow_runs")
+    assert _fk_count(pg_conn_raw, "workflow_runs") == 0
 
-    # Forward migrations now install the takyon shape cleanly.
+    # Forward migrations now install the takyon shape cleanly: 0001/0002 for the spine + ledgers,
+    # 0011 for the ported operator tables whose names polsia2 had collided on.
     _apply_migrations(pg_conn_raw)
     assert _column_exists(pg_conn_raw, "businesses", "owner_user_id")
     assert _column_exists(pg_conn_raw, "billing_accounts", "allowance_included_cents")
     assert _table_exists(pg_conn_raw, "billing_entries")
     assert _table_exists(pg_conn_raw, "custody_entries")
+    # The three retired collisions are reinstalled in takyon (0011) shape:
+    assert _column_exists(pg_conn_raw, "agent_runs", "scope")
+    assert _column_exists(pg_conn_raw, "events", "event_type")
+    assert _column_exists(pg_conn_raw, "idempotency_keys", "operation_hash")
 
     # Functional proof the takyon FKs resolved: a full ownership + ledger insert chain.
     uid = pg_conn_raw.execute(

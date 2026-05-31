@@ -843,6 +843,90 @@ async def auth0_login(request: Request):
     return response
 
 
+def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
+    """Just-in-time provision the top-level Takyon user for a verified dashboard login (task #6).
+
+    Runs ONLY on the Postgres backend — in the SQLite era there is no ``users`` table to provision
+    into, and the dashboard still authenticates purely via its signed session cookie exactly as before,
+    so this is a guarded no-op there. On Postgres it ensures the ``users`` row for this Auth0 ``sub``
+    exists (minting THE single API key + opening billing/custody on first creation, one txn, via
+    ``control_plane.provision_user_on_first_login``). It NEVER raises: the dashboard cookie tier is a
+    separate auth tier from the control-plane API-key boundary, so a provisioning hiccup must not lock
+    the operator out of the dashboard — it is logged loudly instead (invariant #8: surfaced, never
+    silently swallowed). The one-time raw key (only on a brand-new ``sub``) is logged exactly once — it
+    is never stored in clear and never placed in a cookie."""
+    try:
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return
+        import psycopg
+
+        from plugins.takyon.control_plane import provision_user_on_first_login
+        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+
+        try:
+            url = resolve_database_url()
+        except RuntimeNotConfigured:
+            _log.error(
+                "Auth0 login on the Postgres backend but no DATABASE_URL configured; "
+                "top-level user was NOT provisioned"
+            )
+            return
+        sub = str(user.get("sub") or "")
+        if not sub:
+            return
+        email = str(user.get("email") or "") or None
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            user_id, created, raw_key = provision_user_on_first_login(conn, sub, email)
+        finally:
+            conn.close()
+        if created:
+            _log.info(
+                "Provisioned Takyon user %s for an Auth0 sub on first dashboard login", user_id
+            )
+            if raw_key:
+                _log.warning(
+                    "One-time Takyon API key minted for user %s (shown once, store it securely): %s",
+                    user_id,
+                    raw_key,
+                )
+        else:
+            _log.debug("Dashboard login for already-provisioned Takyon user %s", user_id)
+    except Exception as exc:  # noqa: BLE001 - never block dashboard login on a provisioning failure
+        _log.error("JIT provisioning for dashboard login failed (login still allowed): %s", exc)
+
+
+def _seed_platform_owner_if_postgres() -> None:
+    """Serving-flip startup seed for the dashboard server (Phase 8, mediationplan.md owner-wiring
+    finding). The shell-side twin of this runs in ``cli.py``; both call the SAME idempotent
+    ``TakyonStore.seed_platform_owner``. On the Postgres backend the local CEO/shell owns every
+    business it creates as ONE config-keyed platform owner (``TAKYON_PLATFORM_OWNER_SUB``), and
+    ``business.upsert`` resolves that owner read-only and blocks if it is unprovisioned (invariant #8);
+    seeding it at dashboard start makes the same owner exist for a dashboard run that shares the
+    Postgres control plane. Guarded no-op off Postgres; NEVER raises (a seed hiccup must not stop the
+    dashboard from binding) — it is logged loudly instead. The one-time raw key (first PG startup
+    only) is logged exactly once and never stored in clear."""
+    try:
+        from plugins.takyon.core import TakyonStore, _db_backend
+
+        if _db_backend() != "postgres":
+            return
+        user_id, raw_key = TakyonStore(get_takyon_home()).seed_platform_owner()
+        if raw_key:
+            _log.warning(
+                "Provisioned the platform owner (user %s) on the Postgres backend at dashboard "
+                "start. One-time API key (shown once, store it securely): %s",
+                user_id,
+                raw_key,
+            )
+        elif user_id:
+            _log.debug("Platform owner already provisioned (user %s)", user_id)
+    except Exception as exc:  # noqa: BLE001 - never block the dashboard on a startup seed failure
+        _log.error("Platform-owner startup seed failed (dashboard still starting): %s", exc)
+
+
 @app.get("/auth/callback")
 async def auth0_callback(request: Request):
     cfg = _auth0_config()
@@ -899,6 +983,10 @@ async def auth0_callback(request: Request):
     except Exception as exc:
         _log.warning("Auth0 dashboard login rejected: %s", exc)
         return _auth0_error_response(str(exc), 403)
+
+    # Task #6: JIT-provision the top-level Takyon user for this verified identity. Guarded no-op off
+    # Postgres; never raises (the dashboard cookie tier is independent of the control-plane boundary).
+    _provision_dashboard_user_if_postgres(user)
 
     expires_at = now + _AUTH0_COOKIE_MAX_AGE_SECONDS
     session_token = _sign_payload(cfg.secret, {**user, "iat": now, "exp": expires_at})
@@ -5837,6 +5925,11 @@ def start_server(
     app.state.bound_host = host
     app.state.bound_port = port
     _configure_local_product_publish(host, port)
+
+    # Phase 8 serving flip: on the Postgres backend, idempotently seed the single platform owner so
+    # the shared control plane has a resolvable owner for any business this runtime creates. Guarded
+    # no-op off Postgres; never raises (it must not stop the dashboard from binding).
+    _seed_platform_owner_if_postgres()
 
     if open_browser:
         import webbrowser

@@ -242,8 +242,11 @@ class SupabaseS3StorageBackend:
     invariant-#8 block, never a silent fallback. sha256 is stored in object metadata at ``put`` and
     read back in ``list_digests`` so incrementality matches the local backend's digest space.
 
-    NOTE: wired but **unverified against live Supabase** (no live creds in this environment). Treat as
-    cutover-ready code, not a tested path, until the operator provisions the keys in mediationplan Gate 2.
+    NOTE: live-verified against Supabase Storage on 2026-05-31 (put→get→list→delete round-trip with
+    sha256 integrity, via the operator-provisioned ``SUPABASE_S3_*`` keys on project
+    ``ddftvmjpfghfrdxhavvp``, bucket ``business-workspaces``). Stays inert in the runtime until the
+    operator-gated cutover flips ``TAKYON_STORAGE_BACKEND=supabase_s3``; the per-method
+    ``# pragma: no cover`` markers remain because the offline test suite still doesn't hit the network.
     """
 
     name = "supabase_s3"

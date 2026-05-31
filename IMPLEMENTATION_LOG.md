@@ -1935,3 +1935,684 @@ rm hermes-agent-main/tests/plugins/test_takyon_storage_pg.py
 git checkout 5e535934 -- mediationplan.md   # restore the pre-Phase-7 plan (drops the Phase 7 Gate-2 entry + gate finding)
 # this log entry is additive — trim it back to the Phase 6 increment if reverting.
 ```
+
+---
+
+## Increment — Phase 7 follow-up: Supabase Storage credential provisioned in-browser + live-verified (2026-05-31)
+
+**What:** The operator signed in to Supabase; I then provisioned the Phase-7 Storage credential in their
+browser and verified it against live Supabase Storage. Created a **private** bucket `business-workspaces`
+on project four-manifold-prod (ref `ddftvmjpfghfrdxhavvp`, region `us-east-2`) + an S3 access key named
+`takyon-business-workspaces`. Wrote the four `SUPABASE_S3_*` values + `TAKYON_STORAGE_BUCKET` into
+`secrets/.env`, leaving the selector `TAKYON_STORAGE_BACKEND` **commented** (default `local`, so the leaf
+stays inert).
+
+**Why:** Closes the Phase-7 Gate-2 outstanding credential AND the "wired but unverified against live
+Supabase" caveat the Phase-7 increment explicitly left open. Robustness #1: prove the operator-provided
+creds work end-to-end through the real code path while the keys are fresh, rather than discovering a bad
+key at cutover. The credential is present but stays inert until the operator-gated cutover flips the
+selector — no silent activation.
+
+**Verified (LIVE, not mocked):** a throwaway smoke test drove the REAL
+`storage.py::SupabaseS3StorageBackend` (selected via `TAKYON_STORAGE_BACKEND=supabase_s3` for that one
+process only, creds read straight from `secrets/.env`) through **put → get (sha256 integrity match) →
+list_digests (digest round-tripped through object metadata) → delete → list-empty** against live Supabase
+Storage. Result: `LIVE SMOKETEST PASS`; bucket left empty (no residue). `boto3 1.42.89` present in `.venv`.
+
+**Files changed:**
+- `secrets/.env` (TRACKED-but-never-committed): +4 `SUPABASE_S3_*` + `TAKYON_STORAGE_BUCKET` + a comment
+  block; selector `TAKYON_STORAGE_BACKEND` left commented (inert). Values not printed anywhere.
+- `mediationplan.md`: Phase-7 Gate-2 credential bullet marked **✅ PROVISIONED + LIVE-VERIFIED** with the
+  bucket/ref/region/key facts + the 50 MB-vs-256 MiB config note.
+- `plugins/takyon/storage.py`: `SupabaseS3StorageBackend` docstring corrected from "unverified" → live-
+  verified 2026-05-31 (per-method `# pragma: no cover` markers kept; offline suite still doesn't hit net).
+
+**Supersedes the Phase-7 increment's "Not done":** the "supabase_s3 backend is wired but UNVERIFIED" item
+and the "⚠️ Operator action — Storage keys to provide" reminder are now **DONE**. Overall still
+outstanding: `STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3).
+
+**Not done / honest state:**
+- **Still inert** — no caller wired; `with_business_workspace` is not mounted around the worker; core.py
+  still reads/writes the workspace on local disk. (unchanged from Phase 7)
+- **Open config item, NOT yet actioned:** the bucket inherits Supabase's global **50 MB** upload limit
+  while the client cap `MAX_OBJECT_BYTES` is **256 MiB**. Raise the global Storage upload limit to
+  ≥256 MiB before live sync of large media, else objects between 50 MB and 256 MiB are rejected
+  server-side. Left as an operator decision (it is a project-wide setting, not bucket-scoped).
+- **Live apply / cutover still blocked** on polsia2 teardown + backup + operator go-ahead (unchanged).
+
+**Revert:**
+```sh
+git checkout HEAD -- mediationplan.md hermes-agent-main/plugins/takyon/storage.py   # drop the 2026-05-31 truthfulness edits (back to 51d70d29)
+# secrets/.env is never committed — manually remove the 5 SUPABASE_S3_*/TAKYON_STORAGE_BUCKET lines + their comment block.
+# the live bucket `business-workspaces` + key `takyon-business-workspaces` persist in Supabase; delete the bucket / revoke the key in the dashboard to fully undo provisioning.
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Runtime Cutover step 1 (LIVE DDL): retired polsia2's colliding control tables + applied takyon migrations 0001–0010 to live Supabase (2026-05-31)
+
+**What:** Executed the gated live schema cutover against the production Supabase project
+**four-manifold-prod** (ref `ddftvmjpfghfrdxhavvp`, PostgreSQL **17.6**) over `MIGRATION_DATABASE_URL`
+(direct 5432). Two documented steps, in order: (1) ran `plugins/takyon/db/retire_polsia2_public.sql`
+in one transaction — it dropped polsia2's `public.billing_accounts` then `public.businesses` with
+`cascade` (cleared **87** dependent FK *constraints*, left those ~88 dependent tables and their rows
+intact); (2) applied migrations `0001`…`0010` via the canonical `db/runner.py::run_migrations` on an
+autocommit psycopg connection (the SAME code path the test fixtures use — one definition of "the
+schema"). Installed the takyon shape: identity spine (`users`, `user_api_keys`, takyon `businesses`),
+both ledgers (flow A `billing_accounts`+`billing_entries`, flow B `custody_accounts`+`custody_entries`),
+`api_rate_limits`, `app_execution_policies`, the full sub-user/app runtime (`app_users`,
+`app_magic_links`, `app_sessions`, `app_entitlements`, `app_usage_events`, `app_budgets`,
+`app_plan_policies`, `app_checkout_intents`, `app_checkout_sessions`, `app_revenue_events`,
+`webhook_events`, `app_gateway_keys`), and `jobs` + `wake_schedules` + the in-DB `dispatch_due_wakes()`
+function.
+
+**Why:** The operator gave an explicit go-ahead for items 3+4 of the Phase-8 prerequisites and
+**explicitly waived the Supabase backup** ("i dont want to back up live supabase i dont care about it" —
+polsia2's rows are disposable per the Ground-Truth REPLACE decision). This is the "separate, gated live
+apply" the Ground-Truth section left outstanding. Robustness #1: I still did the Gate-1 read-only
+backend inventory FIRST and took a scoped local CSV of the only two tables being dropped as insurance,
+rather than relying on the waiver alone.
+
+**Verified (LIVE, against the production DB, not mocked):**
+- **Pre-apply (read-only inventory):** `public.businesses` + `public.billing_accounts` present in
+  **polsia2 shape** (no `owner_user_id` / no `allowance_included_cents`); all 10 takyon table names
+  ABSENT; **105** public base tables; `profiles`/`agent_runs` present. So the 0001 guard would correctly
+  RAISE until the teardown ran — confirming the retire-first ordering was required.
+- **Post-apply:** all **23** takyon tables present, **every one 0 rows**, and takyon-shaped
+  (`businesses.owner_user_id` ✓, `billing_accounts.allowance_included_cents` ✓,
+  `webhook_events.provider_event_id` ✓); `dispatch_due_wakes()` exists; public base tables **105 → 125**.
+- **No silent polsia2 shadow (the load-bearing safety check):** ALL 10 migrations carry a fail-loud
+  REPLACE guard and ALL 10 applied with **no exception** → nothing bound to a pre-existing polsia2 table;
+  and the empty-table census (0 rows on every takyon table) independently confirms no polsia2 data was
+  shadowed in. A freshly-created table being empty is the definitive shadow test; every table passed.
+
+**Files changed:** **none in the repo** — this increment is a **live-DB state change**, not a code edit
+(the migrations + teardown + runner were already committed in earlier phases). Out-of-repo artifacts:
+`/tmp/takyon_polsia2_predrop_backup/{businesses,billing_accounts}.csv` (32+15 = 47 rows, insurance for
+the dropped tables; deliberately outside the repo, never committed). Doc updates accompanying this:
+`mediationplan.md` Ground-Truth (live apply marked done); this log entry.
+
+**Supersedes:** Ground-Truth's "the live Supabase apply is a *separate* step requiring (a) a fresh
+Supabase backup/snapshot and (b) an explicit operator go-ahead" → **(b) given; (a) waived by the
+operator** (insurance CSV taken instead). And the Cutover-mechanics "Still gated/outstanding … needs a
+live `DATABASE_URL` read, which the operator has not yet authorized" → **authorized + executed** for the
+two colliding roots + the 0001–0010 install. **Still outstanding (unchanged):** full retirement of the
+*rest* of polsia2's `public` (the ~103 now-orphaned tables — `profiles`, `agent_runs`, the `business_id`
+dependents) still needs a verified table inventory + a Supabase role/grant review; the teardown by design
+retired ONLY the two takyon-colliding roots.
+
+**Not done / honest state:**
+- **This is Runtime Cutover step 1 (schema) ONLY.** The operator runtime — the `./takyon` shell + the
+  dashboard — still instantiates `TakyonStore()` and serves **entirely from local SQLite**
+  (`.takyon/state.sqlite3`). Nothing in the live shell reads these new Postgres tables yet. Item 4 ("flip
+  serving") is NOT done; it is the full terminal build (rewire `core.py`'s ~40+ business-state/filesystem
+  call sites onto the Postgres modules + Storage backend, wire the inert worker loop + `pg_cron`/
+  `dispatch_due_wakes` + the Phase-7 sync-around-job, flip `TAKYON_STORAGE_BACKEND=supabase_s3`, full E2E
+  through the real shell, the no-fleet proof, THEN delete the SQLite path).
+- **No data migrated from polsia2** — its rows were disposable; the takyon tables start empty (fresh
+  start, by the operator's REPLACE decision).
+- `TAKYON_STORAGE_BACKEND` still commented (Storage backend inert; files still on local disk).
+- `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding (Phase 3) — flow-A billing webhook stays
+  blocked-with-reason until provided.
+
+**Revert:** the migrations are **forward-only** (no down-migration), so this live apply is effectively
+irreversible without a snapshot — and the operator waived the snapshot. Partial undo only:
+```sh
+# polsia2's two dropped tables: data-only reconstruction from the insurance CSVs (the ~88 FK constraints are NOT auto-restored,
+#   and the polsia2 table shape must be recreated first):
+#   psql "$MIGRATION_DATABASE_URL" -c "\copy public.businesses from '/tmp/takyon_polsia2_predrop_backup/businesses.csv' csv header"
+# the 23 takyon tables are empty; re-running retire_polsia2_public.sql will NOT drop them (guard refuses to nuke takyon-owned tables) — drop manually only if intentionally rolling back.
+git checkout HEAD -- mediationplan.md   # drop the 2026-05-31 live-apply Ground-Truth marker
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 1 (schema port, LOCAL-verified): 0011 operator-runtime migration + extended polsia2 teardown for the 3 operator-name collisions (2026-05-31)
+
+**What:** Wrote `db/migrations/0011_operator_runtime.sql` — the *storage half* of the SQLite kill. It
+(a) **ENRICHES `businesses`** to the operator shape (`goal`/`status`/`work_focus`/`budget_json`/
+`metadata_json`/`updated_at`, a `businesses_work_focus_chk` CHECK on the closed enum `all|marketing|
+product`, and two indexes) — same one slug-keyed 0001 row, purely additive; and (b) **PORTS the 10
+SQLite-only operator tables** that `core.py:_init_db` owns but no prior migration covered: `workspaces`,
+`agent_runs`, `ledger_entries`, `control_states`, `events`, `conversation_threads`,
+`conversation_messages`, `idempotency_keys`, `app_surface_contracts`, and the operator work-request
+record `business_work_requests` (the SQLite `jobs`, **ISOLATED** under a distinct name so it never
+pollutes the 0010 worker-plane execution queue). Every ported table is preceded by a fail-loud REPLACE
+guard keyed on a takyon-distinctive column (`businesses` needs none — 0001's identity guard already
+protects it). Then **extended `db/retire_polsia2_public.sql`** with three more guarded drop blocks —
+`agent_runs` (drop if no `scope`), `events` (drop if no `event_type`), `idempotency_keys` (drop if no
+`operation_hash`) — for the polsia2 collisions live introspection found, so the teardown now retires
+five colliding roots, not two.
+
+**Why:** Phase 8 = kill SQLite. This increment gives the 10 operator tables a Postgres home so the *next*
+increment (the Postgres-backed `TakyonStore` connection seam) has real tables to read/write; it is
+ADDITIVE and does **not** flip serving or touch the worker plane. Design choices recorded in the
+migration header and the mediationplan Phase-8 finding: **text timestamps / text JSON** for the 10 tables
+(a 1:1 port of the SQLite store's ISO-string / `json.dumps` columns — the *only* reader is the ported
+operator store, which speaks strings; `businesses` keeps timestamptz because its readers are the 0001
+psycopg leaf modules), `ledger_entries.amount double precision` (= SQLite REAL), and **ISOLATE** rather
+than reconcile `business_work_requests` (it is a work-*record*, never drained; the 0010 `jobs` is an
+execution *queue*). The retire extension is required because live still carries polsia2's `agent_runs`
+(70 rows), `events` (1274 rows), `idempotency_keys` (0 rows) among its ~103 orphaned tables — 0011's
+guards would (correctly) RAISE on them, so the teardown must drop them FIRST at live-apply time.
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, the real engine, not mocked):** ran through the
+canonical CI-parity path `scripts/run_tests.sh` with `TAKYON_TEST_PG_DSN=postgresql://postgres@127.0.0.1:54329/postgres`,
+which applies every migration via the SAME `db/runner.py::run_migrations` production uses (one definition
+of "the schema").
+- **`tests/plugins/test_takyon_operator_runtime_pg.py` (NEW, 5 tests):** after `run_migrations`, all 10
+  operator tables exist each carrying its distinctive column; `businesses` carries all 6 enrich columns
+  and still has `slug`/`owner_user_id` (not forked); the `work_focus` CHECK *accepts* all|marketing|
+  product and *rejects* an out-of-enum value (`CheckViolation`); a `workspaces` insert takes its
+  `kind`/`status` defaults and the `businesses` FK **cascade is real** (deleting the business deletes the
+  workspace); and a polsia2-shaped `events` (has `kind`, no `event_type`) makes 0011 **FAIL LOUD**
+  (`FeatureNotSupported`, "not the takyon shape") instead of `create-if-not-exists`-binding to it.
+- **`tests/plugins/test_takyon_retire_polsia2_pg.py` (strengthened):** stands up all five polsia2-shaped
+  roots + an innocent `workflow_runs` dependent; after the extended teardown, all five roots are dropped,
+  `workflow_runs` SURVIVES with its FK cleared (cascade clears constraints, not dependent tables), and a
+  full re-apply (0001/0002/**0011**) reinstalls the takyon shape incl. `agent_runs.scope`/
+  `events.event_type`/`idempotency_keys.operation_hash`.
+- **`tests/plugins/test_takyon_db_runner_pg.py`:** runner applies the full set (now incl. 0011) and is
+  idempotent; the "reached latest migration" spot-check now also asserts an 0011 table (`control_states`).
+- **Whole plugin suite:** `1131 passed`. The only 2 failures are **PRE-EXISTING and unrelated**, proven
+  so: `web/test_web_search_provider_plugins.py` (registry now has an 8th provider `xai`; count assertion
+  stale) and `test_takyon_plugin.py::test_business_work_focus_persists_and_blocks_cross_lane_writes` —
+  which fails **identically with no PG DSN set** because it is a pure `TakyonStore(tmp_path)` *SQLite*
+  test, and the mismatch is the operator's **uncommitted** `core.py:2034` route `("outreach/",
+  "distribution/outreach/")` vs the uncommitted test still expecting un-prefixed `outreach/test.md`.
+  Both live in the operator's in-flight workstream (`core.py`, `test_takyon_plugin.py` both show `M`);
+  neither is touched here.
+
+**Files changed:**
+- `plugins/takyon/db/migrations/0011_operator_runtime.sql` (**NEW**) — the port migration above.
+- `plugins/takyon/db/retire_polsia2_public.sql` — +3 guarded drop blocks (agent_runs/events/
+  idempotency_keys); DESTRUCTIVE header + SCOPE note updated to five colliding roots.
+- `tests/plugins/test_takyon_operator_runtime_pg.py` (**NEW**) — the 5 0011 tests above.
+- `tests/plugins/test_takyon_retire_polsia2_pg.py` — retarget the "survives cascade" role to
+  `workflow_runs`; add the 3 collisions as drop targets + their takyon-shape reinstall assertions.
+- `tests/plugins/test_takyon_db_runner_pg.py` — "reached latest" now checks `control_states` (0011).
+- `mediationplan.md` — the Phase-8 Gate-1 finding (written earlier this step).
+- **NOT changed:** `core.py` (no seam yet — shell/dashboard still serve from SQLite), and **nothing
+  applied to live**.
+
+**Not done / honest state:**
+- **Schema only; serving unchanged.** The `./takyon` shell + dashboard still instantiate
+  `TakyonStore()` and serve entirely from local SQLite. 0011's tables have no reader yet — that is the
+  next increment (the Postgres-backed store seam: `_connect`→psycopg, `?`→`%s`, dict_row, datetime↔ISO
+  coercion, 2 `INSERT OR IGNORE`→`ON CONFLICT`, app_* divergence reconciliation).
+- **Not applied to live (deliberate).** 0011 + the retire-of-3 are LOCAL-verified only. The gated live
+  apply (run extended `retire_polsia2_public.sql` FIRST to drop polsia2's agent_runs/events/
+  idempotency_keys, THEN apply 0011) is deferred until the seam is built, to avoid a half-state on live
+  where the tables exist but nothing serves from them. Operator already gave the DDL go-ahead + waived
+  the backup.
+- `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding (Phase 3). Storage 50 MB-vs-256 MiB upload-limit
+  decision still open. Both unchanged.
+
+**Revert (local only — nothing reached live):**
+```sh
+rm hermes-agent-main/plugins/takyon/db/migrations/0011_operator_runtime.sql
+rm hermes-agent-main/tests/plugins/test_takyon_operator_runtime_pg.py
+git checkout HEAD -- hermes-agent-main/plugins/takyon/db/retire_polsia2_public.sql \
+                     hermes-agent-main/tests/plugins/test_takyon_retire_polsia2_pg.py \
+                     hermes-agent-main/tests/plugins/test_takyon_db_runner_pg.py
+# mediationplan.md also carries the Phase-8 Gate-1 finding from this step; `git checkout HEAD -- mediationplan.md` drops it too (additive doc).
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 2a (LOCAL-verified): Postgres-backed `TakyonStore` connection seam — a translating `_PGConn` wrapper + `TAKYON_DB_BACKEND` switch (2026-05-31)
+
+**What:** Gave the operator store a Postgres engine WITHOUT rewriting a single one of its ~150
+`conn.execute` call sites. Three additive pieces in `core.py`, plus a test fixture and a test file:
+- **`_db_backend()`** — reads `TAKYON_DB_BACKEND`, default `sqlite`, opt-in `postgres`. A separate,
+  *explicit* flag (NOT auto-detected from `DATABASE_URL`) so a process that merely has `DATABASE_URL`
+  set for the leaf modules does not silently flip the operator store. Parallels storage.py's
+  `TAKYON_STORAGE_BACKEND`.
+- **`class _PGConn`** — a thin psycopg adapter. The store speaks sqlite3: `conn.execute(sql, params)`
+  with `?` placeholders, reads every row by column name. The wrapper translates `?` → `%s` (escaping
+  any literal `%` → `%%` FIRST, and ONLY when params are bound — psycopg does no %-substitution on a
+  paramless query), opens the connection `row_factory=dict_row`, and is a context manager exactly like
+  sqlite3 so `with self._connect() as conn:` is one atomic transaction.
+- **`_connect()` PG branch + `_connect_postgres()`** — `_connect` still `mkdir`s the per-business
+  filesystem root (used on both backends), then forks: postgres → `_connect_postgres()`, else the
+  unchanged sqlite block. `_connect_postgres` lazy-imports psycopg + the canonical
+  `runtime_app.resolve_database_url` (so the default SQLite path stays dependency-free), connects
+  `autocommit=False`, and does **NO schema bootstrap** — `db/runner.py` owns all DDL, so `_init_db`/
+  `_migrate_db` are intentionally never called (their SQLite-only PRAGMA/ALTER wouldn't even parse on
+  PG). `_PGConn.executescript` (only reachable from the skipped `_init_db`) RAISES if ever called —
+  fail-loud rather than bootstrap a divergent schema (invariant #8).
+- **`TakyonStore.__init__(..., *, database_url=None)`** — an explicit DSN the postgres path opens
+  (tests point it at a throwaway DB); when `None`, `_connect_postgres` resolves `DATABASE_URL`/
+  `POSTGRES_URL` via runtime_app. Unused on SQLite.
+- **`tests/plugins/conftest.py`** — new `pg_store_dsn` fixture: yields a libpq conninfo STRING (via
+  `make_conninfo`) for a fresh, migrated, per-test throwaway DB. The store opens its OWN connections
+  from a URL, so the seam needs a string, not the live handle `pg_conn` hands back.
+- **`tests/plugins/test_takyon_store_pg.py`** (NEW, 5 tests) — proves the SQLite-shaped SQL runs
+  unchanged on real Postgres.
+
+**Why:** Phase 8 = kill SQLite. Step 1 gave the 10 operator tables a Postgres home (0011); this step
+gives them a *reader* — the smallest seam that lets the existing store serve from PG. A translating
+wrapper, not a per-site `?`→`%s` edit, because the entire sqlite3 surface the store actually uses is
+`execute` + one `executescript`/`row_factory` on the bootstrap path the PG backend skips: **zero**
+positional row reads (so `dict_row` is a true drop-in for `sqlite3.Row`), **zero** literal `%` in any
+store SQL (the one LIKE wildcard rides inside a bound parameter, which psycopg leaves untouched), no
+`cursor`/`commit`/`rollback`/`executemany`/`create_function`/`lastrowid`. So one wrapper at the
+connection boundary is faithful to every call site — parsimonious, and it keeps the SQLite path the
+exact unchanged default.
+
+**The one subtlety that drove the design — nested `with conn:` and psycopg-closes-on-exit.** The store
+nests a transaction block (`with conn:` — `commit()` at core.py:4907, `upgrade_businesses` at 8158)
+INSIDE the connection block (`with self._connect() as conn:`). sqlite3's `with conn:` only commits/
+rolls back and never closes, so that nesting is harmless there. psycopg3's `__exit__` commits/rolls
+back **AND CLOSES**. So `_PGConn` tracks `__enter__`/`__exit__` depth: only the OUTERMOST block drives
+psycopg's real commit+close; inner blocks are no-ops that return falsy (so they don't suppress a
+propagating exception — the outer block still sees it and rolls back). Safe because no code reads the
+DB after an inner block exits (both nested sites just `return`), so collapsing both levels into the one
+outer-managed transaction preserves the original atomicity (all writes commit together / roll back
+together).
+
+**Correction to the previous increment's prediction (honest):** the P8.1 "Not done" note predicted this
+seam would also need "datetime↔ISO coercion, 2 `INSERT OR IGNORE`→`ON CONFLICT`, app_* divergence
+reconciliation." That was an **OVER-PREDICTION** for the operator tables, now disproven by reading
+source: (a) 0011 ports the 10 operator tables with `text` JSON + `text` timestamps as a deliberate 1:1
+port of the store's ISO-string / `json.dumps` columns — so strings round-trip with **no coercion**;
+(b) the store already emits `ON CONFLICT`, and 0011 carries the matching unique constraints/PKs
+(`control_states(scope)` PK, `workspaces(business_slug,path)`, `conversation_threads`/`_messages
+(business_slug,source,external_id)`, `idempotency_keys(key)` PK) — verified compatible, **no
+`INSERT OR IGNORE` rewrite needed**. The app_* divergence is real but belongs to a DIFFERENT slice
+(see Not done) — it is NOT part of this connection seam. Net: the operator-table seam is **pure
+placeholder translation**, nothing more.
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, the real engine, never mocked):** via the canonical
+CI-parity `scripts/run_tests.sh` with `TAKYON_TEST_PG_DSN` set; each test runs against a fresh
+throwaway DB migrated by the SAME `db/runner.py` production uses.
+- **`tests/plugins/test_takyon_store_pg.py` — 5 passed:**
+  - `test_default_backend_is_sqlite`: with the flag unset, `_connect()` returns a `sqlite3.Connection`
+    — the switch is genuinely opt-in.
+  - `test_backend_switch_returns_pg_wrapper_without_bootstrapping`: with the flag set, `_connect()`
+    returns a `_PGConn`; a `?`-parametrized `dict_row` read works (row addressable by aliased name);
+    `executescript` RAISES `RuntimeError("…must not run on the Postgres backend")`; and the guard table
+    it tried to make is absent (`to_regclass('public.should_not_exist') is None`) — bootstrap really
+    was skipped.
+  - `test_multi_op_commit_round_trips_operator_tables`: ONE atomic `commit()` spanning six operator
+    tables (workspace.upsert + ledger.allocate{amount 7, budget 25} + agent.record{completed} +
+    conversation.message.record{exercises ON CONFLICT(business_slug,source,external_id), binds a NULL
+    parent} + event.record); every row read straight back through raw psycopg (tuple rows, bypassing
+    the store) confirms all writes are real AND committed by the outer transaction, including exactly
+    one `idempotency_keys` row.
+  - `test_global_control_set_round_trips`: a GLOBAL-scope `control.set`→`paused` round-trips
+    `control_states` via `ON CONFLICT(scope)` (no business, so the CEO-cron sync path that imports
+    `cron.jobs` is never entered); the store's own `read(scope=global)` returns the control row by name,
+    proving reads round-trip through `dict_row` too.
+  - `test_commit_idempotency_replay_is_one_effect`: re-committing the same `idempotency_key` returns the
+    STORED original result verbatim (`second == first`) and writes NO new rows (one key row, one
+    workspace row) — a genuine re-apply would PK-violate on the no-ON-CONFLICT `idempotency_keys`
+    INSERT, so success on the second call IS the replay path. (Earlier this slice I'd mis-asserted on a
+    `"idempotent": True` key; the replay path returns the stored `result_json`, which has no such key —
+    fixed to `second == first` + DB counts. My assertion bug, not a seam bug.)
+- **Whole plugin suite with the DSN set: `2 failed, 1136 passed`** (1131 + the 5 new). The 2 failures
+  are **PRE-EXISTING and unrelated**, proven: `web/test_web_search_provider_plugins.py` (registry now
+  has an 8th provider `xai`; stale count assertion — a change-detector test), and
+  `test_takyon_plugin.py::test_business_work_focus_persists_and_blocks_cross_lane_writes` — which fails
+  **identically with no DSN** because it is a pure `TakyonStore(tmp_path)` *SQLite* test, and the
+  mismatch is the operator's **uncommitted** `core.py` work_focus path route vs the uncommitted test's
+  expectation. Both live in the operator's in-flight workstream; neither is touched here.
+
+**Files changed:**
+- `plugins/takyon/core.py` — `_db_backend()` + `class _PGConn` (inserted before `class TakyonStore`),
+  `__init__` gains the keyword-only `database_url`, `_connect()` gains the postgres fork, new
+  `_connect_postgres()`. **My hunks only** — `core.py` also carries the operator's uncommitted
+  meta-ads / work_focus changes, which are NOT mine and NOT part of this increment.
+- `tests/plugins/conftest.py` — new `pg_store_dsn` fixture (additive; sits after `pg_conn_raw`).
+- `tests/plugins/test_takyon_store_pg.py` (**NEW**) — the 5 seam tests above.
+- **NOT changed:** 0011 (already landed step 1), the leaf modules, the shell/dashboard serving path,
+  and **nothing applied to live**.
+
+**Not done / honest state:**
+- **Seam only; serving unchanged.** `_connect()` defaults to SQLite, and nothing sets
+  `TAKYON_DB_BACKEND=postgres` outside this test file. The `./takyon` shell + dashboard still serve
+  entirely from local SQLite. Flipping the runtime onto PG is the serving flip (P8.4).
+- **`business.upsert` not exercised — deferred to P8.3 (owner wiring).** PG `businesses.owner_user_id`
+  is `not null references users(id)` (0001 spine) and the store supplies no owner. The seam tests
+  PRE-SEED a users row + an owned business by hand (raw psycopg) and drive the store's OTHER operator
+  operations against it. Seeding/resolving the platform user + Auth0 JIT is P8.3.
+- **`job.enqueue` / `app.*` not routed through the seam — deferred to P8.2b.** Their PG tables are owned
+  by the Phase-6 (0010 jobs) and Phase-5 (0006/0007 app_*) leaf modules with `timestamptz`/`jsonb`
+  shapes that diverge from the store's SQLite SQL. Delegating the store's app_*/jobs reads+writes to
+  those leaves (in `_apply_operation`, `read`, `calculate_pulse`) is the next slice — this is the
+  "app_* divergence" the P8.1 note flagged, correctly scoped OUT of the connection seam.
+- **Not applied to live (deliberate).** The gated live apply (run the extended
+  `retire_polsia2_public.sql` FIRST to drop polsia2's agent_runs/events/idempotency_keys, THEN apply
+  0011) is still P8.5, after the serving flip, to avoid a live half-state.
+- `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding (Phase 3). Storage 50 MB-vs-256 MiB upload-limit
+  decision still open. Both unchanged.
+
+**Revert (local only — nothing reached live):**
+```sh
+rm hermes-agent-main/tests/plugins/test_takyon_store_pg.py
+# core.py + conftest.py also carry the operator's unrelated uncommitted work, so do NOT `git checkout`
+# them wholesale. Hand-remove only this increment's additions:
+#   core.py: delete `def _db_backend()`, `class _PGConn`, the `_connect_postgres` method, the
+#            `if _db_backend() == "postgres":` fork in `_connect`, and the `database_url` __init__ param.
+#   conftest.py: delete the `pg_store_dsn` fixture (the block after `pg_conn_raw`).
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 2b (LOCAL-verified): route the store's `job.enqueue` + `app.*` ops through the Postgres leaves — Stage A storage-retarget + Stage B leaf-delegation (2026-05-31)
+
+**What:** The 2a seam translated placeholders, but two op families could not just ride the wrapper because their PG tables (0010/0006/0007/0008) deliberately diverge from the store's SQLite SQL. This step routes them — additively, with the SQLite path kept as the exact default — in two stages.
+
+**Stage A — `job.enqueue` is a STORAGE RETARGET, not delegation.** The operator's `jobs` writes are a *work-request record* (enqueue / count / list / GC), never a worker-plane drain. New **`_work_requests_table()`** returns `"jobs"` on SQLite and `"business_work_requests"` on Postgres (0011's 1:1 text-column port of the SQLite operator `jobs`), interpolated into the ~7 operator-jobs `conn.execute` sites (enqueue, the queued-count, the two list reads, the GC SELECT/DELETE). This ISOLATES the operator record from the **0010 `jobs` execution queue** (a different uuid/jsonb/SKIP-LOCKED table the worker plane owns) — same physical name, opposite role; mixing them would let a maintenance GC prune live queued work. Pure name interpolation: the SQL text is otherwise unchanged, so it round-trips through the 2a wrapper.
+
+**Stage B — `app.*` writes DELEGATE to the Phase-5 leaves.** On Postgres each of the five `app.*` write ops in `_apply_operation` forks `if _db_backend() == "postgres":` to the leaf that already owns the table, with the original SQLite block moved verbatim under `else:`:
+- `app.budget.set` → `app_usage.set_app_budget` (status hoisted before the call so an omitted status is preserved, not reset).
+- `app.plan.upsert` → `app_entitlements.upsert_plan_policy` (migration 0006 dropped the dead `stripe_payment_link_*` columns the SQLite INSERT still lists; the leaf also normalizes `plan_key` and folds plan-validation warnings — so the store passes RAW metadata to avoid double-folding, and re-reads `policy.plan_key` for the receipt).
+- `app.customer.upsert` → `app_identity.upsert_app_user`.
+- `app.entitlement.upsert` → `app_entitlements.grant_entitlement` (auto-provisions the sub-user from email — no recursive customer.upsert needed on PG — enforces the SAME anti-fake-billing rule, and resyncs `app_users.tier` atomically).
+- `app.usage.record` → `app_usage.record_completed_usage` (**REQUIRED**, not just preferred: the PG table mandates a NOT-NULL `reservation_key` the SQLite INSERT never set, and the leaf row-locks the budget and re-checks the cap against committed spend atomically — invariant #8; so the store's non-atomic SUM pre-check is skipped on PG).
+
+Three small seam helpers carry the delegation: **`_app_leaves()`** (lazy import of the three leaf modules, dual repo-root / package import), **`_leaf_conn()`** (a `@contextmanager` that swaps the live connection's `row_factory` from `dict_row` to `tuple_row` for the leaf call — the leaves read their rows BY POSITION — and restores `dict_row` after), and **`_app_user_metadata_select()`** (the sub-user metadata blob is jsonb `metadata` on PG vs text `metadata_json` on SQLite; only the **two** reads — `_rewrite_app_files`, `_app_summary` — that literally name the column needed it, because everywhere else `_row_to_dict` already passes a jsonb dict through untouched while decoding a `_json` text suffix). Plus a `_json_default` net on `_json_dumps` (datetime→isoformat, Decimal→int/float) for the values PG hands back into the app summary/budget dicts; SQLite never triggers it. New imports: `contextmanager`, `Decimal`.
+
+**Why delegate (Stage B) but retarget (Stage A)?** Parsimony + invariant #8. The leaves are the canonical writers for these tables; re-porting their reserve→settle / anti-fake-billing / tier-resync logic into the store would be a SECOND writer of the same rows — exactly the "third parallel system" the plan forbids, and a place the usage cap could silently race. So where a leaf owns the table, the store calls it. Where there is no leaf (the operator job record has none — the 0010 queue is a different concern the store never drains), a name retarget is the smallest faithful change. Per-op judgment, recorded honestly: budget/plan/entitlement are faithful or a superset; usage is semantically required; `app.customer.upsert` is an ACCEPTED NARROWING — the identity leaf forces `status='active'` and does not persist a caller-supplied tier / metadata / custom id on the `app_users` row. Acceptable because effective tier is governed by entitlements (`_sync_user_tier`), `'active'` is already this op's default, and the `app_users` metadata blob is read by no downstream operator path.
+
+**Transaction nesting (verified by reading `commit()`):** the leaf runs on the raw psycopg conn while the store's outer `with self._connect() as conn:` transaction is already open, so the leaf's own `with conn.transaction()` nests as a SAVEPOINT; on outer success the idempotency row + leaf write + `events` row + file mirror all commit together. A leaf error becomes `TakyonError` and PROPAGATES out of `commit()` (it is raised inside `with conn:` with no try/except), rolling the whole transaction back — so a rejected grant/cap leaves NO orphan rows.
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, real engine, never mocked):** canonical CI-parity `scripts/run_tests.sh` with `TAKYON_TEST_PG_DSN` set; each test runs against a fresh throwaway DB migrated by the SAME `db/runner.py` production uses.
+- **`tests/plugins/test_takyon_store_pg.py` — 15 passed** (5 from 2a + 2 Stage A + 8 new Stage B):
+  - Stage A: `…job_enqueue_isolates_to_business_work_requests` (row lands in `business_work_requests` with the store's exact text shape; the 0010 `jobs` queue stays empty; `read(query="jobs")` returns it) and `…maintenance_gc_prunes_business_work_requests_not_jobs_queue` (GC prunes the completed record there, receipt keys the pruned set by the physical table, 0010 queue untouched).
+  - Stage B: budget delegate + status-preservation; plan delegate proving the `stripe_payment_link_*` columns are ABSENT on PG (`information_schema`), the receipt is the leaf-normalized `pro-plan`, and the advisory warning is folded EXACTLY ONCE; customer delegate (receipt id == persisted id, email normalized, status `active`); entitlement email auto-provision + atomic tier resync to `pro`; anti-fake-billing rejection (manual paid, no evidence) raising `TakyonError` and leaving zero entitlement AND zero orphan user rows; usage delegate proving the receipt `usage_event` is the leaf-generated id (≠ the reservation_key the store passes) and that the LEAF's reservation_key idempotency collapses a duplicate under a DIFFERENT store key; the atomic budget cap refusing the over-cap second record and leaving exactly the accepted row; and a full read round-trip (`read(query="app")` + `calculate_pulse`) after all five delegated writes.
+- **SQLite plugin suite unchanged: `1 failed, 77 passed`** (`scripts/run_tests.sh tests/plugins/test_takyon_plugin.py`, no DSN). The one failure is the SAME PRE-EXISTING, unrelated `test_business_work_focus_persists_and_blocks_cross_lane_writes` from the operator's uncommitted work_focus lane-routing (`distribution/outreach/…` prefix) — nothing to do with this slice; every SQLite `app.*` / jobs test stayed green, proving the `else:` branches are byte-for-byte the historical behavior.
+
+**Files changed:**
+- `plugins/takyon/core.py` — **my hunks only.** `contextmanager` + `Decimal` imports; `_json_default` + the `default=` on `_json_dumps`; `_work_requests_table()` + its interpolation at the ~7 operator-jobs sites (Stage A); `_app_user_metadata_select()` + the two app_users read SELECTs converted to f-strings; `_leaf_conn()`; `_app_leaves()`; the `if _db_backend() == "postgres":` fork in the five `app.*` ops with the SQLite path preserved under `else:` (Stage B). `core.py` also carries the operator's uncommitted meta-ads / work_focus changes — NOT mine, NOT part of this increment.
+- `tests/plugins/test_takyon_store_pg.py` — header docstring updated (app.* moved from "NOT exercised" to a Stage B section); the 2 Stage A tests and the `_commit_one` helper + 8 Stage B tests appended.
+- **NOT changed:** 0011 and the other migrations, the leaf modules themselves, the shell/dashboard serving path, and **nothing applied to live.**
+
+**Not done / honest state:**
+- **Still seam-only on the serving side.** Nothing sets `TAKYON_DB_BACKEND=postgres` outside the test file; the `./takyon` shell + dashboard still serve entirely from local SQLite. The runtime flip is P8.4.
+- **`business.upsert` still deferred to P8.3 (owner wiring).** The tests still pre-seed a users row + owned business by hand because PG `businesses.owner_user_id` is NOT NULL and the store supplies no owner.
+- **Accepted `app.customer.upsert` narrowing on PG** (status forced `active`; caller tier/metadata/custom-id not persisted on `app_users`) is deliberate, documented above, and not a bug — but it IS a behavior difference between backends worth remembering at the P8.6 E2E.
+- **Not applied to live (deliberate).** Gated live apply (extended `retire_polsia2_public.sql` FIRST, then 0011) is still P8.5, after the serving flip.
+- `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding (Phase 3). Storage 50 MB-vs-256 MiB upload-limit decision still open. Both unchanged.
+
+**Revert (local only — nothing reached live):**
+```sh
+# tests: keep the 5 P8.2a tests; remove ONLY this slice's additions.
+#   test_takyon_store_pg.py: delete the "Stage B" section (the `_commit_one` helper + `test_app_*`),
+#     the 2 "Stage A" tests (`test_operator_job_enqueue_*`, `test_maintenance_gc_*`), and restore the
+#     header docstring's "NOT exercised … app.*" wording.
+# core.py also carries the operator's unrelated uncommitted work, so do NOT `git checkout` it wholesale.
+# Hand-remove only this increment's additions:
+#   - delete `_work_requests_table`, `_app_user_metadata_select`, `_leaf_conn`, `_app_leaves`;
+#   - re-inline the literal `jobs` at the work-request SQL sites; restore the two app_users SELECTs to
+#     listing `metadata_json` (drop the f-string);
+#   - in each of the 5 `app.*` ops delete the `if _db_backend() == "postgres":` branch and de-indent
+#     the `else:` body back to the original SQLite block;
+#   - revert `_json_dumps` to the plain call and delete `_json_default`; drop the `contextmanager`/
+#     `Decimal` imports IF nothing else uses them.
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 3 (LOCAL-verified): owner wiring — single config-keyed platform owner resolved into `business.upsert`, + Auth0 `/auth/callback` JIT (task #6) (2026-05-31)
+
+**What:** Closed the last storage-seam gap before the serving flip: on Postgres, `businesses.owner_user_id`
+is `NOT NULL references users(id)` (0001 spine), but the operator store's `business.upsert` supplied no
+owner (it serves the local CEO/shell, which has no Auth0/login context). This step resolves a **single
+config-keyed platform owner** into the create path — read-only, no secret through the commit — and wires
+the deferred Auth0 first-login JIT (task #6) into the dashboard callback, both guarded to PG so the SQLite
+era is untouched.
+
+**Why:** Without an owner the PG create path fails the not-null; with a *fabricated* owner it would violate
+invariant #8 (no fake state). The robust shape is one platform/operator user owning every shell-created
+business, unified with the dashboard login when the operator points the env at their real Auth0 `sub`
+(control_api's `/v1/businesses` scopes `where owner_user_id = principal.user_id`, so shell-created and
+dashboard-seen businesses must resolve to the SAME `users` row). Full Gate-1/Gate-2 reasoning in
+`mediationplan.md` ("Phase 8 owner-wiring finding").
+
+**Decisions (all recorded in the plan finding):**
+- **Single platform owner, config-keyed.** New `control_plane.platform_owner_sub()` reads
+  **`TAKYON_PLATFORM_OWNER_SUB`** (default sentinel `takyon|platform-owner`; optional
+  `TAKYON_PLATFORM_OWNER_EMAIL`). A NON-secret identifier with a working default → zero-friction local is
+  unaffected; set it to your real Auth0 `sub` to unify shell↔dashboard ownership.
+- **Minting stays OUT of the store (no key through a commit).** `business.upsert`'s PG branch resolves the
+  owner **read-only** via new `control_plane.resolve_platform_owner_id(conn)` (a bare
+  `select id from users where auth0_sub=%s`, run over the **raw** psycopg conn lent by the existing
+  `_leaf_conn` so it speaks `%s`/positional like the other leaf calls). Unprovisioned → `TakyonError`
+  **blocked with an actionable reason**, never a NULL/fake owner. The one-time raw API key is therefore
+  never observable in a commit result, event payload, or file mirror — it is surfaced only by the explicit
+  `control_plane.ensure_platform_owner(conn)` bootstrap (wraps `provision_user_on_first_login` →
+  `(user_id, raw_key)`), which the serving flip (P8.4) calls at startup, and by the dashboard JIT.
+- **Only the INSERT forks.** The PG INSERT adds the `owner_user_id` column+value; the SQLite INSERT is
+  byte-identical (no such column); the UPDATE/existing-business path is unchanged on both. The `raise`
+  precedes `self._business_root(slug)` + mkdir, so an unprovisioned-owner block creates **no** filesystem
+  side effect and rolls back the transaction. `mode or "live"` stays within `_BUSINESS_MODES={"live","test"}`
+  = 0001's `businesses_mode_chk`.
+- **Auth0 JIT (#6).** `/auth/callback`, right after `_auth0_authorize_claims`, calls
+  `_provision_dashboard_user_if_postgres(user)` → `provision_user_on_first_login(conn, sub, email)` **only
+  when `_db_backend()=="postgres"`** (a guarded no-op in the SQLite era — there is no `users` table, and the
+  dashboard still logs the operator in via its signed cookie exactly as today), on a per-request
+  `autocommit=True` psycopg conn mirroring `runtime_app`'s `control_conn`. On a brand-new `sub` it surfaces
+  the one-time key via a prominent server **log** (never a cookie). Wrapped so it can NEVER raise into the
+  login flow (logs at error and continues).
+
+**Files changed:**
+- `plugins/takyon/control_plane.py` — added `import os`; added the platform-owner block before
+  `mint_api_key`: `platform_owner_sub()`, `platform_owner_email()`, `resolve_platform_owner_id(conn)`
+  (read-only resolver), `ensure_platform_owner(conn)` (idempotent bootstrap → `(user_id, raw_key)`).
+- `plugins/takyon/core.py` — **my hunk only:** the `business.upsert` create path now forks
+  `elif _db_backend() == "postgres":` (resolve owner read-only via `_leaf_conn` → `resolve_platform_owner_id`;
+  block-with-reason if unprovisioned; INSERT with `owner_user_id`) vs `else:` (the byte-identical SQLite
+  INSERT). The UPDATE branch is untouched. (`core.py` also carries the operator's unrelated uncommitted
+  meta-ads / work_focus changes — NOT mine.)
+- `takyon_cli/web_server.py` — added `_provision_dashboard_user_if_postgres(user)` (lazy-imports
+  `_db_backend`/`provision_user_on_first_login`/`resolve_database_url`; no-op off PG; opens
+  `psycopg.connect(url, autocommit=True)`; logs a minted one-time key at WARNING "shown once, store it
+  securely"; wrapped in `try/except` so it never raises) and a call to it in `/auth/callback` right after
+  the claims are authorized.
+- `tests/plugins/test_takyon_store_pg.py` — appended **4** PG tests (header docstring updated):
+  `test_ensure_platform_owner_idempotent_mints_key_once` (raw1 starts `tk_`, raw2 is None, exactly 1 active
+  key + 1 billing + 1 custody account), `test_business_upsert_lands_owned_business_with_resolved_platform_owner`
+  (owner_user_id == bootstrapped id; fields persisted; `resolve_api_key(...).business_slugs` contains the
+  slug), `test_business_upsert_blocks_when_platform_owner_unprovisioned`
+  (`pytest.raises(TakyonError, match="platform owner is not provisioned")` + 0 business rows),
+  `test_business_upsert_update_path_preserves_owner_on_postgres` (owner untouched on update).
+- `mediationplan.md` — appended the "Phase 8 owner-wiring finding (2026-05-31, step 3; task #6)" paragraph
+  (Gate 1 + the four decisions + Gate 2 = one new NON-secret config identifier).
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, real engine, never mocked):** the full PG store file
+`tests/plugins/test_takyon_store_pg.py` → **19 passed** (15 from 2a/2b + 4 new owner-wiring), each against a
+fresh throwaway DB migrated by the production `db/runner.py`. The 3 touched Python files byte-compile clean.
+(Per the operator's batched-cadence request, the *whole-suite* CI-parity run is performed once at the end of
+the P8.4–P8.6 batch, not per-slice.)
+
+**Not done / honest state:**
+- The **startup `ensure_platform_owner` seed** is built but not yet *called* by any serving entrypoint — that
+  call rides with the serving flip (P8.4). Until then a PG `business.upsert` blocks-with-reason unless an
+  owner is pre-provisioned (the tests bootstrap it explicitly).
+- Nothing applied to live; the shell/dashboard still serve from SQLite (flip is P8.4; live 0011 apply is the
+  gated P8.5).
+- `STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3) and the 50 MB→≥256 MiB Storage upload-limit decision still open.
+
+**Revert (local only — nothing reached live):**
+```sh
+git checkout -- mediationplan.md   # drops the owner-wiring finding paragraph (outer repo)
+# control_plane.py is untracked: delete the platform-owner block (platform_owner_sub/_email,
+#   resolve_platform_owner_id, ensure_platform_owner) and the `import os` if nothing else uses it.
+# core.py carries unrelated operator work — do NOT checkout wholesale. Hand-revert only my hunk:
+#   collapse the `elif _db_backend()=="postgres":` create branch back into a single SQLite INSERT
+#   (drop the owner resolve + block + owner_user_id column).
+# web_server.py: delete `_provision_dashboard_user_if_postgres` and its call in /auth/callback.
+# test_takyon_store_pg.py: delete the 4 owner-wiring tests and restore the header docstring.
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 4 (LOCAL-verified): serving flip — shell + dashboard startup seed the platform owner on Postgres; pg_cron dispatch SQL as the inert wake-trigger seam; Storage backend stays pure-env (2026-05-31)
+
+**What/why.** Step 3 built `ensure_platform_owner(conn)` but left it *uncalled*, so a PG `business.upsert`
+blocked-with-reason until something provisioned the owner. This step wires that one startup call into BOTH
+serving entrypoints, so flipping `TAKYON_DB_BACKEND=postgres` is sufficient to serve — there is no third
+"provision the owner first" manual step. The flip itself is **env-driven and already seamed** (P8.2a/P7):
+`_db_backend()` reads `TAKYON_DB_BACKEND` (default `sqlite`, opt-in `postgres`); `get_storage_backend()`
+reads `TAKYON_STORAGE_BACKEND` (default `local`, opt-in `supabase_s3`). So the Storage half of the flip is
+**pure env, zero code** this step. PG-sole serving authority is enforced by construction, NOT by deleting
+the SQLite branches: selecting Postgres with no DSN **raises** `RuntimeNotConfigured`
+(`runtime_app.resolve_database_url`, called directly by `_connect_postgres`) — invariant #8, never a silent
+fall-back to SQLite. Keeping the SQLite path as the env-default-off branch is what lets the ~17k hermetic
+SQLite suite keep running; the live runtime is Postgres because the VPS/dashboard service sets the env, not
+because the code lost a branch. (Physical removal of the SQLite branches, if ever wanted, is a post-cutover
+cleanup, not a serving requirement — held with the gated P8.5.)
+
+- **One idempotent seed, two callers, one home.** New `TakyonStore.seed_platform_owner() -> (user_id|None,
+  raw_key|None)` is a guarded **no-op off Postgres** (returns `(None, None)`); on PG it delegates to
+  `control_plane.ensure_platform_owner` over the **raw** psycopg conn lent by the existing `_leaf_conn`,
+  inside the store's own `_connect()` txn — reusing the P8.2b leaf seam rather than inventing a second
+  connection strategy (parsimony). `control_plane.py` must stay connection-strategy-free and `runtime_app`
+  imports FastAPI at top (so the shell can't depend on it) → the store is the correct shared home.
+- **Shell caller** (`cli._seed_platform_owner_at_startup(store)`, called in `_interactive_shell` right after
+  `store = TakyonStore()`): prints a freshly-minted one-time key to **stderr** ("shown ONCE — store it
+  securely"); on an already-provisioned owner it stays silent; wrapped so a seed failure **never blocks the
+  shell** (writes a skipped-notice to stderr and continues).
+- **Dashboard caller** (`web_server._seed_platform_owner_if_postgres()`, called in `start_server` right after
+  `_configure_local_product_publish`): same idempotent `TakyonStore.seed_platform_owner()`, logs a minted key
+  at **WARNING** ("shown once, store it securely") / already-provisioned at DEBUG; wrapped so it **never
+  raises into dashboard startup**. The shell-side and dashboard-side callers both funnel through the SAME
+  store method — one minting path, no duplication.
+- **pg_cron dispatch as an inert, operator-gated seam.** New `plugins/takyon/db/apply_pg_cron_dispatch.sql`
+  (deliberately **NOT** under `db/migrations/` — the runner + conftest sweep `migrations/*.sql` on every run
+  and pg_cron is Supabase-/superuser-only, absent in local/CI PG, so sweeping it in would fail every run). It
+  schedules the already-migration-installed, already-Phase-6-tested `dispatch_due_wakes()` to run every
+  minute via `cron.schedule('takyon-dispatch-wakes', '* * * * *', …)`. A leading `do $$…$$` block **raises
+  loudly** (invariant #8) if `dispatch_due_wakes()` is not installed or `pg_cron` is not in `pg_extension`,
+  and unschedules any prior job of that name first so re-applying is a clean single-job replace. Revert is one
+  statement: `select cron.unschedule('takyon-dispatch-wakes');`.
+
+**Files changed:**
+- `plugins/takyon/core.py` — **my hunk only:** added `TakyonStore.seed_platform_owner()` immediately after
+  `_connect_postgres` (no-op off PG; on PG `with self._connect() as conn: with self._leaf_conn(conn) as raw:
+  return control_plane.ensure_platform_owner(raw)`; import-style-robust import of `control_plane`). (core.py
+  also carries the operator's unrelated uncommitted meta-ads / work_focus changes — NOT mine.)
+- `plugins/takyon/cli.py` — added `_seed_platform_owner_at_startup(store)` before `_interactive_shell` and a
+  call to it inside `_interactive_shell` right after `store = TakyonStore()` (uses the already-imported `sys`
+  + `TakyonStore`).
+- `takyon_cli/web_server.py` — added `_seed_platform_owner_if_postgres()` after
+  `_provision_dashboard_user_if_postgres` and a call to it in `start_server` after
+  `_configure_local_product_publish(host, port)` (lazy-imports `TakyonStore`/`_db_backend`; uses the
+  module `_log`; no-op off PG; never raises).
+- `plugins/takyon/db/apply_pg_cron_dispatch.sql` — **new file** (untracked): the gated Supabase-only pg_cron
+  apply that wires the interval trigger around `dispatch_due_wakes()`.
+- `mediationplan.md` — appended the "Phase 8 serving-flip finding (2026-05-31, step 4)" paragraph
+  (env-driven flip already seamed; owner gap = the one substantive wire; the store-as-home decision; pg_cron
+  apply SQL; the **honest** enqueue-only / worker-drain-deferred caveat; Gate 2 = NONE new — two env toggles
+  + optional Supabase pg_cron config).
+- `tests/plugins/test_takyon_store_pg.py` — appended **2** P8.4 tests in a new "P8.4 serving flip" section:
+  `test_seed_platform_owner_via_store_is_idempotent_and_enables_create` (first `store.seed_platform_owner()`
+  returns a key starting `tk_`, second returns `None`; exactly one active key + one billing + one custody
+  account; a subsequent `business.upsert` of "flipco" then succeeds owned by that owner — proving the seed
+  unblocks create) and `test_seed_platform_owner_is_noop_off_postgres` (with `TAKYON_DB_BACKEND` unset,
+  `TakyonStore(root=tmp_path).seed_platform_owner() == (None, None)`).
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, real engine, never mocked):** the 2 P8.4 tests pass, and
+the **whole PG store surface runs green together** — `test_takyon_store_pg.py` + `test_takyon_serving_flip_pg.py`
+(P8.6, below) + `test_takyon_storage_pg.py` → **45 passed**, each against a fresh throwaway DB migrated by the
+production `db/runner.py`. Re-confirmed at source (not memory) that `_connect_postgres` →
+`resolve_database_url` raises `RuntimeNotConfigured` when no DSN is set (no silent SQLite fallback). Touched
+Python files byte-compile clean.
+
+**Not done / honest state:**
+- **Worker drain stays UNMOUNTED — so pg_cron dispatch is ENQUEUE-ONLY.** `jobs.run_one` (the drain) has no
+  caller; mounting it needs a CEO-turn handler registry that runs the *model*, which is the deferred Phase-6
+  **worker-plane deployment**, deliberately OUT of this step's scope. `dispatch_due_wakes()` only INSERTs due
+  wakes into the jobs queue (idempotent on the per-wake key); applying the pg_cron SQL on a runtime whose
+  worker is not yet draining is therefore harmless — due wakes accumulate as queued jobs and drain once the
+  worker is mounted. The SQL file documents this honestly in its header.
+- pg_cron is unavailable locally (Supabase-only), so the apply SQL is **operator-gated**, applied once at the
+  live cutover; it is not swept by the migration runner and has no local test (the function it schedules is
+  already migration-installed + Phase-6-tested directly).
+- The flip is opt-in: default backend is still `sqlite`; nothing applied to live (the live 0011 apply is the
+  gated P8.5). `STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3), the 50 MB→≥256 MiB Storage upload-limit decision,
+  and the Supabase pg_cron enable toggle remain operator-pending.
+
+**Revert (local only — nothing reached live):**
+```sh
+git checkout -- mediationplan.md   # drops the serving-flip finding paragraph (outer repo)
+# core.py carries unrelated operator work — do NOT checkout wholesale. Hand-revert only my hunk:
+#   delete the `TakyonStore.seed_platform_owner` method (the block right after `_connect_postgres`).
+# cli.py: delete `_seed_platform_owner_at_startup` and its call in `_interactive_shell`.
+# web_server.py: delete `_seed_platform_owner_if_postgres` and its call in `start_server`.
+rm plugins/takyon/db/apply_pg_cron_dispatch.sql   # new file (untracked)
+# test_takyon_store_pg.py: delete the 2 P8.4 tests (the "P8.4 serving flip" section).
+# this log entry is additive — trim it if reverting.
+```
+
+---
+
+## Increment — Phase 8 step 6 (LOCAL-verified): full E2E through the REAL shell parser + no-fleet stateless resume via the operator store, both on real Postgres; SQLite kept as the env-default-off branch (the "kill" is the env flip, not code deletion) (2026-05-31)
+
+**What/why.** This is the acceptance for the serving flip: drive the runtime the way an operator actually
+does and prove identical behavior on Postgres, plus prove a second empty-disk host resumes purely from
+Postgres + Storage. New file `tests/plugins/test_takyon_serving_flip_pg.py` (2 tests), both against a real
+migrated throwaway PG (never mocks). On "delete the SQLite path": the SQLite branches **stay in the tree** as
+the env-default-off backend (deleting them would break the ~17k hermetic SQLite suite and local dev for zero
+production gain). PG-sole serving authority is achieved by the env flip + invariant-#8 no-silent-fallback
+(verified above), so the "kill" is operational (live service sets `TAKYON_DB_BACKEND=postgres`), not a code
+excision. Any physical removal is an optional post-cutover cleanup held with the gated P8.5.
+
+- **Real-shell operator lifecycle on Postgres** (`test_shell_operator_lifecycle_on_postgres`). Drives the
+  ACTUAL per-line shell parser/router `cli._handle_shell_line` — the same function the interactive `./takyon`
+  shell calls for every typed line — for the model-free operator commands with `TAKYON_DB_BACKEND=postgres`,
+  `DATABASE_URL=<throwaway>`, `TAKYON_HOME=<tmp>`. The platform owner is seeded exactly as shell startup does
+  (`cli._seed_platform_owner_at_startup`), so `business.upsert` resolves a real owner. It runs
+  `/create --no-auto --test e2eco …` (`--no-auto` keeps it model-free — no CEO turn, no cron), then asserts
+  on the **raw PG row** that the business landed owned by the seeded `auth0|e2e-operator` (NOT a NULL/fake
+  owner) with the right goal/mode/status; then `/status`, `/pulse`, `/test status`, and `/show` read back
+  through the shell on PG (read path, not just write path), including a workspace file reading back
+  byte-faithfully through `/show`. This exercises slash-command parsing + scoped routing +
+  `run_takyon_command` → `TakyonStore` end-to-end on PG — not just the store API the other PG tests call.
+- **No-fleet stateless resume via the OPERATOR STORE on Postgres**
+  (`test_no_fleet_resume_via_operator_store_on_postgres`). The Phase-7 no-fleet proof used the raw psycopg
+  leaf; THIS ties it to the full `TakyonStore`. Host A's store creates the PG-authoritative business
+  (`business.upsert` of "nfco") and writes a realistic four-root workspace (text + a binary receipt blob) to
+  local scratch, then `sync_up`s (3 uploaded). Host B is a SECOND store on a **genuinely empty disk** sharing
+  the same Postgres (empty-disk precondition asserted BEFORE host B acts). It resumes the business from PG
+  alone via `store.read(scope="business:nfco", query="summary")` (slug/goal come back from PG with no local
+  tree). The test then makes the **two state planes explicit and independent**: (1) the **Postgres plane** —
+  reading the summary mirrors the PG-authoritative app surface contract to `product/surface.md` on disk, the
+  ONLY file present before any Storage round-trip; (2) the **Storage plane** — `sync_down` reconstructs the
+  workspace blobs byte-for-byte (default `delete_local=False`, so the PG-mirrored contract is left untouched
+  alongside them), and the workspace subtree (excluding the PG mirror) is byte-identical to host A, binary
+  blob included. That is the "host is disposable; state lives in Postgres + Storage" acceptance.
+
+**Files changed:**
+- `tests/plugins/test_takyon_serving_flip_pg.py` — **new file**, 2 E2E tests (above) + local
+  `_seed_workspace`/`_tree` helpers mirroring the Phase-7 storage fixture so the byte-identity assertion is
+  apples-to-apples. `psycopg = pytest.importorskip("psycopg")`; uses the conftest `pg_store_dsn` fixture.
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, real engine, never mocked):** both E2E tests pass; the
+full PG surface (store + serving-flip + storage) is **45 passed** together against fresh per-test throwaway
+DBs. First run surfaced one real behavior I had mis-modeled — `read(summary)` mirrors `product/surface.md`
+to disk as a PG→disk materialization, so the "empty disk" assertion had to move BEFORE the read and the
+byte-identity check had to separate the PG plane from the Storage plane; the corrected test is a *stronger*
+proof (it now demonstrates both planes reconstruct independently). Per the operator's batched-cadence
+request, the **whole-suite** CI-parity run is performed once at the end of the P8.4–P8.6 batch.
+
+**Not done / honest state:**
+- The E2E exercises the **model-free** operator surface (`/create --no-auto`, `/status`, `/pulse`, `/test`,
+  `/show`) — it deliberately does not invoke a CEO model turn (that needs provider creds and is non-hermetic);
+  the model-routing path (harness commands, plain-text→CEO) is unchanged by the flip and covered elsewhere.
+- SQLite branches remain in the tree (env-default-off) by design; nothing applied to live; worker drain still
+  unmounted (see step 4). The live 0011 apply remains the gated P8.5.
+
+**Revert (local only — nothing reached live):**
+```sh
+rm tests/plugins/test_takyon_serving_flip_pg.py   # new file — the entire P8.6 E2E
+# this log entry is additive — trim it if reverting.
+```

@@ -73,3 +73,22 @@ def pg_conn_raw(worker_id):
         pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
     with _throwaway_db(worker_id) as conn:
         yield conn
+
+
+@pytest.fixture
+def pg_store_dsn(worker_id):
+    """A libpq conninfo STRING for a fresh, per-test throwaway database with all migrations applied.
+
+    Unlike pg_conn (which hands back a live handle), the Postgres-backed TakyonStore opens its OWN
+    connections from a URL/DSN — so the seam needs a connection string, not a connection. Built with
+    ``make_conninfo`` so a URL-style TAKYON_TEST_PG_DSN merges cleanly with the throwaway dbname into a
+    string ``psycopg.connect`` (and the store's ``resolve_database_url`` passthrough) accepts. The DB is
+    created and migrated here and dropped on teardown; the store's per-block connections close on
+    ``with`` exit, and the teardown drop uses ``(force)`` regardless."""
+    if not _DSN:
+        pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
+    from psycopg.conninfo import make_conninfo
+
+    with _throwaway_db(worker_id) as conn:
+        _apply_migrations(conn)
+        yield make_conninfo(_DSN, dbname=conn.info.dbname)
