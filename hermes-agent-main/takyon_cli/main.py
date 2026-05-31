@@ -9570,6 +9570,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "uninstall",
         "profile",
         "dashboard",
+        "worker",
         "honcho",
         "claw",
         "plugins",
@@ -10344,6 +10345,29 @@ def cmd_dashboard(args):
     )
 
 
+def cmd_worker(args):
+    """Run the Postgres-native worker-drain loop: dispatch due CEO wakes, reclaim stale claims, and
+    drain queued jobs through the budget-gated run_one cycle. Requires DATABASE_URL (Postgres
+    control plane); raises loudly if unconfigured. This is the Phase-6 worker plane process — the
+    Postgres-native replacement for the legacy file-cron CEO wakeups."""
+    from plugins.takyon.worker import run_worker_loop
+
+    try:
+        drained = run_worker_loop(
+            worker_id=getattr(args, "worker_id", None),
+            poll_interval=getattr(args, "poll_interval", None),
+            dispatch=not getattr(args, "no_dispatch", False),
+            once=getattr(args, "once", False),
+            max_jobs=getattr(args, "max_jobs", None),
+        )
+    except Exception as e:  # invariant #8: a missing DATABASE_URL (or any startup failure) is loud.
+        print(f"✗ worker could not start: {e}")
+        sys.exit(1)
+    if getattr(args, "once", False):
+        print(f"worker tick drained {drained} job(s).")
+    sys.exit(0)
+
+
 def cmd_completion(args, parser=None):
     """Print shell completion script."""
     from takyon_cli.completion import generate_bash, generate_zsh, generate_fish
@@ -10413,7 +10437,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "plugins", "postinstall", "profile", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "chat",
+        "version", "webhook", "whatsapp", "worker", "chat",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -13188,6 +13212,50 @@ Examples:
         help="List running takyon dashboard processes and exit",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    # =========================================================================
+    # worker command (Postgres worker-drain plane)
+    # =========================================================================
+    worker_parser = subparsers.add_parser(
+        "worker",
+        help="Run the Postgres worker-drain loop (dispatch wakes + drain jobs)",
+        description=(
+            "Run the Postgres-native worker plane: self-dispatch due CEO wakes, reclaim stale "
+            "claims, and drain queued jobs through the budget-gated run_one cycle. Requires "
+            "DATABASE_URL (Postgres control plane). Runs until SIGTERM/SIGINT."
+        ),
+    )
+    worker_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single dispatch+drain tick and exit (smoke check / manual drain).",
+    )
+    worker_parser.add_argument(
+        "--no-dispatch",
+        action="store_true",
+        help="Drain only; do not enqueue due CEO wakes (use when pg_cron owns dispatch).",
+    )
+    worker_parser.add_argument(
+        "--poll-interval",
+        dest="poll_interval",
+        type=float,
+        default=None,
+        help="Seconds between ticks when idle (default 15, or TAKYON_WORKER_POLL_SECONDS).",
+    )
+    worker_parser.add_argument(
+        "--max-jobs",
+        dest="max_jobs",
+        type=int,
+        default=None,
+        help="Stop after draining this many jobs (default: unbounded).",
+    )
+    worker_parser.add_argument(
+        "--worker-id",
+        dest="worker_id",
+        default=None,
+        help="Override the worker identity stamped on claims (default: worker-<host>-<pid>).",
+    )
+    worker_parser.set_defaults(func=cmd_worker)
 
     # =========================================================================
     # logs command

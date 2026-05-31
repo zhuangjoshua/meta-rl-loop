@@ -2658,3 +2658,124 @@ git checkout HEAD -- deploy/argon-alpha-14/takyon-dashboard.service   # drops En
 git checkout HEAD -- hermes-agent-main/plugins/takyon/runtime_app.py hermes-agent-main/plugins/takyon/core.py hermes-agent-main/pyproject.toml
 # this log entry is additive — trim it if reverting.
 ```
+
+**LIVE VERIFIED (2026-05-31, post-deploy).** Pushed `88cfc108`; the "Deploy Takyon" workflow (run
+`26725907695`) went green — build UI, compile, rsync runtime, SCP the flipped unit, restart, smoke
+(dashboard 200/302 + `/api/status` 200/401) all ✓. On the VPS: `takyon-dashboard.service` **active**,
+the live unit carries `TAKYON_DB_BACKEND=postgres`, **zero** error-priority journal entries since the
+restart. The smoke test only proves the dashboard answers, so the load-bearing proof is the database:
+live Supabase `users` went **0 → 1** (`auth0_sub = takyon|platform-owner`, `created_at = 22:10:58Z` =
+the restart moment), and the owner came up fully provisioned — `billing_accounts = 1` **and**
+`custody_accounts = 1` (both ledgers opened by JIT) + `user_api_keys = 1` (key minted). `businesses = 0`
+(the VPS's 9 local-SQLite test businesses are deliberately orphaned). The live operator runtime is now
+authoritative on Postgres. The one-time raw owner key was emitted to the dashboard's startup log surface
+only (not captured to any clear-text store, by design); if external control-plane API access is needed
+later, mint/rotate a fresh key rather than recovering this one. Follow-up (not blocking): set
+`TAKYON_PLATFORM_OWNER_SUB` to the operator's real Auth0 sub before creating real businesses (clean now
+at 0 businesses; a later switch just creates the real-sub owner and leaves the default vestigial).
+
+---
+
+## Increment — P8.9: worker-drain plane (built INERT; local-PG-tested; VPS activation held) (2026-05-31)
+
+**What.** Built the Postgres-native **worker-drain plane** — the long-lived process that finally ties the
+Phase-6 queue (`jobs.py`) and schedule (`wakes.py`) together and **replaces the legacy SQLite file-cron CEO
+wakeups**. One tick (`worker.drain_tick`) does, in order: **self-dispatch** due wakes
+(`wakes.dispatch_due_wakes` → enqueues a `ceo_wake` job carrying the schedule's payload, then advances
+`next_run_at`), **reclaim** stale claims (`jobs.requeue_stale`, older-than 900s), then **drain** the queue
+through the budget-gated `jobs.run_one` cycle until empty, routing each job kind to a handler and returning
+counts `{dispatched, requeued, drained, completed, blocked, failed}`. Because the worker self-dispatches,
+**pg_cron is optional** (pass `--no-dispatch` if pg_cron owns dispatch instead).
+
+Three surfaces, one new module:
+1. **`plugins/takyon/worker.py`** (new) — `drain_tick`, the `ceo_wake_handler`, the `HANDLERS` registry,
+   `_run_ceo_turn`, and `run_worker_loop`. The handler reuses the **real sources of truth** rather than
+   re-deriving anything: the wake prompt from `core._ceo_cron_prompt(slug)`, the wake toolsets from
+   `core._ceo_cron_toolsets()` (`["takyon","web","skills","todo"]`), the stable system prompt from
+   `cli._load_ceo_prompt()` (ceo.md), model resolution from `cli._read_model_config`/`_require_agent_model_config`,
+   and the inactivity-timeout pattern from `cron/scheduler.py` (ThreadPoolExecutor + idle poll → `interrupt()`
+   + `TimeoutError`). The only thing built fresh is the ~20-line `AIAgent` construction — deliberately **not**
+   `cli._run_agent`, which discards the turn's cost and wraps the message in an interactive operator envelope
+   that is wrong for a scheduled wake. The handler converts the turn's **true USD cost → integer cents**
+   (`max(0, round(usd*100))`) and always reports it, so `run_one` settles correctly whenever an estimate was
+   reserved.
+2. **`takyon_cli/main.py`** — added the `takyon-cli worker` subcommand (`cmd_worker` + `worker` subparser with
+   `--once`, `--no-dispatch`, `--poll-interval`, `--max-jobs`, `--worker-id`; registered in both `_SUBCOMMANDS`
+   and `_BUILTIN_SUBCOMMANDS`). `cmd_worker` fails **loud** on any startup error and exits non-zero (invariant
+   #8 — never a silent half-start).
+3. **`deploy/argon-alpha-14/takyon-worker.service`** (new) — the canonical unit for the worker, **tracked but
+   INERT**: `deploy-runtime.sh` (and `deploy.yml`) only manage `takyon-dashboard.service`, and the rsync ships
+   `worker.py` + the `worker` CLI to the VPS, so the **code is present** and `takyon-cli worker --once` can be
+   run by hand for a smoke check, but **no daemon starts**. Recurring wake EXECUTION stays on the legacy
+   file-cron until activation — a separate, operator-gated step documented in the unit header (scp the unit +
+   `systemctl enable --now`). Only ONE worker per deployment (jobs are `FOR UPDATE SKIP LOCKED`, so extras are
+   safe but redundant); `TimeoutStopSec=120` so an in-flight CEO turn can finish on stop.
+
+**Why.** This is the last piece of the Phase-6 plane and the operator's explicitly-authorized remaining work
+("the others"), with the standing instruction to build it **inert + local-PG-tested and HOLD VPS activation**.
+Robustness (#1 value) drove the loop design: `run_worker_loop` calls `load_takyon_env()` then
+`resolve_database_url()` **before any loop or signal handler**, so a missing `DATABASE_URL` raises
+`RuntimeNotConfigured` immediately (invariant #8). Each tick opens a **fresh** per-tick psycopg connection
+(`autocommit=True`, `prepare_threshold=None` — the same pgbouncer-safe settings as `runtime_app`), so a dropped
+connection costs one tick and reconnects next tick. `drain_tick` is exception-guarded (a tick failure logs and
+the daemon survives). SIGTERM/SIGINT stop pulling NEW jobs between jobs and exit cleanly; a job **killed
+mid-turn** is left `running` and reclaimed by the next worker's `requeue_stale`, **its reservation refunded** —
+so an interrupted wake is safe, never double-billed, never a fake completion.
+
+Wake billing is **opt-in per schedule**: `dispatch_due_wakes` copies `wake_schedules.payload` onto the job, so
+a wake bills only if its payload carries `estimate_cents`. Per the `run_one` contract, when `estimate_cents`
+is absent/0 nothing is reserved and the handler's reported cost is ignored; when present, the owner's flow-A
+balance is reserved under `job:<id>:<attempts>`, the handler runs, and the ledger settles to
+`max(0, min(actual, reserved))`. An owner who cannot cover the estimate is `blocked('budget_exhausted')` and
+**the handler never runs** — proven by test.
+
+**Verified (LOCAL Postgres 16.14 @ 127.0.0.1:54329, real engine — dispatch/claim/reserve/settle/lifecycle are
+the real `jobs`/`wakes`/`billing` code; only the leaf CEO turn is stubbed, exactly as `jobs_pg` stubs the work
+seam):**
+- **`tests/plugins/test_takyon_worker_pg.py`** (new, **12 tests, all green**). PG end-to-end: a due wake is
+  enqueued-then-drained in **one tick** (dispatched=1, completed=1, handler ran once); a **second** tick is a
+  no-op because dispatch advanced the cursor past now() (the wake ran exactly once across both ticks); true cost
+  **settles the ledger** (allowance 100000, estimate 500, true cost 300 → `allowance_used=300`, `reserved=0` —
+  settled at true cost, remainder released); an exhausted budget is **blocked** and the handler never runs;
+  `--no-dispatch` drains the queue **without** enqueuing the due wake (`last_enqueued_at` stays NULL); an empty
+  queue is a clean all-zero no-op; and with no explicit handlers the tick consults `worker.HANDLERS`, proving
+  `ceo_wake` is wired (run seam stubbed). Unit: the handler maps `$0.0734 → 7` cents, sources the canonical wake
+  toolsets, honors `payload.max_turns`, reports 0 cents for a free turn; and `run_worker_loop(database_url=None)`
+  with the env cleared raises `RuntimeNotConfigured` (invariant #8).
+- **Engine intact:** worker + jobs + wakes PG suites together = **35 passed**.
+- **CLI wiring:** `takyon-cli worker --help` renders the subcommand + all five flags (exit 0); `worker.py` and
+  `takyon_cli/main.py` are `py_compile`-clean.
+- **One real issue found and fixed during testing** (honest state): the invariant-#8 unit test initially DID NOT
+  RAISE on this dev box, because `run_worker_loop` legitimately calls `load_takyon_env()` first (that is how it
+  reads `DATABASE_URL` from `$TAKYON_HOME/.env` in production), which **repopulated** `DATABASE_URL` from the
+  on-disk `.env` and masked the invariant. The fix is **test-isolation, not a worker behavior change**: the test
+  now monkeypatches `core.load_takyon_env` to a no-op so the resolve seam is exercised with a genuinely empty
+  env. The worker's load-then-resolve order is correct and unchanged.
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/worker.py` — **new file**, the drain plane (drain_tick, ceo_wake_handler,
+  HANDLERS, _run_ceo_turn, run_worker_loop).
+- `hermes-agent-main/takyon_cli/main.py` — `cmd_worker` + `worker` subparser + `_SUBCOMMANDS`/`_BUILTIN_SUBCOMMANDS`
+  entries.
+- `hermes-agent-main/tests/plugins/test_takyon_worker_pg.py` — **new file**, 12 tests (above).
+- `deploy/argon-alpha-14/takyon-worker.service` — **new tracked INERT unit** (ships code; starts no daemon).
+
+**Not done / honest state:**
+- **The worker daemon is NOT enabled on the VPS** — by design. This push ships `worker.py` + the `worker` CLI
+  + the (inert) unit; recurring wake EXECUTION stays on the legacy file-cron until the operator runs the gated
+  activation in the unit header. `takyon-cli worker --once` can be run by hand on the VPS as a smoke check
+  without enabling the daemon.
+- `pg_cron` remains optional (the worker self-dispatches); `plugins/takyon/db/apply_pg_cron_dispatch.sql` is
+  available to apply on Supabase if pg_cron-owned dispatch is later preferred (then run the worker with
+  `--no-dispatch`).
+- `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding; `TAKYON_PLATFORM_OWNER_SUB` still defaulting (both
+  unchanged by this step).
+
+**Revert (local only — nothing reached live; the unit is inert even after it ships):**
+```sh
+rm hermes-agent-main/plugins/takyon/worker.py
+rm hermes-agent-main/tests/plugins/test_takyon_worker_pg.py
+rm deploy/argon-alpha-14/takyon-worker.service
+git checkout HEAD -- hermes-agent-main/takyon_cli/main.py   # drops cmd_worker + the worker subparser/registrations
+# this log entry is additive — trim it if reverting.
+```

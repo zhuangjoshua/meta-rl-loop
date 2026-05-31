@@ -1,0 +1,42 @@
+# Takyon Postgres worker-drain plane — TRACKED BUT INERT.
+#
+# This unit is the canonical definition for the Phase-6 worker process (the Postgres-native
+# replacement for the legacy file-cron CEO wakeups). It is intentionally NOT deployed or enabled by
+# deploy/argon-alpha-14/deploy-runtime.sh — that script only manages takyon-dashboard.service. The
+# runtime rsync DOES ship plugins/takyon/worker.py and the `takyon-cli worker` command to the VPS,
+# so the code is present and `takyon-cli worker --once` can be run by hand for a smoke check, but no
+# daemon starts. Recurring wake EXECUTION stays on the legacy file-cron until this is deliberately
+# activated. Activation is a separate, operator-gated step:
+#
+#   scp -i ~/.ssh/takyon_argon_alpha14 deploy/argon-alpha-14/takyon-worker.service \
+#       root@137.184.75.57:/etc/systemd/system/takyon-worker.service
+#   ssh ... 'systemctl daemon-reload && systemctl enable --now takyon-worker.service'
+#
+# Only ONE worker should run per deployment (jobs are claimed FOR UPDATE SKIP LOCKED, so extra
+# workers are safe but redundant). With the worker self-dispatching due wakes, pg_cron is OPTIONAL;
+# pass --no-dispatch here if pg_cron owns dispatch instead.
+
+[Unit]
+Description=Takyon Worker (Postgres job drain + CEO wake dispatch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/takyon/hermes-agent-main
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/root
+Environment=PYTHONUNBUFFERED=1
+# DATABASE_URL is read from /opt/takyon/.takyon/.env by load_takyon_env() at startup, exactly like
+# the dashboard. The worker is inherently Postgres (jobs/wake_schedules are PG-only); it does NOT
+# consult TAKYON_DB_BACKEND, and it raises loudly (invariant #8) if no DATABASE_URL is configured.
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli worker
+Restart=always
+RestartSec=5
+# Give the worker time to finish the in-flight CEO turn on stop. If it overruns and is SIGKILLed,
+# the job is left 'running' and the next worker's requeue_stale reclaims it and refunds its
+# reservation — an interrupted wake is safe, never double-billed, never a fake completion.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
