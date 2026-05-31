@@ -72,6 +72,12 @@ dependencies = [
 # Native Anthropic provider — only needed when provider=anthropic (not via
 # OpenRouter or other aggregators).
 anthropic = ["anthropic==0.86.0"]
+# Postgres backend driver — only needed when TAKYON_DB_BACKEND=postgres (the
+# operator-runtime / control-plane store and the live control-plane host). It is
+# lazily imported (plugins/takyon/runtime_app.py and core.py:_connect_postgres),
+# so the default SQLite path never requires it and the PG tests importorskip it.
+# [binary] bundles libpq so no system libpq-dev is required on the deploy host.
+postgres = ["psycopg[binary]==3.3.4"]
 # Web search backends — each only loaded when the user picks it as their
 # search provider (configured via `takyon tools` or config.yaml).
 exa = ["exa-py==2.10.2"]

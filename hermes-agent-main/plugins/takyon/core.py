@@ -3037,6 +3037,12 @@ class TakyonStore:
             resolve_database_url(self._database_url),
             row_factory=dict_row,
             autocommit=False,
+            # See runtime_app.build_runtime_app: the live DATABASE_URL is Supabase's pgbouncer
+            # endpoint (6543). prepare_threshold=None disables auto server-side prepared statements
+            # so a PREPARE/EXECUTE can never split across pooler-reassigned backends. Store
+            # connections are also short-lived (one per `with self._connect()` block), so nothing
+            # relies on cross-transaction prepared-statement reuse.
+            prepare_threshold=None,
         )
         return _PGConn(conn)
 

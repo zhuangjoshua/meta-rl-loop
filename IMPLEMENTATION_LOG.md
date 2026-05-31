@@ -2616,3 +2616,45 @@ request, the **whole-suite** CI-parity run is performed once at the end of the P
 rm tests/plugins/test_takyon_serving_flip_pg.py   # new file — the entire P8.6 E2E
 # this log entry is additive — trim it if reverting.
 ```
+
+---
+
+## Increment — P8.7–P8.8: VPS Postgres serving flip (psycopg provisioning + pgbouncer-safe connections + tracked-unit env flip) (2026-05-31)
+
+**What.** Flipped the live dashboard host (`argon-alpha-14`, `137.184.75.57`, runtime `/opt/takyon/hermes-agent-main`) from the SQLite serving backend onto the Postgres operator store, via three changes:
+1. **`pyproject.toml`** — added a `postgres = ["psycopg[binary]==3.3.4"]` optional-dependency extra (exact-pinned per the supply-chain policy; `[binary]` bundles libpq so no system `libpq-dev`). psycopg is lazily imported (`runtime_app.py`, `core._connect_postgres`) and the PG tests `importorskip` it, so it is backend-specific and belongs in an extra, not core. **Caught a real gap:** psycopg had only ever been pip-installed into the local dev venv during P8 — it was never declared, and the deploy excludes `.venv/` and never installs Python deps, so the VPS venv had **no psycopg**. A flip without it would have crashed the runtime on first PG connect. Installed `psycopg[binary]==3.3.4` (cp312 manylinux wheel, x86_64) into `/opt/takyon/hermes-agent-main/.venv` manually — the same way every other VPS dep got there.
+2. **`plugins/takyon/runtime_app.py` + `plugins/takyon/core.py`** — set `prepare_threshold=None` on **both** psycopg connect sites (the per-request control-plane connection and the `TakyonStore` `_connect_postgres` seam). The live `DATABASE_URL` resolves to Supabase's **pgbouncer endpoint (port 6543)**; in transaction pooling a server backend is reassigned per transaction, so psycopg's default auto-prepare (threshold 5) can split a `PREPARE` and its `EXECUTE` across backends → `prepared statement does not exist`. Disabling auto-prepare removes that entire failure class with identical correctness (extended protocol either way) and negligible cost on a low-QPS control plane. This is the upstream connection-factory fix, not a downstream retry band-aid.
+3. **`deploy/argon-alpha-14/takyon-dashboard.service`** — added `Environment=TAKYON_DB_BACKEND=postgres`. This is the canonical, version-controlled flip: the deploy SCPs this tracked unit over `/etc/systemd/system/takyon-dashboard.service` every run, so the flip survives redeploys (a systemd drop-in would survive but be untracked). The tracked unit was byte-verified to match the live unit before the edit, so the SCP changes only this one env line.
+
+**Why.** The operator gave an explicit go-ahead for the full cutover ("you can do this … go. and the others"). Robustness is the #1 value, so before touching production I ran a read-only on-VPS probe that resolves `DATABASE_URL` exactly as the runtime does (`core.load_takyon_env` → `runtime_app.resolve_database_url`), reported the endpoint shape **without printing credentials**, and **forced psycopg past its prepare threshold** (12 repeated parametrized autocommit queries on one long-lived connection — a strictly harder case than the runtime's short-lived per-request/per-op connections) to detect pooler breakage before the flip rather than in production.
+
+**Verified BEFORE the flip (read-only against LIVE Supabase + local PG, never mocked):**
+- **Live schema (read-only verifier):** the P8.5 apply is in fact complete on live — `0001`–`0010` present + takyon-shaped (0 rows), the retire-of-3 targets (`agent_runs`/`events`/`idempotency_keys`) now takyon-shaped, all 7 of 0011's net-new tables present + takyon-shaped, all 6 `businesses` operator-enrich columns present, `profiles` still present (confirms the real prod DB). (Task #48 was stale-marked pending; corrected.)
+- **On-VPS connectivity probe (read-only):** `DATABASE_URL` → scheme `postgresql`, **port 6543** (pgbouncer), db `postgres`; `select 1` ✓, param-bind ✓, `count(businesses)=0` (fresh — see below), `public_tables=132` (125 after 0001–0010 + 7 net-new from 0011 ✓), `operator_tables=10` ✓; **prepared-statement loop ×12 PASSED** even with default psycopg (so the flip was already prepared-statement-safe; `prepare_threshold=None` is belt-and-suspenders correctness for the pooler).
+- **Local PG regression (Postgres 16.14 @ 127.0.0.1:54329):** the full PG-integration set — both connect sites, 23 files — is **318 passed** with `prepare_threshold=None`; the serving-flip E2E (`test_takyon_serving_flip_pg.py`) is green. Both touched files `py_compile`-clean.
+
+**Platform-owner seed (designed one-time secret surface).** First PG serving startup mints the single platform owner (`control_plane.ensure_platform_owner`, keyed by `TAKYON_PLATFORM_OWNER_SUB`) and surfaces its one-time API key **exactly once** — for the dashboard via `web_server._seed_platform_owner_if_postgres` → `_log.warning` (→ journald). The seed is idempotent and is wrapped so a hiccup never blocks the dashboard from binding (invariant #8: a later `business.upsert` would block with its own reason rather than serving a NULL owner). `TAKYON_PLATFORM_OWNER_SUB` is currently **unset on the VPS → defaults to `takyon|platform-owner`**, which is acceptable for the flip because there are **0 businesses** (fresh start; switching the sub later is clean). The key is left in its designed one-time log surface; it is **not** echoed anywhere or persisted in clear.
+
+**uv.lock (deliberately NOT regenerated).** The committed `uv.lock` pins `websockets 15.0.1` while `pyproject` pins core `websockets==16.0` — the lock is **already stale, predating the websockets bump**, and that (not the psycopg addition) is why `uv lock` fails: the optional `daytona==0.155.0` extra requires `websockets<16.0`, which is unsatisfiable against the core `==16.0` pin at `python_full_version >= '3.14'`. Because `websockets==16.0` is a **core** dep (not an extra), no `[tool.uv] conflicts` declaration can resolve it, and fixing it would mean altering the unrelated `daytona` extra or `requires-python` — out of scope for the PG flip. The **outer-repo `deploy.yml` does not run `uv lock`/`uv lock --check`**, so a stale lock does not affect this deploy. Left as-is; flagged here.
+
+**Files changed:**
+- `hermes-agent-main/pyproject.toml` — `postgres` extra (1 line + rationale comment).
+- `hermes-agent-main/plugins/takyon/runtime_app.py` — `prepare_threshold=None` + comment on the per-request connect.
+- `hermes-agent-main/plugins/takyon/core.py` — `prepare_threshold=None` + comment on `_connect_postgres`.
+- `deploy/argon-alpha-14/takyon-dashboard.service` — `Environment=TAKYON_DB_BACKEND=postgres` + rationale comment.
+- VPS-side (out of repo): `psycopg[binary]==3.3.4` installed into the runtime venv.
+
+**Not done / honest state (at commit time):**
+- **The live flip executes on the deploy restart triggered by this push** (the workflow SCPs the flipped unit + rsyncs the connection change + restarts). Post-restart live confirmation (service active, journald shows PG backend + owner seed, no `RuntimeNotConfigured`, dashboard 200/302, `/api/status` 200/401) is appended as a follow-up below after `gh run watch`.
+- The VPS's 9 local-SQLite **test** businesses are **deliberately orphaned** by the flip (disposable test data; the PG operator store starts empty per the REPLACE decision). No data was migrated.
+- `TAKYON_STORAGE_BACKEND` stays default (local disk) for the single-VPS host; `STRIPE_BILLING_WEBHOOK_SECRET` still outstanding (flow-A billing webhook stays blocked-with-reason); the worker-drain plane is built next and held **inert** (no `takyon-worker.service` enabled on the VPS yet); pg_cron is optional (the worker self-dispatches `dispatch_due_wakes`).
+
+**Revert (the flip is env-reversible — no schema change here):**
+```sh
+# Remove the one env line and redeploy → dashboard restarts on SQLite (default backend):
+git checkout HEAD -- deploy/argon-alpha-14/takyon-dashboard.service   # drops Environment=TAKYON_DB_BACKEND=postgres
+# Emergency fast revert (no workflow wait): SCP a unit without that line to the VPS + `systemctl daemon-reload && systemctl restart takyon-dashboard.service`.
+# The prepare_threshold=None + postgres extra are safe to keep regardless of backend; revert them only to fully undo:
+git checkout HEAD -- hermes-agent-main/plugins/takyon/runtime_app.py hermes-agent-main/plugins/takyon/core.py hermes-agent-main/pyproject.toml
+# this log entry is additive — trim it if reverting.
+```

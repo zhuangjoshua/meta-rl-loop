@@ -9,6 +9,12 @@ WorkingDirectory=/opt/takyon/hermes-agent-main
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
+# Serving backend = Postgres (Supabase control plane). The runtime reads TAKYON_DB_BACKEND
+# (core._db_backend, default "sqlite"); this line is the Phase-8 serving flip that points the live
+# dashboard at the Postgres operator store + both ledgers via DATABASE_URL (Supabase pgbouncer 6543).
+# Requires psycopg[binary] in the venv (pyproject `postgres` extra) — installed manually because the
+# deploy never installs Python deps. Revert the flip by deleting this one line and redeploying.
+Environment=TAKYON_DB_BACKEND=postgres
 ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build --tui
 Restart=always
 RestartSec=5

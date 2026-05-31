@@ -69,7 +69,16 @@ def build_runtime_app(*, database_url: str | None = None) -> FastAPI:
         # `with conn.transaction():`. FastAPI caches this dependency per-request (use_cache), so the
         # SAME connection is reused across _resolve_principal → _rate_limited_principal → endpoint
         # within one request, then closed here when the request ends.
-        conn = psycopg.connect(resolved_url, autocommit=True)
+        #
+        # prepare_threshold=None disables psycopg's automatic server-side prepared statements. The
+        # live control-plane DATABASE_URL is Supabase's pgbouncer endpoint (port 6543); in
+        # transaction-pooling mode a server backend is reassigned per transaction, so a statement
+        # PREPAREd on one backend can EXECUTE on another that never saw it ("prepared statement
+        # does not exist"). Short-lived per-request connections rarely cross the default threshold
+        # (=5), but disabling auto-prepare removes the entire failure class regardless of pooler
+        # mode. Correctness is identical (extended protocol either way); only a micro perf hint is
+        # dropped, which a low-QPS control plane does not need.
+        conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
         try:
             yield conn
         finally:
