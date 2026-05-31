@@ -1,37 +1,14 @@
 import {
-  Activity,
-  AlertCircle,
   ArrowUp,
-  Briefcase,
-  Building2,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Clock3,
-  Code2,
-  Command,
-  DollarSign,
   ExternalLink,
-  FileText,
-  Folder,
-  Gauge,
-  Globe2,
-  ListChecks,
-  MessageCircle,
   PanelRight,
-  Play,
   Plus,
   RefreshCw,
-  Rocket,
-  Search,
-  Sparkles,
   Square,
-  Users,
-  Wallet,
   X,
 } from "lucide-react";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -50,12 +27,11 @@ import {
   GatewayClient,
   type ConnectionState,
 } from "@/lib/gatewayClient";
-import {
-  displayNameFromId,
-  metadataDebugDetail,
-} from "@/lib/takyonActivity";
+import { displayNameFromId } from "@/lib/takyonActivity";
 import { cn } from "@/lib/utils";
 import { PluginSlot } from "@/plugins";
+
+import "./chat-dashboard.css";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -167,8 +143,6 @@ interface BusinessOverviewFile {
   path?: string;
   type?: string;
 }
-
-const EMPTY_BUSINESS_FILES: BusinessOverviewFile[] = [];
 
 interface BusinessOverviewJob {
   id?: string;
@@ -361,11 +335,6 @@ interface TakyonPromptContextResponse extends ScopeState {
   text?: string;
 }
 
-interface BusinessFilesResponse extends ScopeState {
-  path?: string;
-  files?: BusinessOverviewFile[];
-}
-
 interface BusinessOutputsResponse extends ScopeState {
   outputs?: Deliverable[];
 }
@@ -414,15 +383,6 @@ interface Deliverable {
   at: number;
 }
 
-interface SourceDocTile {
-  detail?: string;
-  label: string;
-  path: string;
-  status?: string;
-}
-
-type PanelTab = "home" | "next" | "files" | "outputs" | "dev";
-
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
@@ -440,13 +400,6 @@ const EMPTY_SCOPE_STATE: ScopeState = {
 };
 
 const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
-const PANEL_TABS: Array<{ id: PanelTab; label: string }> = [
-  { id: "home", label: "Home" },
-  { id: "next", label: "Next" },
-  { id: "files", label: "Files" },
-  { id: "outputs", label: "Outputs" },
-  { id: "dev", label: "Dev" },
-];
 const MEDIA_EXTENSIONS = "mp4|mov|webm|m4v|png|jpg|jpeg|webp|gif";
 const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql";
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
@@ -478,59 +431,6 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function asNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function formatCount(value: unknown): string {
-  return new Intl.NumberFormat().format(asNumber(value));
-}
-
-function formatCents(value: unknown): string {
-  return new Intl.NumberFormat(undefined, {
-    currency: "USD",
-    maximumFractionDigits: 0,
-    style: "currency",
-  }).format(asNumber(value) / 100);
-}
-
-function formatMicrousd(value: unknown): string {
-  const dollars = asNumber(value) / 1_000_000;
-  if (dollars <= 0) return "$0";
-  if (dollars < 1) return `$${dollars.toFixed(2)}`;
-  return new Intl.NumberFormat(undefined, {
-    currency: "USD",
-    maximumFractionDigits: 0,
-    style: "currency",
-  }).format(dollars);
-}
-
-function readableDate(value?: string): string {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function readableFileTime(value?: number | string): string {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return readableDate(new Date(value).toISOString());
-  }
-  return readableDate(typeof value === "string" ? value : "");
-}
-
-function formatBytes(value?: number): string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
-}
-
 function humanizeJobKind(kind?: string): string {
   const value = (kind || "gated action").trim();
   if (value === "product.deploy") return "Deploy product site";
@@ -539,121 +439,6 @@ function humanizeJobKind(kind?: string): string {
   return value
     .replace(/[._-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function humanizeArtifactStatus(status?: string): string {
-  switch ((status || "").trim()) {
-    case "local_source":
-      return "Local";
-    case "published_local":
-      return "Published local";
-    case "draft_only":
-      return "Draft only";
-    case "generated":
-      return "Generated";
-    case "asset_without_receipt":
-      return "No receipt";
-    case "missing":
-    case "":
-      return "Missing";
-    default:
-      return humanizeJobKind(status);
-  }
-}
-
-function humanizeStatus(status?: string): string {
-  const value = (status || "").trim().toLowerCase();
-  if (!value) return "Recorded";
-  if (/blocked|fail|error|overdue|attention|missing/.test(value)) return "Needs attention";
-  if (/recover/.test(value)) return "Recovering";
-  if (/queued|pending|waiting|scheduled|needed/.test(value)) return "Not started";
-  if (/running|active|watch|working|research_first/.test(value)) return "Working";
-  if (/done|complete|success|passed|visible|previewable/.test(value)) return "Done";
-  if (value === "quiet") return "Quiet";
-  return humanizeJobKind(value);
-}
-
-function registryTool(
-  registry: RegistryDisplayPayload | undefined,
-  name?: string,
-): RegistryDisplayEntry | undefined {
-  const key = (name || "").trim();
-  return key ? registry?.tools?.[key] : undefined;
-}
-
-function parseRuntimeTool(task: BusinessOverviewTask | BusinessOverviewJob): {
-  detail?: string;
-  duration?: string;
-  phase: "preparing" | "started" | "completed";
-  toolName: string;
-} | null {
-  const text = `${task.label || ""} ${task.detail || ""}`.trim();
-  const delegatedMatch = text.match(
-    /\bagent\s*(?:->|→)\s*(delegate_task|business_claude_agent_task):\s*(.*)/i,
-  );
-  if (delegatedMatch) {
-    const detail = (delegatedMatch[2] || "")
-      .replace(/\s*·\s*(?:running|working|done)$/i, "")
-      .replace(/^subagent\b/i, "Subagent")
-      .trim();
-    return {
-      detail,
-      phase: /\b(done|completed|finished)\b/i.test(detail) ? "completed" : "started",
-      toolName: delegatedMatch[1],
-    };
-  }
-  const match =
-    text.match(/\b(preparing tool|tool started|tool completed)\s*(?:->|→|-)?\s*([a-zA-Z0-9_.:-]+)(?:\s*·\s*(.*))?/i) ||
-    text.match(/\bagent\s*(?:->|→)\s*(executing tool|tool completed):\s*([a-zA-Z0-9_.:-]+)(?:\s*\(([^)]*)\))?/i);
-  if (!match) return null;
-  const phase =
-    match[1].toLowerCase().includes("completed")
-      ? "completed"
-      : match[1].toLowerCase().includes("started") || match[1].toLowerCase().includes("executing")
-        ? "started"
-        : "preparing";
-  const tail = (match[3] || "").trim();
-  const duration = /^\d+(?:\.\d+)?s$/.test(tail) ? tail : undefined;
-  return {
-    detail: duration ? "" : tail,
-    duration,
-    phase,
-    toolName: match[2],
-  };
-}
-
-function taskLabel(
-  task: BusinessOverviewTask | BusinessOverviewJob,
-  registry?: RegistryDisplayPayload,
-): string {
-  const runtimeTool = parseRuntimeTool(task);
-  if (runtimeTool) {
-    return displayNameFromId(runtimeTool.toolName, registry, "tools").label;
-  }
-  const source = (task as BusinessOverviewTask).source;
-  const kind = (task as BusinessOverviewJob).kind;
-  const rawId = source || kind;
-  if (!task.label && rawId) return displayNameFromId(rawId, registry, "tools").label;
-  return task.label || humanizeJobKind(rawId);
-}
-
-function taskDetail(
-  task: BusinessOverviewTask | BusinessOverviewJob,
-  registry?: RegistryDisplayPayload,
-): string {
-  const runtimeTool = parseRuntimeTool(task);
-  if (runtimeTool) {
-    const display = displayNameFromId(runtimeTool.toolName, registry, "tools");
-    const statusDetail = runtimeTool.duration ? `done in ${runtimeTool.duration}` : "";
-    return metadataDebugDetail(
-      runtimeTool.toolName,
-      display.hasMetadata,
-      [runtimeTool.detail, statusDetail].filter(Boolean).join(" · "),
-    );
-  }
-  if (task.detail) return task.detail;
-  if ("kind" in task) return gatedActionDetail(task);
-  return task.updated_at ? `Updated ${readableDate(task.updated_at)}` : "";
 }
 
 function naturalToolLabel(tool: ToolEntry, registry?: RegistryDisplayPayload): string {
@@ -673,338 +458,6 @@ function naturalToolLabel(tool: ToolEntry, registry?: RegistryDisplayPayload): s
   return humanizeJobKind(tool.name || "Action");
 }
 
-function toolDetail(tool: ToolEntry, registry?: RegistryDisplayPayload): string {
-  const detail = friendlyError(tool.error || tool.summary || tool.preview || tool.context || "");
-  const display = displayNameFromId(tool.name || "tool", registry, "tools");
-  return metadataDebugDetail(tool.name || "", display.hasMetadata, detail || humanizeStatus(tool.status));
-}
-
-function formatElapsedSeconds(seconds: number, options: { compact?: boolean } = {}): string {
-  const value = Math.max(0, seconds);
-  if (!options.compact && value < 10) return `${value.toFixed(1)}s`;
-  return `${Math.round(value)}s`;
-}
-
-function toolElapsedSeconds(tool: ToolEntry, now: number): number | null {
-  if (typeof tool.duration_s === "number" && Number.isFinite(tool.duration_s)) {
-    return Math.max(0, tool.duration_s);
-  }
-  if (tool.startedAt <= 0) return null;
-  const end = tool.completedAt || now;
-  return Math.max(0, (end - tool.startedAt) / 1000);
-}
-
-function toolActivityStatus(tool: ToolEntry, now: number): string {
-  const elapsed = toolElapsedSeconds(tool, now);
-  if (tool.status === "running") {
-    return elapsed === null ? "running" : `running ${formatElapsedSeconds(elapsed, { compact: true })}`;
-  }
-  if (tool.status === "error") {
-    return elapsed === null ? "needs attention" : `needs attention in ${formatElapsedSeconds(elapsed)}`;
-  }
-  return elapsed === null ? "done" : `done in ${formatElapsedSeconds(elapsed)}`;
-}
-
-function conciseActivityDetail(value?: string): string {
-  const text = cleanText(value || "");
-  if (!text) return "";
-  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
-}
-
-function isStatusOnlyDetail(value?: string): boolean {
-  const text = (value || "").trim().toLowerCase();
-  return (
-    !text ||
-    text === "done" ||
-    text === "working" ||
-    text === "running" ||
-    /^running\s+\d+(?:\.\d+)?s$/.test(text) ||
-    /^done\s+in\s+\d+(?:\.\d+)?s$/.test(text)
-  );
-}
-
-function cleanTraceDetail(detail?: string, status?: string, label?: string): string {
-  const text = conciseActivityDetail(detail);
-  if (!text) return "";
-  const normalized = text.toLowerCase();
-  const normalizedStatus = (status || "").trim().toLowerCase();
-  const normalizedLabel = (label || "").trim().toLowerCase();
-  if (isStatusOnlyDetail(text)) return "";
-  if (normalized === normalizedStatus || normalized === normalizedLabel) return "";
-  if (normalized === `raw: runtime`) return "";
-  return text;
-}
-
-function cleanTraceStatus(status?: string): string {
-  const text = (status || "").trim();
-  if (!text) return "";
-  if (/^running\b/i.test(text)) return text.replace(/^running/i, "Running");
-  if (/^working$/i.test(text)) return "Working";
-  if (/^done\b/i.test(text)) return text.replace(/^done/i, "Done");
-  if (/^needs attention\b/i.test(text)) return text.replace(/^needs attention/i, "Needs attention");
-  return humanizeStatus(text);
-}
-
-function parseRuntimeAgentEvent(task: BusinessOverviewTask | BusinessOverviewJob): ActivityTraceItem | null {
-  const id = String(task.id || `${task.label || "runtime"}:${task.detail || ""}`);
-  const text = `${task.label || ""} ${task.detail || ""}`.trim();
-  const line = text.replace(/^(agent|ceo live trace)\s+/i, "").trim();
-  if (!line || /^\.?\s*done$/i.test(line) || /^tool\s*$/i.test(line)) return null;
-
-  let match = line.match(/^agent\s*(?:->|→)\s*receiving stream response/i);
-  if (match) {
-    return {
-      id,
-      label: "Receiving model response",
-      status: "Working",
-      tone: "running",
-    };
-  }
-
-  match = line.match(/^agent\s*(?:->|→)\s*starting API call\s+#?(\d+)/i);
-  if (match) {
-    return {
-      detail: `API call #${match[1]}`,
-      id,
-      label: "Starting model call",
-      status: "Working",
-      tone: "running",
-    };
-  }
-
-  match = line.match(/^agent\s*(?:->|→)\s*API call\s+#?(\d+)\s+completed/i);
-  if (match) {
-    return {
-      detail: `API call #${match[1]}`,
-      id,
-      label: "Model call finished",
-      status: "Done",
-      tone: "done",
-    };
-  }
-
-  return null;
-}
-
-interface ActivityTraceItem {
-  detail?: string;
-  id: string;
-  label: string;
-  rawId?: string;
-  status: string;
-  tone?: string;
-}
-
-function compactActivityItems(items: Array<ActivityTraceItem | null | undefined>): ActivityTraceItem[] {
-  const seen = new Set<string>();
-  const compacted: ActivityTraceItem[] = [];
-  for (const item of items) {
-    if (!item) continue;
-    const label = (item.label || "").trim();
-    const status = cleanTraceStatus(item.status);
-    const detail = cleanTraceDetail(item.detail, status, label);
-    if (!label || (/^(agent|tool|\.)$/i.test(label) && !detail)) continue;
-    const key = `${label.toLowerCase()}:${detail.toLowerCase()}:${status.toLowerCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    compacted.push({ ...item, detail, status });
-  }
-  return compacted;
-}
-
-function normalizedTraceKey(value?: string): string {
-  return cleanText(value || "")
-    .toLowerCase()
-    .replace(/\(iteration\s+\d+\/\d+\)/g, "(iteration)")
-    .replace(/\brunning\s+\d+(?:\.\d+)?s\b/g, "running")
-    .replace(/\bdone\s+in\s+\d+(?:\.\d+)?s\b/g, "done")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isWorkerTask(
-  task: BusinessOverviewTask | BusinessOverviewJob,
-  registry?: RegistryDisplayPayload,
-): boolean {
-  const runtimeTool = parseRuntimeTool(task);
-  if (runtimeTool && isWorkerToolName(runtimeTool.toolName, registry)) return true;
-  const rawId = (task as BusinessOverviewTask).source || (task as BusinessOverviewJob).kind || "";
-  return isWorkerToolName(rawId, registry);
-}
-
-function activityFromTool(
-  tool: ToolEntry,
-  registry: RegistryDisplayPayload | undefined,
-  now: number,
-): ActivityTraceItem {
-  const display = displayNameFromId(tool.name || "tool", registry, "tools");
-  const status = toolActivityStatus(tool, now);
-  const detail = cleanTraceDetail(
-    tool.status === "running"
-      ? tool.context || tool.preview
-      : tool.context || tool.summary || tool.preview,
-    status,
-    naturalToolLabel(tool, registry),
-  );
-  return {
-    detail: metadataDebugDetail(tool.name || "", display.hasMetadata, detail),
-    id: tool.id,
-    label: naturalToolLabel(tool, registry),
-    rawId: display.hasMetadata ? undefined : tool.name,
-    status,
-    tone: tool.status,
-  };
-}
-
-function activityFromTask(
-  task: BusinessOverviewTask | BusinessOverviewJob,
-  registry: RegistryDisplayPayload | undefined,
-): ActivityTraceItem | null {
-  const runtimeAgentEvent = parseRuntimeAgentEvent(task);
-  if (runtimeAgentEvent) return runtimeAgentEvent;
-  const runtimeTool = parseRuntimeTool(task);
-  if (runtimeTool) {
-    const display = displayNameFromId(runtimeTool.toolName, registry, "tools");
-    const status =
-      runtimeTool.phase === "completed"
-        ? `done${runtimeTool.duration ? ` in ${runtimeTool.duration}` : ""}`
-        : "running";
-    return {
-      detail: metadataDebugDetail(
-        runtimeTool.toolName,
-        display.hasMetadata,
-        cleanTraceDetail(runtimeTool.detail, status, display.label),
-      ),
-      id: String(task.id || `${runtimeTool.phase}:${runtimeTool.toolName}`),
-      label: display.label,
-      rawId: display.hasMetadata ? undefined : runtimeTool.toolName,
-      status,
-      tone: task.tone || task.status,
-    };
-  }
-  const rawId = (task as BusinessOverviewTask).source || (task as BusinessOverviewJob).kind || "";
-  const display = displayNameFromId(rawId, registry, "tools");
-  const label = taskLabel(task, registry);
-  const status = humanizeStatus(task.status).toLowerCase();
-  if (/^(agent|tool|\.)$/i.test(label.trim()) && !cleanTraceDetail(task.detail, status, label)) {
-    return null;
-  }
-  return {
-    detail: cleanTraceDetail(taskDetail(task, registry), status, label),
-    id: String(task.id || `${taskLabel(task, registry)}:${task.status || ""}`),
-    label: /^preparing$/i.test(label) ? "Preparing next step" : label,
-    rawId: rawId && rawId !== "runtime" && !display.hasMetadata ? rawId : undefined,
-    status,
-    tone: task.tone || task.status,
-  };
-}
-
-interface WorkerDisplayItem {
-  id: string;
-  latestDetail?: string;
-  name: string;
-  purpose?: string;
-  rawId?: string;
-  status: string;
-  tone?: string;
-}
-
-function isWorkerTool(tool: ToolEntry, registry?: RegistryDisplayPayload): boolean {
-  return isWorkerToolName(tool.name, registry);
-}
-
-function isWorkerToolName(name?: string, registry?: RegistryDisplayPayload): boolean {
-  const meta = registryTool(registry, name);
-  if (meta?.category === "agent") return true;
-  return /delegate|subagent|agent|claude/i.test(name || "");
-}
-
-function workerItems(
-  tools: ToolEntry[],
-  overviewWorkers: BusinessOverviewWorker[],
-  overviewTasks: BusinessOverviewTask[],
-  registry: RegistryDisplayPayload | undefined,
-  now: number,
-): WorkerDisplayItem[] {
-  const liveWorkers = tools
-    .filter((tool) => isWorkerTool(tool, registry))
-    .slice()
-    .reverse()
-    .slice(0, 6)
-    .map((tool) => {
-      const display = displayNameFromId(tool.name || "tool", registry, "tools");
-      const status = toolActivityStatus(tool, now);
-      const name = naturalToolLabel(tool, registry);
-      const purpose = cleanTraceDetail(tool.context || tool.preview || tool.summary || tool.error, status, name);
-      const latestDetail = cleanTraceDetail(tool.summary || tool.preview || tool.error, status, name);
-      return {
-        id: `live:${tool.tool_id}`,
-        latestDetail,
-        name,
-        purpose,
-        rawId: display.hasMetadata ? undefined : tool.name,
-        status,
-        tone: tool.status,
-      };
-    });
-  const runtimeWorkers = overviewTasks
-    .map((task) => ({ task, runtimeTool: parseRuntimeTool(task) }))
-    .filter(({ runtimeTool }) => runtimeTool && isWorkerToolName(runtimeTool.toolName, registry))
-    .slice(0, 6)
-    .map(({ task, runtimeTool }) => {
-      const toolName = runtimeTool?.toolName || "";
-      const display = displayNameFromId(toolName, registry, "tools");
-      const phase = runtimeTool?.phase || "started";
-      const status = phase === "completed"
-        ? `done${runtimeTool?.duration ? ` in ${runtimeTool.duration}` : ""}`
-        : "running";
-      const detail = cleanTraceDetail(runtimeTool?.detail || task.detail || "", status, display.label);
-      return {
-        id: `runtime:${task.id || toolName}:${phase}`,
-        latestDetail: detail,
-        name: display.label,
-        purpose: detail,
-        rawId: display.hasMetadata ? undefined : toolName,
-        status,
-        tone: task.tone || task.status,
-      };
-    });
-  const historicalWorkers = overviewWorkers.map((worker) => {
-    const rawId = worker.tool_name || "";
-    const display = displayNameFromId(rawId, registry, "tools");
-    return {
-      id: `overview:${worker.id || worker.tool_name || worker.name || worker.updated_at || "worker"}`,
-      latestDetail: conciseActivityDetail(worker.latest_detail),
-      name: display.hasMetadata ? display.label : worker.name || display.label,
-      purpose: conciseActivityDetail(worker.purpose),
-      rawId: rawId && !display.hasMetadata ? rawId : undefined,
-      status: humanizeStatus(worker.status).toLowerCase(),
-      tone: worker.tone || worker.status,
-    };
-  });
-
-  const seen = new Set<string>();
-  return [...liveWorkers, ...runtimeWorkers, ...historicalWorkers].filter((worker) => {
-    const key = [
-      worker.rawId || worker.name,
-      normalizedTraceKey(worker.purpose || worker.latestDetail),
-      normalizedTraceKey(worker.status),
-    ].join(":");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 3);
-}
-
-function toneClasses(tone?: string): string {
-  const value = (tone || "").toLowerCase();
-  if (/blocked|error|fail/.test(value)) return "border-red-400/25 bg-red-400/10 text-red-100";
-  if (/done|ready|success/.test(value)) return "border-emerald-400/25 bg-emerald-400/10 text-emerald-100";
-  if (/active|working|running/.test(value)) return "border-sky-400/25 bg-sky-400/10 text-sky-100";
-  if (/waiting|pending|queued/.test(value)) return "border-amber-300/25 bg-amber-300/10 text-amber-100";
-  return "border-zinc-800 bg-zinc-900 text-zinc-400";
-}
-
 function quoteTakyonArg(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return '""';
@@ -1021,48 +474,12 @@ function friendlyError(message?: string | null): string {
   return text.split(/\n/)[0].slice(0, 140);
 }
 
-function gatedActionDetail(job: BusinessOverviewJob): string {
-  const kind = job.kind || "";
-  const updated = job.updated_at ? `Updated ${readableDate(job.updated_at)}` : "";
-  let gate = "Queued only as gated follow-up work; the CEO decides when state changes.";
-  if (kind === "product.deploy") {
-    gate = "Requires deploy target, domain/provider config, and live approval.";
-  } else if (kind === "vendor.stripe_setup") {
-    gate = "Requires live mode, Stripe credentials, products/prices, and webhook setup.";
-  } else if (kind === "product.api_route") {
-    gate = "Requires provider credentials, product auth, budget gates, and usage audit records.";
-  }
-  return [gate, updated].filter(Boolean).join(" · ");
-}
-
 function compactPath(path?: string): string {
   if (!path) return "";
   if (path.length <= 34) return path;
   const parts = path.split("/");
   if (parts.length <= 2) return path.slice(0, 31) + "...";
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
-}
-
-function researchOutputItems(overview?: BusinessOverview): BusinessOverviewResearchOutput[] {
-  const rawItems = [
-    ...((overview?.research_outputs || []) as BusinessOverviewResearchOutput[]),
-    ...((overview?.research?.outputs || []) as BusinessOverviewResearchOutput[]),
-  ];
-  const byPath = new Map<string, BusinessOverviewResearchOutput>();
-  for (const item of rawItems) {
-    const path = normalizeBusinessPath(item.path);
-    if (!path || byPath.has(path)) continue;
-    byPath.set(path, { ...item, path });
-  }
-  return [...byPath.values()].sort((a, b) => {
-    const aTime = typeof a.updated_at === "number" ? a.updated_at : Date.parse(String(a.updated_at || ""));
-    const bTime = typeof b.updated_at === "number" ? b.updated_at : Date.parse(String(b.updated_at || ""));
-    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
-  });
-}
-
-function normalizeBusinessPath(path?: string): string {
-  return (path || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
 function normalizeOpenableUrl(value?: string): string {
@@ -1101,51 +518,6 @@ function openUrlInNewTab(url: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-}
-
-function reserveTabForUserClick(): Window | null {
-  try {
-    return window.open("about:blank", "_blank", "noopener,noreferrer");
-  } catch {
-    return null;
-  }
-}
-
-function navigateReservedTab(tab: Window | null, url: string): boolean {
-  const target = normalizeOpenableUrl(url);
-  if (!target) throw new Error("No URL available.");
-  if (!tab || tab.closed) return false;
-  try {
-    tab.location.href = target;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const STATE_STATUSES = new Set([
-  "visible",
-  "available",
-  "previewable",
-  "ready",
-  "done",
-  "complete",
-  "completed",
-  "published",
-  "live",
-]);
-
-const STATE_PHRASE_REGEX =
-  /\b(is|are|was|were|has|have)\b[^.!?]*\b(available|ready|visible|live|published|complete|completed|done|created|generated|previewable)\b/i;
-
-function isActionableTask(
-  task: BusinessOverviewTask | BusinessOverviewJob,
-): boolean {
-  const status = (task.status || "").toLowerCase().trim();
-  if (status && STATE_STATUSES.has(status)) return false;
-  const text = `${task.label || ""} ${task.detail || ""}`.trim();
-  if (text && STATE_PHRASE_REGEX.test(text)) return false;
-  return true;
 }
 
 function loadCreateInTestModeDefault(): boolean {
@@ -1289,13 +661,6 @@ function mergeOutputs(current: Deliverable[], historical: Deliverable[]): Delive
   return [...byKey.values()].sort((a, b) => b.at - a.at).slice(0, 60);
 }
 
-function prettyTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 function connectionDot(state: ConnectionState): string {
   if (state === "open") return "bg-emerald-400";
   if (state === "connecting" || state === "idle" || state === "polling") return "bg-amber-400";
@@ -1339,15 +704,37 @@ function scopeName(scope: ScopeState): string {
   return currentName === scope.business ? `business:${scope.business}` : currentName;
 }
 
-function scopeDetail(scope: ScopeState): string {
-  if (!scope.business) return "account scope";
-  const mode = scope.current?.mode || scope.current?.status || scope.current?.state || "";
-  return mode ? `business:${scope.business} · ${mode}` : `business:${scope.business}`;
-}
-
 function businessModeLabel(item: BusinessSummary): string {
   const parts = [item.state || item.status, item.mode].filter(Boolean);
   return parts.length ? parts.join("/") : "business";
+}
+
+function prettyHost(url: string): string {
+  const text = (url || "").trim();
+  if (!text) return "";
+  return text.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
+function modeDotClass(item: BusinessSummary): "td-live" | "td-test" | "td-idle" {
+  const mode = (item.mode || "").toLowerCase();
+  if (mode === "live") return "td-live";
+  if (mode === "test") return "td-test";
+  return "td-idle";
+}
+
+// True when the business has a publicly reachable product (real structural
+// state, never a fabricated metric).
+function productIsLive(product?: BusinessOverviewProduct): boolean {
+  if (!product) return false;
+  const publishStatus = (product.publish_status || "").toLowerCase();
+  const status = (product.status || "").toLowerCase();
+  return (
+    publishStatus === "published" ||
+    publishStatus === "live" ||
+    status === "live" ||
+    status === "published" ||
+    !!normalizeOpenableUrl(product.public_url)
+  );
 }
 
 function normalizeBusinessLookup(value: string): string {
@@ -1416,7 +803,7 @@ export default function ChatPage() {
   const [state, setState] = useState<ConnectionState>("idle");
   const reconnectAttemptsRef = useRef(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [info, setInfo] = useState<SessionInfo>({});
+  const [, setInfo] = useState<SessionInfo>({});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
@@ -2192,20 +1579,6 @@ export default function ChatPage() {
     [appendSystem, executeTakyonSlash, state],
   );
 
-  const listBusinessFiles = useCallback(
-    async (path: string): Promise<BusinessOverviewFile[]> => {
-      if (!sessionId) return [];
-      const res = await gw.request<BusinessFilesResponse>(
-        "takyon.files.list",
-        { session_id: sessionId, path },
-        10_000,
-      );
-      setScopeState(normalizeScopeState(res));
-      return Array.isArray(res.files) ? res.files : [];
-    },
-    [gw, sessionId],
-  );
-
   const resolveBusinessMedia = useCallback(
     async (path: string): Promise<BusinessMediaResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
@@ -2357,84 +1730,99 @@ export default function ChatPage() {
       ? historicalOutputs.items
       : [];
 
+  const overviewForShell = scopeState.overview || {};
+  const productPublicUrl = customerWebsiteUrl({
+    business: scopeState.business,
+    product: overviewForShell.product || {},
+    website: overviewForShell.artifacts?.website || {},
+  });
+
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-black normal-case text-zinc-100 [font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
+    <div className="tk-dash flex h-full min-h-0 w-full flex-col overflow-hidden">
       <PluginSlot name="chat:top" />
 
       {inBusiness && rightOpen && (
         <button
-          aria-label="Close side panel"
+          aria-label="Close CEO panel"
           onClick={() => setRightOpen(false)}
-          className="fixed inset-0 z-[55] bg-black/70 backdrop-blur-sm lg:hidden"
+          className="fixed inset-0 z-[55] bg-[#1a1916]/35 backdrop-blur-sm lg:hidden"
           type="button"
         />
       )}
 
-      <div
-        className={cn(
-          "grid min-h-0 min-w-0 flex-1 bg-black",
-          inBusiness
-            ? "lg:grid-cols-[minmax(0,1fr)_minmax(320px,26vw)]"
-            : "lg:grid-cols-[minmax(0,1fr)]",
-        )}
-      >
-        <main className="flex min-h-0 min-w-0 flex-col bg-black">
-          <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-900 px-4 sm:px-6">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-zinc-100">
-                <span className={cn("h-2 w-2 rounded-full", connectionDot(state))} />
-                <div className="min-w-0">
-                  <div>Takyon</div>
-                  <div className="mt-0.5 truncate text-xs font-normal text-zinc-500">
-                    {STATE_LABEL[state]}
-                  </div>
-                </div>
-              </div>
-              <ScopeSwitcher
-                disabled={!canInteract}
-                onSelect={setTakyonScope}
-                scope={scopeState}
-              />
-            </div>
+      <div className={cn("td-app min-h-0 flex-1", !inBusiness && "td-app--global")}>
+        <BizSidebar
+          canInteract={canInteract}
+          onCreate={() => {
+            void setTakyonScope("");
+          }}
+          onSelect={setTakyonScope}
+          scope={scopeState}
+          state={state}
+        />
 
-            <div className="flex items-center gap-1.5">
-              {inBusiness && (
-                <IconButton
-                  label="Open CEO intercom"
-                  onClick={() => setRightOpen(true)}
-                  className="lg:hidden"
-                >
-                  <PanelRight className="h-4 w-4" />
-                </IconButton>
+        <main className="td-main">
+          <div className="td-topbar">
+            <div className="td-title">
+              <h1>{inBusiness ? scopeName(scopeState) : "Portfolio"}</h1>
+              {inBusiness ? (
+                <BusinessStatusPill scope={scopeState} />
+              ) : (
+                <span className="td-meta">account scope</span>
               )}
-              <HeaderLinkActionButton href={newChatHref} label="New chat">
-                <Plus className="h-4 w-4" />
-              </HeaderLinkActionButton>
-              <IconButton label="Reconnect chat" onClick={reconnect}>
-                <RefreshCw className="h-4 w-4" />
-              </IconButton>
+              {inBusiness && productPublicUrl && (
+                <span className="td-url">{prettyHost(productPublicUrl)}</span>
+              )}
             </div>
-          </header>
+            <div className="td-spacer" />
+            <span className="td-meta" title={STATE_LABEL[state]}>
+              <span
+                className={cn(
+                  "mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle",
+                  connectionDot(state),
+                )}
+              />
+              {STATE_LABEL[state]}
+            </span>
+            {inBusiness && (
+              <button
+                aria-label="Open CEO panel"
+                className="td-pill td-ghost lg:hidden"
+                onClick={() => setRightOpen(true)}
+                type="button"
+              >
+                <PanelRight className="h-3.5 w-3.5" /> CEO
+              </button>
+            )}
+            <a className="td-pill td-ghost" href={newChatHref}>
+              <Plus className="h-3.5 w-3.5" /> New chat
+            </a>
+            <button
+              aria-label="Reconnect"
+              className="td-pill td-ghost"
+              onClick={reconnect}
+              type="button"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Reconnect
+            </button>
+          </div>
 
           {inBusiness ? (
             <CompanyWorkspace
+              deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
               onCommand={runTakyonLine}
-              onListFiles={listBusinessFiles}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
+              productPublicUrl={productPublicUrl}
               scope={scopeState}
-              statusItems={statusItems}
-              tools={tools}
             />
           ) : (
             <GlobalLaunchpad
               error={error}
               onCreate={runTakyonLine}
               onEnterPendingBusiness={enterPendingBusiness}
-              onSelectBusiness={setTakyonScope}
               running={running}
-              scope={scopeState}
               state={state}
               statusItems={statusItems}
               tools={tools}
@@ -2442,24 +1830,23 @@ export default function ChatPage() {
           )}
         </main>
 
-        <aside
-          className={cn(
-            "min-h-0 overflow-hidden border-l border-zinc-900 bg-black",
-            inBusiness ? "lg:relative lg:z-auto lg:flex" : "hidden",
-            rightOpen
-              ? "fixed inset-y-0 right-0 z-[60] flex w-[min(92vw,390px)]"
-              : "hidden",
-          )}
-        >
-          {inBusiness ? (
+        {inBusiness && (
+          <aside
+            className={cn(
+              "td-rail flex-col",
+              rightOpen
+                ? "fixed inset-y-0 right-0 z-[60] flex w-[min(92vw,360px)]"
+                : "hidden lg:flex",
+            )}
+          >
             <IntercomPanel
               onClose={() => setRightOpen(false)}
+              running={running}
               scope={scopeState}
               sessionId={sessionId}
               showClose={rightOpen}
             >
               <Thread
-                compact
                 error={error}
                 messages={messages}
                 running={running}
@@ -2470,7 +1857,6 @@ export default function ChatPage() {
               >
                 <Composer
                   canAct={canAct}
-                  compact
                   disabled={!canInteract}
                   inputRef={inputRef}
                   isRunning={running}
@@ -2478,6 +1864,7 @@ export default function ChatPage() {
                   onKeyDown={onComposerKeyDown}
                   onSlashApply={applySlashCompletion}
                   onSubmit={onComposerSubmit}
+                  onWake={() => void runTakyonLine("/wake")}
                   slashIndex={slashIndex}
                   slashItems={slashItems}
                   setSlashIndex={setSlashIndex}
@@ -2485,25 +1872,8 @@ export default function ChatPage() {
                 />
               </Thread>
             </IntercomPanel>
-          ) : (
-            <DeliverablesPanel
-              cwd={info.cwd}
-              deliverables={deliverables}
-              historicalOutputs={scopedHistoricalOutputs}
-              onCommand={runTakyonLine}
-              onListFiles={listBusinessFiles}
-              onReadFile={readBusinessFile}
-              onResolveMedia={resolveBusinessMedia}
-              onResolveSitePreview={resolveBusinessSitePreview}
-              onClose={() => setRightOpen(false)}
-              scope={scopeState}
-              sessionId={sessionId}
-              showClose={rightOpen}
-              statusItems={statusItems}
-              tools={tools}
-            />
-          )}
-        </aside>
+          </aside>
+        )}
       </div>
 
       <PluginSlot name="chat:bottom" />
@@ -2511,13 +1881,134 @@ export default function ChatPage() {
   );
 }
 
+function BizSidebar({
+  canInteract,
+  onCreate,
+  onSelect,
+  scope,
+  state,
+}: {
+  canInteract: boolean;
+  onCreate: () => void;
+  onSelect: (business: string) => Promise<void>;
+  scope: ScopeState;
+  state: ConnectionState;
+}) {
+  const businesses = scope.businesses;
+  const ready = canUseConnection(state) && canInteract;
+  return (
+    <aside className="td-side">
+      <div className="td-brand">
+        <span className="td-mark">T</span>
+        <span className="td-name">Takyon</span>
+      </div>
+
+      <div className="min-h-0">
+        <div className="td-side-label">
+          <p className="td-eyebrow">Businesses</p>
+          <span className="td-meta">{businesses.length || ""}</span>
+        </div>
+        <div className="td-biz-list">
+          {businesses.length === 0 ? (
+            <p className="td-meta" style={{ padding: "4px 8px" }}>
+              No businesses yet.
+            </p>
+          ) : (
+            businesses.map((item) => {
+              const slug = item.slug || "";
+              const active = !!slug && slug === scope.business;
+              return (
+                <button
+                  className={cn("td-biz", active && "td-active")}
+                  disabled={!slug || !canUseConnection(state)}
+                  key={slug || item.name || "biz"}
+                  onClick={() => {
+                    if (slug) void onSelect(slug);
+                  }}
+                  type="button"
+                >
+                  <span className={cn("td-dot", modeDotClass(item))} />
+                  <span className="min-w-0">
+                    <span className="td-bname truncate">{item.name || slug}</span>
+                    <span className="td-sub">{businessModeLabel(item)}</span>
+                  </span>
+                  <span className="td-mrr td-defer-inline">—</span>
+                </button>
+              );
+            })
+          )}
+          <button
+            className="td-side-add"
+            disabled={!ready}
+            onClick={onCreate}
+            type="button"
+          >
+            <Plus className="h-4 w-4" />
+            New business
+          </button>
+        </div>
+      </div>
+
+      <div className="td-side-foot">
+        <div className="td-card td-portfolio">
+          <p className="td-eyebrow">Portfolio MRR</p>
+          <div className="td-defer">
+            <span className="td-dash">—</span>
+          </div>
+          <span className="td-defer-note">
+            <span className="td-dotline" />
+            not wired yet
+          </span>
+        </div>
+        <button
+          className="td-acct"
+          onClick={() => void onSelect("")}
+          style={{ width: "100%", textAlign: "left" }}
+          type="button"
+        >
+          <span className="td-av">T</span>
+          <span className="min-w-0">
+            <span className="td-who" style={{ display: "block" }}>
+              Operator
+            </span>
+            <span className="td-role" style={{ display: "block" }}>
+              account · global scope
+            </span>
+          </span>
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function BusinessStatusPill({ scope }: { scope: ScopeState }) {
+  const product = scope.overview?.product;
+  if (productIsLive(product)) {
+    return (
+      <span className="td-pill td-live">
+        <span className="td-pdot" />
+        Live
+      </span>
+    );
+  }
+  const mode = (scope.current?.mode || scope.overview?.mode || "").toLowerCase();
+  const status = (product?.status || "").toLowerCase();
+  const label =
+    mode === "test"
+      ? "Test mode"
+      : status === "building" || status === "in_progress"
+        ? "Building"
+        : status
+          ? status.replace(/_/g, " ")
+          : "Setup";
+  return <span className="td-pill td-soft">{label}</span>;
+}
+
 function GlobalLaunchpad({
   error,
   onCreate,
   onEnterPendingBusiness,
-  onSelectBusiness,
   running,
-  scope,
   state,
   statusItems,
   tools,
@@ -2525,9 +2016,7 @@ function GlobalLaunchpad({
   error: string | null;
   onCreate: (line: string) => Promise<void>;
   onEnterPendingBusiness: (business: string, mode: "test" | "live", goal?: string) => void;
-  onSelectBusiness: (business: string) => Promise<void>;
   running: boolean;
-  scope: ScopeState;
   state: ConnectionState;
   statusItems: string[];
   tools: ToolEntry[];
@@ -2537,7 +2026,6 @@ function GlobalLaunchpad({
   const [mode, setMode] = useState<"test" | "live">("test");
   const [budget, setBudget] = useState("25");
   const [schedule, setSchedule] = useState("every 6h");
-  const recentBusinesses = scope.businesses.slice(0, 6);
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
   const latestStatus = activeTool?.name || statusItems[0] || "";
   const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
@@ -2563,57 +2051,58 @@ function GlobalLaunchpad({
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto bg-black px-4 py-5 sm:px-6">
-      <div className="mx-auto grid max-w-5xl gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
-        <form className="rounded-2xl border border-zinc-900 bg-[#050505] p-4" onSubmit={submit}>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
-              <Rocket className="h-4 w-4 text-zinc-500" />
-              New company
-            </div>
-            <span className={cn("h-2 w-2 rounded-full", running ? "animate-pulse bg-sky-300" : "bg-emerald-400")} />
+    <div className="td-scroll">
+      <div className="mx-auto grid w-full max-w-xl gap-5">
+        <form className="td-card" onSubmit={submit}>
+          <div className="td-card-h">
+            <h3>New business</h3>
+            <span className="td-meta">{STATE_LABEL[state]}</span>
           </div>
           {displayError && (
-            <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100">
+            <p className="td-meta" style={{ color: "var(--td-accent-ink)", marginBottom: 12 }}>
               {displayError}
-            </div>
+            </p>
           )}
           {running && (
-            <div className="mt-3 rounded-lg border border-sky-300/20 bg-sky-300/5 px-3 py-2 text-xs text-sky-100">
-              {latestStatus || "Working"}
-            </div>
+            <p className="td-meta" style={{ color: "var(--td-up)", marginBottom: 12 }}>
+              {latestStatus || "Working…"}
+            </p>
           )}
 
-          <div className="mt-4 grid gap-3">
+          <div className="grid gap-3">
             <label className="grid gap-1.5">
-              <span className="text-xs text-zinc-500">Name</span>
+              <span className="td-meta">Name</span>
               <input
-                className="h-10 rounded-lg border border-zinc-800 bg-black px-3 text-sm text-zinc-100 outline-none transition-colors placeholder:text-zinc-700 focus:border-zinc-600"
+                className="h-10 rounded-[10px] border border-[var(--td-border)] bg-[var(--td-surface)] px-3 text-[14px] text-[var(--td-fg)] outline-none transition-colors placeholder:text-[var(--td-meta)] focus:border-[var(--td-accent)]"
                 onChange={(event) => setName(event.target.value)}
                 placeholder="latexflow"
                 value={name}
               />
             </label>
             <label className="grid gap-1.5">
-              <span className="text-xs text-zinc-500">Goal</span>
+              <span className="td-meta">Goal</span>
               <textarea
-                className="min-h-28 resize-none rounded-lg border border-zinc-800 bg-black px-3 py-2 text-sm leading-6 text-zinc-100 outline-none transition-colors placeholder:text-zinc-700 focus:border-zinc-600"
+                className="min-h-28 resize-none rounded-[10px] border border-[var(--td-border)] bg-[var(--td-surface)] px-3 py-2 text-[14px] leading-6 text-[var(--td-fg)] outline-none transition-colors placeholder:text-[var(--td-meta)] focus:border-[var(--td-accent)]"
                 onChange={(event) => setGoal(event.target.value)}
-                placeholder="Build a business around..."
+                placeholder="Build a business around…"
                 value={goal}
               />
             </label>
           </div>
 
-          <div className="mt-4 grid gap-2 sm:grid-cols-[1.2fr_0.8fr_1fr]">
-            <div className="rounded-lg border border-zinc-900 bg-black p-2">
-              <div className="mb-2 text-xs text-zinc-500">Mode</div>
-              <div className="grid grid-cols-2 gap-1 rounded-md bg-zinc-950 p-1">
+          <div className="mt-3 grid gap-3 sm:grid-cols-[1.2fr_0.8fr_1fr]">
+            <div>
+              <div className="td-meta" style={{ marginBottom: 6 }}>
+                Mode
+              </div>
+              <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-[var(--td-border)] p-1">
                 {(["test", "live"] as const).map((option) => (
                   <button
                     className={cn(
-                      "h-8 rounded px-2 text-xs font-medium transition-colors",
-                      mode === option ? "bg-zinc-100 text-black" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-100",
+                      "h-8 rounded-md text-xs font-medium transition-colors",
+                      mode === option
+                        ? "bg-[var(--td-fg)] text-[var(--td-bg)]"
+                        : "text-[var(--td-muted)] hover:bg-[var(--td-fg-soft)]",
                     )}
                     key={option}
                     onClick={() => setMode(option)}
@@ -2624,87 +2113,32 @@ function GlobalLaunchpad({
                 ))}
               </div>
             </div>
-            <label className="grid gap-2 rounded-lg border border-zinc-900 bg-black p-2">
-              <span className="text-xs text-zinc-500">Budget</span>
+            <label className="grid gap-1.5">
+              <span className="td-meta">Budget</span>
               <input
-                className="h-8 min-w-0 rounded-md border border-zinc-900 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-zinc-700"
+                className="h-8 min-w-0 rounded-md border border-[var(--td-border)] bg-[var(--td-surface)] px-2 text-xs text-[var(--td-fg)] outline-none focus:border-[var(--td-accent)]"
                 inputMode="decimal"
                 onChange={(event) => setBudget(event.target.value)}
                 value={budget}
               />
             </label>
-            <label className="grid gap-2 rounded-lg border border-zinc-900 bg-black p-2">
-              <span className="text-xs text-zinc-500">Wake</span>
+            <label className="grid gap-1.5">
+              <span className="td-meta">Wake</span>
               <input
-                className="h-8 min-w-0 rounded-md border border-zinc-900 bg-zinc-950 px-2 text-xs text-zinc-100 outline-none focus:border-zinc-700"
+                className="h-8 min-w-0 rounded-md border border-[var(--td-border)] bg-[var(--td-surface)] px-2 text-xs text-[var(--td-fg)] outline-none focus:border-[var(--td-accent)]"
                 onChange={(event) => setSchedule(event.target.value)}
                 value={schedule}
               />
             </label>
           </div>
 
-          <div className="mt-4 flex items-center justify-between gap-3">
-            <div className="flex min-w-0 gap-2 text-[0.68rem] text-zinc-600">
-              <span className="rounded-full border border-zinc-900 px-2 py-1">research first</span>
-              <span className="rounded-full border border-zinc-900 px-2 py-1">{STATE_LABEL[state]}</span>
-            </div>
-            <button
-              className={cn(
-                "inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors",
-                canCreate ? "bg-zinc-100 text-black hover:bg-white" : "bg-zinc-900 text-zinc-600",
-              )}
-              disabled={!canCreate}
-              type="submit"
-            >
-              <Rocket className="h-4 w-4" />
-              Create
+          <div className="mt-4 flex items-center justify-end">
+            <button className="td-btn td-btn-primary" disabled={!canCreate} type="submit">
+              Create business
+              <ArrowUp className="td-ar h-3.5 w-3.5" style={{ transform: "rotate(45deg)" }} />
             </button>
           </div>
         </form>
-
-        <section className="rounded-2xl border border-zinc-900 bg-[#050505] p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
-              <Building2 className="h-4 w-4 text-zinc-500" />
-              Companies
-            </div>
-            <span className="rounded-full border border-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-600">
-              {formatCount(scope.businesses.length)}
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2">
-            {recentBusinesses.length === 0 ? (
-              <EmptyPanelLine text="No companies yet." />
-            ) : (
-              recentBusinesses.map((item) => {
-                const slug = item.slug || "";
-                return (
-                  <button
-                    className="group min-w-0 rounded-xl border border-zinc-900 bg-black px-3 py-2.5 text-left transition-colors hover:border-zinc-800 hover:bg-zinc-950"
-                    disabled={!slug || !canUseConnection(state)}
-                    key={slug || item.name}
-                    onClick={() => {
-                      if (slug) void onSelectBusiness(slug);
-                    }}
-                    type="button"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-zinc-100">
-                          {item.name || slug}
-                        </div>
-                        <div className="mt-0.5 truncate text-xs text-zinc-600">
-                          business:{slug} · {businessModeLabel(item)}
-                        </div>
-                      </div>
-                      <ChevronRight className="h-4 w-4 shrink-0 text-zinc-700 transition-colors group-hover:text-zinc-300" />
-                    </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </section>
       </div>
     </div>
   );
@@ -2712,7 +2146,6 @@ function GlobalLaunchpad({
 
 function Thread({
   children,
-  compact = false,
   error,
   messages,
   running,
@@ -2722,7 +2155,6 @@ function Thread({
   tools,
 }: {
   children: ReactNode;
-  compact?: boolean;
   error: string | null;
   messages: ChatMessage[];
   running: boolean;
@@ -2731,59 +2163,67 @@ function Thread({
   statusItems?: string[];
   tools?: ToolEntry[];
 }) {
+  const displayError = friendlyError(error);
+  const activeTool = (tools || []).slice().reverse().find((tool) => tool.status === "running");
+  const workingLabel =
+    activeTool?.preview ||
+    activeTool?.context ||
+    (activeTool ? naturalToolLabel(activeTool) : "") ||
+    (statusItems && statusItems[0]) ||
+    "Thinking…";
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div
-        ref={scrollerRef}
-        className={cn(
-          "min-h-0 flex-1 overflow-y-auto",
-          compact ? "px-3 py-3" : "px-4 py-6 sm:px-6",
-        )}
-      >
-        <div
-          className={cn(
-            "mx-auto flex min-h-full w-full flex-col",
-            compact ? "max-w-none" : "max-w-3xl",
-          )}
-        >
-          {error && <ErrorBanner message={error} />}
-          {messages.length === 0 ? (
-            <ThreadWelcome compact={compact} scope={scope} />
-          ) : (
-            <div className={cn(compact ? "space-y-4 pb-4" : "space-y-6 pb-6")}>
-              {messages.map((message) => (
-                <Message compact={compact} key={message.id} message={message} />
-              ))}
-              {running && <LoadingIndicator statusItems={statusItems} tools={tools} />}
+    <>
+      <div ref={scrollerRef} className="td-thread">
+        {displayError && (
+          <div className="td-msg td-ceo">
+            <div className="td-mrole">CEO</div>
+            <div
+              className="td-mbody"
+              style={{ borderColor: "var(--td-accent)", color: "var(--td-accent-ink)" }}
+            >
+              {displayError}
             </div>
-          )}
-        </div>
-      </div>
-      <div
-        className={cn(
-          "mx-auto w-full",
-          compact ? "max-w-none px-3 pb-3" : "max-w-3xl px-4 pb-4 sm:px-6 sm:pb-6",
+          </div>
         )}
-      >
-        {children}
+        {messages.length === 0 && !displayError && <ThreadWelcome scope={scope} />}
+        {messages.map((message) => (
+          <Message key={message.id} message={message} />
+        ))}
+        {running && (
+          <div className="td-msg td-ceo">
+            <div className="td-mrole">CEO</div>
+            <div className="td-mbody" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                aria-hidden
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: "var(--td-up)",
+                  animation: "td-pulse 1.6s ease-in-out infinite",
+                  flexShrink: 0,
+                }}
+              />
+              <span className="truncate">{workingLabel}</span>
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+      {children}
+    </>
   );
 }
 
-function ThreadWelcome({ compact = false, scope }: { compact?: boolean; scope: ScopeState }) {
+function ThreadWelcome({ scope }: { scope: ScopeState }) {
   const inBusiness = !!scope.business;
+  const name = scope.current?.name || scope.business;
   return (
-    <div className={cn("flex flex-1 items-center justify-center text-center", compact ? "py-5" : "py-10")}>
-      <div>
-        <h2 className={cn("font-medium text-zinc-100", compact ? "text-sm" : "text-xl")}>
-          What should Takyon work on?
-        </h2>
-        <p className={cn("mt-2 text-zinc-500", compact ? "text-xs" : "text-sm")}>
-          {inBusiness
-            ? `Operating inside business:${scope.business}.`
-            : "Global scope. Create a business or choose one above."}
-        </p>
+    <div className="td-msg td-ceo">
+      <div className="td-mrole">CEO</div>
+      <div className="td-mbody">
+        {inBusiness
+          ? `I'm running ${name}. Ask me to research, build, ship, or grow — or open a deliverable on the left.`
+          : "Pick a business on the left, or create one to get started."}
       </div>
     </div>
   );
@@ -2791,7 +2231,6 @@ function ThreadWelcome({ compact = false, scope }: { compact?: boolean; scope: S
 
 function Composer({
   canAct,
-  compact = false,
   disabled = false,
   inputRef,
   isRunning,
@@ -2799,13 +2238,13 @@ function Composer({
   onKeyDown,
   onSlashApply,
   onSubmit,
+  onWake,
   setSlashIndex,
   slashIndex,
   slashItems,
   value,
 }: {
   canAct: boolean;
-  compact?: boolean;
   disabled?: boolean;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   isRunning: boolean;
@@ -2813,6 +2252,7 @@ function Composer({
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSlashApply: (item: SlashCompletionItem) => void;
   onSubmit: (event: FormEvent) => void;
+  onWake: () => void;
   setSlashIndex: (value: number) => void;
   slashIndex: number;
   slashItems: SlashCompletionItem[];
@@ -2821,7 +2261,7 @@ function Composer({
   const hasInput = !!value.trim();
 
   return (
-    <form className="relative pt-2" onSubmit={onSubmit}>
+    <form className="td-composer" onSubmit={onSubmit}>
       {slashItems.length > 0 && (
         <SlashPalette
           activeIndex={slashIndex}
@@ -2830,49 +2270,41 @@ function Composer({
           onHover={setSlashIndex}
         />
       )}
-      <div
-        className={cn(
-          "flex items-end gap-2 border border-zinc-800 bg-zinc-950 px-3 py-2 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] transition-colors focus-within:border-zinc-600",
-          compact ? "rounded-2xl" : "rounded-3xl",
-        )}
-      >
+      <div className="td-box">
         <textarea
           ref={inputRef}
           aria-label="Message input"
           autoFocus
-          className={cn(
-            "flex-1 resize-none bg-transparent py-2 leading-6 text-zinc-100 outline-none placeholder:text-zinc-600",
-            compact ? "max-h-28 min-h-9 text-xs" : "max-h-36 min-h-10 text-sm",
-          )}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
           disabled={disabled}
           placeholder={
             disabled
-              ? "Backend disconnected - reconnect to create or wake"
+              ? "Disconnected — reconnect to chat"
               : isRunning
-                ? "Add an interjection..."
-                : "Ask Takyon anything or type /"
+                ? "Add an interjection…"
+                : "Message the CEO…  ( / for commands )"
           }
           rows={1}
           value={value}
         />
         <button
           aria-label={isRunning && !hasInput ? "Stop generating" : "Send message"}
-          className={cn(
-            "flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors",
-            canAct
-              ? "bg-zinc-100 text-black hover:bg-white"
-              : "bg-zinc-800 text-zinc-500",
-          )}
+          className="td-send"
           disabled={!canAct}
           type="submit"
         >
           {isRunning && !hasInput ? (
-            <Square className="h-3.5 w-3.5 fill-current" />
+            <Square className="h-3 w-3 fill-current" />
           ) : (
             <ArrowUp className="h-4 w-4" />
           )}
+        </button>
+      </div>
+      <div className="td-wake">
+        <span className="td-meta">{isRunning ? "CEO is working" : "CEO is idle"}</span>
+        <button disabled={isRunning} onClick={onWake} type="button">
+          Wake now
         </button>
       </div>
     </form>
@@ -2891,31 +2323,29 @@ function SlashPalette({
   onHover: (index: number) => void;
 }) {
   return (
-    <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/98 p-1 shadow-2xl shadow-black/70 backdrop-blur">
+    <div
+      className="absolute inset-x-3 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-[var(--td-border)] bg-[var(--td-surface)] p-1"
+      style={{ boxShadow: "0 14px 30px -14px rgba(26,25,22,.4)" }}
+    >
       <div className="max-h-72 overflow-y-auto">
         {items.map((item, index) => (
           <button
             className={cn(
-              "flex w-full items-start gap-3 rounded-xl px-3 py-2 text-left transition-colors",
-              index === activeIndex ? "bg-zinc-800 text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100",
+              "flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left transition-colors",
+              index === activeIndex
+                ? "bg-[var(--td-surface-2)]"
+                : "hover:bg-[var(--td-fg-soft)]",
             )}
             key={`${item.text}-${index}`}
             onClick={() => onApply(item)}
             onMouseEnter={() => onHover(index)}
             type="button"
           >
-            <span className="w-28 shrink-0 font-mono text-sm text-zinc-100">
+            <span className="w-28 shrink-0 font-mono text-[13px] text-[var(--td-fg)]">
               {item.display || item.text}
             </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs text-zinc-500">
-                {item.description || item.meta || "Takyon command"}
-              </span>
-              {item.meta && item.description && (
-                <span className="mt-0.5 block truncate text-[0.68rem] uppercase tracking-[0.12em] text-zinc-600">
-                  {item.meta}
-                </span>
-              )}
+            <span className="block min-w-0 flex-1 truncate text-xs text-[var(--td-muted)]">
+              {item.description || item.meta || "Takyon command"}
             </span>
           </button>
         ))}
@@ -2924,33 +2354,32 @@ function SlashPalette({
   );
 }
 
-function Message({ compact = false, message }: { compact?: boolean; message: ChatMessage }) {
+function Message({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
 
   if (isSystem) {
     return (
-      <div className="mx-auto w-full max-w-3xl whitespace-pre-wrap rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-xs leading-5 text-zinc-400">
-        {message.content}
+      <div className="td-msg td-ceo">
+        <div className="td-mrole">system</div>
+        <div
+          className="td-mbody"
+          style={{ whiteSpace: "pre-wrap", fontFamily: "var(--td-font-mono)", fontSize: 12 }}
+        >
+          {message.content}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
-      <div
-        className={cn(
-          "break-words leading-6",
-          compact ? "max-w-[92%] text-xs" : "max-w-[86%] text-sm",
-          isUser
-            ? "whitespace-pre-wrap rounded-3xl bg-zinc-800 px-4 py-2.5 text-zinc-50"
-            : "w-full max-w-none text-zinc-100",
-        )}
-      >
+    <div className={cn("td-msg", isUser ? "td-you" : "td-ceo")}>
+      <div className="td-mrole">{isUser ? "You" : "CEO"}</div>
+      <div className="td-mbody">
         {isUser ? (
           message.content
         ) : (
-          <div className="[&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-zinc-900 [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-zinc-950">
+          <div className="[&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface)] [&_pre]:p-2">
             <Markdown
               content={message.content}
               streaming={message.status === "streaming"}
@@ -2958,67 +2387,16 @@ function Message({ compact = false, message }: { compact?: boolean; message: Cha
           </div>
         )}
         {message.status === "interrupted" && (
-          <div className="mt-2 text-xs text-zinc-500">Interrupted</div>
+          <div className="td-meta" style={{ marginTop: 6 }}>
+            Interrupted
+          </div>
         )}
         {message.status === "error" && (
-          <div className="mt-2 text-xs text-red-400">Error</div>
+          <div className="td-meta" style={{ marginTop: 6, color: "var(--td-accent-ink)" }}>
+            Error
+          </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function LoadingIndicator({
-  statusItems = [],
-  tools = [],
-}: {
-  statusItems?: string[];
-  tools?: ToolEntry[];
-}) {
-  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const latest = activeTool?.preview || activeTool?.context || activeTool?.name || statusItems[0] || "CEO is working";
-  const stages = activeTool
-    ? ["Reading", "Editing", "Checking", "Saving"]
-    : ["Researching", "Planning", "Writing", "Recording"];
-  return (
-    <div className="rounded-2xl border border-zinc-900 bg-zinc-950 px-3 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-sky-300" />
-          <div className="min-w-0 truncate text-sm text-zinc-200">{latest}</div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.3s]" />
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:-0.15s]" />
-          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" />
-        </div>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        {stages.map((stage, index) => (
-          <div
-            className={cn(
-              "rounded-lg border px-2 py-1.5 text-center text-[0.68rem]",
-              index === 0
-                ? "border-sky-300/30 bg-sky-300/10 text-sky-100"
-                : "border-zinc-900 bg-black text-zinc-600",
-            )}
-            key={stage}
-          >
-            {stage}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  const display = friendlyError(message);
-  if (!display) return null;
-  return (
-    <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-300/25 bg-amber-300/5 px-3 py-2 text-sm text-amber-100">
-      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-      <span className="min-w-0 whitespace-pre-wrap">{display}</span>
     </div>
   );
 }
@@ -3026,30 +2404,45 @@ function ErrorBanner({ message }: { message: string }) {
 function IntercomPanel({
   children,
   onClose,
+  running,
   scope,
   sessionId,
   showClose,
 }: {
   children: ReactNode;
   onClose: () => void;
+  running: boolean;
   scope: ScopeState;
   sessionId: string | null;
   showClose: boolean;
 }) {
   return (
-    <div className="flex min-h-0 w-full flex-col bg-black text-zinc-100">
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4">
-        <div className="min-w-0">
-          <div className="text-sm font-medium">CEO intercom</div>
-          <div className="mt-0.5 truncate text-xs text-zinc-600">
-            {scopeDetail(scope)}
-            {sessionId ? ` · session ${sessionId}` : ""}
-          </div>
-        </div>
+    <div className="flex h-full min-h-0 w-full flex-col bg-[var(--td-surface)]">
+      <header className="td-rail-head">
+        <span className="td-av">C</span>
+        <span className="min-w-0">
+          <span className="td-t" style={{ display: "block" }}>
+            CEO
+          </span>
+          <span className="td-meta truncate" style={{ display: "block" }}>
+            {scope.current?.name || scope.business}
+            {sessionId ? ` · ${sessionId.slice(0, 8)}` : ""}
+          </span>
+        </span>
+        <span className={cn("td-s", running ? "td-working" : "td-sleep")}>
+          <span className="td-d" />
+          {running ? "working" : "idle"}
+        </span>
         {showClose && (
-          <IconButton label="Close CEO intercom" onClick={onClose}>
+          <button
+            aria-label="Close CEO panel"
+            className="td-linkish lg:hidden"
+            onClick={onClose}
+            style={{ marginLeft: 4 }}
+            type="button"
+          >
             <X className="h-4 w-4" />
-          </IconButton>
+          </button>
         )}
       </header>
       {children}
@@ -3057,260 +2450,58 @@ function IntercomPanel({
   );
 }
 
-function CompanyWorkspace({
-  onCommand,
-  onListFiles,
-  onReadFile,
-  onResolveMedia,
-  onResolveSitePreview,
-  scope,
-  statusItems,
-  tools,
-}: {
-  onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  scope: ScopeState;
-  statusItems: string[];
-  tools: ToolEntry[];
-}) {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
-      <CompanyStatusHero
-        onCommand={onCommand}
-        scope={scope}
-        statusItems={statusItems}
-        tools={tools}
-      />
+const DELIVERABLE_KIND_LABEL: Record<Deliverable["kind"], string> = {
+  deploy: "Deploy",
+  diff: "Code",
+  file: "File",
+  image: "Image",
+  receipt: "Receipt",
+  report: "Report",
+  tool: "Action",
+  video: "Video",
+};
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <CompanyOverview
-          onCommand={onCommand}
-          onListFiles={onListFiles}
-          onReadFile={onReadFile}
-          onResolveMedia={onResolveMedia}
-          onResolveSitePreview={onResolveSitePreview}
-          scope={scope}
-          statusItems={statusItems}
-          tools={tools}
-        />
-      </div>
-    </div>
-  );
-}
+type DeliverableAction = { type: "open"; url: string } | { type: "preview" } | null;
 
-function CompanyStatusHero({
-  onCommand,
-  scope,
-  statusItems,
-  tools,
-}: {
-  onCommand: (line: string) => void;
-  scope: ScopeState;
-  statusItems: string[];
-  tools: ToolEntry[];
-}) {
-  const overview = scope.overview || {};
-  const registry = overview.registry;
-  const cron = (overview.cron || []).filter((job) => job.enabled !== false);
-  const activeTask = (overview.tasks || []).find((task) =>
-    /running|working|active|creating/i.test(`${task.status || ""} ${task.tone || ""}`),
-  );
-  const nextWake = cron.find((job) => job.next_run)?.next_run;
-  const activeTool = tools.slice().reverse().find((t) => t.status === "running");
-  const lastCompleted = tools
-    .slice()
-    .reverse()
-    .find((t) => t.status === "done" || t.status === "error");
-  const liveStatus = statusItems[0];
-
-  let headline: string;
-  let tone: "active" | "idle" | "sleep";
-  if (activeTool) {
-    headline = `Working — ${naturalToolLabel(activeTool, registry)}`;
-    tone = "active";
-  } else if (activeTask) {
-    headline = taskLabel(activeTask, registry);
-    tone = "active";
-  } else if (liveStatus) {
-    headline = liveStatus;
-    tone = "active";
-  } else if (nextWake) {
-    headline = `CEO sleeps until ${readableDate(nextWake)}`;
-    tone = "sleep";
-  } else {
-    headline = "CEO is idle";
-    tone = "idle";
+function deliverableActionFor(item: Deliverable): DeliverableAction {
+  if (item.kind === "deploy" || item.kind === "report") {
+    const url = normalizeOpenableUrl(item.detail);
+    if (url) return { type: "open", url };
   }
-
-  const sub = activeTool
-    ? toolDetail(activeTool, registry)
-    : activeTask
-      ? taskDetail(activeTask, registry)
-    : lastCompleted
-      ? `Last: ${naturalToolLabel(lastCompleted, registry)}${
-          lastCompleted.completedAt
-            ? ` · ${relativeTime(lastCompleted.completedAt)}`
-            : ""
-        }`
-      : "No tool calls yet this session.";
-
-  return (
-    <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-900 px-4 py-3">
-      <div className="min-w-0">
-        <div className="text-xs uppercase tracking-[0.16em] text-zinc-500">
-          Company
-        </div>
-        <div className="mt-1 truncate text-lg font-semibold text-zinc-100">
-          {scope.current?.name || scope.business}
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-          <span
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5",
-              tone === "active" && "border-sky-300/30 bg-sky-300/10 text-sky-100",
-              tone === "sleep" && "border-zinc-700 bg-zinc-900 text-zinc-300",
-              tone === "idle" && "border-amber-300/30 bg-amber-300/10 text-amber-100",
-            )}
-          >
-            {tone === "active" && (
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-300" />
-            )}
-            {headline}
-          </span>
-          <span className="truncate text-zinc-500">{sub}</span>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <button
-          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-900 transition-colors hover:bg-white disabled:opacity-60"
-          disabled={Boolean(activeTool || activeTask)}
-          onClick={() => onCommand("/wake")}
-          type="button"
-        >
-          <Play className="h-3.5 w-3.5" />
-          Wake CEO
-        </button>
-      </div>
-    </div>
-  );
+  if (item.path && item.path.trim()) return { type: "preview" };
+  const url = normalizeOpenableUrl(item.detail);
+  if (url) return { type: "open", url };
+  return null;
 }
 
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 0) return "just now";
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
-
-function CompanyOverview({
+function CompanyWorkspace({
+  deliverables,
   onCommand,
-  onListFiles,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
+  productPublicUrl,
   scope,
-  statusItems,
-  tools,
 }: {
+  deliverables: Deliverable[];
   onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  productPublicUrl: string;
   scope: ScopeState;
-  statusItems: string[];
-  tools: ToolEntry[];
 }) {
   const overview = scope.overview || {};
   const product = overview.product || {};
-  const artifacts = overview.artifacts || {};
-  const website = artifacts.website || {};
-  const tasks = overview.tasks || [];
-  const registry = overview.registry;
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!tools.some((tool) => tool.status === "running")) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [tools]);
-  const previewPath = website.path || website.source_path || product.source_path || "product/site";
-  const publicSiteUrl = customerWebsiteUrl({
-    business: scope.business,
-    product,
-    website,
-  });
-  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const latestActivity: Array<ActivityTraceItem | null> = [
-    ...(activeTool && !isWorkerTool(activeTool, registry) ? [activityFromTool(activeTool, registry, now)] : []),
-    ...tools
-      .slice()
-      .reverse()
-      .filter((tool) => tool.id !== activeTool?.id && !isWorkerTool(tool, registry))
-      .slice(0, 3)
-      .map((tool) => activityFromTool(tool, registry, now)),
-    ...statusItems.slice(0, 3).map((item) => ({
-      id: `status:${item}`,
-      label: "Live update",
-      detail: item,
-      status: "working",
-      tone: "active",
-    })),
-    ...tasks.filter((task) => isActionableTask(task) && !isWorkerTask(task, registry)).slice(0, 6).map((task) => activityFromTask(task, registry)),
-  ];
-  const visibleActivity = compactActivityItems(latestActivity).slice(0, 8);
-  const workers = workerItems(tools, overview.workers || [], overview.tasks || [], registry, now);
-  const isBusinessBusy = Boolean(activeTool)
-    || tasks.some((task) =>
-      /(running|working|active|queued|waiting|preparing)/i.test(
-        `${task?.status || ""} ${task?.tone || ""}`,
-      ))
-    || workers.some((worker) =>
-      /(running|working|active|queued|waiting|preparing)/i.test(
-        `${worker?.status || ""} ${worker?.tone || ""}`,
-      ));
-  const canonicalRootCards = [
-    {
-      root: "research",
-      label: "Research",
-      icon: <Search className="h-4 w-4" />,
-      empty: "No research files visible yet.",
-    },
-    {
-      root: "product",
-      label: "Product",
-      icon: <Globe2 className="h-4 w-4" />,
-      empty: "No product files visible yet.",
-      primary: publicSiteUrl || website.path ? (
-        <ProductPreviewHero
-          onResolveSitePreview={onResolveSitePreview}
-          previewPath={previewPath}
-          publicSiteUrl={publicSiteUrl}
-          websitePath={website.path}
-        />
-      ) : undefined,
-    },
-    {
-      root: "distribution",
-      label: "Distribution",
-      icon: <MessageCircle className="h-4 w-4" />,
-      empty: "No distribution files visible yet.",
-    },
-    {
-      root: "metrics",
-      label: "Metrics",
-      icon: <Activity className="h-4 w-4" />,
-      empty: "No metrics files visible yet.",
-    },
-  ];
+  const website = overview.artifacts?.website || {};
+  const name = scope.current?.name || scope.business;
+  const publicUrl =
+    productPublicUrl || customerWebsiteUrl({ business: scope.business, product, website });
+  const live = productIsLive(product) || !!publicUrl;
+  const previewPath =
+    website.path || website.source_path || product.source_path || "product/site";
+  const latest = deliverables[0];
+
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -3333,2039 +2524,301 @@ function CompanyOverview({
       setViewer({ loading: true, path, title });
       if (mediaKindForPath(path)) {
         void onResolveMedia(path)
-          .then((media) => setViewer({ loading: false, media, path: media.path || path, title }))
-          .catch((err) => setViewer({
+          .then((media) =>
+            setViewer({ loading: false, media, path: media.path || path, title }),
+          )
+          .catch((err) =>
+            setViewer({
+              error: friendlyError(err instanceof Error ? err.message : String(err)),
+              loading: false,
+              path,
+              title,
+            }),
+          );
+        return;
+      }
+      void onReadFile(path)
+        .then((res) =>
+          setViewer({
+            content: res.content || "",
+            loading: false,
+            path: res.path || path,
+            title,
+            truncated: Boolean(res.truncated),
+          }),
+        )
+        .catch((err) =>
+          setViewer({
             error: friendlyError(err instanceof Error ? err.message : String(err)),
             loading: false,
             path,
             title,
-          }));
-        return;
-      }
-      void onReadFile(path)
-        .then((res) => setViewer({
-          content: res.content || "",
-          loading: false,
-          path: res.path || path,
-          title,
-          truncated: Boolean(res.truncated),
-        }))
-        .catch((err) => setViewer({
-          error: friendlyError(err instanceof Error ? err.message : String(err)),
-          loading: false,
-          path,
-          title,
-        }));
+          }),
+        );
     },
     [onReadFile, onResolveMedia],
   );
-  const hasViewer = Boolean(viewer);
-  const showAside = Boolean(viewer || workers.length > 0 || visibleActivity.length > 0);
-
-  const workspaceColumn = (
-    <div className="grid content-start gap-3">
-      <section className="grid gap-3">
-        {canonicalRootCards.map((card) => (
-          <SourceCard
-            icon={card.icon}
-            key={card.root}
-            label={card.label}
-            onOpenDoc={openDocument}
-            primary={card.primary}
-            status=""
-            tone="neutral"
-          >
-            <BusinessFileBrowser
-              autoRefreshIntervalMs={isBusinessBusy ? 2500 : 0}
-              initialFiles={EMPTY_BUSINESS_FILES}
-              initialPath={card.root}
-              onCommand={onCommand}
-              onListFiles={onListFiles}
-              onReadFile={onReadFile}
-              onResolveMedia={onResolveMedia}
-            />
-          </SourceCard>
-        ))}
-      </section>
-    </div>
-  );
-
-  const activityContents = (
-      <div className="mt-3 grid gap-2">
-        {visibleActivity.map((item, index) => (
-          <ActivityTraceRow
-            detail={item.detail}
-            key={item.id || `${item.label}-${index}`}
-            label={item.label}
-            rawId={item.rawId}
-            status={item.status}
-            tone={item.tone}
-          />
-        ))}
-      </div>
-  );
-  const workersBlock = workers.length > 0 && (
-    <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
-        <Users className="h-4 w-4" />
-        Delegated work
-      </div>
-      <div className="mt-3 grid gap-2">
-        {workers.map((worker) => (
-          <WorkerTraceRow key={worker.id} worker={worker} />
-        ))}
-      </div>
-    </section>
-  );
-  const activityBlock = visibleActivity.length > 0 && (
-      <section className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">
-          <Activity className="h-4 w-4" />
-          Recent steps
-        </div>
-        {activityContents}
-      </section>
-  );
-
-  if (hasViewer && viewer) {
-    return (
-      <div className="mx-auto grid w-full max-w-7xl gap-3 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
-        <div className="grid content-start gap-3">
-          <InlineDocumentViewer
-            onClose={() => setViewer(null)}
-            onOpenDoc={openDocument}
-            viewer={viewer}
-          />
-        </div>
-        <div className="grid content-start gap-3">
-          {workspaceColumn}
-          {workersBlock}
-          {activityBlock}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className={cn(
-        "mx-auto grid w-full max-w-7xl gap-3 p-4",
-        showAside && "xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]",
-      )}
-    >
-      {workspaceColumn}
-
-      {showAside && (
-        <div className="grid content-start gap-3">
-          {workersBlock}
-          {activityBlock}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SourceCard({
-  action,
-  children,
-  docs = [],
-  empty,
-  icon,
-  label,
-  onOpenDoc,
-  primary,
-  status,
-  tone,
-}: {
-  action?: ReactNode;
-  children?: ReactNode;
-  docs?: SourceDocTile[];
-  empty?: string;
-  icon: ReactNode;
-  label: string;
-  onOpenDoc?: (doc: SourceDocTile) => void;
-  primary?: ReactNode;
-  status?: string;
-  tone?: string;
-}) {
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 text-zinc-600">{icon}</span>
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-zinc-100">{label}</div>
-          </div>
-        </div>
-        {status && (
-          <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
-            {status}
-          </span>
-        )}
-      </div>
-      {primary && <div className="mt-3">{primary}</div>}
-      {docs.length > 0 ? (
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          {docs.slice(0, 4).map((doc) => (
-            <DocumentTileButton doc={doc} key={doc.path} onOpenDoc={onOpenDoc} />
-          ))}
-        </div>
-      ) : empty ? (
-        <div className="mt-3 rounded-lg border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
-          {empty}
-        </div>
-      ) : null}
-      {children && <div className="mt-3">{children}</div>}
-      {action && <div className="mt-3 flex flex-wrap gap-2">{action}</div>}
-    </div>
-  );
-}
-
-function DocumentTileButton({
-  doc,
-  onOpenDoc,
-}: {
-  doc: SourceDocTile;
-  onOpenDoc?: (doc: SourceDocTile) => void;
-}) {
-  const mediaKind = mediaKindForPath(doc.path);
-  return (
-    <button
-      className="flex min-h-24 min-w-0 flex-col justify-between rounded-xl border border-zinc-900 bg-black px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900"
-      onClick={() => onOpenDoc?.(doc)}
-      title={doc.path}
-      type="button"
-    >
-      <span className="flex items-start justify-between gap-2">
-        <span className="line-clamp-2 text-sm font-medium leading-5 text-zinc-100">
-          {doc.label}
-        </span>
-        {mediaKind === "video" ? (
-          <Play className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-        ) : mediaKind === "image" ? (
-          <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-        ) : (
-          <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-        )}
-      </span>
-      <span className="mt-2 min-w-0">
-        <span className="block truncate font-mono text-[0.68rem] text-zinc-600">
-          {compactPath(doc.path)}
-        </span>
-        {doc.status && (
-          <span className="mt-1 inline-flex rounded-full border border-zinc-800 px-1.5 py-0.5 text-[0.62rem] text-zinc-500">
-            {humanizeStatus(doc.status)}
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
-
-function ResearchFileList({
-  items,
-  limit = 12,
-  onOpenFile,
-}: {
-  items: BusinessOverviewResearchOutput[];
-  limit?: number;
-  onOpenFile?: (path: string) => void;
-}) {
-  if (items.length === 0) {
-    return <EmptyPanelLine text="No research files are visible yet." />;
-  }
-  return (
-    <div className="grid gap-1.5">
-      {items.slice(0, limit).map((item) => {
-        const path = item.path || "";
-        const updated = readableFileTime(item.updated_at);
-        const size = formatBytes(item.size);
-        const meta = [updated, size].filter(Boolean).join(" · ");
-        return (
-          <button
-            className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
-            key={path}
-            onClick={() => path && onOpenFile?.(path)}
-            title={path}
-            type="button"
-          >
-            <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-mono text-[0.72rem] text-zinc-300">
-                {path}
-              </span>
-              {meta && (
-                <span className="mt-0.5 block truncate text-[0.65rem] text-zinc-600">
-                  {meta}
-                </span>
-              )}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-const CHANNEL_DISPLAY: Record<string, string> = {
-  show_hn: "Show HN",
-  hn: "Hacker News",
-  hacker_news: "Hacker News",
-  reddit: "Reddit",
-  email: "Email",
-  twitter: "X (Twitter)",
-  x: "X (Twitter)",
-  linkedin: "LinkedIn",
-  bluesky: "Bluesky",
-  threads: "Threads",
-  slack: "Slack",
-  discord: "Discord",
-};
-
-function prettyChannel(channel: string): string {
-  const key = channel.toLowerCase();
-  if (CHANNEL_DISPLAY[key]) return CHANNEL_DISPLAY[key];
-  const redditMatch = key.match(/^reddit[_-](.+)$/);
-  if (redditMatch) return `Reddit r/${redditMatch[1]}`;
-  return key
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function parseOutreachDestination(path: string): {
-  channel: string;
-  target?: string;
-  status: "local" | "published";
-} | null {
-  const match = path.match(
-    /^outreach\/(local-published|published)\/([^/]+)\/(.+?)\.md$/i,
-  );
-  if (!match) return null;
-  const status = match[1].toLowerCase() === "published" ? "published" : "local";
-  const channel = match[2];
-  const filename = match[3];
-  let target: string | undefined;
-  const fileMatch = filename.match(/^\d{4}-\d{2}-\d{2}-(.+)-[0-9a-f]{6,}$/i);
-  if (fileMatch) target = fileMatch[1];
-  return { channel, status, target };
-}
-
-function resolveSiblingPath(basePath: string, href: string): string {
-  const cleanHref = href.split(/[?#]/)[0];
-  if (!cleanHref) return basePath;
-  if (cleanHref.startsWith("/")) return cleanHref.replace(/^\/+/, "");
-  const segments = basePath.split("/").slice(0, -1);
-  for (const part of cleanHref.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      segments.pop();
-      continue;
-    }
-    segments.push(part);
-  }
-  return segments.join("/");
-}
-
-function InlineDocumentViewer({
-  onClose,
-  onOpenDoc,
-  viewer,
-}: {
-  onClose: () => void;
-  onOpenDoc?: (doc: { label?: string; path?: string }) => void;
-  viewer: {
-    content?: string;
-    error?: string;
-    loading?: boolean;
-    media?: BusinessMediaResponse;
-    path: string;
-    title: string;
-    truncated?: boolean;
-  };
-}) {
-  const isMarkdown = /\.md$/i.test(viewer.path);
-  const outreachDest = parseOutreachDestination(viewer.path);
-  const handleLinkClick = useCallback(
-    (href: string) => {
-      if (/^(https?:|mailto:|tel:)/i.test(href)) return false;
-      if (href.startsWith("#")) return false;
-      const resolved = resolveSiblingPath(viewer.path, href);
-      if (resolved && onOpenDoc) {
-        onOpenDoc({ label: compactPath(resolved), path: resolved });
-      }
-      return true;
-    },
-    [onOpenDoc, viewer.path],
-  );
-  return (
-    <section className="overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950">
-      <div className="flex items-start justify-between gap-3 border-b border-zinc-900 px-3 py-2.5">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-zinc-100">{viewer.title}</div>
-          <div className="mt-0.5 truncate font-mono text-[0.68rem] text-zinc-600">{viewer.path}</div>
-        </div>
-        <IconButton label="Close document" onClick={onClose}>
-          <X className="h-4 w-4" />
-        </IconButton>
-      </div>
-      {outreachDest && (
-        <div
-          className={cn(
-            "border-b px-3 py-2 text-xs",
-            outreachDest.status === "published"
-              ? "border-emerald-400/20 bg-emerald-400/5 text-emerald-100"
-              : "border-amber-300/20 bg-amber-300/5 text-amber-100",
-          )}
-        >
-          <span className="font-medium">
-            {outreachDest.status === "published" ? "Published to" : "Would publish to"}
-            {" "}
-            {prettyChannel(outreachDest.channel)}
-          </span>
-          {outreachDest.target && (
-            <span className="ml-1 font-mono text-[0.7rem] opacity-80">
-              → {outreachDest.target}
-            </span>
-          )}
-          {outreachDest.status === "local" && (
-            <span className="ml-2 opacity-70">Test mode — draft only, not sent.</span>
-          )}
-        </div>
-      )}
-      {viewer.loading ? (
-        <div className="p-3">
-          <EmptyPanelLine text="Opening..." />
-        </div>
-      ) : viewer.error ? (
-        <div className="p-3">
-          <EmptyPanelLine text={viewer.error} />
-        </div>
-      ) : viewer.media ? (
-        <div className="p-3">
-          <MediaPreview media={viewer.media} title={viewer.title} />
-        </div>
-      ) : isMarkdown ? (
-        <div className="max-h-[calc(100vh-180px)] overflow-auto px-3 py-3 text-sm leading-6 text-zinc-300 [&_.text-foreground]:text-zinc-100 [&_a]:text-zinc-100 [&_code]:rounded [&_code]:bg-black [&_code]:text-zinc-100 [&_pre]:rounded-xl [&_pre]:border-zinc-800 [&_pre]:bg-black">
-          <Markdown content={viewer.content || ""} onLinkClick={handleLinkClick} />
-        </div>
-      ) : (
-        <pre className="max-h-[calc(100vh-180px)] overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.75rem] leading-5 text-zinc-300">
-          {viewer.content || ""}
-        </pre>
-      )}
-      {viewer.truncated && (
-        <div className="border-t border-zinc-900 px-3 py-2 text-xs text-amber-200">
-          Preview truncated.
-        </div>
-      )}
-    </section>
-  );
-}
-
-function OpenSitePreviewButton({
-  label = "Preview",
-  onResolveSitePreview,
-  path,
-  variant = "compact",
-}: {
-  label?: string;
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  path?: string;
-  variant?: "compact" | "hero";
-}) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
   const openPreview = useCallback(() => {
-    setLoading(true);
-    setError("");
-    const reservedTab = reserveTabForUserClick();
-    void onResolveSitePreview(path)
-      .then((res) => {
-        if (!res.url) throw new Error("No preview URL returned.");
-        if (!navigateReservedTab(reservedTab, res.url)) {
-          openUrlInNewTab(res.url);
-        }
-      })
-      .catch((err) => {
-        if (reservedTab && !reservedTab.closed) reservedTab.close();
-        setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => setLoading(false));
-  }, [onResolveSitePreview, path]);
-
-  if (variant === "hero") {
-    return (
-      <span className="flex flex-col gap-1">
-        <button
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-100 px-4 py-3 text-sm font-medium text-zinc-900 transition-colors hover:bg-white disabled:opacity-60"
-          disabled={loading}
-          onClick={openPreview}
-          type="button"
-        >
-          <ExternalLink className="h-4 w-4" />
-          {loading ? "Opening preview..." : label}
-        </button>
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </span>
-    );
-  }
+    void onResolveSitePreview(previewPath).then((res) => {
+      if (res.url) openUrlInNewTab(res.url);
+    });
+  }, [onResolveSitePreview, previewPath]);
 
   return (
-    <span className="inline-flex flex-col gap-1">
-      <PanelActionButton
-        icon={<ExternalLink className="h-3.5 w-3.5" />}
-        onClick={openPreview}
-      >
-        {loading ? "Opening..." : label}
-      </PanelActionButton>
-      {error && <span className="text-xs text-red-400">{error}</span>}
-    </span>
-  );
-}
+    <>
+      <div className="td-scroll">
+        <div className="td-momentum">
+          <p className="td-lead">
+            <b>{name}</b>{" "}
+            {live
+              ? latest
+                ? `is live. Latest shipped: ${latest.title}.`
+                : "is live — start distribution to bring in customers."
+              : deliverables.length
+                ? "is taking shape — deliverables are landing."
+                : "is just getting started. Ask the CEO to research and build."}
+          </p>
+        </div>
 
-function ProductPreviewHero({
-  onResolveSitePreview,
-  previewPath,
-  publicSiteUrl,
-  websitePath,
-}: {
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  previewPath?: string;
-  publicSiteUrl?: string;
-  websitePath?: string;
-}) {
-  if (publicSiteUrl) {
-    return (
-      <div className="flex flex-col gap-2">
-        <button
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-100 px-4 py-3 text-sm font-medium text-zinc-900 transition-colors hover:bg-white"
-          onClick={() => openUrlInNewTab(publicSiteUrl)}
-          type="button"
-        >
-          <ExternalLink className="h-4 w-4" />
-          Open website
-        </button>
-      </div>
-    );
-  }
-  if (websitePath) {
-    return (
-      <OpenSitePreviewButton
-        label="Open preview"
-        onResolveSitePreview={onResolveSitePreview}
-        path={previewPath}
-        variant="hero"
-      />
-    );
-  }
-  return (
-    <div className="rounded-xl border border-dashed border-zinc-900 px-3 py-3 text-xs text-zinc-600">
-      No product source or public URL recorded.
-    </div>
-  );
-}
+        <div className="td-kpis">
+          {["MRR", "Paying customers", "Signups", "Net revenue"].map((label) => (
+            <div className="td-kpi" key={label}>
+              <div className="td-k-label">{label}</div>
+              <div className="td-defer">
+                <span className="td-dash">—</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="td-defer-note" style={{ margin: "-6px 0 22px" }}>
+          <span className="td-dotline" />
+          Metrics activate when the billing control plane is connected
+        </p>
 
-function ScopeSwitcher({
-  disabled,
-  onSelect,
-  scope,
-}: {
-  disabled: boolean;
-  onSelect: (business: string) => Promise<void>;
-  scope: ScopeState;
-}) {
-  const [open, setOpen] = useState(false);
-  const currentLabel = scopeName(scope);
-  const businesses = scope.businesses;
+        <div className="td-row2">
+          <div className="td-card">
+            <div className="td-card-h">
+              <h3>Product</h3>
+              <span className="td-meta">{live ? prettyHost(publicUrl) : "not published"}</span>
+            </div>
+            <div className="td-browser">
+              <div className="td-bar">
+                <span className="td-bdot" />
+                <span className="td-bdot" />
+                <span className="td-bdot" />
+                <span className="td-baddr">
+                  {live
+                    ? prettyHost(publicUrl)
+                    : website.path
+                      ? compactPath(website.path)
+                      : "no site yet"}
+                </span>
+              </div>
+              <div className="td-shot">
+                <span className="td-s-eyebrow">{live ? "Live product" : "Not published"}</span>
+                <h2>{name}</h2>
+                {overview.goal && <p>{overview.goal}</p>}
+              </div>
+            </div>
+            <div className="td-funnel">
+              {["Signups", "Active", "Paying"].map((label, index) => (
+                <Fragment key={label}>
+                  {index > 0 && <span className="td-arr">→</span>}
+                  <div className="td-step">
+                    <div className="td-fv">—</div>
+                    <div className="td-fl">{label}</div>
+                  </div>
+                </Fragment>
+              ))}
+            </div>
+            <div className="td-prod-foot">
+              {live ? (
+                <button
+                  className="td-btn td-btn-primary"
+                  onClick={() => openUrlInNewTab(publicUrl)}
+                  type="button"
+                >
+                  Open website <ExternalLink className="td-ar h-3.5 w-3.5" />
+                </button>
+              ) : website.path ? (
+                <button className="td-btn td-btn-primary" onClick={openPreview} type="button">
+                  Open preview <ExternalLink className="td-ar h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <button
+                  className="td-btn td-btn-secondary"
+                  onClick={() => onCommand("/wake")}
+                  type="button"
+                >
+                  Ask the CEO to build
+                </button>
+              )}
+            </div>
+          </div>
 
-  const choose = (business: string) => {
-    setOpen(false);
-    void onSelect(business);
-  };
+          <div className="td-card">
+            <div className="td-card-h">
+              <h3>Revenue momentum</h3>
+            </div>
+            <div className="td-chart-skel">
+              <span className="td-defer-note">
+                <span className="td-dotline" />
+                Chart activates with live revenue
+              </span>
+            </div>
+          </div>
+        </div>
 
-  return (
-    <div className="relative min-w-0">
-      <button
-        className={cn(
-          "flex max-w-[42vw] items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-left text-xs text-zinc-200 transition-colors hover:border-zinc-700 hover:bg-zinc-900 sm:max-w-[280px]",
-          disabled && "cursor-not-allowed opacity-50",
-        )}
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-        title={scopeDetail(scope)}
-        type="button"
-      >
-        {scope.business ? (
-          <Building2 className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+        <div className="td-deliv-head">
+          <h2>Deliverables</h2>
+          <span className="td-meta">{latest ? `Updated ${relativeTime(latest.at)}` : ""}</span>
+        </div>
+        {deliverables.length === 0 ? (
+          <div className="td-empty">
+            <p className="td-empty-title">No deliverables yet</p>
+            <p>When the CEO ships research, a site, posts, or revenue receipts, they show up here.</p>
+          </div>
         ) : (
-          <Globe2 className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-        )}
-        <span className="min-w-0 truncate">{currentLabel}</span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-      </button>
-
-      {open && (
-        <div className="absolute left-0 top-full z-30 mt-2 w-[min(86vw,340px)] overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 p-1 shadow-2xl shadow-black/70">
-          <ScopeOption
-            active={!scope.business}
-            detail="account root"
-            icon={<Globe2 className="h-4 w-4" />}
-            label="Global"
-            onClick={() => choose("")}
-          />
-          {businesses.length > 0 && (
-            <div className="my-1 h-px bg-zinc-900" />
-          )}
-          <div className="max-h-72 overflow-y-auto">
-            {businesses.map((item) => {
-              const slug = item.slug || "";
-              if (!slug) return null;
+          <div className="td-deliv">
+            {deliverables.map((item) => {
+              const action = deliverableActionFor(item);
               return (
-                <ScopeOption
-                  active={scope.business === slug}
-                  detail={businessModeLabel(item)}
-                  icon={<Building2 className="h-4 w-4" />}
-                  key={slug}
-                  label={item.name || slug}
-                  onClick={() => choose(slug)}
-                  suffix={slug}
-                />
+                <div className="td-drow" key={item.id}>
+                  <span className="td-dtype">
+                    <span className="td-ti" />
+                    {DELIVERABLE_KIND_LABEL[item.kind] || "Item"}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="td-dtitle" style={{ display: "block" }}>
+                      {item.title}
+                    </span>
+                    {item.detail && (
+                      <span className="td-ddesc" style={{ display: "block" }}>
+                        {item.detail}
+                      </span>
+                    )}
+                  </span>
+                  <span className="td-dimpact td-defer-inline">—</span>
+                  <span className="td-dact">
+                    {action?.type === "open" ? (
+                      <a href={action.url} rel="noreferrer" target="_blank">
+                        Open ↗
+                      </a>
+                    ) : action ? (
+                      <button
+                        onClick={() => openDocument({ label: item.title, path: item.path })}
+                        type="button"
+                      >
+                        Preview
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
               );
             })}
           </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ScopeOption({
-  active,
-  detail,
-  icon,
-  label,
-  onClick,
-  suffix,
-}: {
-  active: boolean;
-  detail: string;
-  icon: ReactNode;
-  label: string;
-  onClick: () => void;
-  suffix?: string;
-}) {
-  return (
-    <button
-      className={cn(
-        "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors",
-        active ? "bg-zinc-800 text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100",
-      )}
-      onClick={onClick}
-      type="button"
-    >
-      <span className="text-zinc-500">{icon}</span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm">{label}</span>
-        <span className="mt-0.5 block truncate text-xs text-zinc-600">
-          {suffix ? `business:${suffix} · ${detail}` : detail}
-        </span>
-      </span>
-      {active && <Check className="h-4 w-4 shrink-0 text-zinc-300" />}
-    </button>
-  );
-}
-
-function BusinessSnapshot({
-  onCommand,
-  onResolveSitePreview,
-  scope,
-}: {
-  onCommand: (line: string) => void;
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  scope: ScopeState;
-}) {
-  const [previewError, setPreviewError] = useState("");
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const overview = scope.overview || {};
-  const metrics = overview.metrics || {};
-  const product = overview.product || {};
-  const budget = overview.budget || {};
-  const artifacts = overview.artifacts || {};
-  const website = artifacts.website || {};
-  const sourcePath = website.source_path || product.source_path || "";
-  const publicSiteUrl = customerWebsiteUrl({
-    business: scope.business,
-    product,
-    website,
-  });
-  const previewPath = sourcePath || "product/site";
-  const openSitePreview = useCallback(() => {
-    setPreviewLoading(true);
-    setPreviewError("");
-    void onResolveSitePreview(previewPath)
-      .then((res) => {
-        if (!res.url) throw new Error("No preview URL returned.");
-        openUrlInNewTab(res.url);
-      })
-      .catch((err) => {
-        setPreviewError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => setPreviewLoading(false));
-  }, [onResolveSitePreview, previewPath]);
-
-  if (!scope.business) {
-    return (
-      <PanelSection icon={<Globe2 className="h-4 w-4" />} title="Home">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
-            <Sparkles className="h-4 w-4 text-zinc-500" />
-            Global account
-          </div>
-          <p className="mt-2 text-xs leading-5 text-zinc-500">
-            Choose a business from the header, type a switch request in chat, or use a
-            slash command. Business work stays separated by scope.
-          </p>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <SnapshotMetric
-              icon={<Briefcase className="h-3.5 w-3.5" />}
-              label="Businesses"
-              value={formatCount(scope.businesses.length)}
-            />
-            <SnapshotMetric
-              icon={<Command className="h-3.5 w-3.5" />}
-              label="Commands"
-              value="/"
-              detail="type to browse"
-            />
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <PanelActionButton icon={<Gauge className="h-3.5 w-3.5" />} onClick={() => onCommand("/status")}>
-              Status
-            </PanelActionButton>
-          </div>
-        </div>
-
-        {scope.businesses.length > 0 && (
-          <div className="space-y-2">
-            {scope.businesses.slice(0, 5).map((item) => (
-              <div
-                className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2"
-                key={item.slug || item.name}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-zinc-100">
-                      {item.name || item.slug}
-                    </div>
-                    <div className="mt-0.5 truncate text-xs text-zinc-600">
-                      business:{item.slug} · {businessModeLabel(item)}
-                    </div>
-                  </div>
-                  <ChevronRight className="h-4 w-4 shrink-0 text-zinc-700" />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </PanelSection>
-    );
-  }
-
-  const productStatus = publicSiteUrl
-    ? "live"
-    : sourcePath || website.path
-      ? "built_local"
-      : "No deliverables";
-  const openMessages =
-    asNumber(metrics.unresolved_inbound) ||
-    asNumber(overview.conversations?.unresolved_messages);
-  const outreach = artifacts.outreach || {};
-  const creativeAssets = artifacts.creative_assets || {};
-  const creativeAssetsDir = creativeAssets.path
-    ? creativeAssets.path.split("/").slice(0, -1).join("/") || "."
-    : ".";
-
-  return (
-    <PanelSection icon={<Briefcase className="h-4 w-4" />} title="Business">
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold text-zinc-100">
-              {scope.current?.name || `business:${scope.business}`}
-            </div>
-            <div className="mt-0.5 truncate text-xs text-zinc-600">
-              business:{scope.business}
-            </div>
-          </div>
-          <span className="shrink-0 rounded-full border border-zinc-800 px-2 py-0.5 text-[0.65rem] uppercase text-zinc-500">
-            {overview.mode || scope.current?.mode || "scoped"}
-          </span>
-        </div>
-        {(overview.goal || scope.current?.goal) && (
-          <p className="mt-3 line-clamp-3 text-xs leading-5 text-zinc-500">
-            {overview.goal || scope.current?.goal}
-          </p>
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <SnapshotMetric
-          icon={<Users className="h-3.5 w-3.5" />}
-          label="Customers"
-          value={formatCount(metrics.users)}
-          detail={`${formatCount(metrics.paid_customers)} paid`}
-        />
-        <SnapshotMetric
-          icon={<DollarSign className="h-3.5 w-3.5" />}
-          label="Revenue"
-          value={formatCents(metrics.revenue_cents)}
-          detail={`${formatCents(metrics.mrr_cents)} MRR`}
-        />
-        <SnapshotMetric
-          icon={<MessageCircle className="h-3.5 w-3.5" />}
-          label="Needs reply"
-          value={formatCount(openMessages)}
-          detail={`${formatCount(metrics.usage_events)} app events`}
-        />
-        <SnapshotMetric
-          icon={<Wallet className="h-3.5 w-3.5" />}
-          label="App budget"
-          value={formatMicrousd(budget.app_remaining_microusd)}
-          detail={`${budget.app_status || "budget"} remaining`}
-        />
-      </div>
-
-      <PreviewCard
-        icon={<FileText className="h-4 w-4" />}
-        title="Deliverables"
-        value={productStatus}
-        detail={
-          publicSiteUrl ||
-          sourcePath ||
-          website.path ||
-          "No deliverable recorded yet."
-        }
-      >
-        <div className="flex flex-wrap gap-2">
-          {sourcePath && (
-            <PanelActionButton
-              icon={<Folder className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/files ${sourcePath}`)}
-            >
-              Source
-            </PanelActionButton>
-          )}
-        </div>
-        {(product.verification_status || product.routes_count !== undefined) && (
-          <div className="mt-2 text-xs leading-5 text-zinc-600">
-            {product.verification_status
-              ? `Verification: ${product.verification_status}`
-              : `${product.routes_count || 0} routes recorded`}
-          </div>
-        )}
-      </PreviewCard>
-
-      {(publicSiteUrl || sourcePath || website.path) && (
-        <PreviewCard
-          icon={<Globe2 className="h-4 w-4" />}
-          title="Website"
-          value={publicSiteUrl ? "Live" : humanizeArtifactStatus(website.status)}
-          detail={publicSiteUrl || sourcePath || website.path}
+      {viewer && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+          onClick={() => setViewer(null)}
+          role="presentation"
+          style={{ background: "rgba(26,25,22,.42)", backdropFilter: "blur(2px)" }}
         >
-          <div className="flex flex-wrap gap-2">
-            {publicSiteUrl && (
-              <PanelActionButton
-                icon={<ExternalLink className="h-3.5 w-3.5" />}
-                onClick={() => openUrlInNewTab(publicSiteUrl)}
-              >
-                Open
-              </PanelActionButton>
-            )}
-            {website.path && !publicSiteUrl && (
-              <PanelActionButton
-                icon={<ExternalLink className="h-3.5 w-3.5" />}
-                onClick={openSitePreview}
-              >
-                {previewLoading ? "Opening..." : "Preview"}
-              </PanelActionButton>
-            )}
-            {website.path && (
-              <PanelActionButton
-                icon={<FileText className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/read ${website.path}`)}
-              >
-                Index
-              </PanelActionButton>
-            )}
-            {sourcePath && (
-              <PanelActionButton
-                icon={<Folder className="h-3.5 w-3.5" />}
-                onClick={() => onCommand(`/files ${sourcePath}`)}
-              >
-                Source
-              </PanelActionButton>
-            )}
-          </div>
-          {previewError && <div className="mt-2 text-xs leading-5 text-red-400">{previewError}</div>}
-        </PreviewCard>
-      )}
-
-      {outreach.path && (
-        <PreviewCard
-          icon={<MessageCircle className="h-4 w-4" />}
-          title="Outreach"
-          value={humanizeArtifactStatus(outreach.status)}
-          detail={outreach.path}
-        >
-          <div className="flex flex-wrap gap-2">
-            <PanelActionButton
-              icon={<FileText className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${outreach.path}`)}
-            >
-              Post
-            </PanelActionButton>
-          </div>
-        </PreviewCard>
-      )}
-
-      {creativeAssets.path && (
-        <PreviewCard
-          icon={<Play className="h-4 w-4" />}
-          title="Creative assets"
-          value={humanizeArtifactStatus(creativeAssets.status)}
-          detail={creativeAssets.path}
-        >
-          <div className="flex flex-wrap gap-2">
-            <PanelActionButton
-              icon={<Play className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/files ${creativeAssetsDir}`)}
-            >
-              Files
-            </PanelActionButton>
-          </div>
-        </PreviewCard>
-      )}
-    </PanelSection>
-  );
-}
-
-function BusinessFileBrowser({
-  autoRefreshIntervalMs = 0,
-  initialFiles,
-  initialPath = ".",
-  onCommand,
-  onListFiles,
-  onReadFile,
-  onResolveMedia,
-}: {
-  autoRefreshIntervalMs?: number;
-  initialFiles: BusinessOverviewFile[];
-  initialPath?: string;
-  onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
-  onReadFile?: (path: string) => Promise<BusinessFileReadResponse>;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-}) {
-  const [path, setPath] = useState(initialPath);
-  const [files, setFiles] = useState(initialFiles);
-  const [preview, setPreview] = useState<BusinessMediaResponse | null>(null);
-  const [textPreview, setTextPreview] = useState<BusinessFileReadResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
-
-  const openPath = useCallback(
-    async (nextPath: string, options?: { background?: boolean }) => {
-      const background = Boolean(options?.background);
-      if (background) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-        setError("");
-      }
-      try {
-        const nextFiles = await onListFiles(nextPath || ".");
-        setPath(nextPath || ".");
-        setFiles(nextFiles);
-        if (!background) {
-          setPreview(null);
-          setTextPreview(null);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        if (background) {
-          setRefreshing(false);
-        } else {
-          setLoading(false);
-        }
-      }
-    },
-    [onListFiles],
-  );
-
-  const parentPath = useMemo(() => {
-    if (!path || path === ".") return "";
-    const parts = path.split("/").filter(Boolean);
-    parts.pop();
-    return parts.length ? parts.join("/") : ".";
-  }, [path]);
-  const showParentButton = Boolean(parentPath && path !== initialPath);
-
-  useEffect(() => {
-    const normalizedPath = initialPath || ".";
-    setPath(normalizedPath);
-    if (normalizedPath === "." && initialFiles.length > 0) {
-      setFiles(initialFiles);
-      return;
-    }
-    void openPath(normalizedPath);
-  }, [initialFiles, initialPath, openPath]);
-
-  useEffect(() => {
-    if (!autoRefreshIntervalMs || preview || textPreview) return;
-    const timer = window.setInterval(() => {
-      if (!loading && !refreshing) void openPath(path, { background: true });
-    }, autoRefreshIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [autoRefreshIntervalMs, loading, openPath, path, preview, refreshing, textPreview]);
-
-  return (
-    <div
-      className={cn(
-        "space-y-2 rounded-lg transition-shadow",
-        refreshing && "ring-1 ring-sky-400/25",
-      )}
-    >
-      <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-600">
-        <span className="truncate">/{path === "." ? "" : path}</span>
-        {refreshing && (
-          <span className="rounded-full border border-sky-400/30 px-1.5 py-0.5 text-[0.6rem] uppercase tracking-[0.14em] text-sky-200">
-            updating
-          </span>
-        )}
-        {showParentButton && (
-          <button
-            className="ml-auto rounded-md border border-zinc-900 px-2 py-0.5 text-[0.68rem] text-zinc-500 transition-colors hover:border-zinc-800 hover:text-zinc-200"
-            onClick={() => void openPath(parentPath)}
-            type="button"
+          <div
+            className="td-card"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              maxHeight: "86vh",
+              maxWidth: 780,
+              overflow: "hidden",
+              padding: 0,
+              width: "100%",
+            }}
           >
-            Up
-          </button>
-        )}
-      </div>
-      {error && <EmptyPanelLine text={error} />}
-      {loading ? (
-        <EmptyPanelLine text="Loading files..." />
-      ) : files.length === 0 ? (
-        <EmptyPanelLine text="No business files visible here." />
-      ) : (
-        <div className="grid gap-1.5">
-          {files.map((item) => {
-            const itemPath = item.path || ".";
-            const isDir = item.type === "dir";
-            const mediaKind = mediaKindForPath(itemPath);
-            return (
+            <div
+              className="td-card-h"
+              style={{
+                borderBottom: "1px solid var(--td-border)",
+                marginBottom: 0,
+                padding: "14px 18px",
+              }}
+            >
+              <div className="min-w-0">
+                <h3 className="truncate">{viewer.title}</h3>
+                <div className="td-meta truncate">{viewer.path}</div>
+              </div>
               <button
-                className="flex min-w-0 items-center gap-2 rounded-lg border border-zinc-900 bg-black/30 px-2.5 py-1.5 text-left text-xs text-zinc-400 transition-colors hover:border-zinc-800 hover:bg-zinc-900 hover:text-zinc-100"
-                key={`${item.type}-${itemPath}`}
-                onClick={() => {
-                  if (isDir) {
-                    void openPath(itemPath);
-                    return;
-                  }
-                  if (mediaKind) {
-                    setTextPreview(null);
-                    void onResolveMedia(itemPath).then(setPreview).catch((err) => {
-                      setError(err instanceof Error ? err.message : String(err));
-                    });
-                    return;
-                  }
-                  if (onReadFile) {
-                    setLoading(true);
-                    setError("");
-                    setPreview(null);
-                    void onReadFile(itemPath)
-                      .then(setTextPreview)
-                      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-                      .finally(() => setLoading(false));
-                    return;
-                  }
-                  onCommand(`/read ${itemPath}`);
-                }}
-                title={itemPath}
+                aria-label="Close preview"
+                className="td-linkish"
+                onClick={() => setViewer(null)}
+                style={{ marginLeft: "auto" }}
                 type="button"
               >
-                {isDir ? (
-                  <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-                ) : mediaKind === "video" ? (
-                  <Play className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-                ) : mediaKind === "image" ? (
-                  <ExternalLink className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-                ) : (
-                  <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
-                )}
-                <span className="min-w-0 truncate">{compactPath(itemPath)}</span>
-                <span className="ml-auto shrink-0 text-[0.65rem] text-zinc-700">
-                  {isDir ? "dir" : mediaKind || "file"}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {preview?.url && preview.path && (
-        <MediaPreview media={preview} title={preview.path.split("/").pop() || preview.path} />
-      )}
-      {textPreview?.path && (
-        <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
-          <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-2">
-            <div className="min-w-0">
-              <div className="truncate text-xs font-medium text-zinc-100">
-                {textPreview.path.split("/").pop() || textPreview.path}
-              </div>
-              <div className="truncate font-mono text-[0.65rem] text-zinc-600">{textPreview.path}</div>
-            </div>
-            {textPreview.truncated && (
-              <span className="shrink-0 rounded-full bg-amber-300/10 px-2 py-0.5 text-[0.65rem] text-amber-100">
-                truncated
-              </span>
-            )}
-          </div>
-          <pre className="max-h-72 overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.72rem] leading-5 text-zinc-300">
-            {textPreview.content || ""}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SnapshotMetric({
-  detail,
-  icon,
-  label,
-  value,
-}: {
-  detail?: string;
-  icon: ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="min-w-0 rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
-      <div className="flex items-center gap-1.5 text-[0.68rem] uppercase text-zinc-600">
-        {icon}
-        <span className="truncate">{label}</span>
-      </div>
-      <div className="mt-1 truncate text-sm font-semibold text-zinc-100">{value}</div>
-      {detail && <div className="mt-0.5 truncate text-[0.68rem] text-zinc-600">{detail}</div>}
-    </div>
-  );
-}
-
-function PreviewCard({
-  children,
-  detail,
-  icon,
-  title,
-  value,
-}: {
-  children?: ReactNode;
-  detail?: string;
-  icon: ReactNode;
-  title: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2.5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-2">
-          <span className="mt-0.5 text-zinc-600">{icon}</span>
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-zinc-100">{title}</div>
-            {detail && (
-              <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
-                {detail}
-              </div>
-            )}
-          </div>
-        </div>
-        <span className="shrink-0 rounded-full bg-zinc-900 px-2 py-0.5 text-[0.65rem] text-zinc-500">
-          {value}
-        </span>
-      </div>
-      {children && <div className="mt-3">{children}</div>}
-    </div>
-  );
-}
-
-function PanelActionButton({
-  children,
-  icon,
-  onClick,
-}: {
-  children: ReactNode;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-zinc-800 bg-black px-2.5 text-xs text-zinc-300 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-50"
-      onClick={onClick}
-      type="button"
-    >
-      {icon}
-      <span>{children}</span>
-    </button>
-  );
-}
-
-function DeliverablesPanel({
-  cwd,
-  deliverables,
-  historicalOutputs,
-  onCommand,
-  onListFiles,
-  onReadFile,
-  onResolveMedia,
-  onResolveSitePreview,
-  onClose,
-  scope,
-  sessionId,
-  showClose,
-  statusItems,
-  tools,
-}: {
-  cwd?: string;
-  deliverables: Deliverable[];
-  historicalOutputs: Deliverable[];
-  onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
-  onClose: () => void;
-  scope: ScopeState;
-  sessionId: string | null;
-  showClose: boolean;
-  statusItems: string[];
-  tools: ToolEntry[];
-}) {
-  const [activeTab, setActiveTab] = useState<PanelTab>("home");
-  const effectiveTab: PanelTab = scope.business ? activeTab : "home";
-  const outputs = useMemo(
-    () => mergeOutputs(deliverables, historicalOutputs),
-    [deliverables, historicalOutputs],
-  );
-  useEffect(() => {
-    if (!scope.business && activeTab !== "home") setActiveTab("home");
-  }, [activeTab, scope.business]);
-  const panelTitle = scope.business
-    ? effectiveTab === "home"
-      ? "Business home"
-      : `${PANEL_TABS.find((tab) => tab.id === effectiveTab)?.label || "Business"}`
-    : "Takyon home";
-
-  return (
-    <div className="flex min-h-0 w-full flex-col bg-black text-zinc-100">
-      <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-900 px-4">
-        <div className="min-w-0">
-          <div className="text-sm font-medium">{panelTitle}</div>
-          <div className="mt-0.5 truncate text-xs text-zinc-600">
-            {scopeDetail(scope)}
-            {sessionId ? ` · session ${sessionId}` : ""}
-            {cwd ? ` · ${cwd}` : ""}
-          </div>
-        </div>
-        {showClose && (
-          <IconButton label="Close side panel" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </IconButton>
-        )}
-      </header>
-
-      {scope.business && <PanelTabs active={effectiveTab} onChange={setActiveTab} />}
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {effectiveTab === "home" && (
-          <>
-            <BusinessSnapshot
-              onCommand={onCommand}
-              onResolveSitePreview={onResolveSitePreview}
-              scope={scope}
-            />
-          </>
-        )}
-
-        {effectiveTab === "next" && (
-          <NextPanel onCommand={onCommand} onReadFile={onReadFile} scope={scope} />
-        )}
-
-        {effectiveTab === "files" && (
-          <FilesPanel
-            onCommand={onCommand}
-            onListFiles={onListFiles}
-            onReadFile={onReadFile}
-            onResolveMedia={onResolveMedia}
-            scope={scope}
-          />
-        )}
-
-        {effectiveTab === "outputs" && (
-          <OutputsPanel onCommand={onCommand} onResolveMedia={onResolveMedia} outputs={outputs} />
-        )}
-
-        {effectiveTab === "dev" && (
-          <DevPanel
-            cwd={cwd}
-            scope={scope}
-            sessionId={sessionId}
-            statusItems={statusItems}
-            tools={tools}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PanelTabs({
-  active,
-  onChange,
-}: {
-  active: PanelTab;
-  onChange: (tab: PanelTab) => void;
-}) {
-  return (
-    <div className="shrink-0 border-b border-zinc-900 px-3 py-2">
-      <div className="grid grid-cols-5 gap-1 rounded-xl border border-zinc-900 bg-zinc-950 p-1">
-        {PANEL_TABS.map((tab) => (
-          <button
-            className={cn(
-              "h-8 rounded-lg px-1 text-xs font-medium transition-colors",
-              active === tab.id
-                ? "bg-zinc-800 text-zinc-50"
-                : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200",
-            )}
-            key={tab.id}
-            onClick={() => onChange(tab.id)}
-            type="button"
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function NextPanel({
-  onCommand,
-  onReadFile,
-  scope,
-}: {
-  onCommand: (line: string) => void;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
-  scope: ScopeState;
-}) {
-  return <TaskBoard onCommand={onCommand} onReadFile={onReadFile} scope={scope} />;
-}
-
-function FilesPanel({
-  onCommand,
-  onListFiles,
-  onReadFile,
-  onResolveMedia,
-  scope,
-}: {
-  onCommand: (line: string) => void;
-  onListFiles: (path: string) => Promise<BusinessOverviewFile[]>;
-  onReadFile?: (path: string) => Promise<BusinessFileReadResponse>;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  scope: ScopeState;
-}) {
-  if (!scope.business) {
-    return (
-      <PanelSection icon={<Folder className="h-4 w-4" />} title="Files">
-        <EmptyPanelLine text="Choose a business to browse its filesystem." />
-      </PanelSection>
-    );
-  }
-
-  return (
-    <PanelSection icon={<Folder className="h-4 w-4" />} title="Files">
-      <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
-        <div className="mb-3 text-xs text-zinc-600">
-          business:{scope.business} workspace
-        </div>
-        <BusinessFileBrowser
-          key={scope.business}
-          initialFiles={scope.overview?.files || EMPTY_BUSINESS_FILES}
-          onCommand={onCommand}
-          onListFiles={onListFiles}
-          onReadFile={onReadFile}
-          onResolveMedia={onResolveMedia}
-        />
-      </div>
-    </PanelSection>
-  );
-}
-
-function OutputsPanel({
-  onCommand,
-  onResolveMedia,
-  outputs,
-}: {
-  onCommand: (line: string) => void;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  outputs: Deliverable[];
-}) {
-  return (
-    <PanelSection icon={<FileText className="h-4 w-4" />} title="Outputs">
-      {outputs.length === 0 ? (
-        <EmptyPanelLine text="No historical or current-session outputs yet." />
-      ) : (
-        outputs.map((item) => (
-          <DeliverableItem
-            item={item}
-            key={item.id}
-            onCommand={onCommand}
-            onResolveMedia={onResolveMedia}
-          />
-        ))
-      )}
-    </PanelSection>
-  );
-}
-
-function TaskBoard({
-  onCommand,
-  onReadFile,
-  scope,
-}: {
-  onCommand: (line: string) => void;
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
-  scope: ScopeState;
-}) {
-  const overview = scope.overview || {};
-  const registry = overview.registry;
-  const tasks = (overview.tasks || []).filter(isActionableTask);
-  const fallbackJobs = (overview.jobs || [])
-    .filter((job) => job.kind || job.status)
-    .filter(isActionableTask);
-  const displayTasks: Array<BusinessOverviewTask | BusinessOverviewJob> =
-    tasks.length > 0 ? tasks : fallbackJobs;
-  const ceoLoop = overview.ceo_loop;
-  const statusCards = overview.status_cards || [];
-  const researchOutputs = researchOutputItems(overview);
-  const wakeHealth = overview.wake_health;
-  const [researchPreview, setResearchPreview] = useState<{
-    content?: string;
-    error?: string;
-    loading?: boolean;
-    path: string;
-    truncated?: boolean;
-  } | null>(null);
-  const openResearchFile = useCallback(
-    (path: string) => {
-      setResearchPreview({ loading: true, path });
-      void onReadFile(path)
-        .then((res) => setResearchPreview({
-          content: res.content || "",
-          path: res.path || path,
-          truncated: Boolean(res.truncated),
-        }))
-        .catch((err) => setResearchPreview({
-          error: friendlyError(err instanceof Error ? err.message : String(err)),
-          path,
-        }));
-    },
-    [onReadFile],
-  );
-
-  return (
-    <div className="space-y-6">
-      {ceoLoop && (
-        <PanelSection icon={<Sparkles className="h-4 w-4" />} title="CEO Loop">
-          <TaskRow
-            detail={ceoLoop.detail || ceoLoop.next_action}
-            label={ceoLoop.headline || "CEO is choosing the next move"}
-            status={humanizeStatus(ceoLoop.status)}
-            tone={ceoLoop.status}
-          />
-          {ceoLoop.next_action && (
-            <TaskRow
-              detail={ceoLoop.next_action}
-              label="Next move"
-              status="Visible"
-              tone="active"
-            />
-          )}
-        </PanelSection>
-      )}
-
-      <PanelSection icon={<Gauge className="h-4 w-4" />} title="Company State">
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-          {statusCards.length === 0 ? (
-            <EmptyPanelLine text="No status cards recorded yet." />
-          ) : (
-            statusCards.map((card, index) => (
-              <TaskRow
-                detail={card.detail}
-                key={`${card.label}-${index}`}
-                label={card.label || "Status"}
-                status={humanizeStatus(card.status)}
-                tone={card.tone || card.status}
-              />
-            ))
-          )}
-        </div>
-      </PanelSection>
-
-      <PanelSection icon={<Search className="h-4 w-4" />} title="Research">
-        <ResearchFileList items={researchOutputs} onOpenFile={openResearchFile} />
-        {researchPreview && (
-          <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
-            <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-2">
-              <div className="min-w-0">
-                <div className="truncate text-xs font-medium text-zinc-100">
-                  {researchPreview.path.split("/").pop() || researchPreview.path}
-                </div>
-                <div className="truncate font-mono text-[0.65rem] text-zinc-600">
-                  {researchPreview.path}
-                </div>
-              </div>
-              <IconButton label="Close research file" onClick={() => setResearchPreview(null)}>
                 <X className="h-4 w-4" />
-              </IconButton>
+              </button>
             </div>
-            {researchPreview.loading ? (
-              <div className="p-3">
-                <EmptyPanelLine text="Opening..." />
-              </div>
-            ) : researchPreview.error ? (
-              <div className="p-3">
-                <EmptyPanelLine text={researchPreview.error} />
-              </div>
-            ) : (
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap p-3 font-mono text-[0.72rem] leading-5 text-zinc-300">
-                {researchPreview.content || ""}
-              </pre>
-            )}
-            {researchPreview.truncated && (
-              <div className="border-t border-zinc-900 px-3 py-2 text-xs text-amber-200">
-                Preview truncated.
-              </div>
-            )}
-          </div>
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<ListChecks className="h-4 w-4" />} title="Tasks">
-        {displayTasks.length === 0 ? (
-          <EmptyPanelLine text="No task records are visible yet." />
-        ) : (
-          <div className="grid gap-2 lg:grid-cols-2">
-            {displayTasks.slice(0, 12).map((task, index) => (
-              <TaskRow
-                detail={taskDetail(task, registry)}
-                key={task.id || `${taskLabel(task, registry)}-${index}`}
-                label={taskLabel(task, registry)}
-                status={humanizeStatus(task.status)}
-                tone={task.tone || task.status}
-              />
-            ))}
-          </div>
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Scheduled checks">
-        <TaskRow
-          detail={wakeHealth?.detail || "No scheduled CEO check is visible."}
-          label={wakeHealth?.headline || "Scheduled CEO check"}
-          status={humanizeStatus(wakeHealth?.status)}
-          tone={wakeHealth?.status}
-        />
-        <div className="flex flex-wrap gap-2 pt-1">
-          <PanelActionButton icon={<Clock3 className="h-3.5 w-3.5" />} onClick={() => onCommand("/cron list")}>
-            List
-          </PanelActionButton>
-          <PanelActionButton icon={<Play className="h-3.5 w-3.5" />} onClick={() => onCommand("/wake")}>
-            Wake now
-          </PanelActionButton>
-        </div>
-      </PanelSection>
-    </div>
-  );
-}
-
-function DevPanel({
-  cwd,
-  scope,
-  sessionId,
-  statusItems,
-  tools,
-}: {
-  cwd?: string;
-  scope: ScopeState;
-  sessionId: string | null;
-  statusItems: string[];
-  tools: ToolEntry[];
-}) {
-  const registry = scope.overview?.registry;
-  const builderItems = tools
-    .filter((tool) => /tool|file|write|patch|shell|exec|agent|build|verify|npm|python|git|code/i.test(`${tool.name} ${tool.context || ""} ${tool.summary || ""}`))
-    .slice()
-    .reverse()
-    .slice(0, 5);
-  const visibleTasks = (scope.overview?.tasks || []).filter((task) =>
-    /agent|job/.test(task.source || ""),
-  );
-
-  return (
-    <div className="space-y-6">
-      <PanelSection icon={<Code2 className="h-4 w-4" />} title="Build activity">
-        <div className="space-y-2">
-          {builderItems.length === 0 && visibleTasks.length === 0 ? (
-            <TaskRow
-              detail={scope.overview?.product?.source_path || "No builder activity recorded in this session."}
-              label="Builder feed"
-              status="Quiet"
-              tone="neutral"
-            />
-          ) : (
-            <>
-              {builderItems.map((tool) => (
-                <TaskRow
-                  detail={toolDetail(tool, registry)}
-                  key={tool.id}
-                  label={naturalToolLabel(tool, registry)}
-                  status={humanizeStatus(tool.status)}
-                  tone={tool.status}
-                />
-              ))}
-              {visibleTasks.slice(0, 3).map((task, index) => (
-                <TaskRow
-                  detail={taskDetail(task, registry)}
-                  key={task.id || `${task.source}-${index}`}
-                  label={taskLabel(task, registry)}
-                  status={humanizeStatus(task.status)}
-                  tone={task.tone || task.status}
-                />
-              ))}
-            </>
-          )}
-        </div>
-      </PanelSection>
-
-      <PanelSection icon={<Command className="h-4 w-4" />} title="Build">
-        <TaskRow
-          detail={scopeDetail(scope)}
-          label="Dashboard build"
-          status="ui"
-        />
-        <TaskRow
-          detail={cwd || "cwd unavailable"}
-          label={sessionId ? `session ${sessionId}` : "session pending"}
-          status="runtime"
-        />
-      </PanelSection>
-
-      <PanelSection icon={<CheckCircle2 className="h-4 w-4" />} title="Actions">
-        {tools.length === 0 ? (
-          <EmptyPanelLine text="No tool calls yet." />
-        ) : (
-          tools
-            .slice()
-            .reverse()
-            .map((tool) => <ToolActivityItem key={tool.id} registry={registry} tool={tool} />)
-        )}
-      </PanelSection>
-
-      <PanelSection icon={<Clock3 className="h-4 w-4" />} title="Pulse">
-        {statusItems.length === 0 ? (
-          <EmptyPanelLine text="No pulse yet." />
-        ) : (
-          statusItems.map((item, index) => (
-            <div
-              className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2 text-xs leading-5 text-zinc-400"
-              key={`${item}-${index}`}
-            >
-              {item}
+            <div style={{ overflow: "auto", padding: 18 }}>
+              {viewer.loading ? (
+                <p className="td-meta">Opening…</p>
+              ) : viewer.error ? (
+                <p className="td-meta" style={{ color: "var(--td-accent-ink)" }}>
+                  {viewer.error}
+                </p>
+              ) : viewer.media ? (
+                viewer.media.media_type?.startsWith("video/") ? (
+                  <video className="w-full rounded-lg" controls src={viewer.media.url} />
+                ) : (
+                  <img alt={viewer.title} className="w-full rounded-lg" src={viewer.media.url} />
+                )
+              ) : /\.md$/i.test(viewer.path) ? (
+                <div
+                  className="[&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface-2)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface-2)] [&_pre]:p-3"
+                  style={{ color: "var(--td-fg)", fontSize: 14, lineHeight: 1.6 }}
+                >
+                  <Markdown content={viewer.content || ""} />
+                </div>
+              ) : (
+                <pre
+                  style={{
+                    color: "var(--td-fg-2)",
+                    fontFamily: "var(--td-font-mono)",
+                    fontSize: 12.5,
+                    lineHeight: 1.55,
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {viewer.content || ""}
+                </pre>
+              )}
+              {viewer.truncated && (
+                <p className="td-meta" style={{ marginTop: 10 }}>
+                  Preview truncated.
+                </p>
+              )}
             </div>
-          ))
-        )}
-      </PanelSection>
-    </div>
-  );
-}
-
-function TaskRow({
-  detail,
-  label,
-  onClick,
-  status,
-  tone,
-}: {
-  detail?: string;
-  label: string;
-  onClick?: () => void;
-  status: string;
-  tone?: string;
-}) {
-  const content = (
-    <>
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-sm text-zinc-200">{label}</div>
-        <span className="inline-flex shrink-0 items-center gap-1">
-          {onClick && <ExternalLink className="h-3.5 w-3.5 text-zinc-600" />}
-          <span className={cn("rounded-full border px-2 py-0.5 text-[0.65rem]", toneClasses(tone || status))}>
-            {status}
-          </span>
-        </span>
-      </div>
-      {detail && (
-        <div className="mt-0.5 truncate text-xs leading-5 text-zinc-600">
-          {detail}
+          </div>
         </div>
       )}
     </>
   );
-  const className = cn(
-    "w-full rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2",
-    onClick && "text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900",
-  );
-  if (onClick) {
-    return (
-      <button className={className} onClick={onClick} title={detail || label} type="button">
-        {content}
-      </button>
-    );
-  }
-  return (
-    <div className={className}>
-      {content}
-    </div>
-  );
 }
 
-function ActivityTraceRow({
-  detail,
-  label,
-  rawId,
-  status,
-  tone,
-}: {
-  detail?: string;
-  label: string;
-  rawId?: string;
-  status: string;
-  tone?: string;
-}) {
-  const cleanedStatus = cleanTraceStatus(status);
-  const cleanedDetail = cleanTraceDetail(
-    detail && detail !== `raw: ${rawId || ""}` ? detail : "",
-    cleanedStatus,
-    label,
-  );
-  const debug = rawId && !detail?.includes(rawId) ? `raw: ${rawId}` : "";
-  const active = /active|running|working/i.test(`${tone || ""} ${cleanedStatus || ""}`);
-  const statusTone = `${tone || ""} ${cleanedStatus || ""}`;
-  return (
-    <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
-      <div className="flex min-w-0 items-start gap-2">
-        <span
-          className={cn(
-            "mt-2 h-1.5 w-1.5 shrink-0 rounded-full",
-            active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
-          )}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-start justify-between gap-3">
-            <div className="break-words text-sm leading-6 text-zinc-300">
-              {label}
-            </div>
-            {cleanedStatus && (
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
-                  /active|running|working/i.test(statusTone) && "bg-sky-300/10 text-sky-100",
-                  /done|complete|success/i.test(statusTone) && "bg-emerald-400/10 text-emerald-200",
-                  /attention|blocked|error|fail/i.test(statusTone) && "bg-red-400/10 text-red-200",
-                  !/active|running|working|done|complete|success|attention|blocked|error|fail/i.test(statusTone) && "bg-zinc-900 text-zinc-400",
-                )}
-              >
-                {cleanedStatus}
-              </span>
-            )}
-          </div>
-          {cleanedDetail && (
-            <div className="mt-0.5 break-words text-xs leading-5 text-zinc-500">
-              {cleanedDetail}
-            </div>
-          )}
-          {debug && (
-            <div className="mt-0.5 break-words font-mono text-[0.68rem] leading-5 text-zinc-600">
-              {debug}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function WorkerTraceRow({ worker }: { worker: WorkerDisplayItem }) {
-  const active = /active|running|working/i.test(`${worker.tone || ""} ${worker.status || ""}`);
-  return (
-    <div className="rounded-lg border border-zinc-900 bg-black/30 px-3 py-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span
-              className={cn(
-                "h-1.5 w-1.5 shrink-0 rounded-full",
-                active ? "animate-pulse bg-sky-300" : "bg-zinc-700",
-              )}
-            />
-            <div className="truncate text-sm font-medium text-zinc-200">{worker.name}</div>
-          </div>
-          {worker.purpose && (
-            <div className="mt-1 break-words text-xs leading-5 text-zinc-500">
-              {worker.purpose}
-            </div>
-          )}
-          {worker.latestDetail && (
-            <div className="mt-1 break-words text-xs leading-5 text-zinc-400">
-              {worker.latestDetail}
-            </div>
-          )}
-          {worker.rawId && (
-            <div className="mt-1 break-words font-mono text-[0.68rem] leading-5 text-zinc-600">
-              raw: {worker.rawId}
-            </div>
-          )}
-        </div>
-        <span
-          className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
-            active && "bg-sky-300/10 text-sky-100",
-            !active && /done|complete|success/.test(worker.status) && "bg-emerald-400/10 text-emerald-200",
-            !active && /attention|blocked|error|fail/.test(worker.status) && "bg-red-400/10 text-red-200",
-            !active && !/done|complete|success|attention|blocked|error|fail/.test(worker.status) && "bg-zinc-900 text-zinc-400",
-          )}
-        >
-          {worker.status}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function PanelSection({
-  children,
-  className,
-  icon,
-  title,
-}: {
-  children: ReactNode;
-  className?: string;
-  icon: ReactNode;
-  title: string;
-}) {
-  return (
-    <section className={className}>
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.14em] text-zinc-600">
-        {icon}
-        {title}
-      </div>
-      <div className="space-y-2">{children}</div>
-    </section>
-  );
-}
-
-function DeliverableItem({
-  item,
-  onCommand,
-  onResolveMedia,
-}: {
-  item: Deliverable;
-  onCommand: (line: string) => void;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-}) {
-  const [media, setMedia] = useState<BusinessMediaResponse | null>(null);
-  const [error, setError] = useState("");
-  const mediaKind = mediaKindForPath(item.path) || (item.kind === "image" || item.kind === "video" ? item.kind : undefined);
-
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-zinc-100">{item.title}</div>
-          {item.path && (
-            <div className="mt-0.5 truncate font-mono text-[0.7rem] text-zinc-600">
-              {item.path}
-            </div>
-          )}
-        </div>
-        <span className="shrink-0 text-[0.65rem] text-zinc-600">
-          {prettyTime(item.at)}
-        </span>
-      </div>
-      <div className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">
-        {item.detail}
-      </div>
-      {item.path && (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {mediaKind ? (
-            <PanelActionButton
-              icon={mediaKind === "video" ? <Play className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
-              onClick={() => {
-                setError("");
-                void onResolveMedia(item.path || "")
-                  .then(setMedia)
-                  .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-              }}
-            >
-              Preview
-            </PanelActionButton>
-          ) : (
-            <PanelActionButton
-              icon={<FileText className="h-3.5 w-3.5" />}
-              onClick={() => onCommand(`/read ${item.path || ""}`)}
-            >
-              Read
-            </PanelActionButton>
-          )}
-          <PanelActionButton
-            icon={<FileText className="h-3.5 w-3.5" />}
-            onClick={() => window.navigator.clipboard?.writeText(item.path || "")}
-          >
-            Copy path
-          </PanelActionButton>
-        </div>
-      )}
-      {error && <div className="mt-2 text-xs text-red-300">{error}</div>}
-      {media?.url && <MediaPreview media={media} title={item.title} />}
-    </div>
-  );
-}
-
-function MediaPreview({
-  media,
-  title,
-}: {
-  media: BusinessMediaResponse;
-  title: string;
-}) {
-  const kind = media.media_type?.startsWith("video/") ? "video" : "image";
-  return (
-    <div className="mt-2 overflow-hidden rounded-lg border border-zinc-900 bg-black">
-      {kind === "video" ? (
-        <video className="max-h-52 w-full bg-black" controls src={media.url} title={title} />
-      ) : (
-        <img alt={title} className="max-h-52 w-full object-contain" src={media.url} />
-      )}
-      <div className="flex items-center justify-between gap-2 border-t border-zinc-900 px-2 py-1 text-[0.65rem] text-zinc-600">
-        <span className="min-w-0 truncate">{media.path}</span>
-        {media.url && (
-          <a className="shrink-0 text-zinc-400 hover:text-zinc-100" href={media.url} rel="noreferrer" target="_blank">
-            Open
-          </a>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ToolActivityItem({
-  registry,
-  tool,
-}: {
-  registry?: RegistryDisplayPayload;
-  tool: ToolEntry;
-}) {
-  return (
-    <div className="rounded-xl border border-zinc-900 bg-zinc-950 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-sm text-zinc-200">{naturalToolLabel(tool, registry)}</div>
-        <span
-          className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 text-[0.65rem]",
-            tool.status === "running" && "bg-amber-400/10 text-amber-200",
-            tool.status === "done" && "bg-emerald-400/10 text-emerald-200",
-            tool.status === "error" && "bg-red-400/10 text-red-200",
-          )}
-        >
-          {humanizeStatus(tool.status)}
-        </span>
-      </div>
-      {(tool.error || tool.summary || tool.preview || tool.context) && (
-        <div className="mt-1 line-clamp-3 text-xs leading-5 text-zinc-500">
-          {toolDetail(tool, registry)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function EmptyPanelLine({ text }: { text: string }) {
-  return (
-    <div className="rounded-xl border border-dashed border-zinc-900 px-3 py-5 text-center text-xs text-zinc-600">
-      {text}
-    </div>
-  );
-}
-
-function IconButton({
-  children,
-  className,
-  label,
-  onClick,
-}: {
-  children: ReactNode;
-  className?: string;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      aria-label={label}
-      className={cn(
-        "flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-100",
-        className,
-      )}
-      onClick={onClick}
-      title={label}
-      type="button"
-    >
-      {children}
-    </button>
-  );
-}
-
-function HeaderLinkActionButton({
-  children,
-  href,
-  label,
-}: {
-  children: ReactNode;
-  href: string;
-  label: string;
-}) {
-  return (
-    <a
-      aria-label={label}
-      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-zinc-800 px-3 text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-100"
-      href={href}
-      rel="noreferrer"
-      target="_blank"
-      title={label}
-    >
-      {children}
-      <span className="hidden sm:inline">{label}</span>
-    </a>
-  );
+function relativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 0) return "just now";
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
