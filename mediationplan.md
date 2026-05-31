@@ -24,7 +24,7 @@ Generated app ─(project gateway key)► AI Gateway ──┤
                                                     ▼
                               Supabase Postgres (SOURCE OF TRUTH)  +  Supabase Storage (artifacts/filesystem)
                                                     ▼
-                              Job queue (FOR UPDATE SKIP LOCKED) → workers (local now, Modal for heavy later)
+                              Job queue (FOR UPDATE SKIP LOCKED) → workers (local now, scale out horizontally later)
 ```
 
 Postgres is the memory. The queue is the control plane. The runtime is a **stateless, replaceable worker** — not the source of truth.
@@ -121,7 +121,7 @@ Before expensive work: `reserve(estimate)` on the billing account (allowance buc
 
 ## Worker Plane
 
-`jobs` queue with `SELECT … FOR UPDATE SKIP LOCKED` pickup → one job, one worker. Idempotent execution (idempotency key), at-least-once. Result persisted atomically; partial = `blocked`/`failed`, never `completed`. Retries re-check budget (exhausted → `blocked`, not infinite retry). Local worker now; **Modal for heavy/build jobs later** under the same job contract. Every side effect writes a receipt.
+`jobs` queue with `SELECT … FOR UPDATE SKIP LOCKED` pickup → one job, one worker. Idempotent execution (idempotency key), at-least-once. Result persisted atomically; partial = `blocked`/`failed`, never `completed`. Retries re-check budget (exhausted → `blocked`, not infinite retry). The runtime worker drains the queue under one provider-neutral job contract — the VPS now, scaled out to N stateless workers later. There is **no external job runner**: heavy/build jobs run on the same contract, just on a worker with more headroom. Every side effect writes a receipt.
 
 ### Scheduled CEO wakes (cron) — Postgres-native, no local ticker
 
@@ -186,7 +186,7 @@ API keys hashed (SHA-256) + prefix, constant-time compare, one-active-per-user, 
 
 - **Now:** Supabase Postgres (source of truth) + Supabase Storage (filesystem/object home — S3-compatible, so **no separate S3/"F3" needed**). Already provisioned.
 - **Stripe:** keys present; Connect deferred/optional per the money model.
-- **Later:** Modal (heavy jobs/builds). Optional Temporal/Inngest (durable cron-wake loops).
+- **Later:** scale the stateless runtime worker out to N (heavy/build jobs run on the same job contract — **no external job runner**). Optional Temporal/Inngest (durable cron-wake loops) only if durable orchestration is ever actually needed.
 - **VPS:** keep now (demoted to a worker), retire after the no-fleet proof. No other new provider required.
 
 ## Build Discipline (applies to every phase below)
@@ -231,7 +231,7 @@ If a phase needs a new secret, API key, service account, OAuth app, or paid prov
 - **Phase 3 — Control API:** opaque-key boundary + rate limiting + topup checkout + payout/Connect (deferred). *Accept:* full opaque boundary; per-user rate limit; zero-connection onboarding.
 - **Phase 4 — Execution policy engine:** inline vs job vs cheaper vs blocked from allowance/topup/policy/estimate. *Accept:* features degrade gracefully under budget pressure instead of hard-failing.
 - **Phase 5 — App runtime API:** sub-user auth/session/account/usage/checkout/generate/jobs; sub-user payments accrue to owner custody minus app fee; project gateway keys. *Accept:* all apps share rails; sub-user payment shows in owner custody; generated app never holds provider key.
-- **Phase 6 — Worker plane + scheduled wakes:** jobs queue, idempotent, retries-with-budget, receipts; Modal for heavy jobs; `wake_schedules` + `pg_cron` dispatch enqueues due CEO wakes into the queue (no local ticker). *Accept:* heavy work runs as jobs; partial = blocked/failed; a due `wake_schedule` enqueues exactly one job and the worker drains it; a host outage fires one catch-up wake, not a backlog; **no SQLite/jobs.json/systemd cron path is reintroduced.**
+- **Phase 6 — Worker plane + scheduled wakes:** jobs queue, idempotent, retries-with-budget, receipts; heavy jobs run on the same job contract drained by the runtime worker (no external job runner); `wake_schedules` + `pg_cron` dispatch enqueues due CEO wakes into the queue (no local ticker). *Accept:* heavy work runs as jobs; partial = blocked/failed; a due `wake_schedule` enqueues exactly one job and the worker drains it; a host outage fires one catch-up wake, not a backlog; **no SQLite/jobs.json/systemd cron path is reintroduced.**
 - **Phase 7 — Externalize filesystem + no-fleet proof:** Storage-backed workspaces; second empty-disk runtime resumes; demote/retire VPS. *Accept:* second host resumes from Postgres+Storage; VPS disposable.
 - **Phase 8 — Kill SQLite:** delete the SQLite authority path. *Accept:* no SQLite authority remains; all E2E green on Postgres.
 

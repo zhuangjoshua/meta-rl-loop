@@ -1616,3 +1616,169 @@ git checkout -p hermes-agent-main/plugins/takyon/core.py   # drop ONLY the gener
 git checkout -- hermes-agent-main/skills/takyon/takyon-app-runtime/SKILL.md
 # this log entry is additive — trim it back to the connection-layer increment if reverting.
 ```
+
+## Increment — Worker plane + scheduled CEO wakes (Phase 6): an at-least-once, budget-gated job queue, and recurring wakes as due-rows enqueued into that SAME queue
+
+**Date:** 2026-05-30
+
+**What:** Built the Postgres-native **worker plane** (mediationplan.md > Worker Plane) in three coupled
+pieces, all additive and inert until a caller is wired at cutover:
+- **migration 0010** — `jobs` (the at-least-once queue: one job, one worker via `FOR UPDATE SKIP
+  LOCKED`; `idempotency_key UNIQUE` dedup; a CHECKED `queued→running→completed|blocked|failed|cancelled`
+  lifecycle; `reserved_billing_entry_id` as the flow-A reservation back-reference; bounded
+  `attempts`/`max_attempts`), `wake_schedules` (one recurring CEO-wake row per business; `next_run_at`
+  is the dispatcher's cursor), and the in-DB `dispatch_due_wakes()` function (enqueue-when-due **then**
+  advance, atomically, in one statement over a `FOR UPDATE SKIP LOCKED` `due` set).
+- **`plugins/takyon/jobs.py`** — the queue ops + the ONE budget-gated execution contract: `enqueue`
+  (idempotent), `get_job`/`list_jobs`, `claim_one` (skip-locked → 'running', attempts++), `complete`/
+  `block`/`fail` (atomic terminal transitions; the row is its own receipt), `requeue_stale` (crash
+  recovery), and `run_one` (claim → handler-lookup → reserve on the OWNER's flow-A account → run →
+  settle/complete | block | refund+fail).
+- **`plugins/takyon/wakes.py`** — `wake_schedules` CRUD (`upsert_wake_schedule`, `get`, `list`,
+  `set_enabled`) + a thin `dispatch_due_wakes(conn)` caller of the in-DB function.
+
+Also **struck every Modal reference from `mediationplan.md`** (operator directive: "we weren't ever
+going to use Modal") — the 4 "Modal (later)" mentions are replaced with provider-neutral framing: the
+**runtime worker drains the queue under one job contract — the VPS now, scaled out to N stateless
+workers later; there is no external job runner** (heavy/build jobs run on the same contract, just on a
+worker with more headroom).
+
+**Why (mediationplan Worker Plane, line 124 + acceptance, line 234):** heavy/recurring work must run as
+durable, idempotent, budget-gated jobs, and a missing config/credential must **block with a reason**,
+never fabricate a completion (invariant #8). Scheduled CEO wakes are **not** a second mechanism — they
+are due-rows enqueued into the SAME `jobs` queue the worker already drains, so there is no systemd
+timer, no `.takyon/cron/jobs.json`, no `.tick.lock`.
+
+**Gate-1 finding (inspect-before-build — repo AND live backend):** `policy.py` already emits
+`PolicyDecision(outcome="job", estimate_cents=…)` (`policy.py:328`) with **no consumer** — this queue
+is that consumer (policy DECIDES; the worker RESERVES). `billing.py reserve(…, *, business_slug,
+job_id)` already takes `job_id` (`billing.py:180`), so the worker reuses the flow-A
+reserve→settle/refund engine **unchanged** — `jobs.reserved_billing_entry_id` is the back-reference;
+**no new money path**. Read-only live Supabase catalog check (105 public tables): the exact names
+`jobs` and `wake_schedules` are **ABSENT** (collision-free); the polsia2-era analogs (`cron_jobs` which
+conflates schedule+lock+status, `business_ceo_wakeups`, `workflow_jobs`, `media_generation_jobs`) are
+disposable/orphaned and are **NOT read or migrated** — this design SEPARATES schedule
+(`wake_schedules`) from queue (`jobs`), the correct single-path REPLACE. The legacy FILE cron
+(`cron/scheduler.py`, `cron/jobs.py`, `gateway/run.py::_start_cron_ticker`) is SQLite-era and is
+retired in **Phase 8**, NOT here; 0010 installs the Postgres replacement ALONGSIDE it. *Decisions:*
+`jobs`/`wake_schedules` + `jobs.py`/`wakes.py` are **NEW**; the budget gate **EXTENDS** `billing.py`;
+the job decision **CONSUMES** `policy.py`'s existing `outcome="job"`; wakes **REPLACE** the legacy file
+cron (coexisting until Phase 8). REPLACE guards mirror 0001–0009 (fail loud on a differently-shaped
+pre-existing table, keyed on `jobs.reserved_billing_entry_id` and `wake_schedules.next_run_at`).
+
+**Gate-2 finding (credentials/providers): NONE new.** Dispatch is gated by **`CRON_SECRET`** (already
+provisioned). Heavy jobs run on the **runtime worker** (no external job runner — Modal struck per the
+operator directive above). pg_cron is an in-DB Supabase extension enabled at cutover; equivalently a
+`CRON_SECRET`-bearer endpoint runs the identical `select dispatch_due_wakes()` on an interval. No new
+account, key, or paid service. The one outstanding credential remains **`STRIPE_BILLING_WEBHOOK_SECRET`**
+(Phase 3), untouched.
+
+**Decisions (and the deliberate choices):**
+- **One job, one worker.** `claim_one` locks the oldest queued row with `FOR UPDATE SKIP LOCKED`, then
+  flips it 'running' in the same transaction — two workers (or a pg_cron overlap) never pick the same
+  row. The skip-locked guarantee is proven against a second live connection holding the lock.
+- **At-least-once + idempotent.** `enqueue` is `on conflict (idempotency_key) do nothing`; a replay
+  returns the EXISTING row unchanged (one effect, original payload preserved).
+- **The worker RESERVES; policy only DECIDED.** `run_one` reserves `payload.estimate_cents` on the
+  owner's flow-A account under a **per-attempt** key `job:<id>:<attempts>`. A reserve the buckets can't
+  cover ⇒ `block('budget_exhausted')` and **nothing runs** (invariant #8). On handler success →
+  `settle` at the TRUE cost (clamped ≤ reserved, remainder released) + `complete`; on handler raise →
+  `refund` the whole hold + `fail`. **Stale-hold reconciliation:** before reserving, `run_one` refunds
+  any prior attempt's outstanding hold (idempotent), so a crash-mid-job reservation can never leak
+  across retries.
+- **Retries are BOUNDED.** `fail` re-queues only while `attempts < max_attempts`, else terminal
+  'failed' — an exhausted budget or a permanently-failing job stops, never loops. `requeue_stale`
+  recovers a crashed worker's stranded 'running' job (or blocks it `'stalled_max_attempts'` at the
+  bound).
+- **The job row is its own receipt.** `status` + `result`/`error` are written ATOMICALLY with the
+  terminal transition; `complete`/`block`/`fail` only act on a 'running' row (single-writer — the
+  claimer holds it) and raise `JobNotRunning` rather than overwrite a terminal row.
+- **The work is a SEAM.** `run_one(…, handlers: Mapping[str, Handler])` — the host wires real handlers
+  (a `ceo_wake` handler that runs a CEO turn, a build handler, …); tests inject deterministic stubs.
+  This mirrors the AI gateway's `get_provider_caller` seam: the engine (claim, budget, lifecycle) is
+  real and tested on real Postgres; only the leaf side effect is injected.
+- **The wake schedule lives in the table, advanced ONLY by dispatch.** `dispatch_due_wakes()` enqueues
+  one job per due row keyed `wake:<slug>:<YYYYMMDDHH24MI>` of the *scheduled* time (window idempotency
+  via the jobs unique key) and advances `next_run_at = greatest(now(), next_run_at) + interval` (the
+  catch-up bound: a host down for N intervals fires ONE enqueue and realigns to now, never an N-deep
+  backlog) — both effects in one statement so a crash can't split enqueue from advance. `upsert`
+  preserves the cursor on update (same bound param coalesced to `now()` on INSERT, to the existing
+  cursor on UPDATE) unless an explicit `next_run_at` is passed; `set_enabled` pauses/resumes without
+  moving it.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0010_jobs_and_wakes.sql` — the two tables, three
+  indexes (`jobs_queued_idx` partial on `status='queued'`, `jobs_business_idx`, `wake_schedules_due_idx`
+  partial on `enabled`), two fail-loud REPLACE guards, and `dispatch_due_wakes()`.
+- `hermes-agent-main/plugins/takyon/jobs.py` — pure-leaf queue + execution engine (`Job`/`JobRunResult`/
+  `JobOutcome`, `enqueue`/`get_job`/`list_jobs`/`claim_one`/`complete`/`block`/`fail`/`requeue_stale`/
+  `run_one`; `Handler` seam type).
+- `hermes-agent-main/plugins/takyon/wakes.py` — pure-leaf `WakeSchedule` + `upsert_wake_schedule`/`get`/
+  `list`/`set_enabled`/`dispatch_due_wakes`.
+- `hermes-agent-main/tests/plugins/test_takyon_jobs_pg.py` — **14** tests on real PG: enqueue
+  idempotent; claim_one FIFO + never-double-claim + kind filter + **the real SKIP-LOCKED proof** (a row
+  locked by a second live connection is skipped, then claimable on release); run_one
+  reserve→settle→complete (ledger moves: `allowance_used==actual`, `reserved==0`); budget-exhausted
+  blocks with nothing run/held (invariant #8); unknown-kind blocks ('no_handler', nothing reserved);
+  zero-estimate completes without touching billing; handler-error refunds + fails; **bounded** retry
+  then terminal-failed with no leak (handler ran exactly max_attempts times, never re-claimed after);
+  empty-queue → None; requeue_stale recovers a crashed job / blocks it at max attempts; **stale-hold
+  released before the next reserve** (no cross-retry leak: `reserved==0`, only the true cost charged).
+- `hermes-agent-main/tests/plugins/test_takyon_wakes_pg.py` — **9** tests on real PG: upsert creates
+  due-now-by-default; update preserves the cursor unless explicit; rejects non-positive interval;
+  set_enabled pauses dispatch + preserves cursor on resume; dispatch enqueues exactly one ceo_wake job
+  (keyed on the scheduled minute) + advances the cursor + sets last_enqueued_at; window-idempotency
+  replay collapses to zero new jobs; bounded one-shot catch-up after a multi-interval outage (realigned
+  to ~now+interval, not a backlog); the dispatched wake drains through `run_one(kinds=['ceo_wake'])`;
+  distinct minute-windows fire distinct jobs.
+
+**Files changed:**
+- `mediationplan.md` — **all 4 Modal references struck** (operator directive), replaced with
+  provider-neutral "runtime worker drains the queue / scale to N stateless workers / no external job
+  runner" framing at lines ~27, ~124, ~189, ~234. (Optional Temporal/Inngest noted only as an unused
+  "if durable orchestration is ever actually needed" aside.)
+- `IMPLEMENTATION_LOG.md` — this entry.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the jobs+wakes suites → **23 passed**. Full `tests/plugins/`
+→ **1104 passed, 2 failed**. The 2 failures are the **same pre-existing, unrelated** pair as the Phase 5
+increments — `test_business_work_focus_persists_and_blocks_cross_lane_writes` (core.py artifact-path,
+from the operator's separate uncommitted `distribution/meta-ads` working-tree edits) and the web-search
+`test_all_seven_plugins_present_in_registry` (a change-detector snapshot expecting 7; committed `xai`
+makes 8 — the failure literally prints "Left contains one more item: 'xai'"). Proven not-mine: neither
+imports `jobs`/`wakes` nor uses the `pg_conn` fixture. Because the conftest re-runs the FULL migration
+chain (0001→0010) for every `pg_conn` test, all 1104 passing PG tests also prove 0010 applies cleanly
+and breaks nothing downstream. `grep -ci modal mediationplan.md` → **0**.
+
+**Not done / honest state:**
+- **No caller is wired yet — the engine is inert.** Nothing in the serving path calls `run_one` or
+  `dispatch_due_wakes`. The worker LOOP (a process calling `run_one` in a loop) and the dispatch
+  TRIGGER (pg_cron, or a `CRON_SECRET` endpoint calling `select dispatch_due_wakes()`) are wired at the
+  operator-gated cutover. This increment builds the queue + schedule + dispatch; it does not start a
+  worker or schedule a tick.
+- **No real handlers yet.** The `ceo_wake` handler (runs a CEO turn), build/deploy handlers, etc. are
+  host wiring landed with the worker loop. Tests inject stubs through the SAME `handlers` seam
+  production will use.
+- **Legacy file cron still runs, untouched.** `cron/scheduler.py` + `jobs.json` + `.tick.lock` are
+  SQLite-era; their retirement rides with the SQLite path in **Phase 8**. 0010 is the Postgres
+  replacement installed alongside, not a retirement.
+- **Live Supabase apply remains blocked** on polsia2 teardown + backup + operator go-ahead. 0010 is
+  validated on local PG only. pg_cron is enabled at cutover; until then the `CRON_SECRET` endpoint runs
+  the identical dispatch SQL.
+
+**Phase 6 worker plane complete (engine).** The queue, the one budget-gated execution contract, and
+the schedule+dispatch for recurring CEO wakes all exist and are proven on real Postgres — reusing the
+flow-A billing engine and consuming policy's `outcome="job"` with no new money path and no new
+credential. The remaining steps are the operator-gated worker loop + dispatch trigger at cutover, then
+Phase 7 (externalize the filesystem) and Phase 8 (retire SQLite + the legacy file cron).
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/db/migrations/0010_jobs_and_wakes.sql
+rm hermes-agent-main/plugins/takyon/jobs.py
+rm hermes-agent-main/plugins/takyon/wakes.py
+rm hermes-agent-main/tests/plugins/test_takyon_jobs_pg.py
+rm hermes-agent-main/tests/plugins/test_takyon_wakes_pg.py
+git checkout 07619804 -- mediationplan.md   # restore the 4 "Modal (later)" mentions struck in this commit
+# this log entry is additive — trim it back to the AI-gateway increment if reverting.
+```
