@@ -1782,3 +1782,156 @@ rm hermes-agent-main/tests/plugins/test_takyon_wakes_pg.py
 git checkout 07619804 -- mediationplan.md   # restore the 4 "Modal (later)" mentions struck in this commit
 # this log entry is additive — trim it back to the AI-gateway increment if reverting.
 ```
+
+---
+
+## Increment — Externalize the per-business filesystem + the no-fleet proof (Phase 7): a stateless host that resumes a business from Postgres + an object store
+
+**Date:** 2026-05-30
+
+**What:** Built the Postgres-era **externalized filesystem** (mediationplan.md > Runtime Cutover step 4 +
+Phase 7) as ONE pure leaf, additive and inert until a caller is wired at cutover:
+- **`plugins/takyon/storage.py`** — the object-store leaf, shaped like `jobs`/`wakes` and seamed like the
+  AI gateway's `get_provider_caller`:
+  - `StorageBackend` (a put/get/delete/`list_digests` Protocol) + `get_storage_backend()` — ONE seam,
+    selected by config: `LocalStorageBackend` (a real local-directory object store; the credential-free
+    default + the CI tier + the literal "local disk = scratch" stand-in for the bucket) or
+    `SupabaseS3StorageBackend` (Supabase Storage over its S3-compatible API, lazy `boto3`).
+  - `sync_up`/`sync_down` — content-**digest incremental** (an unchanged file is skipped; only changed
+    bytes move) and **integrity-checked** (a downloaded blob whose sha256 ≠ its recorded digest raises
+    before it lands), reusing `core._safe_relpath`'s containment discipline so an object key can never
+    escape the `<slug>/` prefix.
+  - `with_business_workspace(...)` — the worker integration seam: sync-down on enter → yield scratch →
+    sync-up on **clean** exit (default: mirror deletions); on an exception it does NOT sync up (crash
+    discipline — a crashed run never clobbers the last good remote state).
+
+**Why (mediationplan Runtime Cutover step 4/6/7, lines 166/168/169 + Phase 7 acceptance, line 236):** the
+per-business workspace lives only on the local disk of whichever box ran the CEO, which makes the host
+*stateful* — a second runtime can't resume a business, and the VPS can't be made disposable. Externalizing
+the workspace to an object store turns the contract into sync-down → run → sync-up so a second host
+resumes from **Postgres (identity/jobs/ledger/schedule) + the object store (files)** — the no-fleet proof.
+A missing Storage credential must **block with a reason**, never silently fall back or fake a "synced"
+result (invariant #8).
+
+**Gate-1 finding (inspect-before-build — repo AND backend):** the per-business filesystem today is
+**local disk only** — `TakyonStore.root` (`$TAKYON_HOME`) `/ "businesses" / <slug>` over four canonical
+roots (`product`/`distribution`/`research`/`metrics` = `TAKYON_BUSINESS_ROOTS`, core.py:58), seeded at
+`business.upsert` (core.py:4940), read/written at **~40+ direct call sites** via `_business_root` /
+`_resolve_business_file` (containment) / `_atomic_write_text` / `_append_jsonl`, with canonical-relpath
+aliasing in `_canonical_business_relpath` (core.py:2038). A grep for any Storage/S3/sync code
+(`supabase storage`, `boto3`, `s3`, `put_object`, `sync_down/up`) finds **none** — the only `storage`
+hits are doc comments + `tools/tool_result_storage.py` (`/tmp` tool-output cache, unrelated). PG
+migrations 0001–0010 have **no `files`/storage table**. *Decisions:* **ADD** a new pure-leaf `storage.py`
+(nothing to extend/dedupe); **REPLACE-on-top, not a third system** — it externalizes the SAME four-root
+taxonomy core.py owns, and the SQLite local-disk path stays until Phase 8 (the transitional dual-write
+must not settle into permanent coexistence). **No DB migration / no new table** — the bucket is the
+source of truth for file bytes + their listing; Postgres stays the source of truth for
+business/jobs/ledger/schedule. (A PG `business_files` manifest was considered and **rejected**: it
+duplicates the store's own listing and adds a bucket↔table two-write drift hazard.)
+
+**Gate-2 finding (credentials/providers): NEW credential for the LIVE backend — recorded, not bandaided.**
+This **corrects** the plan's optimistic Providers note ("Supabase Storage … already provisioned, no
+separate S3/'F3' needed"): the Supabase *project* is provisioned (we hold `DATABASE_URL` /
+`MIGRATION_DATABASE_URL`, confirmed the only DB/storage names in `secrets/.env`), so no separate
+object-store *vendor* is needed — **but `DATABASE_URL` is a Postgres SQL connection and CANNOT read/write
+Storage blob bytes.** Live sync needs NEW Supabase Storage access keys, absent from `secrets/.env` today:
+the **recommended S3-compatible quad** `SUPABASE_S3_ENDPOINT` + `SUPABASE_S3_REGION` +
+`SUPABASE_S3_ACCESS_KEY_ID` + `SUPABASE_S3_SECRET_ACCESS_KEY` (+ our own `TAKYON_STORAGE_BUCKET`), or the
+REST alternative `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (+ bucket). The live S3 backend lazy-imports
+`boto3` only when selected. **The mechanism is fully buildable + proven with NO new credential** (the
+local backend + the no-fleet proof run offline); only the live wire-up is gated. Recorded in
+mediationplan.md Gate 2 + a reminder to the operator below. (`STRIPE_BILLING_WEBHOOK_SECRET` from Phase 3
+remains the other outstanding operator-pending key.)
+
+**Decisions (and the deliberate choices):**
+- **One seam, two impls — not a second code path.** `local` and `supabase_s3` satisfy the same
+  `StorageBackend` contract; `get_storage_backend()` picks by `TAKYON_STORAGE_BACKEND` exactly like a
+  provider selector. The local backend is a REAL object store (the credential-free + CI + scratch tier),
+  not a fake/stub — so test mode and live differ only by which backend the seam returns, with the same
+  gates.
+- **Invariant #8 is the activation gate.** `supabase_s3` is an EXPLICIT opt-in; selected while
+  unconfigured (creds or `boto3` missing) → `StorageUnconfigured` (a `blocked`-with-reason that names the
+  missing creds), **never** a silent downgrade to local and never a fake "synced."
+- **Incrementality + integrity are first-class (robustness #1).** Sync compares sha256 digests (one
+  digest space across backends; the local backend computes by reading so the listing is exactly the bytes
+  on disk, no drift-prone sidecar), moves only changed bytes, and **verifies every downloaded blob's
+  sha256 before writing it** — a corrupt/tampered object raises rather than landing.
+- **Mirror semantics are explicit + safe-by-default.** The raw `sync_up`/`sync_down` are additive
+  (`delete_remote`/`delete_local` default False — a partial tree can't delete good state). The
+  worker-facing `with_business_workspace` opts into mirror deletion on a CLEAN run only.
+- **Crash discipline.** `with_business_workspace` syncs up only on normal exit; an exception propagates
+  WITHOUT sync-up, so the requeued job (Phase 6) re-syncs the last good remote tree — the externalized
+  filesystem and the at-least-once queue compose.
+- **Containment is a durable hardcode.** `_safe_rel` (mirrors `core._safe_relpath`: no absolute, no
+  empty/`.`/`..` segments, depth-capped) + the local backend's resolved-root check make a key escaping the
+  business prefix impossible; a 256 MiB per-object cap bounds memory.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/storage.py` — the pure-leaf object-store seam (`StorageBackend`,
+  `LocalStorageBackend`, `SupabaseS3StorageBackend`, `get_storage_backend`, `sync_up`/`sync_down`,
+  `with_business_workspace`, `digest_bytes`, `object_prefix`; `StorageError`/`ObjectNotFound`/`UnsafePath`/
+  `StorageUnconfigured`). No import of the SQLite-coupled `core`; no psycopg; no global state.
+- `hermes-agent-main/tests/plugins/test_takyon_storage_pg.py` — **22** tests: **the no-fleet proof**
+  (a real PG business; host A writes the four-root workspace + a binary blob and syncs up; host B — a
+  fresh EMPTY scratch dir that learns the slug only from `select slug from businesses …` — resumes
+  BYTE-IDENTICAL from the store); two-business store isolation; digest incrementality (re-up skips all,
+  one changed file moves alone, the revised bytes resume); a `_LyingBackend` proving sync_down refuses a
+  digest-mismatched blob and lands nothing; mirror-delete vs. safe additive default; path containment
+  (5 escape keys + 5 unsafe slugs rejected, case-normalization allowed); backend selection (local default;
+  `supabase_s3` unconfigured → `StorageUnconfigured` naming the missing creds; unknown kind rejected);
+  `with_business_workspace` syncs down→up on clean exit and does NOT sync up on an exception.
+
+**Files changed:**
+- `mediationplan.md` — added the **Phase 7 Gate 2 entry** (the new Supabase Storage credential need, with
+  the S3 quad / REST alternative + the operator provisioning step + the corrected "already provisioned"
+  claim) and the **Phase 7 gate finding** paragraph (Gate-1 inventory + decisions, in the same house style
+  as Phases 3–5). Both written BEFORE any code, per the standing gate discipline.
+- `IMPLEMENTATION_LOG.md` — this entry.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic, all credential env unset): the storage suite → **22 passed**.
+Full `tests/plugins/` → **1126 passed, 2 failed** (= the prior 1104 baseline + these 22). The 2 failures
+are the **same pre-existing, unrelated** pair tracked since Phase 5 — `test_business_work_focus_persists…`
+(core.py artifact-path, from the operator's separate uncommitted `distribution/meta-ads` working-tree
+edits) and the web-search `test_all_seven_plugins_present_in_registry` (a change-detector snapshot
+expecting 7; committed `xai` makes 8 — it literally prints "Left contains one more item: 'xai'"). Proven
+not-mine: neither imports `storage` nor the new test. The local backend + no-fleet proof run with NO new
+credential and the live backend's invariant-#8 block is proven without `boto3` or live Supabase.
+
+**Not done / honest state:**
+- **No caller is wired yet — the leaf is inert.** Nothing in the serving path calls `sync_down`/`sync_up`
+  or wraps the worker's per-job run in `with_business_workspace`. That integration (sync-down → run →
+  sync-up around `jobs.run_one`) is the operator-gated cutover step, exactly as Phase 6 left the worker
+  loop unmounted. core.py still reads/writes the workspace on local disk via `_business_root`.
+- **The `supabase_s3` backend is wired but UNVERIFIED against live Supabase.** No live Storage creds
+  exist in this environment, so its boto3 calls (`put_object`/`get_object`/`list_objects_v2`+`head_object`/
+  `delete_object`) are cutover-ready code, NOT a tested path. The local backend is the verified one. The
+  operator must provision the Gate-2 keys and a private bucket before live cutover; absent them the path
+  blocks with a reason (proven), it does not fake.
+- **Local disk still authoritative until cutover.** This increment externalizes the mechanism and proves
+  resume; it does not flip core.py off local disk. The VPS is not yet demoted/disposable — that follows
+  once the cutover wires the sync around the worker and selects the live backend.
+- **Live Supabase apply/cutover remains blocked** on polsia2 teardown + backup + operator go-ahead
+  (unchanged). No new migration was added by this phase.
+
+**⚠️ Operator action — NEW credential to provide before LIVE filesystem sync (Phase 7):** create a
+**private Supabase Storage bucket** (e.g. `business-workspaces`) and, under Storage → S3 Access Keys,
+generate an access key; then add to `secrets/.env`: `SUPABASE_S3_ENDPOINT`
+(`https://<ref>.storage.supabase.co/storage/v1/s3`), `SUPABASE_S3_REGION`, `SUPABASE_S3_ACCESS_KEY_ID`,
+`SUPABASE_S3_SECRET_ACCESS_KEY`, and `TAKYON_STORAGE_BUCKET`. (Outstanding keys overall:
+`STRIPE_BILLING_WEBHOOK_SECRET` from Phase 3 + these Storage keys.)
+
+**Phase 7 mechanism complete (leaf + proof).** The externalized filesystem — one provider-neutral seam, a
+real credential-free local backend, digest-incremental + integrity-checked sync, and a wired-but-unverified
+Supabase S3 backend that blocks-with-reason when unprovisioned — exists and is proven on real Postgres:
+a second host on an empty disk resumes a business byte-identically from Postgres + the store. The remaining
+steps are the operator-gated cutover (wire the sync around the worker, select the live backend, provision
+the Storage keys), then Phase 8 (retire SQLite + the legacy file cron + the local-disk-authoritative path).
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/storage.py
+rm hermes-agent-main/tests/plugins/test_takyon_storage_pg.py
+git checkout 5e535934 -- mediationplan.md   # restore the pre-Phase-7 plan (drops the Phase 7 Gate-2 entry + gate finding)
+# this log entry is additive — trim it back to the Phase 6 increment if reverting.
+```

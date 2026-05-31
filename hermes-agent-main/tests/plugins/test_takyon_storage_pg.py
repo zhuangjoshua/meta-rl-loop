@@ -1,0 +1,294 @@
+"""Tests for the externalized per-business filesystem (``plugins/takyon/storage.py``, Phase 7) — the
+leaf that makes the runtime host stateless so a second runtime resumes a business from Postgres +
+the object store, never from local disk.
+
+Proves the Phase 7 contract:
+  * **the no-fleet proof** (the acceptance): a business's workspace written + synced up on "host A" is
+    resumed BYTE-IDENTICAL on "host B" — a fresh, empty scratch dir — where host B learns the business
+    only from Postgres (the ``businesses`` row) and pulls every file from the store. Postgres + Storage,
+    no shared disk;
+  * sync is content-**digest incremental** (an unchanged file is skipped on re-sync, only changed bytes
+    move) and **integrity-checked** (a blob whose sha256 ≠ its recorded digest is refused, not landed);
+  * ``delete_remote``/``delete_local`` give faithful mirror semantics (a deletion propagates);
+  * **path containment** — an object key can never escape the business prefix;
+  * **backend selection is one seam, two impls** — ``local`` is the credential-free default;
+    ``supabase_s3`` is an explicit opt-in that BLOCKS with a reason when unprovisioned (invariant #8),
+    never silently downgrading to local;
+  * :func:`with_business_workspace` syncs down→up on a clean run but, by the crash discipline, does NOT
+    sync up on an exception, so a crashed run never clobbers the last good remote state.
+
+Most tests exercise the pure leaf (no DB); the headline no-fleet test ties it to a real Postgres
+business. The module skips entirely unless psycopg is importable.
+"""
+
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+import pytest
+
+psycopg = pytest.importorskip("psycopg")
+
+from plugins.takyon import storage  # noqa: E402
+from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────────────────────────
+
+
+def _backend(tmp_path) -> storage.LocalStorageBackend:
+    """A real local-directory object store standing in for 'the bucket'."""
+    return storage.LocalStorageBackend(tmp_path / "bucket")
+
+
+def _seed_workspace(root: Path) -> None:
+    """Write a realistic four-root workspace (text + a binary blob) under ``root``."""
+    (root / "research").mkdir(parents=True, exist_ok=True)
+    (root / "research" / "strategy.md").write_text("# Acme\nGoal: win the market\n")
+    (root / "product").mkdir(parents=True, exist_ok=True)
+    (root / "product" / "runtime.md").write_text("Rails By Owner\n")
+    (root / "metrics" / "receipts").mkdir(parents=True, exist_ok=True)
+    (root / "metrics" / "receipts" / "r1.json").write_bytes(b"\x00\x01\x02 binary receipt")
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    """Every regular file under ``root`` as {posix-relpath: bytes} — for byte-identity assertions."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+
+
+def _business(pg_conn) -> tuple[str, str]:
+    """Provision a user + a business they own; return (slug, owner_user_id)."""
+    uid, _created, _raw = provision_user_on_first_login(pg_conn, f"auth0|{uuid.uuid4().hex}")
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    pg_conn.execute(
+        "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+        (slug, "Acme", uid),
+    )
+    return slug, uid
+
+
+# ── the no-fleet proof (Postgres + Storage) ───────────────────────────────────────────────────────
+
+
+def test_no_fleet_resume_from_postgres_and_storage(pg_conn, tmp_path):
+    # A real PG-backed business. Host A builds its workspace on local scratch and syncs up.
+    slug, uid = _business(pg_conn)
+    backend = _backend(tmp_path)
+    host_a = tmp_path / "host-a-scratch"
+    _seed_workspace(host_a)
+    up = storage.sync_up(backend, slug, host_a)
+    assert len(up.uploaded) == 3 and up.deleted == ()
+
+    # Host B is a SECOND runtime on an empty disk. It learns the business only from Postgres...
+    host_b = tmp_path / "host-b-scratch"
+    host_b.mkdir()
+    assert _tree(host_b) == {}  # genuinely empty before resume
+    (resumed_slug,) = pg_conn.execute(
+        "select slug from businesses where owner_user_id = %s", (uid,)
+    ).fetchone()
+
+    # ...and reconstructs the entire workspace from the store. That is the acceptance.
+    down = storage.sync_down(backend, resumed_slug, host_b)
+    assert len(down.downloaded) == 3
+    assert _tree(host_b) == _tree(host_a)  # byte-identical resume, including the binary blob
+
+
+def test_two_businesses_are_isolated_in_the_store(pg_conn, tmp_path):
+    # Each business lives under its own prefix; resuming one never leaks the other's files.
+    slug_a, _ = _business(pg_conn)
+    slug_b, _ = _business(pg_conn)
+    backend = _backend(tmp_path)
+
+    a_src = tmp_path / "a"
+    (a_src).mkdir()
+    (a_src / "research").mkdir()
+    (a_src / "research" / "strategy.md").write_text("A secrets\n")
+    storage.sync_up(backend, slug_a, a_src)
+
+    b_dest = tmp_path / "b"
+    b_dest.mkdir()
+    storage.sync_down(backend, slug_b, b_dest)
+    assert _tree(b_dest) == {}  # business B sees nothing of business A
+
+
+# ── incrementality + integrity ─────────────────────────────────────────────────────────────────
+
+
+def test_sync_is_digest_incremental_only_changed_bytes_move(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    _seed_workspace(src)
+    assert len(storage.sync_up(backend, "biz-x", src).uploaded) == 3
+
+    # Re-up with no changes: everything is skipped, nothing re-uploaded.
+    again = storage.sync_up(backend, "biz-x", src)
+    assert again.uploaded == () and len(again.skipped) == 3
+
+    # Change exactly one file: only that one moves.
+    (src / "research" / "strategy.md").write_text("# Acme\nGoal: REVISED\n")
+    delta = storage.sync_up(backend, "biz-x", src)
+    assert delta.uploaded == ("research/strategy.md",)
+    assert len(delta.skipped) == 2
+
+    # And a fresh host now resumes the revised bytes.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    storage.sync_down(backend, "biz-x", dest)
+    assert (dest / "research" / "strategy.md").read_text() == "# Acme\nGoal: REVISED\n"
+
+
+def test_sync_down_refuses_a_corrupt_blob(tmp_path):
+    # A backend whose listing advertises a digest that its bytes don't match — sync_down must catch the
+    # mismatch and raise, never write a corrupt file. (Robustness rail: integrity before it lands.)
+    class _LyingBackend:
+        name = "lying"
+
+        def list_digests(self, prefix):
+            return {f"{prefix}research/strategy.md": "0" * 64}  # claimed sha256 that won't match
+
+        def get(self, key):
+            return b"actual bytes that hash to something else"
+
+        def put(self, key, data, *, digest):  # pragma: no cover - unused here
+            raise AssertionError
+
+        def delete(self, key):  # pragma: no cover - unused here
+            raise AssertionError
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(storage.StorageError, match="integrity check failed"):
+        storage.sync_down(_LyingBackend(), "biz-x", dest)
+    assert _tree(dest) == {}  # nothing landed
+
+
+# ── mirror semantics ───────────────────────────────────────────────────────────────────────────
+
+
+def test_delete_remote_mirrors_local_deletions(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    _seed_workspace(src)
+    storage.sync_up(backend, "biz-x", src)
+
+    # Delete a file locally, then sync up WITH mirror deletion.
+    (src / "product" / "runtime.md").unlink()
+    report = storage.sync_up(backend, "biz-x", src, delete_remote=True)
+    assert report.deleted == ("product/runtime.md",)
+
+    # A fresh resume no longer has the deleted file.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    storage.sync_down(backend, "biz-x", dest)
+    assert "product/runtime.md" not in _tree(dest)
+    assert "research/strategy.md" in _tree(dest)
+
+
+def test_additive_sync_up_default_does_not_delete(tmp_path):
+    # Without delete_remote, a missing-locally file is left untouched remotely (safe default).
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    _seed_workspace(src)
+    storage.sync_up(backend, "biz-x", src)
+    (src / "product" / "runtime.md").unlink()
+    report = storage.sync_up(backend, "biz-x", src)  # default: additive
+    assert report.deleted == ()
+    assert backend.get("biz-x/product/runtime.md") == b"Rails By Owner\n"  # still there
+
+
+# ── path containment ───────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad", ["../escape", "/abs/path", "a/../../b", "", "."])
+def test_object_key_cannot_escape_business_prefix(tmp_path, bad):
+    backend = _backend(tmp_path)
+    with pytest.raises(storage.UnsafePath):
+        backend.get(bad)
+
+
+@pytest.mark.parametrize("bad", ["../x", "Has Space", "", "a/b", "."])
+def test_prefix_rejects_unsafe_slug(bad):
+    with pytest.raises(storage.UnsafePath):
+        storage.object_prefix(bad)
+
+
+def test_prefix_normalizes_case_rather_than_escaping():
+    # Case is collapsed (matches core._slugify) — safe, since casing can't escape a prefix.
+    assert storage.object_prefix("UPPER") == "upper/"
+
+
+# ── backend selection (one seam, two impls) ──────────────────────────────────────────────────────
+
+
+def test_default_backend_is_local_and_credential_free(monkeypatch, tmp_path):
+    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    backend = storage.get_storage_backend(root=tmp_path / "b")
+    assert backend.name == "local"
+
+
+def test_live_backend_selected_but_unconfigured_blocks_with_reason(monkeypatch):
+    # Invariant #8: explicit opt-in to the live backend with no creds -> blocked-with-reason, NEVER a
+    # silent fall back to local and NEVER a fake "synced".
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "supabase_s3")
+    for k in (
+        "SUPABASE_S3_ENDPOINT",
+        "SUPABASE_S3_REGION",
+        "SUPABASE_S3_ACCESS_KEY_ID",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "TAKYON_STORAGE_BUCKET",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(storage.StorageUnconfigured) as exc:
+        storage.get_storage_backend()
+    assert "supabase_s3" in str(exc.value)
+    assert "SUPABASE_S3_ENDPOINT" in str(exc.value)  # names the missing creds
+
+
+def test_unknown_backend_kind_is_rejected(monkeypatch):
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "ftp")
+    with pytest.raises(storage.StorageError, match="unknown TAKYON_STORAGE_BACKEND"):
+        storage.get_storage_backend()
+
+
+# ── worker integration seam + crash discipline ───────────────────────────────────────────────────
+
+
+def test_with_business_workspace_syncs_down_then_up_on_clean_exit(tmp_path):
+    backend = _backend(tmp_path)
+    seed = tmp_path / "seed"
+    _seed_workspace(seed)
+    storage.sync_up(backend, "biz-x", seed)
+
+    scratch = tmp_path / "scratch"
+    with storage.with_business_workspace(backend, "biz-x", scratch) as root:
+        assert (root / "research" / "strategy.md").exists()  # synced down on enter
+        (root / "metrics" / "summary.md").write_text("pulse\n")  # the run produces a new file
+
+    # Clean exit synced up: a fresh resume sees the new file.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    storage.sync_down(backend, "biz-x", dest)
+    assert (dest / "metrics" / "summary.md").read_text() == "pulse\n"
+
+
+def test_with_business_workspace_does_not_sync_up_on_exception(tmp_path):
+    backend = _backend(tmp_path)
+    seed = tmp_path / "seed"
+    _seed_workspace(seed)
+    storage.sync_up(backend, "biz-x", seed)
+    before = backend.list_digests(storage.object_prefix("biz-x"))
+
+    scratch = tmp_path / "scratch"
+    with pytest.raises(RuntimeError, match="boom"):
+        with storage.with_business_workspace(backend, "biz-x", scratch) as root:
+            (root / "research" / "strategy.md").write_text("HALF-WRITTEN, crash mid-run\n")
+            raise RuntimeError("boom")
+
+    # The crash did NOT sync up: the last good remote state is preserved untouched.
+    after = backend.list_digests(storage.object_prefix("biz-x"))
+    assert after == before
