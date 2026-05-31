@@ -1,0 +1,540 @@
+"""Product plan catalog + sub-user entitlements — Phase 5 (increment b) of mediationplan.md.
+
+Builds on `app_identity` (the sub-user spine). Two concerns, both scoped by `business_slug`:
+
+  * the per-business PLAN CATALOG (`app_plan_policies`) — what a product sells: price, tier,
+    included AI budget/action quota, Stripe product/price linkage. This is descriptive metadata
+    for the operator and the product UI; nothing here is a hard runtime gate (the enforced AI
+    budget is `app_budgets` in increment c).
+
+  * per-sub-user ENTITLEMENTS (`app_entitlements`) — append-a-row grants of access. A sub-user's
+    EFFECTIVE tier is resolved across their grants whose status is active/trialing (highest rank
+    wins) and cached onto `app_users.tier`, mirroring the SQLite trunk's `_sync_user_tier`
+    (core.py:3545). Granting a non-free tier MANUALLY without Stripe evidence is REJECTED — that
+    is the money-truth guard ported verbatim from core.py:5314 (a manual paid grant would fake
+    billing state).
+
+Postgres port of the SQLite trunk's app_plan_policies / app_entitlements (core.py:3036-3140);
+the SQLite product path is the predecessor, retired in Phase 8. The dead `stripe_payment_link_*`
+columns are dropped (written, never read); `included_action_quota` / `allow_overage` are KEPT
+(they are read — plans.md mirror + plan-validation warnings).
+
+House style (matches billing.py / custody.py / policy.py / app_identity.py): pure leaf, takes a
+psycopg connection, imports no psycopg, opens its own `conn.transaction()` per mutating op, and
+raises typed errors on broken preconditions. An unknown business fails loud through the FK to
+businesses(slug). The email→sub-user resolution reuses `app_identity.upsert_app_user`.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+
+from plugins.takyon import app_identity
+
+# tier → rank for resolving the effective tier; LOWER wins. Verbatim from core.py:2742.
+_TIER_RANK = {"owner": 0, "paid": 1, "pro": 1, "free": 2}
+_DEFAULT_TIER_RANK = 5
+
+_VALID_BILLING_INTERVALS = {"month", "year", "one_time"}
+_BILLING_INTERVAL_ALIASES = {
+    "monthly": "month",
+    "mo": "month",
+    "per_month": "month",
+    "annual": "year",
+    "annually": "year",
+    "yearly": "year",
+    "yr": "year",
+    "per_year": "year",
+    "once": "one_time",
+    "one-time": "one_time",
+    "single": "one_time",
+}
+
+# A non-free entitlement granted from one of these sources (or carrying metadata.non_billing) is
+# an explicit non-billing comp/internal grant, exempt from the Stripe-evidence requirement.
+_NON_BILLING_SOURCES = {"internal", "owner", "comp", "test"}
+
+# Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
+_ACTIVE_STATUSES = ("active", "trialing")
+
+
+class EntitlementError(Exception):
+    """Base for plan/entitlement errors."""
+
+
+class InvalidPlan(EntitlementError):
+    """A plan field is malformed (bad interval, negative amount, …)."""
+
+
+class AppUserNotFound(EntitlementError):
+    """The referenced sub-user does not exist in this business."""
+
+
+class FakeBillingRejected(EntitlementError):
+    """A manual non-free grant with no Stripe evidence would fake billing state."""
+
+
+@dataclass(frozen=True)
+class PlanPolicy:
+    """One row of a business's plan catalog (unique per (business_slug, plan_key))."""
+
+    id: str
+    business_slug: str
+    plan_key: str
+    tier: str
+    price_cents: int
+    currency: str
+    billing_interval: str
+    included_ai_budget_microusd: int
+    included_action_quota: int
+    allow_overage: bool
+    stripe_product_id: str | None
+    stripe_price_id: str | None
+    source: str
+    notes: str
+    metadata: dict
+
+
+@dataclass(frozen=True)
+class Entitlement:
+    """One grant of access to a sub-user. The sub-user's effective tier is resolved across all
+    of their grants — this single row is not authoritative on its own."""
+
+    id: str
+    business_slug: str
+    app_user_id: str
+    tier: str
+    status: str
+    source: str
+    stripe_customer_id: str | None
+    stripe_subscription_id: str | None
+    stripe_checkout_session_id: str | None
+    plan_key: str | None
+    current_period_end: object
+    metadata: dict
+
+
+_PLAN_COLUMNS = (
+    "id, business_slug, plan_key, tier, price_cents, currency, billing_interval, "
+    "included_ai_budget_microusd, included_action_quota, allow_overage, "
+    "stripe_product_id, stripe_price_id, source, notes, metadata"
+)
+_ENT_COLUMNS = (
+    "id, business_slug, app_user_id, tier, status, source, "
+    "stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id, "
+    "plan_key, current_period_end, metadata"
+)
+
+
+def _json_dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _normalize_plan_key(value: str) -> str:
+    """Slugify a plan key the same way the SQLite trunk's `_file_slug` does, so 'Free Plan' and
+    'free-plan' collapse to one catalog row."""
+    raw = str(value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-_.")
+    return (raw or "free")[:96]
+
+
+def _normalize_billing_interval(value: str) -> str:
+    raw = str(value or "month").strip().lower().replace("-", "_")
+    return _BILLING_INTERVAL_ALIASES.get(raw, raw)
+
+
+def _contains_unlimited(value) -> bool:
+    if isinstance(value, str):
+        return "unlimited" in value.lower()
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value < 0
+    if isinstance(value, dict):
+        return any(_contains_unlimited(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_unlimited(item) for item in value)
+    return False
+
+
+def plan_validation_warnings(
+    plan_key: str, tier: str, quota: int, allow_overage: bool, metadata: dict
+) -> list[str]:
+    """Operator-facing advisory warnings about a plan's coherence. Pure (no DB). Ported from
+    core.py:1978 so the upsert can fold them into stored metadata, exactly as the SQLite path
+    did — they are advisory only and gate nothing."""
+    warnings: list[str] = []
+    normalized_key = _normalize_plan_key(plan_key)
+    normalized_tier = _normalize_plan_key(tier)
+    if (
+        normalized_tier
+        and normalized_key
+        and normalized_tier not in normalized_key
+        and normalized_key not in {"free"}
+    ):
+        warnings.append(
+            "plan_key and entitlement tier differ; this can be valid for billing variants "
+            "but should be intentional"
+        )
+    if _contains_unlimited(metadata) and quota > 0 and not allow_overage:
+        warnings.append(
+            "metadata suggests an unlimited entitlement but included_action_quota is finite "
+            "and overage is disabled"
+        )
+    return warnings
+
+
+def _plan_from_row(row) -> PlanPolicy:
+    return PlanPolicy(
+        id=str(row[0]),
+        business_slug=str(row[1]),
+        plan_key=str(row[2]),
+        tier=str(row[3]),
+        price_cents=int(row[4]),
+        currency=str(row[5]),
+        billing_interval=str(row[6]),
+        included_ai_budget_microusd=int(row[7]),
+        included_action_quota=int(row[8]),
+        allow_overage=bool(row[9]),
+        stripe_product_id=None if row[10] is None else str(row[10]),
+        stripe_price_id=None if row[11] is None else str(row[11]),
+        source=str(row[12]),
+        notes=str(row[13]),
+        metadata=row[14] if isinstance(row[14], dict) else {},
+    )
+
+
+def _ent_from_row(row) -> Entitlement:
+    return Entitlement(
+        id=str(row[0]),
+        business_slug=str(row[1]),
+        app_user_id=str(row[2]),
+        tier=str(row[3]),
+        status=str(row[4]),
+        source=str(row[5]),
+        stripe_customer_id=None if row[6] is None else str(row[6]),
+        stripe_subscription_id=None if row[7] is None else str(row[7]),
+        stripe_checkout_session_id=None if row[8] is None else str(row[8]),
+        plan_key=None if row[9] is None else str(row[9]),
+        current_period_end=row[10],
+        metadata=row[11] if isinstance(row[11], dict) else {},
+    )
+
+
+# ── plan catalog ─────────────────────────────────────────────────────────────────
+
+
+def upsert_plan_policy(
+    conn,
+    business_slug: str,
+    plan_key: str,
+    *,
+    tier: str | None = None,
+    price_cents: int = 0,
+    currency: str = "usd",
+    billing_interval: str = "month",
+    included_ai_budget_microusd: int = 0,
+    included_action_quota: int = 25,
+    allow_overage: bool = False,
+    stripe_product_id: str | None = None,
+    stripe_price_id: str | None = None,
+    source: str = "takyon",
+    notes: str = "",
+    metadata: dict | None = None,
+) -> PlanPolicy:
+    """Create or update a plan in the business's catalog, idempotent on (business_slug, plan_key).
+    Every field overwrites on conflict EXCEPT `stripe_product_id`/`stripe_price_id`, which are
+    COALESCE-preserved (a re-upsert that omits them keeps the prior linkage) — matching the SQLite
+    upsert (core.py:5207). Unknown business → ForeignKeyViolation (fail loud)."""
+    key = _normalize_plan_key(plan_key)
+    tier_value = str(tier or key or "free")
+    price = int(float(price_cents or 0))
+    if price < 0:
+        raise InvalidPlan("plan price must be non-negative")
+    interval = _normalize_billing_interval(billing_interval)
+    if interval not in _VALID_BILLING_INTERVALS:
+        raise InvalidPlan("billing_interval must be one of: month, year, one_time")
+    budget = int(float(included_ai_budget_microusd or 0))
+    if budget < 0:
+        raise InvalidPlan("included_ai_budget_microusd must be non-negative")
+    quota = int(included_action_quota if included_action_quota is not None else 25)
+    if quota < 0:
+        raise InvalidPlan("included_action_quota must be non-negative")
+    overage = bool(allow_overage)
+    meta = dict(metadata or {})
+    warnings = plan_validation_warnings(key, tier_value, quota, overage, meta)
+    if warnings:
+        prior = meta.get("takyon_plan_validation")
+        prior = prior if isinstance(prior, dict) else {}
+        prior_warnings = prior.get("warnings")
+        prior_warnings = prior_warnings if isinstance(prior_warnings, list) else []
+        meta = {
+            **meta,
+            "takyon_plan_validation": {
+                **prior,
+                "status": "warning",
+                "warnings": [*prior_warnings, *warnings],
+            },
+        }
+    with conn.transaction():
+        row = conn.execute(
+            "insert into app_plan_policies "
+            "(business_slug, plan_key, tier, price_cents, currency, billing_interval, "
+            " included_ai_budget_microusd, included_action_quota, allow_overage, "
+            " stripe_product_id, stripe_price_id, source, notes, metadata) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+            "on conflict (business_slug, plan_key) do update set "
+            " tier = excluded.tier, "
+            " price_cents = excluded.price_cents, "
+            " currency = excluded.currency, "
+            " billing_interval = excluded.billing_interval, "
+            " included_ai_budget_microusd = excluded.included_ai_budget_microusd, "
+            " included_action_quota = excluded.included_action_quota, "
+            " allow_overage = excluded.allow_overage, "
+            " stripe_product_id = coalesce(excluded.stripe_product_id, app_plan_policies.stripe_product_id), "
+            " stripe_price_id = coalesce(excluded.stripe_price_id, app_plan_policies.stripe_price_id), "
+            " source = excluded.source, "
+            " notes = excluded.notes, "
+            " metadata = excluded.metadata, "
+            " updated_at = now() "
+            f"returning {_PLAN_COLUMNS}",
+            (
+                business_slug,
+                key,
+                tier_value,
+                price,
+                str(currency or "usd").lower(),
+                interval,
+                budget,
+                quota,
+                overage,
+                stripe_product_id,
+                stripe_price_id,
+                str(source or "takyon"),
+                str(notes or ""),
+                _json_dumps(meta),
+            ),
+        ).fetchone()
+    return _plan_from_row(row)
+
+
+def get_plan_policy(conn, business_slug: str, plan_key: str) -> PlanPolicy | None:
+    """One plan by (business, plan_key), or None. Pure read."""
+    row = conn.execute(
+        f"select {_PLAN_COLUMNS} from app_plan_policies "
+        "where business_slug = %s and plan_key = %s",
+        (business_slug, _normalize_plan_key(plan_key)),
+    ).fetchone()
+    return None if row is None else _plan_from_row(row)
+
+
+def list_plan_policies(conn, business_slug: str) -> list[PlanPolicy]:
+    """A business's whole catalog, cheapest first. Pure read."""
+    rows = conn.execute(
+        f"select {_PLAN_COLUMNS} from app_plan_policies "
+        "where business_slug = %s order by price_cents asc, plan_key asc",
+        (business_slug,),
+    ).fetchall()
+    return [_plan_from_row(r) for r in rows]
+
+
+# ── entitlements ─────────────────────────────────────────────────────────────────
+
+
+def _resolve_app_user_id(
+    conn, business_slug: str, *, app_user_id: str | None, email: str | None, name: str | None
+) -> str:
+    if app_user_id:
+        exists = conn.execute(
+            "select 1 from app_users where business_slug = %s and id = %s",
+            (business_slug, app_user_id),
+        ).fetchone()
+        if exists is None:
+            raise AppUserNotFound(str(app_user_id))
+        return str(app_user_id)
+    if email:
+        # Reuses the identity leaf; an unknown business fails loud here through its FK.
+        return app_identity.upsert_app_user(conn, business_slug, email, name=name).id
+    raise ValueError("grant_entitlement requires app_user_id or email")
+
+
+def _sync_user_tier(conn, business_slug: str, app_user_id: str) -> str:
+    """Resolve the effective tier from active/trialing grants (highest rank) and cache it onto
+    app_users.tier. Mirrors the SQLite `_sync_user_tier`. Caller already holds a transaction."""
+    placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    rank_case = (
+        "case tier when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
+        f"when 'free' then 2 else {_DEFAULT_TIER_RANK} end"
+    )
+    row = conn.execute(
+        "select tier from app_entitlements "
+        f"where business_slug = %s and app_user_id = %s and status in ({placeholders}) "
+        f"order by {rank_case} asc, updated_at desc limit 1",
+        (business_slug, app_user_id, *_ACTIVE_STATUSES),
+    ).fetchone()
+    tier = str(row[0]) if row is not None else "free"
+    conn.execute(
+        "update app_users set tier = %s, updated_at = now() "
+        "where business_slug = %s and id = %s",
+        (tier, business_slug, app_user_id),
+    )
+    return tier
+
+
+def resolve_user_tier(conn, business_slug: str, app_user_id: str) -> str:
+    """Recompute and persist a sub-user's effective tier from their entitlements. Idempotent;
+    safe to call after any out-of-band status change (e.g. a subscription lapse)."""
+    with conn.transaction():
+        return _sync_user_tier(conn, business_slug, app_user_id)
+
+
+def grant_entitlement(
+    conn,
+    business_slug: str,
+    *,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    name: str | None = None,
+    tier: str = "free",
+    status: str = "active",
+    source: str = "manual",
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    stripe_checkout_session_id: str | None = None,
+    plan_key: str | None = None,
+    current_period_end: object = None,
+    metadata: dict | None = None,
+) -> tuple[Entitlement, str]:
+    """Append an entitlement grant for a sub-user (by id or email) and return
+    (Entitlement, effective_tier). Atomic: the grant insert and the app_users.tier resync commit
+    together. A manual non-free grant with no Stripe evidence and no explicit non-billing source
+    is rejected (FakeBillingRejected) — granting a paid tier with no payment proof would fake
+    billing state (core.py:5314). Supply `email` to auto-provision the sub-user; an unknown
+    business fails loud."""
+    tier_value = str(tier or "free")
+    status_value = str(status or "active")
+    source_value = str(source or "manual")
+    meta = dict(metadata or {})
+    has_stripe_evidence = bool(
+        stripe_customer_id or stripe_subscription_id or stripe_checkout_session_id
+    )
+    explicit_non_billing = bool(meta.get("non_billing") or source_value in _NON_BILLING_SOURCES)
+    if (
+        tier_value not in {"", "free"}
+        and source_value == "manual"
+        and not has_stripe_evidence
+        and not explicit_non_billing
+    ):
+        raise FakeBillingRejected(
+            "manual paid entitlement would fake billing state; use Stripe/webhook evidence "
+            "or an explicit non-billing source"
+        )
+    with conn.transaction():
+        resolved_id = _resolve_app_user_id(
+            conn, business_slug, app_user_id=app_user_id, email=email, name=name
+        )
+        row = conn.execute(
+            "insert into app_entitlements "
+            "(business_slug, app_user_id, tier, status, source, stripe_customer_id, "
+            " stripe_subscription_id, stripe_checkout_session_id, plan_key, "
+            " current_period_end, metadata) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+            f"returning {_ENT_COLUMNS}",
+            (
+                business_slug,
+                resolved_id,
+                tier_value,
+                status_value,
+                source_value,
+                stripe_customer_id,
+                stripe_subscription_id,
+                stripe_checkout_session_id,
+                plan_key,
+                current_period_end,
+                _json_dumps(meta),
+            ),
+        ).fetchone()
+        effective = _sync_user_tier(conn, business_slug, resolved_id)
+    return _ent_from_row(row), effective
+
+
+def list_entitlements(
+    conn, business_slug: str, *, app_user_id: str | None = None
+) -> list[Entitlement]:
+    """Entitlement grants for a business, newest first; scoped to one sub-user if given. Read."""
+    if app_user_id is not None:
+        rows = conn.execute(
+            f"select {_ENT_COLUMNS} from app_entitlements "
+            "where business_slug = %s and app_user_id = %s order by updated_at desc",
+            (business_slug, app_user_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"select {_ENT_COLUMNS} from app_entitlements "
+            "where business_slug = %s order by updated_at desc",
+            (business_slug,),
+        ).fetchall()
+    return [_ent_from_row(r) for r in rows]
+
+
+def set_subscription_status(
+    conn,
+    stripe_subscription_id: str,
+    *,
+    status: str,
+    stripe_customer_id: str | None = None,
+    current_period_end: object = None,
+    metadata: dict | None = None,
+) -> list[dict]:
+    """Apply a subscription-lifecycle status to every stripe-sourced entitlement carrying this
+    subscription id, then resync each affected sub-user's effective tier. Mirrors the SQLite
+    `_process_subscription_event` (core.py:6929): a lapse/cancel flips status so the grant no
+    longer confers a tier (only active/trialing do — see `_ACTIVE_STATUSES`).
+
+    `status` is the already-mapped ENTITLEMENT status (active/cancelled/past_due); the
+    Stripe-status interpretation lives in `app_payments`, keeping this leaf free of Stripe
+    vocabulary. COALESCE preserves the existing customer id / period end when not supplied, and
+    the `metadata` patch is merged onto the row's jsonb (`||`). Returns one
+    {business_slug, app_user_id, tier} dict per affected sub-user — empty when the subscription
+    is unknown here (a webhook for a subscription this business never recorded is a no-op, not an
+    error)."""
+    status_value = str(status or "")
+    if not status_value:
+        raise ValueError("status is required")
+    patch = _json_dumps(dict(metadata or {}))
+    with conn.transaction():
+        targets = conn.execute(
+            "select distinct business_slug, app_user_id from app_entitlements "
+            "where source = 'stripe' and stripe_subscription_id = %s",
+            (stripe_subscription_id,),
+        ).fetchall()
+        updated: list[dict] = []
+        for business_slug, app_user_id in targets:
+            conn.execute(
+                "update app_entitlements set status = %s, "
+                "stripe_customer_id = coalesce(%s, stripe_customer_id), "
+                "current_period_end = coalesce(%s, current_period_end), "
+                "metadata = metadata || %s::jsonb, updated_at = now() "
+                "where source = 'stripe' and stripe_subscription_id = %s "
+                "and business_slug = %s and app_user_id = %s",
+                (
+                    status_value,
+                    stripe_customer_id,
+                    current_period_end,
+                    patch,
+                    stripe_subscription_id,
+                    business_slug,
+                    app_user_id,
+                ),
+            )
+            tier = _sync_user_tier(conn, business_slug, app_user_id)
+            updated.append(
+                {
+                    "business_slug": business_slug,
+                    "app_user_id": str(app_user_id),
+                    "tier": tier,
+                }
+            )
+    return updated

@@ -669,3 +669,694 @@ rm hermes-agent-main/tests/plugins/test_takyon_policy_pg.py
 # and revert the two mediationplan.md additions (Phase 4 Gate-2 entry + "Phase 4 gate finding"
 #   paragraph); this log entry is additive — trim it back to the Phase-3 increment if reverting.
 ```
+
+## Increment — Phase 5a: Product sub-user identity / magic-link auth / sessions (Postgres port)
+
+**Date:** 2026-05-30
+
+**What:** Ported the first slice of the SQLite product runtime to Postgres — the *product
+sub-user* identity substrate (a business's CUSTOMERS, not the top-level Takyon operator):
+migration `0005_app_identity.sql` (`app_users` / `app_magic_links` / `app_sessions`, all
+FK'd to `businesses(slug)` and business-scoped) plus a pure leaf module `app_identity.py`
+that mints magic links, redeems them for 30-day bearer sessions, and validates/revokes
+those sessions. Magic-link-only auth; opaque tokens are SHA-256-hashed, never stored in
+clear. This is increment **(a)** of Phase 5 — identity/auth/session only; entitlements,
+checkout/webhook/revenue, usage/budget, owner→custody accrual, and the gateway-key boundary
+are increments **b–e**.
+
+**Why:** Phase-5 acceptance opens with *"all apps share rails"* (mediationplan.md line 233),
+and the first shared rail every product needs is *who is this customer and is their session
+valid*. The SQLite product path that owns this today (`core.py` app_users/app_magic_links/
+app_sessions) is explicitly on death row — Phase 8 kills SQLite — so this is its **successor
+authority on Postgres**, not a second parallel system (the PORT decision recorded in
+mediationplan.md "Phase 5 gate finding"). Token hashing matches the SQLite `_hash_token`
+byte-for-byte so a ported app's existing links/sessions keep verifying.
+
+**Gate-1 finding (PORT, per the recorded Phase 5 finding):** the SQLite trunk's product
+runtime is 11 owner-agnostic tables keyed by `business_slug` (core.py:3026-3243). This
+increment ports the **identity three** (`app_users` UNIQUE(business_slug,email),
+`app_magic_links` token_hash UNIQUE 15-min, `app_sessions` token_hash UNIQUE 30-day),
+carrying the same fail-loud REPLACE-guard pattern as 0001–0004 (`app_users` is net-new to
+Postgres, so the guard fires only if a differently-shaped non-takyon `app_users` lacking
+`business_slug` already exists — the migration's anchor table, since links + sessions FK to
+it). The remaining eight tables (entitlements, checkout intents/sessions, revenue, usage,
+budgets, plan policies, webhook_events) land in increments b–e.
+
+**Gate-2 finding (credentials):** none. The identity leaf mints and stores; it calls no
+provider and moves no money. Email DELIVERY (and its `provider_message_id`) is a side effect
+owned by the layer above — recorded in mediationplan.md "Phase 5 — no NEW external
+credential."
+
+**Decisions:**
+- **Pure leaf owns the guarded STATE change; email DELIVERY is layered above** — exactly as
+  Phase 3 split `billing.topup` (ledger state) from the Stripe call. The leaf mints the link
+  and stores only its hash; `app_magic_links.provider_message_id` is left NULL by the leaf and
+  populated by the (future) send layer, which also decides live-send vs. test-mode
+  suppression. No email is sent from this module.
+- **Single-use becomes ATOMIC, closing the SQLite TOCTOU.** The SQLite original read the link,
+  checked `used_at IS NULL` in Python, then wrote — two simultaneous clicks could both pass the
+  read and double-redeem. The port makes redemption one statement:
+  `UPDATE app_magic_links SET used_at = now() WHERE business_slug=%s AND token_hash=%s AND
+  used_at IS NULL AND expires_at > now() RETURNING app_user_id`. Under READ COMMITTED exactly
+  one concurrent caller's UPDATE matches; everyone else sees `None` → `InvalidMagicLink`. Pinned
+  by a 20-thread concurrency test (own connections, a `threading.Barrier` to maximize overlap):
+  **exactly 1 "ok" + 19 "rejected", and exactly 1 `app_sessions` row** — no errors, no second
+  redemption.
+- **verify is atomic end-to-end.** The redemption, the active-status check, and the session
+  insert all run inside one `conn.transaction()`. If the resolved sub-user is suspended/closed,
+  `InactiveAppUser` is raised and the whole transaction ROLLS BACK — so the `used_at` stamp is
+  undone and **the link survives** for a later (reactivated) attempt. Test-proven
+  (`test_verify_inactive_user_rolls_back_so_link_survives`: suspend → InactiveAppUser → reactivate
+  → the same raw token still redeems).
+- **Everything is business-scoped in the WHERE clause, not just by convention.** A session token
+  minted under business A returns `None` from `validate_session(conn, B, token)` — a token never
+  crosses the business boundary even if the raw value were known. Test-proven
+  (`test_session_is_business_scoped`).
+- **citext + uuid PKs.** `email` is `citext` so `(business_slug, email)` uniqueness and all
+  lookups are case-insensitive without the SQLite `lower()` dance; case variants collapse to one
+  sub-user (test-proven). PKs are `uuid default gen_random_uuid()`.
+- **Raw tokens are never persisted.** Only `sha256(raw)` hex is stored; a test asserts both
+  `stored == hashlib.sha256(raw.encode()).hexdigest()` **and** `stored != raw`.
+- **Typed errors on broken preconditions, sentinels only where "absent" is a normal answer.**
+  `upsert`/`create`/`verify` raise (`InvalidEmail`, `InvalidMagicLink`, `InactiveAppUser`,
+  `ValueError` on non-positive TTL); an unknown business fails loud through the FK
+  (`ForeignKeyViolation`). `get_app_user`/`validate_session` return `None` for missing/garbage,
+  and `revoke_session` returns a `bool` (idempotent: True once, False thereafter) — reads and
+  revokes tolerate empty/garbage tokens without raising.
+- **upsert is idempotent on (business_slug, email)** — a re-request reactivates a suspended row
+  and keeps the existing name unless a new one is supplied (`coalesce(excluded.name,
+  app_users.name)`); it never creates a second row for the same person in the same business, but
+  the same email IS a distinct customer across two businesses (both test-proven).
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0005_app_identity.sql` — REPLACE guard on
+  `app_users`/`business_slug`; `create extension if not exists citext`; the three tables
+  (statuses CHECK-constrained to active/suspended/closed; `tier` default 'free', business-defined;
+  `provider_message_id` nullable for the email layer) + `app_magic_links_user_idx` /
+  `app_sessions_user_idx`. Idempotent DDL.
+- `hermes-agent-main/plugins/takyon/app_identity.py` — pure leaf (takes a psycopg conn, imports
+  no psycopg, opens its own `conn.transaction()` per mutating op): `AppUser`/`MagicLink`/
+  `AppSession` dataclasses; `upsert_app_user`, `get_app_user`, `create_magic_link` (mint only),
+  `verify_magic_link` (atomic redeem → session), `validate_session`, `revoke_session`; helpers
+  `_hash_token` (matches SQLite), `_random_token` (`secrets.token_urlsafe(32)`),
+  `_normalize_email`.
+- `hermes-agent-main/tests/plugins/test_takyon_app_identity_pg.py` — **19** tests on real
+  Postgres (never mocks): upsert create/idempotent-reactivate/normalize/bad-email/unknown-business
+  -fail-loud/distinct-per-business; create-link provisions-user + stores-only-the-hash /
+  rejects-nonpositive-ttl; verify opens-validating-session / single-use / expired / unknown+empty /
+  inactive-rolls-back-so-link-survives / **concurrent-redeems-exactly-once** (20 threads);
+  validate rejects revoked + expired, is business-scoped; revoke idempotent; validate+revoke
+  tolerate garbage.
+
+**Files changed:** none — purely additive (new migration + new module + new test file). No
+existing source touched, so Phases 1–4 cannot regress from this increment.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`,
+via `scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-5a suite → **19 passed**. Full
+`tests/plugins/` → **964 passed, 2 failed** (= Phase 4's 945 + the 19 net-new tests). The 2
+failures are the **same confirmed pre-existing change-detectors** the Phase-4 increment already
+documented: `test_business_work_focus_…` (in `test_takyon_plugin.py`, which carries unrelated
+uncommitted edits) and the web-search registry test (expects 7 providers; the committed `xai`
+makes 8). Neither imports `app_identity`, the 0005 migration, or the PG fixtures; my additions
+are confined to the three new files above. (Note: the *whole-repo* suite is far larger — ~24k
+tests with ~115 unrelated pre-existing failures in google-oauth / mcp-sse / skills areas — so
+regression is measured against `tests/plugins/`, as in every prior phase.)
+
+**Not done / honest state:**
+- **Identity slice only.** Entitlements + plan policies (5b), usage + the collapsed
+  reserve-then-settle budget gate (5c), checkout + webhook + revenue + the NET-NEW owner→custody
+  accrual (5d), and the project gateway-key boundary for `/generate` (5e) are the remaining
+  Phase-5 increments. The eight other product tables are not yet ported.
+- **NOT mounted into any live HTTP surface.** `app_identity.py` is a standalone module like
+  billing/custody/policy. The product HTTP surface (`/api/takyon/apps/<business>/…` verify /
+  session / account, currently SQLite-backed in `app_api.py`) is re-pointed at this leaf in a
+  later increment; nothing live calls it yet.
+- **Email is not sent here.** The leaf returns the raw token to its caller exactly once and
+  stores only the hash; the send layer (live provider vs. test-mode suppression, recording
+  `provider_message_id`) is owned above and is not built in this increment.
+- **Live Supabase apply remains blocked** on the polsia2 teardown + a backup + explicit operator
+  go-ahead (unchanged from earlier phases). 0005 has only been applied to the local throwaway
+  test DBs.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/app_identity.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0005_app_identity.sql
+rm hermes-agent-main/tests/plugins/test_takyon_app_identity_pg.py
+# this log entry is additive — trim it back to the Phase-4 increment if reverting.
+```
+
+## Increment — Phase 5b: Product plan catalog + sub-user entitlements (Postgres port)
+
+**Date:** 2026-05-30
+
+**What:** Ported the second product slice to Postgres — the per-business PLAN CATALOG and the
+per-sub-user ENTITLEMENTS: migration `0006_app_entitlements.sql` (`app_plan_policies` +
+`app_entitlements`) and a pure leaf `app_entitlements.py` that upserts plans, grants entitlements
+(guarded), resolves a sub-user's effective tier, and lists both. This is increment **(b)** of
+Phase 5; identity/auth/session was **(a)**. Usage/budget, checkout/webhook/revenue +
+owner→custody accrual, and the gateway-key boundary are **(c)–(e)**.
+
+**Why:** Phase-5 acceptance is *"all apps share rails"* (mediationplan.md line 233). After
+"who is this customer" (5a) the next shared rail is *what is this customer entitled to* — the
+access tier a paid plan unlocks. The plan catalog is the thing a Stripe checkout (5d) sells; the
+entitlement is what that checkout grants. The SQLite product path owning this (core.py
+app_plan_policies/app_entitlements) is on death row (Phase 8 kills SQLite), so this is its
+**successor authority on Postgres**, not a parallel system.
+
+**Gate-1 finding — and a CORRECTION to the recorded Phase-5 finding.** The Phase-5 gate note
+(mediationplan.md) said to DROP four "dead" `app_plan_policies` fields:
+`included_action_quota` / `allow_overage` / `stripe_payment_link_id` / `stripe_payment_link_url`.
+At build time I verified each against source and **two of those were wrong to call dead**:
+- `included_action_quota` and `allow_overage` ARE read — rendered into the per-business
+  `product/plans.md` mirror (core.py:3884-3885) and fed into `_plan_validation_warnings`
+  (core.py:1995). They are descriptive (not enforced), but they are read, so they are **PORTED**.
+- only `stripe_payment_link_id` / `stripe_payment_link_url` are genuinely write-only (written by
+  the SQLite upsert at core.py:5203/5217-5218/5237-5238, read NOWHERE) → **DROPPED** as cruft.
+
+The mediationplan finding was edited in place with this correction (dated 2026-05-30). Net: the
+PG plan table is the SQLite shape minus the two payment-link columns. This is the Gate-1
+discipline working as intended — inspect before building, correct the premise rather than port a
+mistake.
+
+**Gate-2 finding (credentials):** none. The leaf calls no provider and moves no money; it stores
+catalog + grant state. Stripe ids are stored as opaque references only.
+
+**Decisions:**
+- **The money-truth guard is ported verbatim and fires BEFORE any write.** A grant with a
+  non-free tier, `source='manual'`, no Stripe evidence (customer/subscription/checkout id), and
+  no explicit non-billing escape (`source ∈ {internal,owner,comp,test}` or
+  `metadata.non_billing`) raises `FakeBillingRejected` — granting a paid tier with no payment
+  proof would fake billing state (the exact check at core.py:5314, invariant #8). A test proves
+  the rejection writes **zero** entitlement rows and leaves `app_users.tier='free'`.
+- **Entitlements are append-a-row; the effective tier is resolved, not stored on one row.**
+  `_sync_user_tier` (ported from core.py:3545) selects the highest-rank grant among
+  `status ∈ (active, trialing)` — rank `owner(0) < paid=pro(1) < free(2) < unknown(5)`, verbatim
+  from core.py:2742 — and caches it onto `app_users.tier` in the same transaction as the insert.
+  A `cancelled` grant confers nothing (test-proven), and `resolve_user_tier(...)` recomputes the
+  cache after an out-of-band status change (the seam the 5d webhook will use when a subscription
+  lapses).
+- **Plan upsert is idempotent on (business_slug, plan_key)**; on conflict every field overwrites
+  EXCEPT `stripe_product_id`/`stripe_price_id`, which are **COALESCE-preserved** (a re-upsert that
+  omits them keeps the prior linkage) — faithful to core.py:5207. Validation warnings are folded
+  into stored `metadata.takyon_plan_validation` exactly as the SQLite path did (advisory only).
+- **`billing_interval` and `plan_key` are normalized in the leaf** (interval alias map →
+  {month,year,one_time}; `plan_key` slugified like `_file_slug`) so 'monthly'/'Pro Plan' collapse
+  deterministically; a bad interval or negative amount raises `InvalidPlan`.
+- **jsonb is written with `json.dumps(...)` bound through a `%s::jsonb` cast** — the leaf imports
+  no psycopg (house style), and the existing leaves never wrote a non-default jsonb, so this is the
+  first one to; the cast keeps it adapter-free. On read, psycopg returns jsonb as a dict directly.
+- **email→sub-user resolution reuses `app_identity.upsert_app_user`** (cross-leaf import; no cycle
+  — app_identity imports nothing from here). An unknown business fails loud through that FK; an
+  unknown `app_user_id` raises `AppUserNotFound`.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0006_app_entitlements.sql` — `app_plan_policies`
+  (minus the two dead payment-link columns; CHECKed non-negative amounts + canonical
+  billing_interval; UNIQUE(business_slug, plan_key)) and `app_entitlements` (append-a-row, status
+  free-text, index on (business_slug, app_user_id, status)). Two fail-loud REPLACE guards (one per
+  table) matching 0001-0005. Idempotent DDL.
+- `hermes-agent-main/plugins/takyon/app_entitlements.py` — pure leaf:
+  `upsert_plan_policy`/`get_plan_policy`/`list_plan_policies`; `grant_entitlement` (guarded) /
+  `resolve_user_tier` / `list_entitlements`; `plan_validation_warnings` (pure, ported);
+  `PlanPolicy`/`Entitlement` dataclasses; `EntitlementError`/`InvalidPlan`/`AppUserNotFound`/
+  `FakeBillingRejected`.
+- `hermes-agent-main/tests/plugins/test_takyon_app_entitlements_pg.py` — **23** tests on real
+  Postgres: plan defaults / idempotent upsert / COALESCE-preserve of Stripe ids / interval +
+  slug normalization / bad-interval + negative-price → InvalidPlan / unknown-business fail-loud /
+  validation-warning folding / cheapest-first ordering; entitlement provision-by-email + tier
+  cache / paid-with-evidence (+ timestamptz round-trip) / **manual-paid-without-evidence rejected
+  and writes nothing** / comp + metadata.non_billing escapes / highest-rank-wins / cancelled
+  confers nothing / resolve-after-out-of-band-change / unknown-user + missing-args raise /
+  business scoping / per-user listing.
+
+**Files changed:** none in code (purely additive: new migration + new leaf + new test file, so
+Phases 1–5a cannot regress). The one non-code edit is the **correction to mediationplan.md's
+Phase-5 gate finding** described above (the dead-field set).
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`,
+via `scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-5b suite → **23 passed**. Full
+`tests/plugins/` → **987 passed, 2 failed** (= Phase 5a's 964 + the 23 net-new tests). The 2
+failures are the **same confirmed pre-existing change-detectors** documented since Phase 4
+(`test_business_work_focus_…` under unrelated uncommitted edits; the web-search registry test
+expecting 7 providers when the committed `xai` makes 8). Neither imports `app_entitlements`, the
+0006 migration, or the PG fixtures.
+
+**Not done / honest state:**
+- **NOT mounted into any live HTTP surface.** `app_entitlements.py` is a standalone leaf; the
+  product surface (`/api/takyon/apps/<business>/…`) still runs on SQLite until a later increment
+  re-points it.
+- **Nothing here WRITES entitlements from Stripe yet.** `grant_entitlement` accepts Stripe
+  evidence and clears the money-truth guard, but the checkout-session creation + the webhook that
+  turns a `checkout.session.completed` / subscription event into a grant (and updates status on
+  lapse, and accrues to owner custody) is **increment 5d**. `current_period_end` is a
+  `timestamptz` the 5d webhook will populate from the parsed Stripe period.
+- **The enforced AI budget is still increment 5c.** Plan `included_ai_budget_microusd` /
+  `included_action_quota` are descriptive catalog metadata; the authoritative reserve-then-settle
+  budget gate is not built here.
+- **`app_users.tier` is a denormalized cache.** It is kept correct on every grant and via
+  `resolve_user_tier`; it is not the source of truth (the entitlement rows are). This matches the
+  SQLite behavior.
+- **Live Supabase apply remains blocked** on the polsia2 teardown + backup + operator go-ahead.
+  0006 has only been applied to local throwaway test DBs.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/app_entitlements.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0006_app_entitlements.sql
+rm hermes-agent-main/tests/plugins/test_takyon_app_entitlements_pg.py
+# also revert the Phase-5 gate-finding correction in mediationplan.md (the dead-field note).
+# this log entry is additive — trim it back to the Phase-5a increment if reverting.
+```
+
+---
+
+## Increment — Phase 5c: Product AI-spend budget collapsed to ONE reserve-then-settle gate (Postgres port)
+
+**Date:** 2026-05-30
+
+**What:** Ported the product AI-spend budget cap + usage ledger to Postgres as a pure leaf
+(`app_usage.py`) backed by migration `0007_app_usage_budget.sql` (`app_budgets` + `app_usage_events`),
+and **collapsed the SQLite trunk's two uncoordinated enforcement paths into a single authoritative
+reserve-then-settle gate** mirroring `billing.py` (Phase 3) on the product budget.
+
+**Why:** This is the per-business COMPUTE budget — the cap on what a business's PRODUCT may spend on
+AI on behalf of its sub-users (distinct from the Takyon operator's own money in `billing.py`/0002).
+The SQLite trunk gated it on two paths and both are wrong under load (the whole reason for this
+increment):
+1. an **estimate PRE-CHECK** (`app_api.py:379`, `/generate`) that read a rendered budget mirror
+   (`_app_budget_remaining_microusd`, `app_api.py:176`) and compared `estimate > remaining` but
+   **reserved nothing** — pure read-then-act, so N concurrent calls all saw the same headroom and
+   all proceeded (overspend); and
+2. an **actuals RE-SUM at insert** (`core.py:5362`, the `app.usage.record` op) that summed
+   `actual_cost_microusd` only and raised if it would exceed the cap — but it fires **after** the
+   provider was already called and paid, so tripping it means **refusing to RECORD spend that
+   already happened** (the ledger then under-counts real cost — a money-truth violation,
+   mediationplan invariant #8).
+
+**Gate-1 finding (inspect-before-build):** the budget tables (`app_budgets`, `app_usage_events`) and
+the two-path gate are the canonical SQLite home (`core.py:3026-3034`, `3203-3224`, `3529-3543`,
+`5349-5398`; `app_api.py:330-466`). There is **no** Postgres budget surface yet (0005 = identity,
+0006 = entitlements). So this is the **successor**, not a second parallel authority — net-new
+Postgres tables + leaf that REPLACE the SQLite path at Phase 8, exactly as 5a/5b did. No redundant
+store created; the one canonical reserve/settle pattern already in the repo (`billing.py`) is reused
+in shape, not duplicated in code (different table, different invariant).
+
+**Gate-2 finding (credentials/providers):** **none.** This is pure ledger state on the existing
+local Postgres; no new key, provider, or external call. (The Anthropic key that `/generate` needs to
+actually spend is a *5e* concern — the gateway-key boundary — and the Stripe rails that fund the
+budget are *5d*. This increment only meters and caps; it calls nothing external.)
+
+**Decisions (and the deliberate divergences):**
+- **ONE gate = `reserve_usage`.** It is the only thing that can refuse spend. Atomic under the
+  `app_budgets` row lock (`select … for update`) — the same single-row-lock invariant `billing.py`
+  rests on — so it computes committed spend over a stable view and parallel reserves can never
+  oversell. **Committed = Σ(estimate of still-`reserved` rows) + Σ(actual of `completed` rows)**
+  within the period; `failed`/`released` rows count zero. Refuses with `AppBudgetExceeded` (carrying
+  hard_limit/committed/requested/remaining for a precise 402) or `AppBudgetInactive`, writing
+  nothing.
+- **`settle_usage` records the REAL provider spend and NEVER re-checks the cap.** Once money is
+  spent, recording the truth is mandatory — this is the fix for path-2's integrity bug.
+  **Deliberate divergence from `billing.py`:** `billing.settle` asserts `actual ≤ reserved` because
+  it is custody of the user's real money; here the estimate is only a pre-flight gate and the
+  provider's actual is the truth, so settle records `actual` even if it slightly exceeds the
+  reserved estimate (capping it would reintroduce the very under-count this increment removes). The
+  cap is enforced at reserve. Test `test_settle_records_true_actual_even_if_over_estimate` pins this.
+- **`release_usage` frees the hold on the failure path** (reserved → `failed` when an error is
+  given, else `released`); actual stays 0 so committed drops by the freed estimate. settle/release
+  are idempotent (first finalizer wins; row-locked, so concurrent finalizers serialize).
+- **`record_completed_usage`** is reserve+settle **fused** for the synchronous self-report path (the
+  SQLite `/usage` route, `app_api.py:339`, where the cost is already known and there is no provider
+  round-trip to straddle). It goes through the **same** committed-aggregate gate (so it is not a
+  second gate — the check logic is the shared `_ensure_budget_locked` + `_committed_microusd`), then
+  writes a `completed` row directly; gate amount is `max(estimate, actual)`.
+- **`reservation_key` is the idempotency handle**, UNIQUE per business (mirrors `billing.py`'s
+  `reservation_key`); a replay holds/charges once. `status` is a CHECKed lifecycle
+  (`reserved`/`completed`/`failed`/`released`) — net-new vs SQLite's free-text status, and
+  load-bearing for the gate.
+- **`get_usage_summary`** is the authoritative pre-flight read (status/hard_limit/committed/
+  remaining/period) meant to REPLACE the stale rendered-mirror read the broken pre-check used.
+- **Period semantics ported faithfully** (calendar-month UTC, fixed at row creation) — see Not done.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0007_app_usage_budget.sql` — `app_budgets` (PK
+  business_slug, status, `hard_limit_microusd` bigint default 5_000_000, period defaults via
+  `date_trunc('month', now())`) and `app_usage_events` (uuid PK, `app_user_id` FK SET NULL, CHECKed
+  `status` lifecycle, bigint cost columns, `reservation_key` UNIQUE(business_slug, reservation_key),
+  jsonb metadata, index on (business_slug, created_at, status)). Two fail-loud REPLACE guards (one
+  per table) matching 0001-0006. Idempotent DDL (verified run-twice on a scratch DB across the full
+  0001→0007 chain).
+- `hermes-agent-main/plugins/takyon/app_usage.py` — pure leaf: `ensure_app_budget`/`set_app_budget`/
+  `get_app_budget`/`get_usage_summary`; `reserve_usage`/`settle_usage`/`release_usage`/
+  `record_completed_usage`/`list_usage_events`; `AppBudget`/`UsageEvent` dataclasses;
+  `AppUsageError`/`AppBudgetInactive`/`AppBudgetExceeded`/`UnknownReservation`/`AppUserNotFound`.
+- `hermes-agent-main/tests/plugins/test_takyon_app_usage_pg.py` — **29** tests on real Postgres:
+  budget open/default/idempotent + set cap/status + unknown-business fail-loud + negative-cap →
+  ValueError; reserve-holds-then-settle-records-actual; **settle records true actual even over
+  estimate**; release frees hold (failed vs released); reserve/settle idempotent + first-finalizer
+  wins + release-after-settle no-op; settle/release unknown → UnknownReservation; reserve refused
+  when inactive / over cap (carries figures, **writes nothing**); freed-headroom-lets-later-reserve-
+  fit; unknown/cross-business app_user → AppUserNotFound; input validation; settle COALESCE-preserves
+  provider/model + merges metadata; record_completed gates+writes one-shot + idempotent + max(est,
+  actual); business-scoped reservation keys; event survives sub-user delete (SET NULL); list
+  newest-first + per-user filter; **two real-concurrency tests** — `test_concurrent_reserves_never_
+  overspend` (25 threads, cap fits exactly 10 → exactly 10 ok / 15 exceeded, committed never over
+  cap — the test the SQLite read-then-act gate would FAIL) and `test_concurrent_identical_
+  reservation_key_holds_once`.
+
+**Files changed:** none in code (purely additive: new migration + new leaf + new test file, so
+Phases 1–5b cannot regress).
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-5c suite → **29 passed**. Full `tests/plugins/`
+→ **1016 passed, 2 failed** (= Phase 5b's 987 + the 29 net-new tests). The 2 failures are
+**pre-existing and unrelated**: `test_business_work_focus_persists_and_blocks_cross_lane_writes` and
+the web-search `test_all_seven_plugins_present_in_registry`. Proven not-mine three ways — (a) both
+target subsystems I did not touch (`core.py` artifact-path resolution → `distribution/outreach/…`;
+the web-search provider registry expecting 7 when committed `xai` makes 8); (b) `git status` shows
+`core.py` and `test_takyon_plugin.py` carry **pre-existing uncommitted edits** (+486/+123 lines, a
+separate in-progress `distribution/meta-ads` feature) while my increment is only the 3 untracked
+files; (c) neither failing test imports `app_usage`, the 0007 migration, or the Postgres `pg_conn`
+fixture, so a Postgres-only addition cannot reach them. `py_compile` of the leaf is clean; 0007
+re-applied to a scratch DB is idempotent (only benign "already exists, skipping" notices).
+
+**Not done / honest state:**
+- **NOT mounted into any live HTTP surface.** `app_usage.py` is a standalone leaf; `/generate` and
+  `/usage` (`app_api.py`) still run the SQLite two-path gate until the product surface is re-pointed
+  at a later increment. This increment proves the correct gate exists and is concurrency-safe; it
+  does not yet replace the live path.
+- **Monthly period does NOT auto-roll — ported faithfully from SQLite.** `current_period_start` is
+  fixed at budget creation and the gate sums `created_at >= current_period_start`, so the cap is
+  effectively a since-creation cap, not a resetting monthly one — identical to the SQLite trunk
+  (`_ensure_app_budget`, `core.py:3529`, never advances the period). Rolling the period forward is a
+  **system-wide** semantics decision (it affects SQLite too) and is deliberately out of scope for
+  "collapse the double-charge gate." Flagged here so it can be addressed once, in the right place,
+  rather than diverging the Postgres path from the live SQLite behavior now.
+- **The budget is not yet FUNDED or linked to plans.** A plan's `included_ai_budget_microusd` (0006)
+  is descriptive; wiring a paid plan/top-up into a business's `hard_limit_microusd`, and the Stripe
+  rails that pay for it + owner→custody accrual, are **increment 5d**.
+- **Live Supabase apply remains blocked** on the polsia2 teardown + backup + operator go-ahead. 0007
+  has only been applied to local throwaway test DBs.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/app_usage.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0007_app_usage_budget.sql
+rm hermes-agent-main/tests/plugins/test_takyon_app_usage_pg.py
+# this log entry is additive — trim it back to the Phase-5b increment if reverting.
+```
+
+## Increment — Phase 5d: Product checkout + Stripe webhook reconciliation + revenue ledger + **net-new owner→custody accrual** (Postgres port + flow B ADD)
+
+**Date:** 2026-05-30
+
+**What:** Ported the product CHECKOUT → Stripe WEBHOOK → REVENUE rail to Postgres as a pure leaf
+(`app_payments.py`) backed by migration `0008_app_payments.sql` (four tables: `app_checkout_intents`,
+`app_checkout_sessions`, `app_revenue_events`, and the global `webhook_events`), and **ADDED the
+net-new owner→custody accrual (flow B) the SQLite product path never had** — on a paid revenue event,
+resolve `business_slug → businesses.owner_user_id` and accrue the gross minus the platform app fee
+into the OWNER's custody ledger via the existing `custody.accrue` (0002).
+
+**Why (two things, one increment):**
+1. **The accrual gap (the headline ADD, mediationplan Phase 5 (a)).** The SQLite product webhook
+   (`core.py:6844` `_process_checkout_completed`) records business REVENUE on a paid checkout but
+   performs **ZERO** owner accrual — `grep` finds no custody/accrual/app-fee reference anywhere in the
+   product path. A business's sub-users pay on the shared platform Stripe, but the money never reaches
+   the business OWNER's custody ledger (flow B in 0002). This increment closes that: on a paid revenue
+   event we resolve the owner (the `businesses.owner_user_id` linkage 0001 added and SQLite lacks) and
+   accrue gross − app fee (`STRIPE_CONNECT_APPLICATION_FEE_BPS`, default 2000 bps = 20%) into the
+   owner's custody account, so "sub-user payment shows in owner custody" (the Phase 5 acceptance).
+2. **A latent SQLite double-grant bug (robustness #1).** The SQLite handler INSERT-OR-IGNOREs the
+   `webhook_events` dedup row but then processes **unconditionally**, and its entitlement insert
+   (`core.py:6915`) is a plain `INSERT` with **no conflict target** — so a redelivered
+   `checkout.session.completed` appends a DUPLICATE entitlement. The Postgres port closes that: the
+   webhook gate locks the `webhook_events` row `for update` and SKIPS if `processed_at` is set, so each
+   delivered event is processed to completion **at most once** even under concurrent redelivery.
+
+**Gate-1 finding (inspect-before-build):** the four product payment tables and the webhook handlers
+are the canonical SQLite home (`core.py:3141-3234` DDL; `6844` checkout, `6929` subscription, `6956`
+`handle_business_record_stripe_webhook`). There is **no** Postgres payment surface yet (0005 =
+identity, 0006 = entitlements, 0007 = usage budget). So the four tables + leaf are the **successor**,
+not a second authority — net-new Postgres tables that REPLACE the SQLite path at Phase 8, exactly as
+5a/5b/5c did. The owner accrual is genuinely **net-new (ADD)** and reuses the **existing**
+`custody.accrue` (0002) — it does **not** create a second ledger. `app_payments` **orchestrates
+sibling leaves** (`custody`, `app_entitlements`) — a precedent already in the repo
+(`app_entitlements.py:34` imports `app_identity`), so no new architectural pattern was invented.
+
+**Gate-2 finding (credentials/providers):** **none new.** Signature verification deliberately stays
+**out** of this leaf — the caller verifies the Stripe signature (the existing product
+`STRIPE_WEBHOOK_SECRET`, via `stripe_util`) and hands `record_webhook_and_process` an
+already-verified event dict, so this increment introduces no key/provider/external call.
+`STRIPE_CONNECT_APPLICATION_FEE_BPS` already exists (`custody.app_fee_bps()`, default 2000). The one
+still-outstanding credential remains `STRIPE_BILLING_WEBHOOK_SECRET` (the Phase-3 control-plane topup
+webhook — a *different* secret from this product webhook); it is unchanged by 5d and still tracked in
+mediationplan Gate 2.
+
+**Decisions (and the deliberate divergences):**
+- **The webhook gate = `record_webhook_and_process`.** ONE outer `with conn.transaction():` →
+  `INSERT webhook_events ON CONFLICT DO NOTHING` → `SELECT processed_at … FOR UPDATE` → if already
+  set, return `{deduplicated: True}` and write nothing → else dispatch → `UPDATE processed_at = now()`.
+  This is the at-most-once invariant that fixes the SQLite double-grant; it mirrors `billing.py`'s
+  single-row-lock pattern. Because the whole dispatch is one transaction, a mid-failure rolls back the
+  dedup row too, so the event is cleanly retryable.
+- **Orchestrator opens one transaction; sibling leaves nest as savepoints.** `_process_checkout_completed`
+  runs inside the caller's transaction and calls `app_entitlements.grant_entitlement`,
+  `custody.open_custody_account`, and `custody.accrue` — each opens its own `conn.transaction()`,
+  which psycopg turns into a SAVEPOINT under the outer BEGIN. The concurrency test proves the triple
+  nesting commits/rolls back correctly under 8-way contention.
+- **Owner accrual reuses `custody.accrue`, keyed deterministically** on
+  `f"app_revenue:{business}:{event_id}:{session_id}"`, so a replayed paid event accrues **once**;
+  `custody.open_custody_account` is called first (idempotent) so accrual never hits `NoCustodyAccount`.
+  Accrual fires **only when a NEW `app_revenue_events` row is actually inserted** (the
+  `INSERT … ON CONFLICT DO NOTHING RETURNING id` returns nothing on replay) **and** `amount_total > 0`
+  — so a duplicate paid event neither double-records revenue nor double-accrues.
+- **Connect payout is NOT part of this increment — and that is correct per the money model.** Accrual
+  writes the OWED balance into custody (a ledger fact from day one); the actual Stripe Connect
+  transfer to the owner is the deferred payout rail. This increment makes the owed balance *true*, not
+  *paid*.
+- **Entitlement grant delegated** to `app_entitlements.grant_entitlement` (auto-provisions the sub-user
+  from `customer_email`, passes the fake-billing gate via Stripe evidence, `tier="paid"`,
+  `source="stripe"`). Granted only when there's an email AND (a subscription id OR `payment_status ==
+  'paid'`).
+- **Subscription lifecycle delegated to a net-new `app_entitlements.set_subscription_status`** — added
+  this increment to the **canonical entitlements home**, not buried in `app_payments`. It maps the
+  Stripe status (`active`/`trialing` → active, `canceled`/`cancelled` → cancelled, else past_due —
+  verbatim from `core.py:6026`) and resyncs tier. Stripe-status *interpretation* stays out of the
+  entitlements leaf (the mapping lives in `app_payments._subscription_entitlement_status`); the leaf
+  only applies a given status.
+- **Checkout-intent idempotency:** `create_checkout_intent` is `INSERT … ON CONFLICT
+  (client_reference_id) DO UPDATE SET updated_at = now() RETURNING`, so a replayed start returns the
+  **original** intent and cannot fork a second checkout for the same logical upgrade.
+- **Stripe epoch timestamps → tz-aware `datetime`** via `_epoch_to_dt` (psycopg adapts natively); jsonb
+  via `json.dumps(..., sort_keys=True)` bound through `%s::jsonb`, matching 5a/5b/5c.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0008_app_payments.sql` — the four tables (three
+  business-scoped: `app_checkout_intents`, `app_checkout_sessions`, `app_revenue_events`; one global:
+  `webhook_events`), four fail-loud REPLACE guards (3 keyed on `business_slug`, `webhook_events` keyed
+  on `provider_event_id`), and four indexes. Dedup keys: `app_revenue_events UNIQUE(business_slug,
+  provider_event_id, stripe_object_id)`, `app_checkout_sessions.stripe_checkout_session_id UNIQUE`,
+  `app_checkout_intents.client_reference_id UNIQUE`, `webhook_events UNIQUE(provider,
+  provider_event_id)`. Idempotent DDL (verified run-twice on a scratch DB across the full 0001→0008
+  chain).
+- `hermes-agent-main/plugins/takyon/app_payments.py` — pure leaf orchestrating `custody` +
+  `app_entitlements`: public `create_checkout_intent` / `attach_checkout_session` /
+  `get_checkout_intent` / `record_webhook_and_process` / `list_revenue_events` / `get_revenue_summary`;
+  internal `_process_checkout_completed` / `_process_subscription_event` / `_resolve_owner` /
+  `_find_intent_row`; `CheckoutIntent` / `RevenueEvent` dataclasses; `AppPaymentError` /
+  `InvalidWebhookEvent` / `CheckoutIntentNotFound` / `BusinessOwnerMissing`.
+- `hermes-agent-main/tests/plugins/test_takyon_app_payments_pg.py` — **21** tests on real Postgres:
+  checkout intent create / idempotent-on-ref / unknown-business → ForeignKeyViolation / required
+  fields → ValueError; attach by id / by ref / unknown → CheckoutIntentNotFound; get by id / ref /
+  None; **`test_paid_checkout_accrues_to_owner_custody`** (the acceptance: revenue summary = {1000, 1
+  event}, owner owed = net-of-fee, reconcile ok, paid entitlement with Stripe evidence, tier = paid);
+  owner-accrual-nets-exact-fee (asserts gross/fee/net custody entries for 5000); webhook-idempotent-
+  on-replay (second deduplicated, one revenue / one entitlement, owed not doubled); paid-without-email
+  (accrues, no entitlement); unpaid (session recorded, no revenue/accrual); zero-amount (revenue
+  recorded, no accrual); subscription-cancel-drops-tier-to-free; subscription-unknown noop;
+  ignored-event consumed; event-without-id → InvalidWebhookEvent; list-revenue newest-first; and
+  **`test_concurrent_identical_webhook_processes_exactly_once`** (8 threads via barrier + fresh conns →
+  exactly 1 processed / 7 deduped, 1 revenue event, 1 entitlement, owed accrued once, reconcile ok —
+  proving the SQLite double-grant cannot happen here).
+
+**Files changed:**
+- `hermes-agent-main/plugins/takyon/app_entitlements.py` — appended the net-new public
+  `set_subscription_status` (the subscription-lifecycle writer) in the canonical entitlements home.
+  **Purely additive** — no existing function altered, so 5a/5b/5c cannot regress.
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-5d suite → **21 passed**. Full `tests/plugins/`
+→ **1037 passed, 2 failed** (= Phase 5c's 1016 + the 21 net-new tests). The 2 failures are the **same
+pre-existing, unrelated** pair as 5c — `test_business_work_focus_persists_and_blocks_cross_lane_writes`
+(core.py artifact-path, from the separate uncommitted `distribution/meta-ads` working-tree edits) and
+the web-search `test_all_seven_plugins_present_in_registry` (expects 7, committed `xai` makes 8).
+Proven not-mine three ways, identical to 5c: (a) both target subsystems I did not touch; (b) the edits
+they trip on are pre-existing uncommitted `core.py`/`test_takyon_plugin.py` changes, not my untracked
+files; (c) neither failing test imports `app_payments`, `app_entitlements`, the 0008 migration, or the
+Postgres `pg_conn` fixture. `py_compile` of both Python files is clean; 0008 re-applied to a scratch DB
+is idempotent (only benign "already exists, skipping" notices).
+
+**Not done / honest state:**
+- **NOT mounted into any live HTTP surface.** `app_payments.py` is a standalone leaf; the SQLite
+  `handle_business_record_stripe_webhook` (`core.py:6956`) still runs the live product webhook until
+  the product surface is re-pointed at a later increment. This increment proves the correct gate +
+  accrual exist and are concurrency-safe; it does not yet replace the live path.
+- **Signature verification is the caller's job, by design.** `record_webhook_and_process` takes an
+  already-verified event dict. The eventual mount point must verify the Stripe signature (existing
+  `STRIPE_WEBHOOK_SECRET` via `stripe_util`) before calling in. Keeping provider-secret handling out of
+  the ledger leaf is deliberate.
+- **Owner payout (Stripe Connect transfer) is deferred** per the account/money model — accrual records
+  the *owed* balance in custody; moving that money to the owner is the later payout rail. The owed
+  balance is a true ledger fact from day one; it is not yet *paid out*.
+- **Period roll + plan funding unchanged** (carried from 5c): a plan's `included_ai_budget_microusd`
+  is still descriptive and the monthly period still does not auto-roll — both are out of scope here.
+- **Live Supabase apply remains blocked** on the polsia2 teardown + backup + operator go-ahead. 0008
+  has only been applied to local throwaway test DBs.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/app_payments.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0008_app_payments.sql
+rm hermes-agent-main/tests/plugins/test_takyon_app_payments_pg.py
+# also remove the appended set_subscription_status function from
+# hermes-agent-main/plugins/takyon/app_entitlements.py (git checkout that file, or delete that one fn).
+# this log entry is additive — trim it back to the Phase-5c increment if reverting.
+```
+
+## Increment — Phase 5e: project gateway-key boundary (the credential that fronts the platform provider key)
+
+**Date:** 2026-05-30
+
+**What:** Added the **project gateway-key boundary** as a net-new migration `0009_app_gateway_keys.sql`
+(one table, `app_gateway_keys`) + a pure leaf `app_gateway_keys.py` (mint / resolve / revoke / list).
+A business is minted an internally-generated `tkg_…` key; presenting it resolves to ONLY that
+business (`business_slug` + `key_id`). This is the boundary that lets "generated app never holds
+provider key" (the Phase 5 acceptance): the generated product app and the app runtime hold a
+`tkg_…` gateway key, present it to the internal AI gateway, and the gateway — not the app — calls
+the shared platform provider key server-side.
+
+**Why (mediationplan Gate-1 gap (3), verified at source):** the SQLite product `/generate` path
+(`app_api.py:395`) calls Anthropic with the **platform's shared key** (`_anthropic_key()`,
+`app_api.py:66`) **directly** — there is **no per-business gateway-key boundary** in front of the
+provider key. So any caller of the product AI route is one hop from the raw platform key. This
+increment introduces the missing credential layer: a per-business, internally-minted capability that
+the internal AI gateway resolves to a `business_slug` before it touches the provider key, so the app
+side only ever holds its own scoped `tkg_…` key.
+
+**Gate-1 finding (inspect-before-build):** `grep` confirms **no predecessor** — there is no
+`app_gateway_keys` (or any per-business gateway-key concept) in the SQLite trunk (`core.py`/
+`app_api.py`) or in 0001-0008; the only `ai_gateway` hits are an unrelated `ai_gateway_setup`
+workflow id (`core.py:211`) and archived polsia3 reference docs. So this is **net-new (ADD)**, not a
+port of an existing table. The canonical at-rest pattern to mirror already exists — `user_api_keys`
+(0001:63) + `control_plane.resolve_api_key` (the opaque SHA-256-hash + prefix + by-hash resolve). The
+gateway key is a **different scope** (per-BUSINESS, not per-USER) and a **different keyspace**, so it
+does **not** belong inside `user_api_keys` (which is the entire per-user boundary) nor inside any
+product table. *Decision:* **ISOLATE** — its own `app_gateway_keys` table + its own `app_gateway_keys`
+leaf, **reusing** the prefix-agnostic `user_api_keys.hash_api_key` (the security-critical hashing is
+not duplicated) while minting in a distinct namespace.
+
+**Gate-2 finding (credentials/providers):** **none new.** The gateway key is **internally minted** —
+`secrets.token_urlsafe(32)` in the `tkg_` namespace; minting a hash needs no external account, no
+provider key, no operator action (mediationplan Phase 5 Gate 2: "the project gateway key is an
+internally-minted per-business credential … minting a hash needs no external account"). The shared
+platform Anthropic key it fronts (`ANTHROPIC_API_KEY` / CLI `get_anthropic_key()`) already exists and
+is unchanged. The one still-outstanding credential remains `STRIPE_BILLING_WEBHOOK_SECRET` (Phase 3),
+untouched here.
+
+**Decisions (and the deliberate divergences):**
+- **Distinct, disjoint keyspace `tkg_`** (vs the per-user `tk_`). This is the security crux: a
+  `tk_…` user key never starts with `tkg_` (its 3rd char is `_`, not `g`) and a `tkg_…` gateway key
+  never starts with `tk_`, so the two keyspaces are provably disjoint at the well-formedness check —
+  a user key is **rejected before any DB lookup** as a gateway key and vice versa. Belt-and-suspenders
+  on top of that: the two key types live in **separate tables** (`user_api_keys` vs
+  `app_gateway_keys`) with separate resolvers, so even a hypothetical hash collision could not
+  cross-resolve. Test `test_user_key_and_gateway_key_keyspaces_are_disjoint` pins this.
+- **At-rest = hash + prefix only**, reusing `user_api_keys.hash_api_key` verbatim (SHA-256 hex). The
+  raw key is returned **exactly once** at mint and is unrecoverable; only `key_hash` (UNIQUE, also the
+  hot resolve index) and a non-secret `prefix` are stored — identical discipline to `user_api_keys`.
+- **`resolve_gateway_key` returns the minimum** — a frozen `GatewayPrincipal(business_slug, key_id)`,
+  the opaque handle the gateway needs to route (business → policy (0004) → product budget (0007) →
+  shared provider key → settle). No provider key, no other tenant, no internal handle leaks (the same
+  opaque-by-construction discipline as `ResolvedPrincipal`). None for malformed / unknown / revoked.
+- **NO one-active-per-business constraint — deliberate divergence from `user_api_keys`.** A user has
+  exactly one active key (the whole per-user boundary, enforced by the `user_api_keys_one_active`
+  partial unique index). A business may legitimately hold **several** active gateway keys at once (the
+  app runtime + the generated app, or an overlapping rotation where the old key keeps the deployed app
+  working until cutover). So `mint_gateway_key` always INSERTs and rotation is mint-new + revoke-old
+  as separate steps, not the atomic single-row swap `rotate_api_key` does. Tests
+  `test_business_may_hold_multiple_active_keys` and `test_concurrent_mint_produces_unique_resolvable_keys`
+  pin it (incl. 8-way concurrent mint with no collision).
+- **Revocation is soft, idempotent, and scopable.** `revoke_gateway_key` sets `revoked_at` (keeps the
+  row for audit), identified by `key_id` OR `raw_key`, optionally scoped to `business_slug` so one
+  business cannot revoke another's key (the `(%s::uuid is null or …)` NULL-guard cast pattern from
+  5d's `attach_checkout_session`). Returns True iff a row moved; an already-revoked / unknown /
+  out-of-scope key returns False.
+- **`business_slug` FK CASCADE** — a deleted business takes its gateway keys with it, so a resolvable
+  key always points at a live business and the resolver needs **no existence join** (single-table
+  lookup on the indexed `key_hash`). Test `test_business_delete_cascades_keys` pins it.
+
+**Files created:**
+- `hermes-agent-main/plugins/takyon/db/migrations/0009_app_gateway_keys.sql` — `app_gateway_keys`
+  (uuid PK, `business_slug` FK CASCADE, `key_hash` text UNIQUE check len>0, `prefix` text check
+  len>0, `revoked_at`, `created_at`), one fail-loud REPLACE guard (keyed on `business_slug`), index
+  `app_gateway_keys_business_idx (business_slug, created_at desc)`. Idempotent DDL (verified run-twice
+  on a scratch DB across the full 0001→0009 chain; table shape confirmed via `\d`).
+- `hermes-agent-main/plugins/takyon/app_gateway_keys.py` — pure leaf: `generate_gateway_key` /
+  `is_well_formed` / `gateway_key_prefix`; `mint_gateway_key` / `resolve_gateway_key` /
+  `revoke_gateway_key` / `list_gateway_keys`; `GatewayKey` + `GatewayPrincipal` dataclasses;
+  `AppGatewayKeyError`. Reuses `user_api_keys.hash_api_key`.
+- `hermes-agent-main/tests/plugins/test_takyon_app_gateway_keys_pg.py` — **23** tests on real
+  Postgres: mint returns a `tkg_` key + stores only hash/prefix (sha256, not raw); resolve returns
+  business+key_id only (exactly two fields); resolve rejects malformed (incl. a `tk_` user key) /
+  unknown / revoked; **disjoint keyspace** (user key ✗ as gateway key and vice versa); mint unknown
+  business → ForeignKeyViolation; **multiple active keys per business**; revoke by raw / by id,
+  idempotent, unknown → False, **scoped so it can't cross tenants**, no-identifier → AppGatewayKeyError;
+  cross-business resolve isolation; list excludes revoked by default (include_revoked shows them);
+  **business delete cascades keys**; and **`test_concurrent_mint_produces_unique_resolvable_keys`**
+  (8 threads + barrier + fresh conns → 8 distinct keys, all resolve, list = 8).
+
+**Files changed:** none in code (purely additive: new migration + new leaf + new test file, so
+Phases 1–5d cannot regress).
+
+**Verification:** from `hermes-agent-main`, `TAKYON_TEST_PG_DSN=…@127.0.0.1:54329/takyon_test`, via
+`scripts/run_tests.sh` (`-n 4`, hermetic): the Phase-5e suite → **23 passed**. Full `tests/plugins/`
+→ **1060 passed, 2 failed** (= Phase 5d's 1037 + the 23 net-new tests). The 2 failures are the **same
+pre-existing, unrelated** pair as 5c/5d — `test_business_work_focus_persists_and_blocks_cross_lane_writes`
+(core.py artifact-path, from the separate uncommitted `distribution/meta-ads` working-tree edits) and
+the web-search `test_all_seven_plugins_present_in_registry` (expects 7, committed `xai` makes 8).
+Proven not-mine: neither test imports `app_gateway_keys`, the 0009 migration, or the Postgres
+`pg_conn` fixture; a Postgres-only addition cannot reach them. `py_compile` of the leaf is clean; 0009
+re-applied to a scratch DB is idempotent (only benign "already exists, skipping" notices).
+
+**Not done / honest state:**
+- **NOT mounted into any live HTTP surface.** This increment delivers the gateway-key boundary
+  *primitive* (mint/resolve/revoke). The live `/internal/ai-gateway/messages` endpoint that composes
+  it — `resolve_gateway_key` → `policy.decide_execution` (0004/Phase 4) → `app_usage.reserve_usage`
+  (0007/Phase 5c) → `_call_anthropic(<platform key>)` → `app_usage.settle_usage` — is the deferred
+  live mount, exactly as 5a-5d deferred theirs. The SQLite `/generate` path (`app_api.py:395`) still
+  calls the platform key directly until the product surface is re-pointed at the mount-up phase.
+- **No key handed to a generated app yet** — minting a business's gateway key and injecting it into a
+  generated product app's runtime config is wiring that belongs to the build-product surface, done
+  when the live gateway endpoint exists. This increment proves the credential + its opaque resolve.
+- **No `last_used_at`** on the key (the documented table spec omits it), so `resolve_gateway_key` is a
+  pure read with no write-lock contention; audit of "which key was used" is the gateway's job via the
+  returned `key_id`.
+- **Live Supabase apply remains blocked** on the polsia2 teardown + backup + operator go-ahead. 0009
+  has only been applied to local throwaway test DBs.
+
+**Phase 5 complete (5a-5e).** The entire sub-user/product runtime is ported to Postgres as the
+successor authority — identity/auth/session (5a, 0005), entitlements + plan catalog (5b, 0006), the
+collapsed one-gate usage budget (5c, 0007), checkout + webhook + revenue + **owner→custody accrual**
+(5d, 0008), and the **project gateway-key boundary** (5e, 0009) — plus the two net-new ADDs the
+acceptance demanded (owner accrual so "sub-user payment shows in owner custody"; the gateway key so
+"generated app never holds provider key"). All leaves are unmounted; mounting the live HTTP surfaces
+(control router + product app runtime, currently SQLite-backed) and the live Supabase apply are the
+remaining transitional steps before Phase 8 retires SQLite.
+
+**Revert:**
+```sh
+rm hermes-agent-main/plugins/takyon/app_gateway_keys.py
+rm hermes-agent-main/plugins/takyon/db/migrations/0009_app_gateway_keys.sql
+rm hermes-agent-main/tests/plugins/test_takyon_app_gateway_keys_pg.py
+# this log entry is additive — trim it back to the Phase-5d increment if reverting.
+```

@@ -1,0 +1,294 @@
+"""Product sub-user identity + magic-link auth + sessions — Phase 5 of mediationplan.md.
+
+These are the customers OF a business the Takyon user runs (product sub-users), NOT
+the top-level Takyon operator — that identity lives in `control_plane.py` /
+`user_api_keys.py`. Everything here is scoped by `business_slug`: a sub-user belongs to
+exactly one business, an email is unique only within that business, and a session is
+only valid for the business it was minted in. This is the Postgres port of the SQLite
+trunk's app_users / app_magic_links / app_sessions (core.py).
+
+Auth is magic-link only. Raw tokens are never stored — only their SHA-256 hex hash
+(identical to the SQLite `_hash_token`, so a ported app keeps working). A magic link is
+single-use and short-lived; a session is a 30-day bearer token. This module owns only
+the guarded STATE change (mint a link, redeem it for a session, validate/revoke a
+session) — email DELIVERY is a side effect owned by the layer above (the HTTP/tool
+surface decides live-send vs. test-mode suppression and records `provider_message_id`),
+exactly as Phase 3 split `billing.topup` from the Stripe call.
+
+House style (matches billing.py / custody.py / policy.py): pure leaf, takes a psycopg
+connection, imports no psycopg, opens its own `conn.transaction()` per mutating op, and
+raises typed errors on broken preconditions rather than returning sentinels. An unknown
+business fails loud through the FK to businesses(slug).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import secrets
+from dataclasses import dataclass
+
+_DEFAULT_MAGIC_LINK_TTL_MINUTES = 15
+_DEFAULT_SESSION_TTL_DAYS = 30
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class AppIdentityError(Exception):
+    """Base for product sub-user identity errors."""
+
+
+class InvalidEmail(AppIdentityError):
+    """The supplied email is missing or malformed."""
+
+
+class InvalidMagicLink(AppIdentityError):
+    """The magic link is unknown, expired, or already redeemed."""
+
+
+class InactiveAppUser(AppIdentityError):
+    """The sub-user exists but is suspended/closed, so cannot start a session."""
+
+
+@dataclass(frozen=True)
+class AppUser:
+    """One product sub-user (a business's customer). `tier` is business-defined."""
+
+    id: str
+    business_slug: str
+    email: str
+    name: str | None
+    status: str
+    tier: str
+
+
+@dataclass(frozen=True)
+class MagicLink:
+    """A minted login link. The raw token is returned ALONGSIDE this record exactly
+    once (never stored in clear) and is not a field here."""
+
+    id: str
+    business_slug: str
+    app_user_id: str
+    email: str
+    purpose: str
+    expires_at: object
+
+
+@dataclass(frozen=True)
+class AppSession:
+    """A redeemed bearer session. The raw session token is returned alongside this
+    record exactly once and is not a field here."""
+
+    id: str
+    business_slug: str
+    app_user_id: str
+    expires_at: object
+
+
+def _hash_token(token: str) -> str:
+    """SHA-256 hex of a raw token — the only form stored. Matches the SQLite trunk's
+    `_hash_token` so links/sessions minted by either path verify identically."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _random_token() -> str:
+    """A fresh opaque token (URL-safe, 32 bytes of entropy)."""
+    return secrets.token_urlsafe(32)
+
+
+def _normalize_email(value: str) -> str:
+    """Lowercase + trim + validate. Stored values stay tidy; citext makes lookups
+    case-insensitive regardless, but normalizing on write keeps the data clean."""
+    email = str(value or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise InvalidEmail("valid email is required")
+    return email
+
+
+def _app_user_from_row(row) -> AppUser:
+    return AppUser(
+        id=str(row[0]),
+        business_slug=str(row[1]),
+        email=str(row[2]),
+        name=None if row[3] is None else str(row[3]),
+        status=str(row[4]),
+        tier=str(row[5]),
+    )
+
+
+_APP_USER_COLUMNS = "id, business_slug, email, name, status, tier"
+
+
+def upsert_app_user(conn, business_slug: str, email: str, *, name: str | None = None) -> AppUser:
+    """Create or reactivate a sub-user for (business, email). Idempotent on the
+    (business_slug, email) unique key: a re-request reactivates the row and keeps the
+    existing name unless a new one is supplied. Unknown business → ForeignKeyViolation
+    (fail loud). Returns the row in effect after the write."""
+    normalized = _normalize_email(email)
+    with conn.transaction():
+        row = conn.execute(
+            "insert into app_users (business_slug, email, name) values (%s, %s, %s) "
+            "on conflict (business_slug, email) do update set "
+            " status = 'active', "
+            " name = coalesce(excluded.name, app_users.name), "
+            " updated_at = now() "
+            f"returning {_APP_USER_COLUMNS}",
+            (business_slug, normalized, name),
+        ).fetchone()
+    return _app_user_from_row(row)
+
+
+def get_app_user(
+    conn, business_slug: str, *, app_user_id: str | None = None, email: str | None = None
+) -> AppUser | None:
+    """Look up a sub-user by id or email within a business, or None. Pure read."""
+    if app_user_id is not None:
+        row = conn.execute(
+            f"select {_APP_USER_COLUMNS} from app_users "
+            "where business_slug = %s and id = %s",
+            (business_slug, app_user_id),
+        ).fetchone()
+    elif email is not None:
+        row = conn.execute(
+            f"select {_APP_USER_COLUMNS} from app_users "
+            "where business_slug = %s and email = %s",
+            (business_slug, _normalize_email(email)),
+        ).fetchone()
+    else:
+        raise ValueError("get_app_user requires app_user_id or email")
+    return None if row is None else _app_user_from_row(row)
+
+
+def create_magic_link(
+    conn,
+    business_slug: str,
+    email: str,
+    *,
+    purpose: str = "login",
+    name: str | None = None,
+    ttl_minutes: int = _DEFAULT_MAGIC_LINK_TTL_MINUTES,
+) -> tuple[MagicLink, str]:
+    """Ensure the sub-user exists and mint a single-use login token for them, all in
+    one transaction. Returns (MagicLink, raw_token); the raw token is returned exactly
+    once and only its hash is stored. The expiry is computed from the server clock
+    (`now() + ttl_minutes`) so it never depends on a caller's wall clock. This mints
+    only — sending the email is the caller's concern."""
+    if not isinstance(ttl_minutes, int) or ttl_minutes <= 0:
+        raise ValueError("ttl_minutes must be a positive integer")
+    if not purpose:
+        raise ValueError("purpose must be a non-empty string")
+    raw = _random_token()
+    with conn.transaction():
+        user = conn.execute(
+            "insert into app_users (business_slug, email, name) values (%s, %s, %s) "
+            "on conflict (business_slug, email) do update set "
+            " status = 'active', "
+            " name = coalesce(excluded.name, app_users.name), "
+            " updated_at = now() "
+            "returning id, email",
+            (business_slug, _normalize_email(email), name),
+        ).fetchone()
+        app_user_id, normalized_email = str(user[0]), str(user[1])
+        row = conn.execute(
+            "insert into app_magic_links "
+            "(business_slug, app_user_id, email, token_hash, purpose, expires_at) "
+            "values (%s, %s, %s, %s, %s, now() + make_interval(mins => %s)) "
+            "returning id, expires_at",
+            (business_slug, app_user_id, normalized_email, _hash_token(raw), purpose, ttl_minutes),
+        ).fetchone()
+    link = MagicLink(
+        id=str(row[0]),
+        business_slug=business_slug,
+        app_user_id=app_user_id,
+        email=normalized_email,
+        purpose=purpose,
+        expires_at=row[1],
+    )
+    return link, raw
+
+
+def verify_magic_link(
+    conn,
+    business_slug: str,
+    raw_token: str,
+    *,
+    session_ttl_days: int = _DEFAULT_SESSION_TTL_DAYS,
+) -> tuple[AppSession, str]:
+    """Redeem a magic link and open a session. Returns (AppSession, raw_session_token).
+
+    Single-use is enforced atomically: the redemption is an
+    `update ... where used_at is null and expires_at > now() returning` so two
+    concurrent verifications can't both win the same link (it stamps used_at and tells
+    us the owning user in one statement — closing the read-then-write race the SQLite
+    version had). Raises InvalidMagicLink if the token is unknown/expired/already used,
+    and InactiveAppUser if the resolved sub-user is suspended/closed."""
+    if not isinstance(session_ttl_days, int) or session_ttl_days <= 0:
+        raise ValueError("session_ttl_days must be a positive integer")
+    token = str(raw_token or "").strip()
+    if not token:
+        raise InvalidMagicLink("token is required")
+    raw_session = _random_token()
+    with conn.transaction():
+        redeemed = conn.execute(
+            "update app_magic_links set used_at = now() "
+            "where business_slug = %s and token_hash = %s "
+            "  and used_at is null and expires_at > now() "
+            "returning app_user_id",
+            (business_slug, _hash_token(token)),
+        ).fetchone()
+        if redeemed is None:
+            raise InvalidMagicLink("magic link is invalid, expired, or already used")
+        app_user_id = str(redeemed[0])
+        status_row = conn.execute(
+            "select status from app_users where business_slug = %s and id = %s",
+            (business_slug, app_user_id),
+        ).fetchone()
+        if status_row is None or str(status_row[0]) != "active":
+            raise InactiveAppUser(app_user_id)
+        row = conn.execute(
+            "insert into app_sessions (business_slug, app_user_id, token_hash, expires_at) "
+            "values (%s, %s, %s, now() + make_interval(days => %s)) "
+            "returning id, expires_at",
+            (business_slug, app_user_id, _hash_token(raw_session), session_ttl_days),
+        ).fetchone()
+    session = AppSession(
+        id=str(row[0]),
+        business_slug=business_slug,
+        app_user_id=app_user_id,
+        expires_at=row[1],
+    )
+    return session, raw_session
+
+
+def validate_session(conn, business_slug: str, raw_session_token: str) -> AppUser | None:
+    """Resolve a presented session token to its sub-user, or None. A session counts as
+    valid only while it is unrevoked, unexpired, and its sub-user is active. Pure read —
+    the entire product boundary keys off this. None for missing/garbage tokens."""
+    token = str(raw_session_token or "").strip()
+    if not token:
+        return None
+    row = conn.execute(
+        f"select {', '.join('u.' + c for c in _APP_USER_COLUMNS.split(', '))} "
+        "from app_sessions s join app_users u on u.id = s.app_user_id "
+        "where s.business_slug = %s and s.token_hash = %s "
+        "  and s.revoked_at is null and s.expires_at > now() "
+        "  and u.status = 'active' limit 1",
+        (business_slug, _hash_token(token)),
+    ).fetchone()
+    return None if row is None else _app_user_from_row(row)
+
+
+def revoke_session(conn, business_slug: str, raw_session_token: str) -> bool:
+    """Revoke a session by its token. Returns True if a live session was revoked, False
+    if there was nothing to revoke (unknown or already revoked) — idempotent."""
+    token = str(raw_session_token or "").strip()
+    if not token:
+        return False
+    with conn.transaction():
+        row = conn.execute(
+            "update app_sessions set revoked_at = now() "
+            "where business_slug = %s and token_hash = %s and revoked_at is null "
+            "returning id",
+            (business_slug, _hash_token(token)),
+        ).fetchone()
+    return row is not None
