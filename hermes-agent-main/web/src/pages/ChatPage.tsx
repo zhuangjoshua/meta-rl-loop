@@ -715,6 +715,18 @@ function prettyHost(url: string): string {
   return text.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
 }
 
+function channelLabel(source?: string): string {
+  const s = (source || "").toLowerCase().replace(/^test-/, "");
+  if (!s) return "Post";
+  if (s === "x" || s.startsWith("x-") || s.includes("twitter")) return "X";
+  if (s.includes("reddit")) return "Reddit";
+  if (s.includes("hacker")) return "HN";
+  if (s.includes("linkedin")) return "LinkedIn";
+  if (s.includes("forum")) return "Forum";
+  if (s.includes("outreach")) return "Outreach";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function modeDotClass(item: BusinessSummary): "td-live" | "td-test" | "td-idle" {
   const mode = (item.mode || "").toLowerCase();
   if (mode === "live") return "td-live";
@@ -2379,7 +2391,7 @@ function Message({ message }: { message: ChatMessage }) {
         {isUser ? (
           message.content
         ) : (
-          <div className="[&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface)] [&_pre]:p-2">
+          <div className="td-prose [&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface)] [&_pre]:p-2">
             <Markdown
               content={message.content}
               streaming={message.status === "streaming"}
@@ -2502,6 +2514,17 @@ function CompanyWorkspace({
     website.path || website.source_path || product.source_path || "product/site";
   const latest = deliverables[0];
 
+  const ceoLoop = overview.ceo_loop || {};
+  const intent = (ceoLoop.headline || "").trim();
+  const nextTask = (ceoLoop.next_action || "").trim();
+
+  const outreach = overview.artifacts?.outreach || {};
+  const posts = Array.isArray(overview.posts) ? overview.posts : [];
+  const publishedCount = outreach.published_count || 0;
+  const outreachStatus = (outreach.status || "").trim();
+  const distActive =
+    posts.length > 0 || publishedCount > 0 || (!!outreachStatus && outreachStatus !== "missing");
+
   const [viewer, setViewer] = useState<{
     content?: string;
     error?: string;
@@ -2570,14 +2593,21 @@ function CompanyWorkspace({
       <div className="td-scroll">
         <div className="td-momentum">
           <p className="td-lead">
-            <b>{name}</b>{" "}
-            {live
-              ? latest
-                ? `is live. Latest shipped: ${latest.title}.`
-                : "is live — start distribution to bring in customers."
-              : deliverables.length
-                ? "is taking shape — deliverables are landing."
-                : "is just getting started. Ask the CEO to research and build."}
+            {/* Hero priority: MRR -> intent -> next task -> ship state. MRR stays
+                deferred (no number) until the billing control plane is live, so
+                intent (ceo_loop.headline) is the strongest available lead today. */}
+            <b>{name}</b>
+            {intent
+              ? ` — ${intent}`
+              : nextTask
+                ? ` — Next: ${nextTask}`
+                : live
+                  ? latest
+                    ? ` is live. Latest shipped: ${latest.title}.`
+                    : " is live — start distribution to bring in customers."
+                  : deliverables.length
+                    ? " is taking shape — deliverables are landing."
+                    : " is just getting started. Ask the CEO to research and build."}
           </p>
         </div>
 
@@ -2668,6 +2698,92 @@ function CompanyWorkspace({
               </span>
             </div>
           </div>
+        </div>
+
+        <div className="td-card" style={{ marginBottom: 22 }}>
+          <div className="td-card-h">
+            <h3>Distribution</h3>
+            <span className="td-meta">
+              {distActive
+                ? publishedCount
+                  ? `${publishedCount} published`
+                  : outreachStatus === "draft_only"
+                    ? "drafts ready"
+                    : `${posts.length} thread${posts.length === 1 ? "" : "s"}`
+                : "not started"}
+            </span>
+          </div>
+          {distActive ? (
+            <>
+              {posts.length > 0 ? (
+                <div className="td-deliv">
+                  {posts.slice(0, 5).map((post, index) => (
+                    <div className="td-drow" key={post.id || `${post.source}-${index}`}>
+                      <span className="td-dtype">
+                        <span className="td-ti" />
+                        {channelLabel(post.source)}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="td-dtitle" style={{ display: "block" }}>
+                          {post.title || "Untitled post"}
+                        </span>
+                        {(post.status || post.mode) && (
+                          <span className="td-ddesc" style={{ display: "block" }}>
+                            {[post.status, post.mode].filter(Boolean).join(" · ")}
+                          </span>
+                        )}
+                      </span>
+                      <span className="td-dimpact td-defer-inline">—</span>
+                      <span className="td-dact">
+                        {post.url ? (
+                          <a href={post.url} rel="noreferrer" target="_blank">
+                            Open ↗
+                          </a>
+                        ) : post.artifact_path ? (
+                          <button
+                            onClick={() =>
+                              openDocument({ label: post.title, path: post.artifact_path })
+                            }
+                            type="button"
+                          >
+                            Preview
+                          </button>
+                        ) : post.conversation_file ? (
+                          <button
+                            onClick={() =>
+                              openDocument({ label: post.title, path: post.conversation_file })
+                            }
+                            type="button"
+                          >
+                            Open
+                          </button>
+                        ) : null}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ margin: "0 0 4px", fontSize: 13, color: "var(--td-muted)" }}>
+                  {outreachStatus === "draft_only"
+                    ? "Outreach drafts are ready to publish."
+                    : "Outreach has been published locally."}
+                  {outreach.path ? ` (${compactPath(outreach.path)})` : ""}
+                </p>
+              )}
+              <p className="td-defer-note" style={{ marginTop: 12 }}>
+                <span className="td-dotline" />
+                Reach and engagement activate when distribution analytics are connected
+              </p>
+            </>
+          ) : (
+            <div className="td-empty">
+              <p className="td-empty-title">No distribution yet</p>
+              <p>
+                When the CEO publishes outreach or posts to a channel, it shows up here. Ask the CEO
+                to start distribution.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="td-deliv-head">
@@ -2778,7 +2894,7 @@ function CompanyWorkspace({
                 )
               ) : /\.md$/i.test(viewer.path) ? (
                 <div
-                  className="[&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface-2)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface-2)] [&_pre]:p-3"
+                  className="td-prose [&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface-2)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface-2)] [&_pre]:p-3"
                   style={{ color: "var(--td-fg)", fontSize: 14, lineHeight: 1.6 }}
                 >
                   <Markdown content={viewer.content || ""} />

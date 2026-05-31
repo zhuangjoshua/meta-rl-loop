@@ -315,6 +315,9 @@
 .tk-dash .td-msg .td-mtime { font-family: var(--td-font-mono); font-size: 10px; color: var(--td-meta); margin-top: 4px; }
 .tk-dash .td-msg.td-you .td-mtime { text-align: right; }
 
+/* Shared Markdown renderer hardcodes old dark-theme text-foreground (#ffe6cb); force readable warm text inside warm surfaces. Links keep their accent via [&_a] utilities. */
+.tk-dash .td-prose :where(h1, h2, h3, h4, h5, h6, p, li, code, strong, em, blockquote, table, th, td) { color: var(--td-fg); }
+
 .tk-dash .td-composer { border-top: 1px solid var(--td-border); padding: 12px 14px; flex-shrink: 0; position: relative; }
 .tk-dash .td-composer .td-box {
   display: flex; align-items: center; gap: 8px;
