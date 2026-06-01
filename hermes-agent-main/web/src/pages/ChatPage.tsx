@@ -6,6 +6,7 @@ import {
   Plus,
   RefreshCw,
   Square,
+  User,
   X,
 } from "lucide-react";
 import {
@@ -2232,13 +2233,6 @@ export default function ChatPage() {
     setVersion((v) => v + 1);
   }, []);
 
-  const newChatHref = useMemo(() => {
-    const params = new URLSearchParams();
-    if (scopeState.business) params.set("business", scopeState.business);
-    const query = params.toString();
-    return `/chat${query ? `?${query}` : ""}`;
-  }, [scopeState.business]);
-
   const onComposerSubmit = (event: FormEvent) => {
     event.preventDefault();
     void handleSubmit();
@@ -2356,9 +2350,6 @@ export default function ChatPage() {
                 <PanelRight className="h-3.5 w-3.5" /> CEO
               </button>
             )}
-            <a className="td-pill td-ghost" href={newChatHref}>
-              <Plus className="h-3.5 w-3.5" /> New chat
-            </a>
             <button
               aria-label="Reconnect"
               className="td-pill td-ghost"
@@ -2372,7 +2363,6 @@ export default function ChatPage() {
           {inBusiness ? (
             <CompanyWorkspace
               deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
-              onCommand={runTakyonLine}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -2579,7 +2569,9 @@ function BizSidebar({
           style={{ width: "100%", textAlign: "left" }}
           type="button"
         >
-          <span className="td-av">T</span>
+          <span className="td-av">
+            <User className="h-4 w-4" strokeWidth={2} />
+          </span>
           <span className="min-w-0">
             <span className="td-who" style={{ display: "block" }}>
               Operator
@@ -2765,12 +2757,11 @@ function Thread({
   const displayError = friendlyError(error);
   const activeTool = (tools || []).slice().reverse().find((tool) => tool.status === "running");
   const activityLabels = recentToolLabels(tools);
-  const workingLabel =
-    activeTool?.preview ||
-    activeTool?.context ||
-    (activeTool ? naturalToolLabel(activeTool) : "") ||
-    (statusItems && statusItems[0]) ||
-    "Thinking…";
+  const workingLabel = running ? "Working…" : "";
+  const activitySummary =
+    activityLabels.length > 0
+      ? activityLabels.join(" · ")
+      : activeTool?.name || (statusItems && statusItems[0]) || "Thinking";
   return (
     <>
       <div ref={scrollerRef} className="td-thread">
@@ -2795,15 +2786,9 @@ function Thread({
               <span aria-hidden className="td-activity-dot" />
               <span className="truncate">{workingLabel}</span>
             </div>
-            {activityLabels.length > 0 && (
-              <div className="td-activity-tokens">
-                {activityLabels.map((label) => (
-                  <span className="td-activity-token" key={label}>
-                    {label}
-                  </span>
-                ))}
-              </div>
-            )}
+            <div className="td-activity-tokens">
+              <span className="td-activity-token">{activitySummary}</span>
+            </div>
           </div>
         )}
       </div>
@@ -3017,9 +3002,6 @@ function IntercomPanel({
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--td-surface)]">
       <header className="td-rail-head">
-        <span className="td-av">
-          <Lightbulb className="h-[18px] w-[18px]" strokeWidth={2} />
-        </span>
         <span className="min-w-0">
           <span className="td-t" style={{ display: "block" }}>
             CEO
@@ -3076,7 +3058,6 @@ function deliverableActionFor(item: Deliverable): DeliverableAction {
 
 function CompanyWorkspace({
   deliverables,
-  onCommand,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
@@ -3085,7 +3066,6 @@ function CompanyWorkspace({
   takyonProgress,
 }: {
   deliverables: Deliverable[];
-  onCommand: (line: string) => void;
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
@@ -3114,6 +3094,34 @@ function CompanyWorkspace({
   const outreachStatus = (outreach.status || "").trim();
   const distActive =
     posts.length > 0 || publishedCount > 0 || (!!outreachStatus && outreachStatus !== "missing");
+
+  // Progressive disclosure: a section only appears once it actually exists.
+  // Product shows when live or a built site/preview exists; Distribution when
+  // outreach is active; Deliverables is always the spine. Section numbers count
+  // only the sections that render, so they stay sequential as boxes pop in.
+  const hasProduct = live || !!website.path;
+  const capitalize = (value: string) =>
+    value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+  // Deck stands alone — the masthead name is the headline, so no "{name} — …"
+  // prefix (the business name is already shown top-left and in the masthead).
+  const deckText = capitalize(
+    intent
+      ? intent
+      : nextTask
+        ? `Next: ${nextTask}`
+        : live
+          ? latest
+            ? `Live. Latest shipped: ${latest.title}.`
+            : "Live — start distribution to bring in customers."
+          : deliverables.length
+            ? "Taking shape — deliverables are landing."
+            : "Just getting started. Ask the CEO to research and build.",
+  );
+  const sectionKeys: string[] = [];
+  if (hasProduct) sectionKeys.push("product");
+  if (distActive) sectionKeys.push("distribution");
+  sectionKeys.push("deliverables");
+  const sectionNo = (key: string) => String(sectionKeys.indexOf(key) + 1).padStart(2, "0");
 
   const [viewer, setViewer] = useState<{
     content?: string;
@@ -3218,59 +3226,44 @@ function CompanyWorkspace({
   return (
     <>
       <div className="td-scroll">
-        <div className="td-momentum">
-          <p className="td-lead">
-            {/* Hero priority: MRR -> intent -> next task -> ship state. MRR stays
-                deferred (no number) until the billing control plane is live, so
-                intent (ceo_loop.headline) is the strongest available lead today. */}
-            <b>{name}</b>
-            {intent
-              ? ` — ${intent}`
-              : nextTask
-                ? ` — Next: ${nextTask}`
-                : live
-                  ? latest
-                    ? ` is live. Latest shipped: ${latest.title}.`
-                    : " is live — start distribution to bring in customers."
-                  : deliverables.length
-                    ? " is taking shape — deliverables are landing."
-                  : " is just getting started. Ask the CEO to research and build."}
+        <header className="td-mast">
+          <p className="td-mast-eyebrow">
+            <span className="td-mast-tick" />
+            {live ? "Live" : deliverables.length ? "In progress" : "New business"}
+            {publicUrl ? ` · ${prettyHost(publicUrl)}` : ""}
           </p>
+          <h1 className="td-mast-name">{name}</h1>
+          <p className="td-mast-deck">{deckText}</p>
           {progressLine && (
-            <p className="td-defer-note" style={{ marginTop: 10 }}>
+            <p className="td-mast-progress">
               <span className="td-dotline" />
               {progressLine}
             </p>
           )}
-        </div>
+        </header>
 
-        <div className="td-kpis">
-          {["MRR", "Paying customers", "Signups", "Net revenue"].map((label) => (
-            <div className="td-kpi" key={label}>
-              <div className="td-k-label">{label}</div>
-              <div className="td-defer">
-                <span className="td-dash">—</span>
-              </div>
+        {/* Metric ledger — one ruled stat strip. Values are honest deferred
+            dashes (no number) until the billing control plane is live. */}
+        <div className="td-ledger">
+          {["MRR", "Paying", "Signups", "Net revenue"].map((label) => (
+            <div className="td-led" key={label}>
+              <div className="td-led-k">{label}</div>
+              <div className="td-led-v">—</div>
             </div>
           ))}
         </div>
-        <p className="td-defer-note" style={{ margin: "-6px 0 22px" }}>
-          <span className="td-dotline" />
-          Metrics activate when the billing control plane is connected
-        </p>
 
-        <div className="td-row2">
-          <div className="td-card">
-            <div className="td-card-h">
-              <h3>Product</h3>
-              <span className="td-meta">{live ? prettyHost(publicUrl) : "not published"}</span>
+        {hasProduct && (
+          <section className="td-block">
+            <div className="td-sec">
+              <span className="td-sec-no">{sectionNo("product")}</span>
+              <h3 className="td-sec-label">Product</h3>
+              <span className="td-sec-meta">{live ? prettyHost(publicUrl) : "preview"}</span>
             </div>
-            <div className="td-browser">
-              <div className="td-bar">
-                <span className="td-bdot" />
-                <span className="td-bdot" />
-                <span className="td-bdot" />
-                <span className="td-baddr">
+            <div className="td-plate">
+              <div className="td-plate-top">
+                <span className="td-plate-eyebrow">{live ? "Live product" : "Preview"}</span>
+                <span className="td-plate-host">
                   {live
                     ? prettyHost(publicUrl)
                     : website.path
@@ -3278,199 +3271,164 @@ function CompanyWorkspace({
                       : "no site yet"}
                 </span>
               </div>
-              <div className="td-shot">
-                <span className="td-s-eyebrow">{live ? "Live product" : "Not published"}</span>
-                <h2>{name}</h2>
-                {overview.goal && <p>{overview.goal}</p>}
+              <h2 className="td-plate-name">{name}</h2>
+              {overview.goal && <p className="td-plate-goal">{overview.goal}</p>}
+              <div className="td-funnel">
+                {["Signups", "Active", "Paying"].map((label, index) => (
+                  <Fragment key={label}>
+                    {index > 0 && <span className="td-arr">→</span>}
+                    <div className="td-step">
+                      <div className="td-fv">—</div>
+                      <div className="td-fl">{label}</div>
+                    </div>
+                  </Fragment>
+                ))}
+              </div>
+              <div className="td-prod-foot">
+                {live ? (
+                  <button
+                    className="td-btn td-btn-primary"
+                    onClick={() => openUrlInNewTab(publicUrl)}
+                    type="button"
+                  >
+                    Open website <ExternalLink className="td-ar h-3.5 w-3.5" />
+                  </button>
+                ) : (
+                  <button className="td-btn td-btn-primary" onClick={openPreview} type="button">
+                    Open preview <ExternalLink className="td-ar h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             </div>
-            <div className="td-funnel">
-              {["Signups", "Active", "Paying"].map((label, index) => (
-                <Fragment key={label}>
-                  {index > 0 && <span className="td-arr">→</span>}
-                  <div className="td-step">
-                    <div className="td-fv">—</div>
-                    <div className="td-fl">{label}</div>
-                  </div>
-                </Fragment>
-              ))}
-            </div>
-            <div className="td-prod-foot">
-              {live ? (
-                <button
-                  className="td-btn td-btn-primary"
-                  onClick={() => openUrlInNewTab(publicUrl)}
-                  type="button"
-                >
-                  Open website <ExternalLink className="td-ar h-3.5 w-3.5" />
-                </button>
-              ) : website.path ? (
-                <button className="td-btn td-btn-primary" onClick={openPreview} type="button">
-                  Open preview <ExternalLink className="td-ar h-3.5 w-3.5" />
-                </button>
-              ) : (
-                <button
-                  className="td-btn td-btn-secondary"
-                  onClick={() => onCommand("/wake")}
-                  type="button"
-                >
-                  Ask the CEO to build
-                </button>
-              )}
-            </div>
-          </div>
+          </section>
+        )}
 
-          <div className="td-card">
-            <div className="td-card-h">
-              <h3>Revenue momentum</h3>
-            </div>
-            <div className="td-chart-skel">
-              <span className="td-defer-note">
-                <span className="td-dotline" />
-                Chart activates with live revenue
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="td-card" style={{ marginBottom: 22 }}>
-          <div className="td-card-h">
-            <h3>Distribution</h3>
-            <span className="td-meta">
-              {distActive
-                ? publishedCount
+        {distActive && (
+          <section className="td-block">
+            <div className="td-sec">
+              <span className="td-sec-no">{sectionNo("distribution")}</span>
+              <h3 className="td-sec-label">Distribution</h3>
+              <span className="td-sec-meta">
+                {publishedCount
                   ? `${publishedCount} published`
                   : outreachStatus === "draft_only"
                     ? "drafts ready"
-                    : `${posts.length} thread${posts.length === 1 ? "" : "s"}`
-                : "not started"}
-            </span>
-          </div>
-          {distActive ? (
-            <>
-              {posts.length > 0 ? (
-                <div className="td-deliv">
-                  {posts.slice(0, 5).map((post, index) => {
-                    const postUrl = normalizeOpenableUrl(post.url);
-                    return (
-                      <div className="td-drow" key={post.id || `${post.source}-${index}`}>
-                        <span className="td-dtype">
-                          <span className="td-ti" />
-                          {channelLabel(post.source)}
+                    : `${posts.length} thread${posts.length === 1 ? "" : "s"}`}
+              </span>
+            </div>
+            {posts.length > 0 ? (
+              <div className="td-deliv">
+                {posts.slice(0, 5).map((post, index) => {
+                  const postUrl = normalizeOpenableUrl(post.url);
+                  return (
+                    <div className="td-drow" key={post.id || `${post.source}-${index}`}>
+                      <span className="td-dtype">
+                        <span className="td-ti" />
+                        {channelLabel(post.source)}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="td-dtitle" style={{ display: "block" }}>
+                          {post.title || "Untitled post"}
                         </span>
-                        <span className="min-w-0">
-                          <span className="td-dtitle" style={{ display: "block" }}>
-                            {post.title || "Untitled post"}
+                        {(post.status || post.mode) && (
+                          <span className="td-ddesc" style={{ display: "block" }}>
+                            {[post.status, post.mode].filter(Boolean).join(" · ")}
                           </span>
-                          {(post.status || post.mode) && (
-                            <span className="td-ddesc" style={{ display: "block" }}>
-                              {[post.status, post.mode].filter(Boolean).join(" · ")}
-                            </span>
-                          )}
-                        </span>
-                        <span className="td-dimpact td-defer-inline">—</span>
-                        <span className="td-dact">
-                          {postUrl ? (
-                            <a href={postUrl} rel="noreferrer" target="_blank">
-                              Open ↗
-                            </a>
-                          ) : post.artifact_path ? (
-                            <button
-                              onClick={() =>
-                                openDocument({ label: post.title, path: post.artifact_path })
-                              }
-                              type="button"
-                            >
-                              Preview
-                            </button>
-                          ) : post.conversation_file ? (
-                            <button
-                              onClick={() =>
-                                openDocument({ label: post.title, path: post.conversation_file })
-                              }
-                              type="button"
-                            >
-                              Open
-                            </button>
-                          ) : null}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p style={{ margin: "0 0 4px", fontSize: 13, color: "var(--td-muted)" }}>
-                  {outreachStatus === "draft_only"
-                    ? "Outreach drafts are ready to publish."
-                    : "Outreach has been published locally."}
-                  {outreach.path ? ` (${compactPath(outreach.path)})` : ""}
-                </p>
-              )}
-              <p className="td-defer-note" style={{ marginTop: 12 }}>
-                <span className="td-dotline" />
-                Reach and engagement activate when distribution analytics are connected
+                        )}
+                      </span>
+                      <span className="td-dimpact td-defer-inline">—</span>
+                      <span className="td-dact">
+                        {postUrl ? (
+                          <a href={postUrl} rel="noreferrer" target="_blank">
+                            Open ↗
+                          </a>
+                        ) : post.artifact_path ? (
+                          <button
+                            onClick={() =>
+                              openDocument({ label: post.title, path: post.artifact_path })
+                            }
+                            type="button"
+                          >
+                            Preview
+                          </button>
+                        ) : post.conversation_file ? (
+                          <button
+                            onClick={() =>
+                              openDocument({ label: post.title, path: post.conversation_file })
+                            }
+                            type="button"
+                          >
+                            Open
+                          </button>
+                        ) : null}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p style={{ margin: 0, fontSize: 13.5, color: "var(--td-muted)" }}>
+                {outreachStatus === "draft_only"
+                  ? "Outreach drafts are ready to publish."
+                  : "Outreach has been published locally."}
+                {outreach.path ? ` (${compactPath(outreach.path)})` : ""}
               </p>
-            </>
-          ) : (
+            )}
+          </section>
+        )}
+
+        <section className="td-block">
+          <div className="td-sec">
+            <span className="td-sec-no">{sectionNo("deliverables")}</span>
+            <h3 className="td-sec-label">Deliverables</h3>
+            <span className="td-sec-meta">{latest ? `Updated ${relativeTime(latest.at)}` : ""}</span>
+          </div>
+          {deliverables.length === 0 ? (
             <div className="td-empty">
-              <p className="td-empty-title">No distribution yet</p>
-              <p>
-                When the CEO publishes outreach or posts to a channel, it shows up here. Ask the CEO
-                to start distribution.
-              </p>
+              <p className="td-empty-title">No deliverables yet</p>
+              <p>When the CEO ships research, a site, posts, or revenue receipts, they show up here.</p>
+            </div>
+          ) : (
+            <div className="td-deliv">
+              {deliverables.map((item) => {
+                const action = deliverableActionFor(item);
+                return (
+                  <div className="td-drow" key={item.id}>
+                    <span className="td-dtype">
+                      <span className="td-ti" />
+                      {DELIVERABLE_KIND_LABEL[item.kind] || "Item"}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="td-dtitle" style={{ display: "block" }}>
+                        {item.title}
+                      </span>
+                      {item.detail && (
+                        <span className="td-ddesc" style={{ display: "block" }}>
+                          {item.detail}
+                        </span>
+                      )}
+                    </span>
+                    <span className="td-dimpact td-defer-inline">—</span>
+                    <span className="td-dact">
+                      {action?.type === "open" ? (
+                        <a href={action.url} rel="noreferrer" target="_blank">
+                          Open ↗
+                        </a>
+                      ) : action ? (
+                        <button
+                          onClick={() => openDocument({ label: item.title, path: item.path })}
+                          type="button"
+                        >
+                          Preview
+                        </button>
+                      ) : null}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
-        </div>
-
-        <div className="td-deliv-head">
-          <h2>Deliverables</h2>
-          <span className="td-meta">{latest ? `Updated ${relativeTime(latest.at)}` : ""}</span>
-        </div>
-        {deliverables.length === 0 ? (
-          <div className="td-empty">
-            <p className="td-empty-title">No deliverables yet</p>
-            <p>When the CEO ships research, a site, posts, or revenue receipts, they show up here.</p>
-          </div>
-        ) : (
-          <div className="td-deliv">
-            {deliverables.map((item) => {
-              const action = deliverableActionFor(item);
-              return (
-                <div className="td-drow" key={item.id}>
-                  <span className="td-dtype">
-                    <span className="td-ti" />
-                    {DELIVERABLE_KIND_LABEL[item.kind] || "Item"}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="td-dtitle" style={{ display: "block" }}>
-                      {item.title}
-                    </span>
-                    {item.detail && (
-                      <span className="td-ddesc" style={{ display: "block" }}>
-                        {item.detail}
-                      </span>
-                    )}
-                  </span>
-                  <span className="td-dimpact td-defer-inline">—</span>
-                  <span className="td-dact">
-                    {action?.type === "open" ? (
-                      <a href={action.url} rel="noreferrer" target="_blank">
-                        Open ↗
-                      </a>
-                    ) : action ? (
-                      <button
-                        onClick={() => openDocument({ label: item.title, path: item.path })}
-                        type="button"
-                      >
-                        Preview
-                      </button>
-                    ) : null}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        </section>
       </div>
 
       {viewer && (
