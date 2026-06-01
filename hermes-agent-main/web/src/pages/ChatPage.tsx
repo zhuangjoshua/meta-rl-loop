@@ -466,6 +466,23 @@ function businessCountLabel(count: number): string {
   return `${count} business${count === 1 ? "" : "es"}`;
 }
 
+function optimisticBusinessSummary(
+  businesses: BusinessSummary[],
+  slug: string,
+): BusinessSummary {
+  const existing = businesses.find(
+    (item) => normalizeBusinessLookup(item.slug || item.name || "") === slug,
+  );
+  if (existing) {
+    return {
+      ...existing,
+      slug: existing.slug || slug,
+      name: existing.name || slug,
+    };
+  }
+  return { slug, name: slug };
+}
+
 function makeMessage(role: ChatRole, content: string): ChatMessage {
   return { id: nextId(role), role, content: cleanText(content), status: "complete" };
 }
@@ -1706,10 +1723,8 @@ export default function ChatPage() {
         });
     };
     refresh();
-    const timer = window.setInterval(refresh, 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, [gw, recoverMissingSession, scopeState.business, sessionId, state]);
 
@@ -1770,6 +1785,33 @@ export default function ChatPage() {
   const setTakyonScope = useCallback(
     async (business: string) => {
       if (!sessionId) return;
+      if (business) {
+        const optimistic = optimisticBusinessSummary(scopeState.businesses, business);
+        setPendingBusinessSlug(business);
+        setScopeState((prev) =>
+          normalizeScopeState({
+            ...prev,
+            business,
+            current: optimistic,
+            overview: undefined,
+          }),
+        );
+      } else {
+        setPendingBusinessSlug(null);
+        setScopeState((prev) =>
+          normalizeScopeState({
+            ...prev,
+            business: "",
+            current: {},
+            overview: undefined,
+          }),
+        );
+      }
+      const params = new URLSearchParams(searchParams);
+      if (business) params.set("business", business);
+      else params.delete("business");
+      setSearchParams(params, { replace: true });
+      requestAnimationFrame(() => inputRef.current?.focus());
       let res: ScopeState;
       try {
         res = await gw.request<ScopeState>(
@@ -1786,6 +1828,7 @@ export default function ChatPage() {
       }
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
+      setPendingBusinessSlug(null);
       if (nextScope.business) {
         setBlockedBootBusinessSlug((current) =>
           current === nextScope.business ? null : current,
@@ -1794,18 +1837,13 @@ export default function ChatPage() {
           current && current.includes(`business:${nextScope.business}`) ? null : current,
         );
       }
-      const params = new URLSearchParams(searchParams);
-      if (nextScope.business) params.set("business", nextScope.business);
-      else params.delete("business");
-      setSearchParams(params, { replace: true });
       appendSystem(
         nextScope.business
           ? `Using business:${nextScope.business}`
           : "Using global scope",
       );
-      requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [appendSystem, gw, recoverMissingSession, searchParams, sessionId, setSearchParams],
+    [appendSystem, gw, recoverMissingSession, scopeState.businesses, searchParams, sessionId, setSearchParams],
   );
 
   const enterPendingBusiness = useCallback(
