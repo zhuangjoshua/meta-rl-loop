@@ -2176,7 +2176,7 @@ def _(rid, params: dict) -> dict:
 
             slug = _slugify(boot_business)
             boot_result["requested_business"] = slug
-            if _takyon_can_access_business(session, slug) or _takyon_get_background_run(slug):
+            if _takyon_can_access_business(session, slug):
                 session["takyon_current_business"] = slug
                 boot_result["accepted"] = True
             else:
@@ -5926,7 +5926,7 @@ def _takyon_require_business_access(
     slug = str(business or "").strip()
     if not slug:
         return "business scope required"
-    if _takyon_can_access_business(session, slug) or _takyon_get_background_run(slug):
+    if _takyon_can_access_business(session, slug):
         return None
     return f"access denied for business:{slug}"
 
@@ -6043,7 +6043,7 @@ def _(rid, params: dict) -> dict:
 
         slug = _slugify(business)
         exists = _takyon_can_access_business(session, slug)
-        if not exists and not _takyon_get_background_run(slug):
+        if not exists:
             businesses = [
                 str(item.get("slug") or "").strip()
                 for item in _takyon_businesses_for_session(session)
