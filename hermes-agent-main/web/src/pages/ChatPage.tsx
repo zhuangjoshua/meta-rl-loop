@@ -1960,13 +1960,11 @@ export default function ChatPage() {
   const resolveBusinessMedia = useCallback(
     async (path: string): Promise<BusinessMediaResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
-      const res = await gw.request<BusinessMediaResponse>(
+      return await gw.request<BusinessMediaResponse>(
         "takyon.file.media",
         { session_id: sessionId, path },
         20_000,
       );
-      setScopeState(normalizeScopeState(res));
-      return res;
     },
     [gw, sessionId],
   );
@@ -1974,13 +1972,11 @@ export default function ChatPage() {
   const readBusinessFile = useCallback(
     async (path: string): Promise<BusinessFileReadResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
-      const res = await gw.request<BusinessFileReadResponse>(
+      return await gw.request<BusinessFileReadResponse>(
         "takyon.file.read",
         { session_id: sessionId, path },
         20_000,
       );
-      setScopeState(normalizeScopeState(res));
-      return res;
     },
     [gw, sessionId],
   );
@@ -1988,13 +1984,11 @@ export default function ChatPage() {
   const resolveBusinessSitePreview = useCallback(
     async (path?: string): Promise<BusinessSitePreviewResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
-      const res = await gw.request<BusinessSitePreviewResponse>(
+      return await gw.request<BusinessSitePreviewResponse>(
         "takyon.site.preview",
         { session_id: sessionId, path },
         20_000,
       );
-      setScopeState(normalizeScopeState(res));
-      return res;
     },
     [gw, sessionId],
   );
