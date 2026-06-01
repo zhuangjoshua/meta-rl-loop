@@ -191,6 +191,56 @@ _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 
+_COMMENTARY_BUSINESS_PATHS = {
+    "product/surface.md",
+    "product/runtime.md",
+    "product/design-brief.md",
+    "product/plans.md",
+    "product/customers.md",
+    "product/billing.md",
+    "product/usage.md",
+    "metrics/summary.md",
+    "metrics/wake-history.md",
+    "summary.md",
+}
+
+
+def _business_file_truth_metadata(path: str) -> dict[str, str]:
+    rel = _safe_relpath(path or ".", field="path").as_posix()
+    if rel.startswith("metrics/receipts/"):
+        return {
+            "document_role": "receipt",
+            "proof_level": "authoritative",
+            "proof_guidance": "Machine-generated receipt. Use this as proof of the recorded operation or verified result.",
+        }
+    if rel.startswith("product/site/"):
+        return {
+            "document_role": "implementation_source",
+            "proof_level": "authoritative",
+            "proof_guidance": "Implementation source. Use this to judge current website or app behavior and wiring.",
+        }
+    if rel.startswith("distribution/local-published/"):
+        return {
+            "document_role": "published_artifact",
+            "proof_level": "authoritative",
+            "proof_guidance": "Published outreach artifact. Use this as proof of a published outreach item.",
+        }
+    if (
+        rel in _COMMENTARY_BUSINESS_PATHS
+        or rel.startswith("research/")
+        or rel.startswith("distribution/campaign/")
+    ):
+        return {
+            "document_role": "summary",
+            "proof_level": "commentary",
+            "proof_guidance": "Commentary and planning state only. Do not use this file by itself as proof that implementation, runtime wiring, or live behavior is present.",
+        }
+    return {
+        "document_role": "artifact",
+        "proof_level": "mixed",
+        "proof_guidance": "Business artifact. For implementation-state questions, cross-check with implementation source files or receipts.",
+    }
+
 # Guardrail aliases only. Agents can always pass explicit env names through
 # requires_env when an API is not listed here.
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
@@ -5017,7 +5067,13 @@ class TakyonStore:
                 file_path = self._resolve_business_file(slug, path)
                 if not file_path.exists() or not file_path.is_file():
                     raise TakyonError(f"file not found: {path}")
-                return {"success": True, "scope": scope, "path": path, "content": _read_text_limited(file_path)}
+                return {
+                    "success": True,
+                    "scope": scope,
+                    "path": path,
+                    **_business_file_truth_metadata(path),
+                    "content": _read_text_limited(file_path),
+                }
 
             if query in {"files", "list_files"}:
                 rel = path or "."

@@ -332,6 +332,39 @@ def test_business_memory_is_business_scoped(tmp_path):
         store.read(scope="business:other", query="read_file", path="research/pricing.md")
 
 
+def test_business_read_file_truth_metadata_marks_commentary_vs_authoritative(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:probe",
+        [{"action": "business.upsert", "business": "probe", "name": "Probe"}],
+        "init-probe-read-meta",
+    )
+    business_root = tmp_path / "businesses" / "probe"
+    (business_root / "product").mkdir(parents=True, exist_ok=True)
+    (business_root / "product" / "surface.md").write_text("# Surface\n", encoding="utf-8")
+    (business_root / "product" / "site").mkdir(parents=True, exist_ok=True)
+    (business_root / "product" / "site" / "index.html").write_text("<h1>Probe</h1>\n", encoding="utf-8")
+    (business_root / "metrics" / "receipts").mkdir(parents=True, exist_ok=True)
+    (business_root / "metrics" / "receipts" / "publish.json").write_text("{\"ok\":true}\n", encoding="utf-8")
+
+    summary = store.read(scope="business:probe", query="read_file", path="product/surface.md")
+    source = store.read(scope="business:probe", query="read_file", path="product/site/index.html")
+    receipt = store.read(scope="business:probe", query="read_file", path="metrics/receipts/publish.json")
+
+    assert summary["document_role"] == "summary"
+    assert summary["proof_level"] == "commentary"
+    assert "Do not use this file by itself as proof" in summary["proof_guidance"]
+
+    assert source["document_role"] == "implementation_source"
+    assert source["proof_level"] == "authoritative"
+    assert "judge current website or app behavior and wiring" in source["proof_guidance"]
+
+    assert receipt["document_role"] == "receipt"
+    assert receipt["proof_level"] == "authoritative"
+    assert "Machine-generated receipt" in receipt["proof_guidance"]
+
+
 def test_business_pulse_is_read_only_baseline(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(
