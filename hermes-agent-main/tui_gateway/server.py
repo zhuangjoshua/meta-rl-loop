@@ -4841,6 +4841,16 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             return str(value)
         return ""
 
+    def openable_url(value: Any) -> str:
+        text = brief_text(value).strip()
+        if not text:
+            return ""
+        if re.match(r"^(https?://|data:)", text, re.I):
+            return text
+        if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.I):
+            return text
+        return ""
+
     def parse_ts(value: Any) -> float | None:
         text = brief_text(value).strip()
         if not text:
@@ -4950,11 +4960,12 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     for thread in as_list(conversations.get("threads")):
         thread_dict = as_dict(thread)
         source = brief_text(thread_dict.get("source"))
-        url = brief_text(thread_dict.get("url"))
+        raw_url = brief_text(thread_dict.get("url"))
+        url = openable_url(raw_url)
         source_l = source.lower()
         postish = (
             source_l.startswith("test-")
-            or bool(url)
+            or bool(raw_url)
             or source_l == "x"
             or source_l.startswith("x-")
             or any(
@@ -4973,7 +4984,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         )
         if not postish:
             continue
-        artifact_path = "" if re.match(r"^https?://", url, re.I) else url
+        artifact_path = "" if url else raw_url
         try:
             conversation_file = brief_text(store._conversation_thread_relpath(thread_dict))
         except Exception:

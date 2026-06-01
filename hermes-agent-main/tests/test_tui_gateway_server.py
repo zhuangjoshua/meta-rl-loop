@@ -4865,3 +4865,61 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
         server._sessions.pop("sid_busy", None)
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()
+
+
+def test_business_overview_treats_test_publish_path_as_artifact(tmp_path):
+    business_root = tmp_path / "demo"
+    business_root.mkdir()
+
+    class _FakeStore:
+        def read(self, *, scope, query, **_kwargs):
+            if query == "summary":
+                return {
+                    "business": {},
+                    "app": {},
+                    "jobs": [],
+                    "events": [],
+                    "conversations": {
+                        "threads": [
+                            {
+                                "id": "thread-test-1",
+                                "source": "test-reddit",
+                                "title": "Test local post",
+                                "url": "distribution/local-published/test-post.md",
+                                "status": "active",
+                                "created_at": "2026-06-01T00:00:00Z",
+                                "updated_at": "2026-06-01T00:05:00Z",
+                            }
+                        ],
+                        "unresolved": [],
+                    },
+                }
+            if query == "list_files":
+                return {"files": []}
+            return {}
+
+        def calculate_pulse(self, slug, limit=5):
+            return {}
+
+        def _conversation_thread_relpath(self, thread_dict):
+            return "metrics/conversations/threads/thread-test-1.md"
+
+        def _business_cron_jobs(self, slug):
+            return []
+
+        def _business_root(self, slug):
+            return business_root
+
+        def _connect(self):
+            raise RuntimeError("db not needed for this payload test")
+
+    payload = server._takyon_business_overview_payload(_FakeStore(), "demo")
+
+    assert len(payload["posts"]) == 1
+    assert payload["posts"][0]["mode"] == "test"
+    assert payload["posts"][0]["url"] == ""
+    assert payload["posts"][0]["artifact_path"] == "distribution/local-published/test-post.md"
+    assert (
+        payload["posts"][0]["conversation_file"]
+        == "metrics/conversations/threads/thread-test-1.md"
+    )

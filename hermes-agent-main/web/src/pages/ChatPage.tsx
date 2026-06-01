@@ -3350,50 +3350,53 @@ function CompanyWorkspace({
             <>
               {posts.length > 0 ? (
                 <div className="td-deliv">
-                  {posts.slice(0, 5).map((post, index) => (
-                    <div className="td-drow" key={post.id || `${post.source}-${index}`}>
-                      <span className="td-dtype">
-                        <span className="td-ti" />
-                        {channelLabel(post.source)}
-                      </span>
-                      <span className="min-w-0">
-                        <span className="td-dtitle" style={{ display: "block" }}>
-                          {post.title || "Untitled post"}
+                  {posts.slice(0, 5).map((post, index) => {
+                    const postUrl = normalizeOpenableUrl(post.url);
+                    return (
+                      <div className="td-drow" key={post.id || `${post.source}-${index}`}>
+                        <span className="td-dtype">
+                          <span className="td-ti" />
+                          {channelLabel(post.source)}
                         </span>
-                        {(post.status || post.mode) && (
-                          <span className="td-ddesc" style={{ display: "block" }}>
-                            {[post.status, post.mode].filter(Boolean).join(" · ")}
+                        <span className="min-w-0">
+                          <span className="td-dtitle" style={{ display: "block" }}>
+                            {post.title || "Untitled post"}
                           </span>
-                        )}
-                      </span>
-                      <span className="td-dimpact td-defer-inline">—</span>
-                      <span className="td-dact">
-                        {post.url ? (
-                          <a href={post.url} rel="noreferrer" target="_blank">
-                            Open ↗
-                          </a>
-                        ) : post.artifact_path ? (
-                          <button
-                            onClick={() =>
-                              openDocument({ label: post.title, path: post.artifact_path })
-                            }
-                            type="button"
-                          >
-                            Preview
-                          </button>
-                        ) : post.conversation_file ? (
-                          <button
-                            onClick={() =>
-                              openDocument({ label: post.title, path: post.conversation_file })
-                            }
-                            type="button"
-                          >
-                            Open
-                          </button>
-                        ) : null}
-                      </span>
-                    </div>
-                  ))}
+                          {(post.status || post.mode) && (
+                            <span className="td-ddesc" style={{ display: "block" }}>
+                              {[post.status, post.mode].filter(Boolean).join(" · ")}
+                            </span>
+                          )}
+                        </span>
+                        <span className="td-dimpact td-defer-inline">—</span>
+                        <span className="td-dact">
+                          {postUrl ? (
+                            <a href={postUrl} rel="noreferrer" target="_blank">
+                              Open ↗
+                            </a>
+                          ) : post.artifact_path ? (
+                            <button
+                              onClick={() =>
+                                openDocument({ label: post.title, path: post.artifact_path })
+                              }
+                              type="button"
+                            >
+                              Preview
+                            </button>
+                          ) : post.conversation_file ? (
+                            <button
+                              onClick={() =>
+                                openDocument({ label: post.title, path: post.conversation_file })
+                              }
+                              type="button"
+                            >
+                              Open
+                            </button>
+                          ) : null}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p style={{ margin: "0 0 4px", fontSize: 13, color: "var(--td-muted)" }}>
