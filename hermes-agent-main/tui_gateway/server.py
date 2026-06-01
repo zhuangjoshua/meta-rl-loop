@@ -2165,15 +2165,48 @@ def _(rid, params: dict) -> dict:
         "transport": transport,
     }
     _sessions[sid] = session
+    boot_result = {
+        "requested_business": "",
+        "accepted": False,
+        "reason": "",
+    }
     if boot_business:
         try:
             from plugins.takyon.cli import _slugify
 
             slug = _slugify(boot_business)
+            boot_result["requested_business"] = slug
             if _takyon_can_access_business(session, slug) or _takyon_get_background_run(slug):
                 session["takyon_current_business"] = slug
-        except Exception:
-            pass
+                boot_result["accepted"] = True
+            else:
+                visible_businesses = [
+                    str(item.get("slug") or "").strip()
+                    for item in _takyon_businesses_for_session(session)
+                    if isinstance(item, dict)
+                ]
+                boot_result["reason"] = (
+                    f"Could not open business:{slug}. "
+                    + (
+                        "No businesses are visible for this account."
+                        if not visible_businesses
+                        else "That business is not available to this account."
+                    )
+                )
+                logger.warning(
+                    "takyon session.create boot denied business=%s operator_user_id=%s visible_businesses=%s",
+                    slug,
+                    operator_user_id,
+                    visible_businesses,
+                )
+        except Exception as exc:
+            boot_result["reason"] = str(exc)
+            logger.warning(
+                "takyon session.create boot failed business=%s operator_user_id=%s error=%s",
+                boot_business,
+                operator_user_id,
+                exc,
+            )
 
     # Return the lightweight session immediately so Ink can paint the composer
     # + skeleton panel, then build the real AIAgent just after this response is
@@ -2192,6 +2225,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": sid,
+            "takyon_boot": boot_result,
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -6015,13 +6049,18 @@ def _(rid, params: dict) -> dict:
                 for item in _takyon_businesses_for_session(session)
                 if isinstance(item, dict)
             ]
+            message = (
+                f"Could not open business:{slug}. No businesses are visible for this account."
+                if not businesses
+                else f"Could not open business:{slug}. That business is not available to this account."
+            )
             logger.warning(
                 "takyon scope.set denied business=%s operator_user_id=%s visible_businesses=%s",
                 slug,
                 _takyon_operator_user_id(session) or "",
                 businesses,
             )
-            return _err(rid, 4041, f"access denied for business:{slug}")
+            return _err(rid, 4041, message)
         session["takyon_current_business"] = slug
         return _ok(rid, _takyon_scope_payload(session))
     except Exception as e:

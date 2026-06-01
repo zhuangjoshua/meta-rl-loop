@@ -53,6 +53,11 @@ interface SessionInfo {
 
 interface SessionCreateResponse {
   session_id: string;
+  takyon_boot?: {
+    requested_business?: string;
+    accepted?: boolean;
+    reason?: string;
+  };
   info?: SessionInfo;
 }
 
@@ -853,6 +858,13 @@ function businessFromLocationSearch(): string {
   return normalizeBusinessLookup(params.get("business") || params.get("scope") || "");
 }
 
+function takyonBootMessage(boot?: SessionCreateResponse["takyon_boot"] | null): string {
+  const requested = normalizeBusinessLookup(boot?.requested_business || "");
+  if (!requested || boot?.accepted) return "";
+  const reason = (boot?.reason || "").trim();
+  return reason || `Could not open business:${requested}.`;
+}
+
 function naturalScopeChange(text: string, scope: ScopeState): string | undefined {
   const trimmed = text.trim().replace(/[.!?]+$/g, "");
   const lower = trimmed.toLowerCase();
@@ -919,6 +931,7 @@ export default function ChatPage() {
     useState<TakyonOperatorAccountResponse | null>(null);
   const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
+  const [blockedBootBusinessSlug, setBlockedBootBusinessSlug] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1304,10 +1317,31 @@ export default function ChatPage() {
       }),
     );
 
-    const hydrateScope = async (nextSessionId: string) => {
+    const noteBootIssue = (business: string, message: string) => {
+      const slug = normalizeBusinessLookup(business);
+      const content = message.trim();
+      if (!slug || !content) return;
+      setBlockedBootBusinessSlug(slug);
+      setPendingBusinessSlug((current) => (current === slug ? null : current));
+      setMessages((prev) => {
+        if (prev.some((item) => item.role === "system" && item.content === content)) {
+          return prev;
+        }
+        return [...prev, makeMessage("system", content)];
+      });
+    };
+
+    const hydrateScope = async (
+      nextSessionId: string,
+      boot?: SessionCreateResponse["takyon_boot"],
+    ) => {
       const bootBusiness = businessFromLocationSearch();
+      const bootIssue = takyonBootMessage(boot);
+      if (bootBusiness && bootIssue) {
+        noteBootIssue(bootBusiness, bootIssue);
+      }
       try {
-        const scope = !resumeParam && bootBusiness
+        const scope = !resumeParam && bootBusiness && !bootIssue && !boot?.accepted
           ? await gw.request<ScopeState>(
               "takyon.scope.set",
               { session_id: nextSessionId, business: bootBusiness },
@@ -1326,7 +1360,12 @@ export default function ChatPage() {
           sessionId: nextSessionId,
         });
         setScopeState(nextScope);
-        if (bootBusiness && nextScope.business !== bootBusiness) {
+        if (nextScope.business) {
+          setBlockedBootBusinessSlug((current) =>
+            current === nextScope.business ? null : current,
+          );
+        }
+        if (bootBusiness && nextScope.business !== bootBusiness && !bootIssue) {
           console.info("[takyon-scope] hydrateScope pending fallback", {
             bootBusiness,
             nextBusiness: nextScope.business,
@@ -1336,12 +1375,17 @@ export default function ChatPage() {
         }
       } catch (err) {
         if (!cancelled && bootBusiness) {
+          const message = err instanceof Error ? err.message : String(err);
           console.info("[takyon-scope] hydrateScope error", {
             bootBusiness,
             sessionId: nextSessionId,
-            error: err instanceof Error ? err.message : String(err),
+            error: message,
           });
-          setPendingBusinessSlug(bootBusiness);
+          if (/access denied|could not open business|no businesses are visible/i.test(message)) {
+            noteBootIssue(bootBusiness, message);
+          } else {
+            setPendingBusinessSlug(bootBusiness);
+          }
         }
         throw err;
       }
@@ -1391,7 +1435,7 @@ export default function ChatPage() {
         if (cancelled) return;
         setSessionId(res.session_id);
         setInfo((prev) => ({ ...prev, ...res.info }));
-        void hydrateScope(res.session_id).catch(() => {
+        void hydrateScope(res.session_id, res.takyon_boot).catch(() => {
           /* scope hydration is best effort */
         });
       } catch (err) {
@@ -1415,6 +1459,7 @@ export default function ChatPage() {
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
     if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
+    if (blockedBootBusinessSlug === urlBusiness) return;
     if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
     console.info("[takyon-scope] url fallback pending", {
       sessionId,
@@ -1424,7 +1469,7 @@ export default function ChatPage() {
       pendingBusinessSlug,
     });
     setPendingBusinessSlug(urlBusiness);
-  }, [pendingBusinessSlug, scopeState.business, searchParams, sessionId, state]);
+  }, [blockedBootBusinessSlug, pendingBusinessSlug, scopeState.business, searchParams, sessionId, state]);
 
   useEffect(() => {
     if (state === "open") {
@@ -1647,6 +1692,11 @@ export default function ChatPage() {
       );
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
+      if (nextScope.business) {
+        setBlockedBootBusinessSlug((current) =>
+          current === nextScope.business ? null : current,
+        );
+      }
       const params = new URLSearchParams(searchParams);
       if (nextScope.business) params.set("business", nextScope.business);
       else params.delete("business");
@@ -1665,6 +1715,7 @@ export default function ChatPage() {
     (business: string, mode: "test" | "live", goal?: string) => {
       const slug = normalizeBusinessLookup(business);
       if (!slug) return;
+      setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
       setPendingBusinessSlug(slug);
       setScopeState((prev) => {
         const existing = prev.businesses.find(
@@ -1727,6 +1778,9 @@ export default function ChatPage() {
         });
         if (nextScope.business === pendingBusinessSlug) {
           setScopeState(nextScope);
+          setBlockedBootBusinessSlug((current) =>
+            current === pendingBusinessSlug ? null : current,
+          );
           setPendingBusinessSlug(null);
           return;
         }
