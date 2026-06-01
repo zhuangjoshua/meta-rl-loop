@@ -641,6 +641,57 @@ def test_business_upsert_update_path_preserves_owner_on_postgres(pg_store, pg_st
     assert row[1] == "Up Co v2" and row[2] == "g2" and row[3] == "live"
 
 
+def test_business_delete_detaches_billing_and_custody_history_on_postgres(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "deleteco", mode="test")
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        owner_id = conn.execute(
+            "select owner_user_id from businesses where slug = %s", ("deleteco",)
+        ).fetchone()[0]
+        conn.execute(
+            "insert into billing_accounts (user_id, allowance_included_cents, allowance_used_cents) "
+            "values (%s, 1000, 100)",
+            (owner_id,),
+        )
+        conn.execute(
+            "insert into billing_entries (user_id, business_slug, bucket, kind, amount_cents, "
+            "balance_after_cents, idempotency_key) values (%s, %s, 'allowance', 'reserve', 100, 100, %s)",
+            (owner_id, "deleteco", "deleteco-billing-1"),
+        )
+        conn.execute(
+            "insert into custody_entries (user_id, business_slug, kind, gross_cents, fee_cents, "
+            "net_cents, idempotency_key) values (%s, %s, 'accrual', 500, 50, 450, %s)",
+            (owner_id, "deleteco", "deleteco-custody-1"),
+        )
+
+    result = pg_store.commit(
+        scope="global",
+        operations=[{"action": "business.delete", "business": "deleteco", "confirm": True, "delete_domains": False}],
+        idempotency_key="pg-deleteco-1",
+        reason="test",
+        actor="test",
+    )
+
+    assert result["success"] is True
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        assert conn.execute(
+            "select count(*) from businesses where slug = %s", ("deleteco",)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "select count(*) from billing_entries where business_slug = %s", ("deleteco",)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "select count(*) from billing_entries where idempotency_key = %s and business_slug is null",
+            ("deleteco-billing-1",),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "select count(*) from custody_entries where business_slug = %s", ("deleteco",)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "select count(*) from custody_entries where idempotency_key = %s and business_slug is null",
+            ("deleteco-custody-1",),
+        ).fetchone()[0] == 1
+
+
 # --------------------------------------------------------------------------- P8.4 serving flip
 
 

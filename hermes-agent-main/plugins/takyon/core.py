@@ -493,13 +493,16 @@ def _json_default(value: Any) -> Any:
     leaf tables whose ``timestamptz`` columns deserialize to ``datetime`` and whose numeric/aggregate
     columns can deserialize to ``Decimal``. ``datetime`` → ISO-8601 string (matching the string form the
     SQLite trunk stored), ``Decimal`` → ``int`` when integral else ``float`` (the store treats every
-    money/usage figure as integer microUSD/cents), other ``date``/``time`` objects → ``isoformat``.
+    money/usage figure as integer microUSD/cents), ``UUID`` → canonical string, other ``date``/``time``
+    objects → ``isoformat``.
     Anything else still raises ``TypeError`` so a genuinely unserializable value fails loud (invariant
     #8: never silently coerce an unexpected type into a fake string)."""
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, Decimal):
         return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
     iso = getattr(value, "isoformat", None)
     if callable(iso):
         return iso()
@@ -4820,6 +4823,17 @@ class TakyonStore:
         scope = f"business:{business}"
         scope_like = f"{scope}/%"
         deleted: dict[str, int] = {}
+
+        # Preserve historical money-ledger rows, but detach them from the business before the
+        # business row itself is removed. Postgres keeps `billing_entries.business_slug` and
+        # `custody_entries.business_slug` as nullable FKs for auditability; deleting the business
+        # first would fail the FK and strand the operator-facing delete rail.
+        for table in ("billing_entries", "custody_entries"):
+            cursor = conn.execute(
+                f"UPDATE {table} SET business_slug = NULL WHERE business_slug = ?",
+                (business,),
+            )
+            deleted[f"{table}_detached"] = int(cursor.rowcount or 0)
 
         for table in ("agent_runs", "control_states"):
             cursor = conn.execute(f"DELETE FROM {table} WHERE scope = ? OR scope LIKE ?", (scope, scope_like))
