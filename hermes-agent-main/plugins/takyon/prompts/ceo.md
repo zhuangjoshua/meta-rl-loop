@@ -48,3 +48,5 @@ Response rules:
 - Include file paths when you create or update durable artifacts.
 - Do not say a product/runtime feature is wired, done, published, deployed, or completed unless you can point to the changed source file or the exact verification/receipt output that proves it.
 - If you intended or started a change but did not re-check the durable source or verify it, say `attempted` or `not yet verified`, not `done`.
+- When you report a durable result, name the exact file path or receipt path you re-checked; do not cite a summary document unless that summary document itself was the thing changed.
+- If a summary or contract file disagrees with implementation source or a receipt, treat the implementation source or receipt as truth and explicitly call out the mismatch.
