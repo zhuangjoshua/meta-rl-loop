@@ -1339,6 +1339,12 @@ export default function ChatPage() {
     ) => {
       const bootBusiness = businessFromLocationSearch();
       const bootIssue = takyonBootMessage(boot);
+      console.warn("[takyon-debug] hydrateScope start", {
+        bootAccepted: Boolean(boot?.accepted),
+        bootBusiness,
+        bootIssue,
+        sessionId: nextSessionId,
+      });
       if (bootBusiness && bootIssue) {
         noteBootIssue(bootBusiness, bootIssue);
       }
@@ -1397,6 +1403,12 @@ export default function ChatPage() {
     };
 
     const initializeSession = async () => {
+      const bootBusiness = businessFromLocationSearch();
+      console.warn("[takyon-debug] initializeSession", {
+        bootBusiness,
+        resumeParam,
+        reusableSessionId: sessionIdRef.current,
+      });
       try {
         await gw.connect();
         if (cancelled) return;
@@ -1435,7 +1447,12 @@ export default function ChatPage() {
 
         const res = await gw.request<SessionCreateResponse>("session.create", {
           cols: 100,
-          _takyon_boot_business: businessFromLocationSearch() || undefined,
+          _takyon_boot_business: bootBusiness || undefined,
+        });
+        console.warn("[takyon-debug] session.create result", {
+          bootBusiness,
+          sessionId: res.session_id,
+          takyonBoot: res.takyon_boot || null,
         });
         if (cancelled) return;
         setSessionId(res.session_id);
