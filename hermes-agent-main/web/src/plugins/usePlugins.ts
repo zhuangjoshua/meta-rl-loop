@@ -25,13 +25,26 @@ export function usePlugins() {
 
   // Fetch manifests on mount.
   useEffect(() => {
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      if (!cancelled) setLoading(false);
+    }, 2000);
+
     api
       .getPlugins()
       .then((list) => {
+        if (cancelled) return;
         setManifests(list);
         if (list.length === 0) setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
   }, []);
 
   // Load plugin assets when manifests arrive.
