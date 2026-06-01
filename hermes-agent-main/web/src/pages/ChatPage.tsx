@@ -951,6 +951,7 @@ export default function ChatPage() {
   const sessionIdRef = useRef<string | null>(null);
   const scopeBusinessRef = useRef<string>("");
   const pendingBusinessSlugRef = useRef<string | null>(null);
+  const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
 
   const refreshOperatorAccount = useCallback(async () => {
@@ -1394,6 +1395,8 @@ export default function ChatPage() {
           }
         }
         throw err;
+      } finally {
+        scopeHydrationInFlightRef.current = false;
       }
     };
 
@@ -1413,6 +1416,7 @@ export default function ChatPage() {
 
       try {
         if (resumeParam) {
+          scopeHydrationInFlightRef.current = true;
           const res = await gw.request<SessionResumeResponse>(
             "session.resume",
             { session_id: resumeParam, cols: 100 },
@@ -1432,6 +1436,7 @@ export default function ChatPage() {
 
         const reusableSessionId = sessionIdRef.current;
         if (reusableSessionId) {
+          scopeHydrationInFlightRef.current = true;
           await hydrateScope(reusableSessionId);
           if (cancelled) return;
           setSessionId(reusableSessionId);
@@ -1448,6 +1453,7 @@ export default function ChatPage() {
         if (cancelled) return;
         setSessionId(res.session_id);
         setInfo((prev) => ({ ...prev, ...res.info }));
+        scopeHydrationInFlightRef.current = true;
         void hydrateScope(res.session_id, res.takyon_boot).catch(() => {
           /* scope hydration is best effort */
         });
@@ -1472,6 +1478,7 @@ export default function ChatPage() {
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
     if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
+    if (scopeHydrationInFlightRef.current) return;
     if (blockedBootBusinessSlug === urlBusiness) return;
     if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
     console.info("[takyon-scope] url fallback pending", {
