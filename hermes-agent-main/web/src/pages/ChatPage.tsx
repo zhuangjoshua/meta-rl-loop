@@ -1166,18 +1166,30 @@ export default function ChatPage() {
 
     const hydrateScope = async (nextSessionId: string) => {
       const bootBusiness = bootBusinessParamRef.current;
-      const scope = !resumeParam && bootBusiness
-        ? await gw.request<ScopeState>(
-            "takyon.scope.set",
-            { session_id: nextSessionId, business: bootBusiness },
-            10_000,
-          )
-        : await gw.request<ScopeState>(
-            "takyon.scope.get",
-            { session_id: nextSessionId },
-            10_000,
-          );
-      if (!cancelled) setScopeState(normalizeScopeState(scope));
+      try {
+        const scope = !resumeParam && bootBusiness
+          ? await gw.request<ScopeState>(
+              "takyon.scope.set",
+              { session_id: nextSessionId, business: bootBusiness },
+              10_000,
+            )
+          : await gw.request<ScopeState>(
+              "takyon.scope.get",
+              { session_id: nextSessionId },
+              10_000,
+            );
+        if (cancelled) return;
+        const nextScope = normalizeScopeState(scope);
+        setScopeState(nextScope);
+        if (bootBusiness && nextScope.business !== bootBusiness) {
+          setPendingBusinessSlug(bootBusiness);
+        }
+      } catch (err) {
+        if (!cancelled && bootBusiness) {
+          setPendingBusinessSlug(bootBusiness);
+        }
+        throw err;
+      }
     };
 
     const initializeSession = async () => {
@@ -1243,6 +1255,15 @@ export default function ChatPage() {
       gw.close();
     };
   }, [gw, refreshOperatorAccount, resumeParam]);
+
+  useEffect(() => {
+    const urlBusiness = normalizeBusinessLookup(
+      searchParams.get("business") || searchParams.get("scope") || "",
+    );
+    if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
+    if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
+    setPendingBusinessSlug(urlBusiness);
+  }, [pendingBusinessSlug, scopeState.business, searchParams, sessionId, state]);
 
   useEffect(() => {
     if (state === "open") {
