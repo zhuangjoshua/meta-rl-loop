@@ -3578,16 +3578,39 @@ class TakyonStore:
         if self._workspace_root_override is not None:
             return
         normalized = _slugify(slug)
-        if normalized in self._workspace_sync_cache:
+        from . import storage
+
+        load_takyon_env()
+        backend = storage.get_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        local_bucket = str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip()
+        if backend_name not in {"supabase_s3", "local"}:
+            return
+        if backend_name == "local" and not local_bucket:
+            return
+        # Always refresh from the durable backend. Long-running background bootstraps now write into a
+        # private scratch workspace and sync outward during the run, so a one-time cache leaves the
+        # dashboard stale until the entire bootstrap exits.
+        storage.sync_down(backend, normalized, root, delete_local=True)
+        self._workspace_sync_cache.add(normalized)
+
+    def _sync_business_workspace_remote(self, slug: str) -> None:
+        if self._workspace_root_override is None:
             return
         from . import storage
 
         load_takyon_env()
         backend = storage.get_storage_backend()
-        if backend.name != "supabase_s3":
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        local_bucket = str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip()
+        if backend_name not in {"supabase_s3", "local"}:
             return
-        storage.sync_down(backend, normalized, root, delete_local=True)
-        self._workspace_sync_cache.add(normalized)
+        if backend_name == "local" and not local_bucket:
+            return
+        workspace = self._workspace_root_override / "businesses" / _slugify(slug)
+        if not workspace.exists():
+            return
+        storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
 
     def _business_root(self, slug: str) -> Path:
         base = self._workspace_root_override or self.root
@@ -5278,6 +5301,7 @@ class TakyonStore:
             strategy = root / "research" / "strategy.md"
             if not strategy.exists():
                 _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
 
@@ -5365,6 +5389,7 @@ class TakyonStore:
                     (amount, status, now, slug),
                 )
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"hard_limit_microusd": amount, "reason": reason, "actor": actor})
             return {"action": action, "business": slug, "hard_limit_microusd": amount}
 
@@ -5453,6 +5478,7 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
@@ -5505,6 +5531,7 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=metadata["takyon_publish"])
             return {
                 "action": action,
@@ -5621,6 +5648,7 @@ class TakyonStore:
                     ),
                 )
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"plan_key": plan_key, "price_cents": price_cents})
             return {"action": action, "business": slug, "plan_key": plan_key}
 
@@ -5668,6 +5696,7 @@ class TakyonStore:
                 row = self._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (slug, email)).fetchone())
                 app_user_id = row["id"]
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": app_user_id, "email": email})
             return {"action": action, "business": slug, "app_user_id": app_user_id, "email": email}
 
@@ -5770,6 +5799,7 @@ class TakyonStore:
                 )
                 tier = self._sync_user_tier(conn, slug, user_id)
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": user_id, "tier": tier, "source": source_value})
             return {"action": action, "business": slug, "app_user_id": user_id, "entitlement": entitlement_id, "tier": tier}
 
@@ -5852,6 +5882,7 @@ class TakyonStore:
                     ),
                 )
             self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"usage_event": event_id, "actual_cost_microusd": actual})
             return {"action": action, "business": slug, "usage_event": event_id, "actual_cost_microusd": actual}
 
@@ -5871,6 +5902,7 @@ class TakyonStore:
                 (workspace_id, slug, path_text, kind, status, _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, now),
             )
             (self._business_root(slug) / rel).mkdir(parents=True, exist_ok=True)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/workspace:{path_text}", business_slug=slug, event_type=action, payload={"reason": reason, "actor": actor, "metadata": metadata})
             return {"action": action, "business": slug, "workspace": path_text}
 
@@ -5889,6 +5921,7 @@ class TakyonStore:
             rel = str(file_path.relative_to(self._business_root(slug)))
             _validate_brain_index_completion_gate(rel, content)
             _atomic_write_text(file_path, content)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":
                 self._record_event(
@@ -5920,6 +5953,7 @@ class TakyonStore:
             rel = str(file_path.relative_to(self._business_root(slug)))
             _validate_brain_index_completion_gate(rel, updated_content)
             _atomic_write_text(file_path, updated_content)
+            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":
                 self._record_event(
@@ -6038,6 +6072,7 @@ class TakyonStore:
             if destination_label:
                 receipt["destination_label"] = destination_label
             _atomic_write_text(self._business_root(slug) / receipt_rel, _json_dumps(receipt) + "\n")
+            self._sync_business_workspace_remote(slug)
 
             source = _file_slug(f"test-{channel}", "test-outreach")
             thread_external_id = str(op.get("thread_external_id") or f"{source}:{_file_slug(target, 'target')}")
