@@ -1339,12 +1339,9 @@ export default function ChatPage() {
     ) => {
       const bootBusiness = businessFromLocationSearch();
       const bootIssue = takyonBootMessage(boot);
-      console.warn("[takyon-debug] hydrateScope start", {
-        bootAccepted: Boolean(boot?.accepted),
-        bootBusiness,
-        bootIssue,
-        sessionId: nextSessionId,
-      });
+      console.warn(
+        `[takyon-debug] hydrateScope start business=${bootBusiness || "<none>"} accepted=${boot?.accepted ? "yes" : "no"} issue=${bootIssue || "<none>"} session=${nextSessionId}`,
+      );
       if (bootBusiness && bootIssue) {
         noteBootIssue(bootBusiness, bootIssue);
       }
@@ -1387,11 +1384,9 @@ export default function ChatPage() {
       } catch (err) {
         if (!cancelled && bootBusiness) {
           const message = err instanceof Error ? err.message : String(err);
-          console.info("[takyon-scope] hydrateScope error", {
-            bootBusiness,
-            sessionId: nextSessionId,
-            error: message,
-          });
+          console.warn(
+            `[takyon-debug] hydrateScope error business=${bootBusiness} session=${nextSessionId} message=${message}`,
+          );
           if (/access denied|could not open business|no businesses are visible/i.test(message)) {
             noteBootIssue(bootBusiness, message);
           } else {
@@ -1404,11 +1399,9 @@ export default function ChatPage() {
 
     const initializeSession = async () => {
       const bootBusiness = businessFromLocationSearch();
-      console.warn("[takyon-debug] initializeSession", {
-        bootBusiness,
-        resumeParam,
-        reusableSessionId: sessionIdRef.current,
-      });
+      console.warn(
+        `[takyon-debug] initializeSession business=${bootBusiness || "<none>"} resume=${resumeParam || "<none>"} reusable=${sessionIdRef.current || "<none>"}`,
+      );
       try {
         await gw.connect();
         if (cancelled) return;
@@ -1449,11 +1442,9 @@ export default function ChatPage() {
           cols: 100,
           _takyon_boot_business: bootBusiness || undefined,
         });
-        console.warn("[takyon-debug] session.create result", {
-          bootBusiness,
-          sessionId: res.session_id,
-          takyonBoot: res.takyon_boot || null,
-        });
+        console.warn(
+          `[takyon-debug] session.create result business=${bootBusiness || "<none>"} session=${res.session_id} boot=${JSON.stringify(res.takyon_boot || null)}`,
+        );
         if (cancelled) return;
         setSessionId(res.session_id);
         setInfo((prev) => ({ ...prev, ...res.info }));
@@ -1784,12 +1775,9 @@ export default function ChatPage() {
 
     const confirmScope = async () => {
       attempts += 1;
-      console.info("[takyon-scope] confirmScope attempt", {
-        attempts,
-        pendingBusinessSlug,
-        sessionId,
-        state,
-      });
+      console.warn(
+        `[takyon-debug] confirmScope attempt business=${pendingBusinessSlug} attempts=${attempts} session=${sessionId} state=${state}`,
+      );
       try {
         const res = await gw.request<ScopeState>(
           "takyon.scope.set",
@@ -1798,12 +1786,9 @@ export default function ChatPage() {
         );
         if (cancelled) return;
         const nextScope = normalizeScopeState(res);
-        console.info("[takyon-scope] confirmScope result", {
-          attempts,
-          pendingBusinessSlug,
-          nextBusiness: nextScope.business,
-          sessionId,
-        });
+        console.warn(
+          `[takyon-debug] confirmScope result business=${pendingBusinessSlug} attempts=${attempts} next=${nextScope.business || "<none>"} session=${sessionId}`,
+        );
         if (nextScope.business === pendingBusinessSlug) {
           setScopeState(nextScope);
           setBlockedBootBusinessSlug((current) =>
@@ -1815,12 +1800,11 @@ export default function ChatPage() {
           setPendingBusinessSlug(null);
           return;
         }
-      } catch {
-        console.info("[takyon-scope] confirmScope error", {
-          attempts,
-          pendingBusinessSlug,
-          sessionId,
-        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[takyon-debug] confirmScope error business=${pendingBusinessSlug} attempts=${attempts} session=${sessionId} message=${message}`,
+        );
         /* create may still be registering the business; keep the optimistic page */
       }
 
