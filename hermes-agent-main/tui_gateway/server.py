@@ -6167,6 +6167,43 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5041, str(e))
 
 
+@method("takyon.wake.schedule")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+
+    business = str(session.get("takyon_current_business") or "").strip()
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
+
+    schedule = str(params.get("schedule") or "").strip() or "every 6h"
+    try:
+        _takyon_store(session).commit(
+            scope=f"business:{business}",
+            operations=[
+                {
+                    "action": "cron.ensure_ceo_wakeup",
+                    "business": business,
+                    "schedule": schedule,
+                }
+            ],
+            idempotency_key=f"dashboard-wake-schedule:{business}:{uuid.uuid4().hex}",
+            reason="dashboard updated CEO wake schedule",
+            actor="operator",
+        )
+        return _ok(
+            rid,
+            {
+                "output": f"CEO wake schedule set to {schedule} for business:{business}.",
+                **_takyon_scope_payload(session),
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5043, str(e))
+
+
 @method("takyon.slash.complete")
 def _(rid, params: dict) -> dict:
     text = str(params.get("text") or "")

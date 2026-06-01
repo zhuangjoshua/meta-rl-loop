@@ -387,10 +387,115 @@
 .tk-dash .td-composer .td-send { width: 34px; height: 34px; border-radius: var(--td-radius); background: var(--td-accent); color: #fff; display: grid; place-items: center; flex-shrink: 0; box-shadow: 3px 3px 0 var(--td-fg); transition: transform .12s ease, box-shadow .12s ease; }
 .tk-dash .td-composer .td-send:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--td-fg); }
 .tk-dash .td-composer .td-send:disabled { opacity: .4; box-shadow: none; }
-.tk-dash .td-wake { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding: 0 2px; gap: 8px; }
-.tk-dash .td-wake .td-meta { color: var(--td-meta); }
-.tk-dash .td-wake button { font-family: var(--td-font-mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--td-muted); }
-.tk-dash .td-wake button:hover { color: var(--td-accent-ink); }
+.tk-dash .td-composer-meta { display: flex; align-items: center; justify-content: flex-end; margin-top: 10px; padding: 0 2px; gap: 8px; }
+.tk-dash .td-composer-meta .td-meta { color: var(--td-meta); }
+
+.tk-dash .td-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(26, 25, 22, .38);
+  backdrop-filter: blur(8px);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+.tk-dash .td-modal {
+  width: min(100%, 520px);
+  border: 1px solid var(--td-border);
+  background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(251,247,240,.98));
+  border-radius: 20px;
+  box-shadow: 0 24px 60px -24px rgba(26,25,22,.45);
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.tk-dash .td-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tk-dash .td-modal-head h3 {
+  font-size: 20px;
+  line-height: 1.1;
+  color: var(--td-fg);
+}
+
+.tk-dash .td-cron-grid {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--td-border);
+  background: rgba(255,255,255,.7);
+}
+
+.tk-dash .td-cron-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tk-dash .td-cron-line strong {
+  text-align: right;
+  color: var(--td-fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tk-dash .td-cron-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tk-dash .td-cron-chip {
+  border: 1px solid var(--td-border);
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-family: var(--td-font-mono);
+  font-size: 11px;
+  letter-spacing: .03em;
+  color: var(--td-muted);
+  background: rgba(255,255,255,.88);
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+
+.tk-dash .td-cron-chip:hover {
+  color: var(--td-accent-ink);
+  border-color: var(--td-accent);
+}
+
+.tk-dash .td-cron-chip.td-active {
+  background: var(--td-fg);
+  color: var(--td-bg);
+  border-color: var(--td-fg);
+}
+
+.tk-dash .td-cron-field {
+  display: grid;
+  gap: 6px;
+}
+
+.tk-dash .td-cron-input {
+  height: 42px;
+  border-radius: 12px;
+  border: 1px solid var(--td-border);
+  background: var(--td-surface);
+  padding: 0 12px;
+  color: var(--td-fg);
+  outline: 0;
+  transition: border-color .15s ease;
+}
+
+.tk-dash .td-cron-input:focus {
+  border-color: var(--td-accent);
+}
 
 /* generic link-ish accent text button */
 .tk-dash .td-linkish { color: var(--td-accent-ink); font-weight: 600; }

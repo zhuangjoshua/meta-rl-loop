@@ -338,7 +338,6 @@ interface TakyonShellResponse extends ScopeState {
   output?: string;
 }
 
-
 interface BusinessOutputsResponse extends ScopeState {
   outputs?: Deliverable[];
 }
@@ -424,6 +423,15 @@ const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
 const TAKYON_PROGRESS_MAX_LINES = 8;
+const WAKE_SCHEDULE_PRESETS = [
+  "every 30m",
+  "every 1h",
+  "every 2h",
+  "every 6h",
+  "every 12h",
+  "every 1d",
+] as const;
+const WAKE_SCHEDULE_PATTERN = /^every\s+(\d+)\s*([mhd])$/i;
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -829,6 +837,25 @@ function canUseConnection(state: ConnectionState): boolean {
   return state === "open" || state === "polling";
 }
 
+function selectWakeCron(overview?: BusinessOverview): BusinessOverviewCron | null {
+  const cronJobs = Array.isArray(overview?.cron) ? overview?.cron : [];
+  if (!cronJobs.length) return null;
+  const canonical = cronJobs.find((job) => (job.name || "").startsWith("takyon-ceo:"));
+  if (canonical) return canonical;
+  const fuzzy = cronJobs.find((job) => /(?:^|[-_\s])(?:ceo|wake)(?:$|[-_\s])/i.test(job.name || ""));
+  return fuzzy || cronJobs[0] || null;
+}
+
+function normalizeWakeSchedule(value: string): string | null {
+  const trimmed = value.trim().toLowerCase().replace(/\s+/g, " ");
+  const match = trimmed.match(WAKE_SCHEDULE_PATTERN);
+  if (!match) return null;
+  const amount = Number.parseInt(match[1] || "", 10);
+  const unit = (match[2] || "").toLowerCase();
+  if (!Number.isFinite(amount) || amount < 1) return null;
+  return `every ${amount}${unit}`;
+}
+
 function normalizeScopeState(value: Partial<ScopeState> | null | undefined): ScopeState {
   const business = typeof value?.business === "string" ? value.business : "";
   const businesses = Array.isArray(value?.businesses)
@@ -1009,6 +1036,10 @@ export default function ChatPage() {
   const [slashIndex, setSlashIndex] = useState(0);
   const [createInTestMode] = useState(loadCreateInTestModeDefault);
   const [running, setRunning] = useState(false);
+  const [cronOpen, setCronOpen] = useState(false);
+  const [cronSchedule, setCronSchedule] = useState("every 6h");
+  const [cronSaving, setCronSaving] = useState(false);
+  const [cronError, setCronError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__TAKYON_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through the Litebulb dashboard server."
@@ -1025,6 +1056,7 @@ export default function ChatPage() {
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
   const sessionRecoveryInFlightRef = useRef(false);
+  const wakeCron = useMemo(() => selectWakeCron(scopeState.overview), [scopeState.overview]);
 
   const recoverMissingSession = useCallback(
     (
@@ -1076,6 +1108,12 @@ export default function ChatPage() {
       });
     });
   }, []);
+
+  useEffect(() => {
+    setCronOpen(false);
+    setCronSaving(false);
+    setCronError(null);
+  }, [scopeState.business]);
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -1818,6 +1856,48 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, makeMessage("system", text)]);
   }, []);
 
+  const openCronScheduler = useCallback(() => {
+    setCronSchedule(wakeCron?.schedule || "every 6h");
+    setCronError(null);
+    setCronOpen(true);
+  }, [wakeCron]);
+
+  const saveCronSchedule = useCallback(async () => {
+    if (!sessionId) {
+      setCronError("Chat is still connecting.");
+      return;
+    }
+    const normalized = normalizeWakeSchedule(cronSchedule);
+    if (!normalized) {
+      setCronError("Use an interval like every 30m, every 2h, or every 1d.");
+      return;
+    }
+
+    setCronSaving(true);
+    setCronError(null);
+    try {
+      const res = await gw.request<TakyonShellResponse>(
+        "takyon.wake.schedule",
+        { session_id: sessionId, schedule: normalized },
+        30_000,
+      );
+      const nextScope = normalizeScopeState(res);
+      setScopeState(nextScope);
+      const output = cleanText(res.output || "").trim();
+      if (output) appendSystem(output);
+      setCronOpen(false);
+    } catch (err) {
+      if (isMissingSessionError(err)) {
+        recoverMissingSession(scopeState.business);
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      setCronError(message);
+    } finally {
+      setCronSaving(false);
+    }
+  }, [appendSystem, cronSchedule, gw, recoverMissingSession, scopeState.business, sessionId]);
+
   const interrupt = useCallback(async () => {
     if (!sessionId) return;
     try {
@@ -2319,6 +2399,22 @@ export default function ChatPage() {
             </span>
             {inBusiness && (
               <button
+                aria-label="Open CEO wake schedule"
+                className="td-pill td-ghost"
+                disabled={!canInteract || cronSaving}
+                onClick={openCronScheduler}
+                title={
+                  wakeCron?.schedule
+                    ? `CEO wake schedule: ${wakeCron.schedule}`
+                    : "Configure the CEO wake schedule"
+                }
+                type="button"
+              >
+                Cron
+              </button>
+            )}
+            {inBusiness && (
+              <button
                 aria-label="Open CEO panel"
                 className="td-pill td-ghost lg:hidden"
                 onClick={() => setRightOpen(true)}
@@ -2395,7 +2491,6 @@ export default function ChatPage() {
                   onKeyDown={onComposerKeyDown}
                   onSlashApply={applySlashCompletion}
                   onSubmit={onComposerSubmit}
-                  onWake={() => void runTakyonLine("/wake")}
                   slashIndex={slashIndex}
                   slashItems={slashItems}
                   setSlashIndex={setSlashIndex}
@@ -2404,6 +2499,25 @@ export default function ChatPage() {
               </Thread>
             </IntercomPanel>
           </aside>
+        )}
+
+        {inBusiness && cronOpen && (
+          <CronScheduleModal
+            business={scopeState.business}
+            canInteract={canInteract}
+            cron={wakeCron}
+            error={cronError}
+            onChange={setCronSchedule}
+            onClose={() => {
+              if (cronSaving) return;
+              setCronOpen(false);
+              setCronError(null);
+            }}
+            onSave={() => void saveCronSchedule()}
+            saving={cronSaving}
+            value={cronSchedule}
+            wakeHealth={scopeState.overview?.wake_health}
+          />
         )}
       </div>
 
@@ -2584,6 +2698,141 @@ function BusinessStatusPill({ scope }: { scope: ScopeState }) {
           ? status.replace(/_/g, " ")
           : "Setup";
   return <span className="td-pill td-soft">{label}</span>;
+}
+
+function CronScheduleModal({
+  business,
+  canInteract,
+  cron,
+  error,
+  onChange,
+  onClose,
+  onSave,
+  saving,
+  value,
+  wakeHealth,
+}: {
+  business: string;
+  canInteract: boolean;
+  cron: BusinessOverviewCron | null;
+  error: string | null;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+  saving: boolean;
+  value: string;
+  wakeHealth?: BusinessOverviewWakeHealth;
+}) {
+  const statusHeadline =
+    wakeHealth?.headline || (cron?.enabled ? "CEO wake loop is active." : "No CEO wake loop is configured.");
+  const statusDetail =
+    wakeHealth?.detail ||
+    (cron?.schedule
+      ? "Saving updates the recurring CEO wake cadence without triggering an immediate wake."
+      : "Save a cadence to create the recurring CEO wake loop for this business.");
+
+  return (
+    <div
+      aria-modal="true"
+      className="td-modal-backdrop"
+      onClick={onClose}
+      role="dialog"
+    >
+      <div className="td-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="td-modal-head">
+          <div>
+            <p className="td-eyebrow">CEO wake loop</p>
+            <h3>Cron</h3>
+            <p className="td-meta">business:{business}</p>
+          </div>
+          <button
+            aria-label="Close cron scheduler"
+            className="td-pill td-ghost"
+            disabled={saving}
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="td-cron-grid">
+          <div className="td-cron-line">
+            <span className="td-meta">Status</span>
+            <strong>{statusHeadline}</strong>
+          </div>
+          <div className="td-cron-line">
+            <span className="td-meta">Current cadence</span>
+            <strong>{cron?.schedule || "Not scheduled"}</strong>
+          </div>
+          <div className="td-cron-line">
+            <span className="td-meta">Next run</span>
+            <strong>{cron?.next_run || "Will be set when you save"}</strong>
+          </div>
+          <div className="td-cron-line">
+            <span className="td-meta">Last run</span>
+            <strong>{cron?.last_run || "No wake recorded yet"}</strong>
+          </div>
+        </div>
+
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave();
+          }}
+        >
+          <div className="td-cron-presets">
+            {WAKE_SCHEDULE_PRESETS.map((preset) => {
+              const active = normalizeWakeSchedule(value) === preset;
+              return (
+                <button
+                  className={cn("td-cron-chip", active && "td-active")}
+                  key={preset}
+                  onClick={() => onChange(preset)}
+                  type="button"
+                >
+                  {preset.replace(/^every\s+/i, "")}
+                </button>
+              );
+            })}
+          </div>
+
+          <label className="td-cron-field">
+            <span className="td-meta">Custom interval</span>
+            <input
+              autoFocus
+              className="td-cron-input"
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="every 6h"
+              value={value}
+            />
+          </label>
+
+          <p className="td-defer-note">{statusDetail}</p>
+          <p className="td-defer-note">Use an interval like every 30m, every 2h, or every 1d.</p>
+          {error && (
+            <p className="td-meta" style={{ color: "var(--td-accent-ink)" }}>
+              {friendlyError(error)}
+            </p>
+          )}
+
+          <div className="flex items-center justify-end gap-2">
+            <button className="td-btn td-btn-secondary" disabled={saving} onClick={onClose} type="button">
+              Close
+            </button>
+            <button
+              className="td-btn td-btn-primary"
+              disabled={!canInteract || saving}
+              type="submit"
+            >
+              {saving ? "Saving…" : "Save cron"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
 
 function GlobalLaunchpad({
@@ -2798,7 +3047,6 @@ function Composer({
   onKeyDown,
   onSlashApply,
   onSubmit,
-  onWake,
   setSlashIndex,
   slashIndex,
   slashItems,
@@ -2812,7 +3060,6 @@ function Composer({
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSlashApply: (item: SlashCompletionItem) => void;
   onSubmit: (event: FormEvent) => void;
-  onWake: () => void;
   setSlashIndex: (value: number) => void;
   slashIndex: number;
   slashItems: SlashCompletionItem[];
@@ -2861,11 +3108,8 @@ function Composer({
           )}
         </button>
       </div>
-      <div className="td-wake">
+      <div className="td-composer-meta">
         <span className="td-meta">{isRunning ? "CEO is working" : "CEO is idle"}</span>
-        <button disabled={isRunning} onClick={onWake} type="button">
-          Wake now
-        </button>
       </div>
     </form>
   );
