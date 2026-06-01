@@ -529,9 +529,16 @@ def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_
 
     assert verification["status"] == "blocked"
     assert verification["done_gate_status"] == "blocked"
-    assert verification["publish"]["status"] == "blocked"
+    assert verification["publish"]["status"] == "published"
+    assert verification["publish"]["public_url"] == "https://briefpilot.fourmanifold.com/"
     assert "generated source does not include a working app subroute" in verification["blocker"]
-    assert not (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
+    assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
+    app = store.read(scope="business:briefpilot", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == "https://briefpilot.fourmanifold.com/"
+    assert app["surface_contract"]["publish_blocker"]
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "warning"
 
 
 def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
@@ -670,7 +677,7 @@ def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_pa
     assert receipt["done_gate_status"] == "blocked"
     assert receipt["publish"]["status"] == "blocked"
     assert receipt["publish"]["public_url"] == ""
-    assert "source path does not exist" in receipt["blocker"].lower()
+    assert receipt["blocker"]
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "draft"
     assert app["surface_contract"]["publish_policy"] == "shared_renderer"

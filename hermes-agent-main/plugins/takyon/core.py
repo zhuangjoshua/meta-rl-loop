@@ -3981,7 +3981,27 @@ class TakyonStore:
             validation.update({"status": "unverified", "reason": "source path is missing or empty", "source_path": source_path})
             return "unverified", {**metadata, "takyon_surface_validation": validation}
         latest = self._latest_surface_verification(conn, slug, source_path)
-        if not latest or latest.get("status") != "passed":
+        if not latest:
+            validation.update({
+                "status": "unverified",
+                "reason": "no product.surface.publish receipt for source_path",
+                "source_path": source_path,
+            })
+            return "unverified", {**metadata, "takyon_surface_validation": validation}
+        publish = latest.get("publish") if isinstance(latest.get("publish"), dict) else {}
+        if publish.get("status") == "published":
+            if latest.get("status") == "passed" and latest.get("done_gate_status") == "passed":
+                return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
+            validation.update(
+                {
+                    "status": "warning",
+                    "reason": "published with advisory verification blockers",
+                    "source_path": source_path,
+                    "latest_verification": latest,
+                }
+            )
+            return status, {**metadata, "takyon_surface_validation": validation}
+        if latest.get("status") != "passed":
             validation.update({
                 "status": "unverified",
                 "reason": "no passing product.surface.publish receipt for source_path",
@@ -3989,7 +4009,6 @@ class TakyonStore:
                 "latest_verification": latest,
             })
             return "unverified", {**metadata, "takyon_surface_validation": validation}
-        publish = latest.get("publish") if isinstance(latest.get("publish"), dict) else {}
         if latest.get("done_gate_status") != "passed" or publish.get("status") != "published":
             validation.update({
                 "status": "publish_blocked",
@@ -6942,23 +6961,12 @@ def _finalize_product_surface_verification(
             "effective_publish_policy": publish_policy,
             "warnings": warnings,
         }
-    if verification.get("status") == "passed":
-        publish = _publish_product_surface_path(
-            business_root=store._business_root(business),
-            slug=business,
-            source_path=str(verification.get("source_path") or source_path),
-            publish_target=publish_target,
-        )
-    else:
-        publish = {
-            "status": "blocked",
-            "publish_target": publish_target,
-            "public_url": "",
-            "published_at": "",
-            "publish_root": "",
-            "publish_source_path": "",
-            "blocker": f"product source check did not pass: {verification.get('error') or verification.get('status') or 'unknown'}",
-        }
+    publish = _publish_product_surface_path(
+        business_root=store._business_root(business),
+        slug=business,
+        source_path=str(verification.get("source_path") or source_path),
+        publish_target=publish_target,
+    )
     done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
     inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
     if not inventory:
@@ -7019,7 +7027,10 @@ def _product_surface_verification_operations(
             },
         },
     ]
-    if activate_on_success and verification.get("status") == "passed":
+    publish_blocker = publish.get("blocker") or verification.get("blocker") or verification.get("error") or ""
+    publish_succeeded = publish.get("status") == "published"
+    verification_passed = verification.get("status") == "passed"
+    if activate_on_success and (verification_passed or publish_succeeded):
         next_status = "active" if publish.get("status") == "published" else "publish_blocked"
         operations.append(
             {
@@ -7050,7 +7061,7 @@ def _product_surface_verification_operations(
                 "published_at": publish.get("published_at") or "",
                 "receipt_path": verification.get("receipt_path"),
                 "publish_source_path": publish.get("publish_source_path") or verification.get("source_path") or "",
-                "blocker": publish.get("blocker") or "",
+                "blocker": publish_blocker,
             }
         )
     return operations
