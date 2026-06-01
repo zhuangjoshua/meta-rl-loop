@@ -903,6 +903,12 @@ function isSlashCommandPrefix(value: string): boolean {
   return value.startsWith("/") && !/\s/.test(value.slice(1));
 }
 
+function isMissingSessionError(value: unknown): boolean {
+  const message =
+    value instanceof Error ? value.message : typeof value === "string" ? value : "";
+  return /session not found/i.test(message);
+}
+
 const WS_AUTH_RELOAD_KEY = "takyon.dashboard.wsAuthReloaded";
 
 export default function ChatPage() {
@@ -953,6 +959,37 @@ export default function ChatPage() {
   const pendingBusinessSlugRef = useRef<string | null>(null);
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
+  const sessionRecoveryInFlightRef = useRef(false);
+
+  const recoverMissingSession = useCallback(
+    (
+      requestedBusiness?: string,
+      options?: {
+        clearResume?: boolean;
+      },
+    ) => {
+      if (sessionRecoveryInFlightRef.current) return;
+      sessionRecoveryInFlightRef.current = true;
+      const params = new URLSearchParams(searchParams);
+      if (options?.clearResume) params.delete("resume");
+      if (requestedBusiness === "") params.delete("business");
+      else if (requestedBusiness) params.set("business", requestedBusiness);
+      setSearchParams(params, { replace: true });
+      scopeHydrationInFlightRef.current = false;
+      sessionIdRef.current = null;
+      setSessionId(null);
+      setRunning(false);
+      setError(null);
+      setPendingBusinessSlug(
+        requestedBusiness === ""
+          ? null
+          : requestedBusiness || businessFromLocationSearch() || null,
+      );
+      setStatusItems((prev) => ["Refreshing dashboard session…", ...prev].slice(0, 5));
+      setVersion((current) => current + 1);
+    },
+    [searchParams, setSearchParams],
+  );
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -1023,10 +1060,12 @@ export default function ChatPage() {
           /* detached output refresh is best effort */
         }
       }
-    } catch {
-      /* detached surface refresh is best effort */
+    } catch (err) {
+      if (isMissingSessionError(err)) {
+        recoverMissingSession(scopeBusinessRef.current || businessFromLocationSearch() || undefined);
+      }
     }
-  }, [gw]);
+  }, [gw, recoverMissingSession]);
 
   const scheduleTakyonRefresh = useCallback(() => {
     if (takyonRefreshTimerRef.current !== null) return;
@@ -1093,8 +1132,12 @@ export default function ChatPage() {
             ]);
           }
         })
-        .catch(() => {
-          /* scope refresh is best effort */
+        .catch((err) => {
+          if (isMissingSessionError(err)) {
+            recoverMissingSession(
+              scopeBusinessRef.current || businessFromLocationSearch() || undefined,
+            );
+          }
         });
     };
 
@@ -1402,6 +1445,7 @@ export default function ChatPage() {
 
     const initializeSession = async () => {
       const bootBusiness = businessFromLocationSearch();
+      sessionRecoveryInFlightRef.current = false;
       console.warn(
         `[takyon-debug] initializeSession business=${bootBusiness || "<none>"} resume=${resumeParam || "<none>"} reusable=${sessionIdRef.current || "<none>"}`,
       );
@@ -1417,10 +1461,19 @@ export default function ChatPage() {
       try {
         if (resumeParam) {
           scopeHydrationInFlightRef.current = true;
-          const res = await gw.request<SessionResumeResponse>(
-            "session.resume",
-            { session_id: resumeParam, cols: 100 },
-          );
+          let res: SessionResumeResponse;
+          try {
+            res = await gw.request<SessionResumeResponse>(
+              "session.resume",
+              { session_id: resumeParam, cols: 100 },
+            );
+          } catch (err) {
+            if (!cancelled && isMissingSessionError(err)) {
+              recoverMissingSession(bootBusiness || undefined, { clearResume: true });
+              return;
+            }
+            throw err;
+          }
           if (cancelled) return;
           setSessionId(res.session_id);
           setInfo((prev) => ({ ...prev, ...res.info }));
@@ -1437,7 +1490,15 @@ export default function ChatPage() {
         const reusableSessionId = sessionIdRef.current;
         if (reusableSessionId) {
           scopeHydrationInFlightRef.current = true;
-          await hydrateScope(reusableSessionId);
+          try {
+            await hydrateScope(reusableSessionId);
+          } catch (err) {
+            if (!cancelled && isMissingSessionError(err)) {
+              recoverMissingSession(bootBusiness || undefined);
+              return;
+            }
+            throw err;
+          }
           if (cancelled) return;
           setSessionId(reusableSessionId);
           return;
@@ -1473,7 +1534,7 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh]);
+  }, [gw, recoverMissingSession, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh]);
 
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
@@ -1552,8 +1613,10 @@ export default function ChatPage() {
               });
           }
         })
-        .catch(() => {
-          /* transport recovery is driven by reconnect state */
+        .catch((err) => {
+          if (isMissingSessionError(err)) {
+            recoverMissingSession(scopeState.business || businessFromLocationSearch() || undefined);
+          }
         });
     };
 
@@ -1563,7 +1626,7 @@ export default function ChatPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [gw, running, scopeState.business, sessionId, state]);
+  }, [gw, recoverMissingSession, running, scopeState.business, sessionId, state]);
 
   useEffect(() => {
     if (!takyonProgress?.active || !takyonProgress.business) return;
@@ -1636,8 +1699,10 @@ export default function ChatPage() {
         .then((scope) => {
           if (!cancelled) setScopeState(normalizeScopeState(scope));
         })
-        .catch(() => {
-          /* scope polling is best effort */
+        .catch((err) => {
+          if (isMissingSessionError(err)) {
+            recoverMissingSession(scopeState.business || businessFromLocationSearch() || undefined);
+          }
         });
     };
     refresh();
@@ -1646,7 +1711,7 @@ export default function ChatPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [gw, scopeState.business, sessionId, state]);
+  }, [gw, recoverMissingSession, scopeState.business, sessionId, state]);
 
   useEffect(() => {
     if (!canUseConnection(state) || !sessionId || !isSlashCommandPrefix(input)) {
@@ -1705,11 +1770,20 @@ export default function ChatPage() {
   const setTakyonScope = useCallback(
     async (business: string) => {
       if (!sessionId) return;
-      const res = await gw.request<ScopeState>(
-        "takyon.scope.set",
-        { session_id: sessionId, business },
-        10_000,
-      );
+      let res: ScopeState;
+      try {
+        res = await gw.request<ScopeState>(
+          "takyon.scope.set",
+          { session_id: sessionId, business },
+          10_000,
+        );
+      } catch (err) {
+        if (isMissingSessionError(err)) {
+          recoverMissingSession(business);
+          return;
+        }
+        throw err;
+      }
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
       if (nextScope.business) {
@@ -1731,7 +1805,7 @@ export default function ChatPage() {
       );
       requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [appendSystem, gw, searchParams, sessionId, setSearchParams],
+    [appendSystem, gw, recoverMissingSession, searchParams, sessionId, setSearchParams],
   );
 
   const enterPendingBusiness = useCallback(
@@ -1812,6 +1886,10 @@ export default function ChatPage() {
         console.warn(
           `[takyon-debug] confirmScope error business=${pendingBusinessSlug} attempts=${attempts} session=${sessionId} message=${message}`,
         );
+        if (isMissingSessionError(err)) {
+          recoverMissingSession(pendingBusinessSlug);
+          return;
+        }
         /* create may still be registering the business; keep the optimistic page */
       }
 
@@ -1827,7 +1905,7 @@ export default function ChatPage() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [gw, pendingBusinessSlug, sessionId, state]);
+  }, [gw, pendingBusinessSlug, recoverMissingSession, sessionId, state]);
 
   const applySlashCompletion = useCallback((item: SlashCompletionItem) => {
     const next = `${item.text} `;
