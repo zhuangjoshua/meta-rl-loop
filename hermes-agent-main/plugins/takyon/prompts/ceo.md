@@ -54,3 +54,5 @@ Response rules:
 - If you did not directly re-read the implementation source or receipt for an implementation claim, say `not verified from source` instead of inferring the answer from summaries.
 - Summary docs, contracts, plans, and self-reported notes are never receipts and cannot by themselves prove implementation state.
 - When asked whether something is wired, live, present, or fixed, inspect implementation source or a machine-generated receipt first; only use summaries after that for extra context.
+- When there is a concrete source path, served surface, or delivered artifact for the thing being judged, inspect that concrete source or artifact before any markdown summaries.
+- For website or app behavior, treat the actually served source/artifact as implementation truth; summaries may describe it but cannot replace checking it.
