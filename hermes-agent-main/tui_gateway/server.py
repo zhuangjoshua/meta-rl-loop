@@ -6093,36 +6093,75 @@ def _takyon_store(session: dict | None):
     return store
 
 
+_TAKYON_BUSINESSES_CACHE_TTL_SECONDS = max(
+    0.25,
+    float(os.getenv("TAKYON_BUSINESSES_CACHE_TTL_SECONDS", "1.5") or 1.5),
+)
+
+
+def _takyon_invalidate_businesses_cache(session: dict | None) -> None:
+    if not isinstance(session, dict):
+        return
+    session.pop("takyon_businesses_cache", None)
+
+
 def _takyon_businesses_for_session(
     session: dict | None,
     store=None,
 ) -> list[dict[str, Any]]:
+    if isinstance(session, dict):
+        cached = session.get("takyon_businesses_cache")
+        cached_at = 0.0
+        if isinstance(cached, dict):
+            cached_at = float(cached.get("at") or 0.0)
+            items = cached.get("items")
+            if (
+                isinstance(items, list)
+                and items
+                and (time.monotonic() - cached_at) <= _TAKYON_BUSINESSES_CACHE_TTL_SECONDS
+            ):
+                return [item for item in items if isinstance(item, dict)]
+            if items == [] and (time.monotonic() - cached_at) <= _TAKYON_BUSINESSES_CACHE_TTL_SECONDS:
+                return []
     active_store = store or _takyon_store(session)
-    data = active_store.read(scope="global", query="list_businesses")
+    data = active_store.read(scope="global", query="list_businesses", limit=200)
     businesses = data.get("businesses") if isinstance(data, dict) else []
+    items = [item for item in businesses if isinstance(item, dict)] if isinstance(businesses, list) else []
+    if isinstance(session, dict):
+        session["takyon_businesses_cache"] = {
+            "at": time.monotonic(),
+            "items": items,
+        }
     if not isinstance(businesses, list):
         return []
-    return [item for item in businesses if isinstance(item, dict)]
+    return items
 
 
-def _takyon_can_access_business(session: dict | None, business: str) -> bool:
+def _takyon_can_access_business(
+    session: dict | None,
+    business: str,
+    *,
+    businesses: list[dict[str, Any]] | None = None,
+) -> bool:
     slug = str(business or "").strip()
     if not slug:
         return False
     return any(
         str(item.get("slug") or "").strip() == slug
-        for item in _takyon_businesses_for_session(session)
+        for item in (businesses if businesses is not None else _takyon_businesses_for_session(session))
     )
 
 
 def _takyon_require_business_access(
     session: dict | None,
     business: str,
+    *,
+    businesses: list[dict[str, Any]] | None = None,
 ) -> str | None:
     slug = str(business or "").strip()
     if not slug:
         return "business scope required"
-    if _takyon_can_access_business(session, slug):
+    if _takyon_can_access_business(session, slug, businesses=businesses):
         return None
     return f"access denied for business:{slug}"
 
@@ -6205,7 +6244,11 @@ def _takyon_dashboard_state_payload(
             current_business = auto_slug
 
     if current_business:
-        access_error = _takyon_require_business_access(session, current_business)
+        access_error = _takyon_require_business_access(
+            session,
+            current_business,
+            businesses=businesses,
+        )
         if access_error:
             raise PermissionError(access_error)
 
@@ -6713,6 +6756,7 @@ def _(rid, params: dict) -> dict:
             or requested_mode
             or "test"
         )
+        _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
         session["takyon_pending_business_create"] = True
         session["takyon_pending_business_create_at"] = time.time()
@@ -6777,6 +6821,7 @@ def _(rid, params: dict) -> dict:
             detached_kind, target_business, detached_line = detached_target
             requested_create_slug = ""
             if detached_kind == "create" and target_business:
+                _takyon_invalidate_businesses_cache(session)
                 requested_create_slug = target_business
                 create_store = TakyonStore(operator_user_id=operator_user_id)
                 unique_slug = _takyon_unique_business_slug(create_store, target_business)

@@ -1184,13 +1184,18 @@ export default function ChatPage() {
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
   const sessionRecoveryInFlightRef = useRef(false);
-  const activeBusinessSlug = useMemo(
+  const requestedBusinessSlug = useMemo(
     () =>
       normalizeBusinessLookup(
-        scopeState.business || pendingBusinessSlug || businessFromLocationSearch(),
+        pendingBusinessSlug || businessFromLocationSearch() || scopeState.business || "",
       ),
     [pendingBusinessSlug, scopeState.business, searchParams],
   );
+  const activeBusinessSlug = useMemo(
+    () => normalizeBusinessLookup(scopeState.business || ""),
+    [scopeState.business],
+  );
+  const businessRequestPending = !!requestedBusinessSlug && requestedBusinessSlug !== activeBusinessSlug;
   const displayScope = useMemo(() => {
     if (!activeBusinessSlug) return scopeState;
     const snapshot =
@@ -1341,19 +1346,26 @@ export default function ChatPage() {
     ): Promise<ScopeState | null> => {
       const activeSessionId = options?.sessionId || sessionIdRef.current;
       if (!activeSessionId || !canUseConnection(connectionStateRef.current)) return null;
-      const hasExplicitBusiness = requestedBusiness !== undefined;
+      const locationBusiness = businessFromLocationSearch();
       const business = normalizeBusinessLookup(
-        requestedBusiness ??
-          scopeBusinessRef.current ??
-          pendingBusinessSlugRef.current ??
-          businessFromLocationSearch(),
+        requestedBusiness !== undefined
+          ? requestedBusiness
+          : pendingBusinessSlugRef.current ||
+              locationBusiness ||
+              scopeBusinessRef.current ||
+              "",
       );
+      const shouldRequestBusiness =
+        requestedBusiness !== undefined ||
+        !!normalizeBusinessLookup(pendingBusinessSlugRef.current || "") ||
+        !!locationBusiness ||
+        !!normalizeBusinessLookup(scopeBusinessRef.current || "");
       try {
         const state = await gw.request<TakyonDashboardStateResponse>(
           "takyon.dashboard.state",
           {
             session_id: activeSessionId,
-            ...(hasExplicitBusiness
+            ...(shouldRequestBusiness
               ? { business_slug: business || "global" }
               : {}),
             limit: 50,
@@ -1385,8 +1397,11 @@ export default function ChatPage() {
         setPendingBusinessSlug(null);
         if (options?.syncUrl) {
           const params = new URLSearchParams(searchParams);
-          if (nextScope.business) params.set("business", nextScope.business);
-          else params.delete("business");
+          if (nextScope.business) {
+            params.set("business", nextScope.business);
+          } else if (requestedBusiness !== undefined && !business) {
+            params.delete("business");
+          }
           setSearchParams(params, { replace: true });
         }
         return nextScope;
@@ -1398,7 +1413,7 @@ export default function ChatPage() {
           );
           return null;
         }
-        if (hasExplicitBusiness && isBusinessScopeDeniedMessage(message)) {
+        if (shouldRequestBusiness && business && isBusinessScopeDeniedMessage(message)) {
           noteBootIssue(business, message);
           return null;
         }
@@ -2336,6 +2351,19 @@ export default function ChatPage() {
       if (res.output) {
         setStatusItems((prev) => [cleanText(res.output || ""), ...prev].slice(0, 5));
       }
+      if (
+        createdBusiness &&
+        ["queued", "running"].includes(String(res.job_status || "").toLowerCase())
+      ) {
+        const detail =
+          cleanText(snapshot?.background_run?.detail || "").trim() ||
+          (String(res.job_status || "").toLowerCase() === "running"
+            ? "CEO bootstrap is running."
+            : "CEO bootstrap is queued.");
+        setTakyonProgress((prev) =>
+          syncTakyonProgressFromTask(prev, createdBusiness, detail),
+        );
+      }
       void refreshOperatorAccount();
       void refreshBusinessSurfaces(createdBusiness);
     },
@@ -2551,6 +2579,7 @@ export default function ChatPage() {
       <div className={cn("td-app min-h-0 flex-1", !inBusiness && "td-app--global")}>
         <BizSidebar
           canInteract={canInteract}
+          loadingBusinesses={businessRequestPending}
           onCreate={() => {
             void setTakyonScope("");
           }}
@@ -2630,6 +2659,13 @@ export default function ChatPage() {
               productPublicUrl={productPublicUrl}
               scope={displayScope}
               takyonProgress={takyonProgress}
+            />
+          ) : businessRequestPending ? (
+            <BusinessScopeSyncState
+              business={requestedBusinessSlug}
+              message={blockedBootBusinessSlug === requestedBusinessSlug ? blockedBootMessage : null}
+              onRetry={() => void loadDashboardState(requestedBusinessSlug, { syncUrl: true })}
+              state={state}
             />
           ) : (
             <GlobalLaunchpad
@@ -2715,8 +2751,48 @@ export default function ChatPage() {
   );
 }
 
+function BusinessScopeSyncState({
+  business,
+  message,
+  onRetry,
+  state,
+}: {
+  business: string;
+  message: string | null;
+  onRetry: () => void;
+  state: ConnectionState;
+}) {
+  const blocked = !!message;
+  return (
+    <section className="td-launchpad td-launchpad--business">
+      <div className="td-launch-left">
+        <p className="td-eyebrow">{blocked ? "Scope blocked" : "Opening workspace"}</p>
+        <h2>{blocked ? `Could not open business:${business}` : `Opening business:${business}`}</h2>
+        <p className="td-copy">
+          {blocked
+            ? message
+            : canUseConnection(state)
+              ? "Waiting for the dashboard to resolve the requested business from backend state."
+              : "Waiting for the dashboard connection before loading the requested business."}
+        </p>
+        <div className="td-actions">
+          <button
+            className="td-primary"
+            disabled={!canUseConnection(state)}
+            onClick={onRetry}
+            type="button"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function BizSidebar({
   canInteract,
+  loadingBusinesses,
   onCreate,
   operatorAccount,
   onSelect,
@@ -2724,6 +2800,7 @@ function BizSidebar({
   state,
 }: {
   canInteract: boolean;
+  loadingBusinesses: boolean;
   onCreate: () => void;
   operatorAccount: TakyonOperatorAccountResponse | null;
   onSelect: (business: string) => Promise<void>;
@@ -2766,7 +2843,7 @@ function BizSidebar({
         <div className="td-biz-list">
           {businesses.length === 0 ? (
             <p className="td-meta" style={{ padding: "4px 8px" }}>
-              No businesses yet.
+              {loadingBusinesses ? "Loading businesses…" : "No businesses yet."}
             </p>
           ) : (
             businesses.map((item) => {

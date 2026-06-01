@@ -386,6 +386,64 @@ def test_takyon_dashboard_state_sets_explicit_business(server, monkeypatch):
     assert response["result"]["scope"] == "business:latexflow"
 
 
+def test_takyon_businesses_for_session_caches_reads(server, monkeypatch):
+    session = {}
+
+    class FakeStore:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, **_kwargs):
+            self.calls += 1
+            return {"businesses": [{"slug": "latexflow", "name": "Latexflow"}]}
+
+    store = FakeStore()
+    monkeypatch.setattr(server, "_takyon_store", lambda *_args, **_kwargs: store)
+
+    first = server._takyon_businesses_for_session(session, store=store)
+    second = server._takyon_businesses_for_session(session, store=store)
+
+    assert first == second == [{"slug": "latexflow", "name": "Latexflow"}]
+    assert store.calls == 1
+
+
+def test_takyon_dashboard_state_payload_reuses_prefetched_businesses(server, monkeypatch):
+    session = {"takyon_current_business": "latexflow"}
+
+    class FakeStore:
+        def __init__(self):
+            self.calls: list[tuple[str, str]] = []
+
+        def read(self, *, scope="global", query="summary", **_kwargs):
+            self.calls.append((scope, query))
+            if scope == "global" and query == "list_businesses":
+                return {"businesses": [{"slug": "latexflow", "name": "Latexflow"}]}
+            raise AssertionError(f"unexpected store.read({scope=}, {query=})")
+
+    store = FakeStore()
+    monkeypatch.setattr(server, "_takyon_store", lambda *_args, **_kwargs: store)
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "latexflow",
+            "current": {"slug": "latexflow"},
+            "overview": {"goal": "Overleaf competitor"},
+            "outputs": [],
+            "background_run": None,
+        },
+    )
+
+    result = server._takyon_dashboard_state_payload(
+        session,
+        explicit_business=True,
+        business="latexflow",
+    )
+
+    assert result["business_slug"] == "latexflow"
+    assert store.calls == [("global", "list_businesses")]
+
+
 # ── write_json ───────────────────────────────────────────────────────
 
 

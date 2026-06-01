@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import hmac
 import json
@@ -14,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -205,6 +207,113 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         ],
     },
 }
+
+_POSTGRES_POOL_MAX_SIZE = max(
+    1,
+    int(os.getenv("TAKYON_PG_POOL_SIZE", "8") or 8),
+)
+_POSTGRES_POOL_WAIT_SECONDS = max(
+    1.0,
+    float(os.getenv("TAKYON_PG_POOL_WAIT_SECONDS", "20") or 20),
+)
+
+
+class _PostgresPool:
+    """Tiny in-process connection pool for the dashboard/store read path.
+
+    Deploy currently rsyncs runtime files and compiles Python, but does not install new
+    dependencies on the VPS. Keeping this pool local avoids adding a new package just to
+    reuse psycopg connections across the gateway's concurrent dashboard reads.
+    """
+
+    def __init__(self, dsn: str, *, max_size: int) -> None:
+        self._dsn = dsn
+        self._max_size = max_size
+        self._idle: list[Any] = []
+        self._open = 0
+        self._cond = threading.Condition()
+
+    def acquire(self, factory: Any) -> Any:
+        deadline = time.monotonic() + _POSTGRES_POOL_WAIT_SECONDS
+        while True:
+            with self._cond:
+                while self._idle:
+                    conn = self._idle.pop()
+                    if not getattr(conn, "closed", False):
+                        return conn
+                    self._open = max(0, self._open - 1)
+                if self._open < self._max_size:
+                    self._open += 1
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for a Takyon Postgres connection")
+                self._cond.wait(timeout=remaining)
+        try:
+            return factory()
+        except Exception:
+            with self._cond:
+                self._open = max(0, self._open - 1)
+                self._cond.notify()
+            raise
+
+    def release(self, conn: Any, *, discard: bool = False) -> None:
+        if conn is None:
+            return
+        broken = discard or bool(getattr(conn, "closed", False))
+        if not broken:
+            try:
+                conn.rollback()
+            except Exception:
+                broken = True
+        if broken:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            with self._cond:
+                self._open = max(0, self._open - 1)
+                self._cond.notify()
+            return
+        with self._cond:
+            self._idle.append(conn)
+            self._cond.notify()
+
+    def close_all(self) -> None:
+        with self._cond:
+            idle = list(self._idle)
+            self._idle.clear()
+            self._open = 0
+            self._cond.notify_all()
+        for conn in idle:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+_POSTGRES_POOLS: dict[str, _PostgresPool] = {}
+_POSTGRES_POOLS_LOCK = threading.Lock()
+
+
+def _postgres_pool(dsn: str) -> _PostgresPool:
+    key = str(dsn or "").strip()
+    with _POSTGRES_POOLS_LOCK:
+        pool = _POSTGRES_POOLS.get(key)
+        if pool is None:
+            pool = _PostgresPool(key, max_size=_POSTGRES_POOL_MAX_SIZE)
+            _POSTGRES_POOLS[key] = pool
+        return pool
+
+
+def _close_postgres_pools() -> None:
+    with _POSTGRES_POOLS_LOCK:
+        pools = list(_POSTGRES_POOLS.values())
+        _POSTGRES_POOLS.clear()
+    for pool in pools:
+        pool.close_all()
+
+atexit.register(_close_postgres_pools)
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
@@ -3105,9 +3214,11 @@ class _PGConn:
     transaction — psycopg's own ``__exit__`` commits on success, rolls back on exception, and closes
     the per-block connection (no leak)."""
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn: Any, *, release: Any | None = None) -> None:
         self._pg = conn
         self._depth = 0
+        self._release = release
+        self._returned = False
 
     @staticmethod
     def _translate(sql: str) -> str:
@@ -3138,21 +3249,47 @@ class _PGConn:
         # no-ops. No code reads the DB after an inner block exits, so collapsing both levels into one
         # outer-managed transaction preserves the original atomicity (all writes commit together on
         # success, roll back together on error).
-        if self._depth == 0:
-            self._pg.__enter__()
         self._depth += 1
         return self
 
     def __exit__(self, *exc_info: Any) -> Any:
         self._depth -= 1
         if self._depth == 0:
-            return self._pg.__exit__(*exc_info)
+            exc_type = exc_info[0] if exc_info else None
+            release_discard = False
+            try:
+                if exc_type is None:
+                    self._pg.commit()
+                else:
+                    self._pg.rollback()
+            except Exception:
+                release_discard = True
+                try:
+                    self._pg.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                self._return_to_owner(discard=release_discard)
+            return False
         # Inner block: do not commit, do not close, and do not suppress a propagating exception
         # (return falsy) so the outermost block still sees it and rolls back.
         return False
 
     def close(self) -> None:
-        self._pg.close()
+        self._return_to_owner(discard=True)
+
+    def _return_to_owner(self, *, discard: bool) -> None:
+        if self._returned:
+            return
+        self._returned = True
+        if self._release is not None:
+            self._release(self._pg, discard=discard)
+            return
+        try:
+            self._pg.close()
+        except Exception:
+            pass
 
 
 class TakyonStore:
@@ -3218,18 +3355,20 @@ class TakyonStore:
         except ImportError:  # pragma: no cover - import-style robustness for alternate load paths
             from plugins.takyon.runtime_app import resolve_database_url
 
-        conn = psycopg.connect(
-            resolve_database_url(self._database_url),
-            row_factory=dict_row,
-            autocommit=False,
-            # See runtime_app.build_runtime_app: the live DATABASE_URL is Supabase's pgbouncer
-            # endpoint (6543). prepare_threshold=None disables auto server-side prepared statements
-            # so a PREPARE/EXECUTE can never split across pooler-reassigned backends. Store
-            # connections are also short-lived (one per `with self._connect()` block), so nothing
-            # relies on cross-transaction prepared-statement reuse.
-            prepare_threshold=None,
+        database_url = resolve_database_url(self._database_url)
+        pool = _postgres_pool(database_url)
+        conn = pool.acquire(
+            lambda: psycopg.connect(
+                database_url,
+                row_factory=dict_row,
+                autocommit=False,
+                # See runtime_app.build_runtime_app: the live DATABASE_URL is Supabase's pgbouncer
+                # endpoint (6543). prepare_threshold=None disables auto server-side prepared statements
+                # so a PREPARE/EXECUTE can never split across pooler-reassigned backends.
+                prepare_threshold=None,
+            )
         )
-        return _PGConn(conn)
+        return _PGConn(conn, release=pool.release)
 
     def seed_platform_owner(self) -> tuple[str | None, str | None]:
         """Idempotently provision the single platform/operator owner — the Phase-8 serving-flip
