@@ -3578,6 +3578,8 @@ class TakyonStore:
         if self._workspace_root_override is not None:
             return
         normalized = _slugify(slug)
+        if normalized in self._workspace_sync_cache:
+            return
         from . import storage
 
         load_takyon_env()
@@ -3588,9 +3590,10 @@ class TakyonStore:
             return
         if backend_name == "local" and not local_bucket:
             return
-        # Always refresh from the durable backend. Long-running background bootstraps now write into a
-        # private scratch workspace and sync outward during the run, so a one-time cache leaves the
-        # dashboard stale until the entire bootstrap exits.
+        # Refresh from the durable backend once per store instance. A scope read fans out through
+        # multiple helpers (`summary`, `list_files`, pulse, product surface reads), and each one may
+        # resolve the business root repeatedly. Re-syncing for every nested helper call turns one
+        # dashboard hydrate into many full storage downloads and regularly times out the UI.
         storage.sync_down(backend, normalized, root, delete_local=True)
         self._workspace_sync_cache.add(normalized)
 
