@@ -934,6 +934,8 @@ export default function ChatPage() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const scopeBusinessRef = useRef<string>("");
+  const pendingBusinessSlugRef = useRef<string | null>(null);
   const takyonRefreshTimerRef = useRef<number | null>(null);
 
   const refreshOperatorAccount = useCallback(async () => {
@@ -947,6 +949,14 @@ export default function ChatPage() {
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    scopeBusinessRef.current = scopeState.business;
+  }, [scopeState.business]);
+
+  useEffect(() => {
+    pendingBusinessSlugRef.current = pendingBusinessSlug;
+  }, [pendingBusinessSlug]);
 
   useEffect(() => {
     setMessages((prev) => syncTakyonProgressMessage(prev, takyonProgress));
@@ -1153,7 +1163,9 @@ export default function ChatPage() {
         const kind = asText(ev.payload?.kind).trim().toLowerCase();
         if (kind === "takyon" && text) {
           const businessHint =
-            scopeState.business || pendingBusinessSlug || businessFromLocationSearch();
+            scopeBusinessRef.current ||
+            pendingBusinessSlugRef.current ||
+            businessFromLocationSearch();
           setTakyonProgress((prev) => updateTakyonProgress(prev, text, businessHint));
           scheduleTakyonRefresh();
         }
@@ -1393,7 +1405,7 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, pendingBusinessSlug, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh, scopeState.business]);
+  }, [gw, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh]);
 
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
