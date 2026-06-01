@@ -425,7 +425,6 @@ const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
-const TAKYON_PROGRESS_MESSAGE_PREFIX = "takyon-progress";
 const TAKYON_PROGRESS_MAX_LINES = 8;
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
@@ -443,10 +442,6 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`;
-}
-
-function takyonProgressMessageId(business: string): string {
-  return `${TAKYON_PROGRESS_MESSAGE_PREFIX}-${business || "global"}`;
 }
 
 function formatBudgetCents(value?: number | null): string {
@@ -534,6 +529,49 @@ function friendlyError(message?: string | null): string {
   return text.split(/\n/)[0].slice(0, 140);
 }
 
+function isTransientConnectionMessage(message?: string | null): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  return /live stream (?:reconnecting|disconnected|unauthorized|forbidden)|websocket connection failed/i.test(
+    text,
+  );
+}
+
+function isBusinessScopeDeniedMessage(message?: string | null): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  return /could not open business:|no businesses are visible for this account|that business is not available to this account|access denied for business:/i.test(
+    text,
+  );
+}
+
+function isDetachedTakyonProgressMessage(message?: string | null): boolean {
+  const text = cleanText(message || "").trim();
+  if (!text) return false;
+  return /^(?:CEO bootstrap: |Create started for business:|Wake started for business:|Create for business:|Wake for business:)/i.test(
+    text,
+  );
+}
+
+function isTakyonChatNoiseMessage(message: ChatMessage): boolean {
+  if (message.role !== "system") return false;
+  return (
+    isTransientConnectionMessage(message.content) ||
+    isBusinessScopeDeniedMessage(message.content) ||
+    isDetachedTakyonProgressMessage(message.content)
+  );
+}
+
+function stripTakyonChatNoise(messages: ChatMessage[]): ChatMessage[] {
+  let changed = false;
+  const next = messages.filter((message) => {
+    const keep = !isTakyonChatNoiseMessage(message);
+    if (!keep) changed = true;
+    return keep;
+  });
+  return changed ? next : messages;
+}
+
 function compactPath(path?: string): string {
   if (!path) return "";
   if (path.length <= 34) return path;
@@ -617,7 +655,9 @@ function messageFromResume(
   }
   if (item.role === "user" || item.role === "assistant" || item.role === "system") {
     const text = item.text?.trim();
-    return text ? makeMessage(item.role, text) : null;
+    if (!text) return null;
+    const message = makeMessage(item.role, text);
+    return isTakyonChatNoiseMessage(message) ? null : message;
   }
   return null;
 }
@@ -630,6 +670,7 @@ function mergePolledMessages(prev: ChatMessage[], polled: ChatMessage[]): ChatMe
     : [...prev];
   const seen = new Set(next.map((message) => `${message.role}\n${message.content}`));
   for (const message of polled) {
+    if (isTakyonChatNoiseMessage(message)) continue;
     const key = `${message.role}\n${message.content}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -669,23 +710,6 @@ function updateTakyonProgress(
     active: !terminal,
     status: nextStatus,
   };
-}
-
-function syncTakyonProgressMessage(
-  prev: ChatMessage[],
-  progress: TakyonProgressState | null,
-): ChatMessage[] {
-  const next = prev.filter((message) => !message.id.startsWith(TAKYON_PROGRESS_MESSAGE_PREFIX));
-  if (!progress || !progress.lines.length) return next;
-  return [
-    ...next,
-    {
-      id: takyonProgressMessageId(progress.business),
-      role: "system",
-      content: progress.lines.join("\n"),
-      status: progress.status,
-    },
-  ];
 }
 
 function extractPaths(text: string): string[] {
@@ -1008,6 +1032,27 @@ export default function ChatPage() {
     [searchParams, setSearchParams],
   );
 
+  const noteBootIssue = useCallback((business: string, message: string) => {
+    const slug = normalizeBusinessLookup(business);
+    const content = message.trim();
+    if (!slug || !content) return;
+    setBlockedBootBusinessSlug(slug);
+    setBlockedBootMessage(content);
+    setPendingBusinessSlug((current) => (current === slug ? null : current));
+    setScopeState((prev) => {
+      if (normalizeBusinessLookup(prev.business || "") !== slug) return prev;
+      return normalizeScopeState({
+        ...prev,
+        business: "",
+        current: undefined,
+        overview: undefined,
+        businesses: prev.businesses.filter(
+          (item) => normalizeBusinessLookup(item.slug || "") !== slug,
+        ),
+      });
+    });
+  }, []);
+
   const refreshOperatorAccount = useCallback(async () => {
     try {
       setOperatorAccount(await api.getTakyonOperatorAccount());
@@ -1031,10 +1076,6 @@ export default function ChatPage() {
   useEffect(() => {
     pendingBusinessSlugRef.current = pendingBusinessSlug;
   }, [pendingBusinessSlug]);
-
-  useEffect(() => {
-    setMessages((prev) => syncTakyonProgressMessage(prev, takyonProgress));
-  }, [takyonProgress]);
 
   useEffect(() => {
     return () => {
@@ -1118,6 +1159,10 @@ export default function ChatPage() {
   }, [messages, running]);
 
   useEffect(() => {
+    setMessages((prev) => stripTakyonChatNoise(prev));
+  }, [sessionId, scopeState.business]);
+
+  useEffect(() => {
     let cancelled = false;
     const cleanup: Array<() => void> = [];
 
@@ -1143,10 +1188,18 @@ export default function ChatPage() {
               ),
             ]);
           } else if (nextScope.auto_scope_warning) {
-            setMessages((prev) => [
-              ...prev,
-              makeMessage("system", nextScope.auto_scope_warning || ""),
-            ]);
+            const warning = nextScope.auto_scope_warning || "";
+            if (isBusinessScopeDeniedMessage(warning)) {
+              noteBootIssue(
+                nextScope.auto_switched_business ||
+                  scopeBusinessRef.current ||
+                  pendingBusinessSlugRef.current ||
+                  businessFromLocationSearch(),
+                warning,
+              );
+            } else if (!isTransientConnectionMessage(warning)) {
+              setMessages((prev) => [...prev, makeMessage("system", warning)]);
+            }
           }
         })
         .catch((err) => {
@@ -1257,6 +1310,20 @@ export default function ChatPage() {
       gw.on<{ message?: string }>("error", (ev) => {
         const message = ev.payload?.message || "The chat gateway reported an error.";
         setRunning(false);
+        if (isTransientConnectionMessage(message)) {
+          setError(null);
+          return;
+        }
+        if (isBusinessScopeDeniedMessage(message)) {
+          noteBootIssue(
+            scopeBusinessRef.current ||
+              pendingBusinessSlugRef.current ||
+              businessFromLocationSearch(),
+            message,
+          );
+          setError(null);
+          return;
+        }
         setError(message);
         setMessages((prev) => [...prev, makeMessage("system", message)]);
       }),
@@ -1378,21 +1445,6 @@ export default function ChatPage() {
         refreshScope();
       }),
     );
-
-    const noteBootIssue = (business: string, message: string) => {
-      const slug = normalizeBusinessLookup(business);
-      const content = message.trim();
-      if (!slug || !content) return;
-      setBlockedBootBusinessSlug(slug);
-      setBlockedBootMessage(content);
-      setPendingBusinessSlug((current) => (current === slug ? null : current));
-      setMessages((prev) => {
-        if (prev.some((item) => item.role === "system" && item.content === content)) {
-          return prev;
-        }
-        return [...prev, makeMessage("system", content)];
-      });
-    };
 
     const hydrateScope = async (
       nextSessionId: string,
@@ -1538,8 +1590,18 @@ export default function ChatPage() {
       } catch (err) {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : String(err);
-          setError(message);
-          setMessages((prev) => [...prev, makeMessage("system", message)]);
+          if (isTransientConnectionMessage(message)) {
+            setError(null);
+          } else if (isBusinessScopeDeniedMessage(message)) {
+            noteBootIssue(
+              businessFromLocationSearch() || pendingBusinessSlugRef.current || "",
+              message,
+            );
+            setError(null);
+          } else {
+            setError(message);
+            setMessages((prev) => [...prev, makeMessage("system", message)]);
+          }
         }
       }
     };
@@ -1767,6 +1829,7 @@ export default function ChatPage() {
   }, [gw, input, scopeState.business, sessionId, state]);
 
   const appendSystem = useCallback((text: string) => {
+    if (isTransientConnectionMessage(text)) return;
     setMessages((prev) => [...prev, makeMessage("system", text)]);
   }, []);
 
@@ -1777,6 +1840,10 @@ export default function ChatPage() {
       setRunning(false);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (isTransientConnectionMessage(message)) {
+        setError(null);
+        return;
+      }
       setError(message);
       appendSystem(`Interrupt failed: ${message}`);
     }
@@ -1928,6 +1995,10 @@ export default function ChatPage() {
           recoverMissingSession(pendingBusinessSlug);
           return;
         }
+        if (isBusinessScopeDeniedMessage(message)) {
+          noteBootIssue(pendingBusinessSlug, message);
+          return;
+        }
         /* create may still be registering the business; keep the optimistic page */
       }
 
@@ -2040,7 +2111,13 @@ export default function ChatPage() {
         setSearchParams(params, { replace: true });
       }
       const output = cleanText(res.output || "").trim();
-      if (output) appendSystem(output);
+      if (output) {
+        if (/^(?:Create|Wake) started for business:/i.test(output)) {
+          setStatusItems((prev) => [output, ...prev].slice(0, 5));
+        } else {
+          appendSystem(output);
+        }
+      }
     },
     [
       appendSystem,
@@ -2137,6 +2214,10 @@ export default function ChatPage() {
     } catch (err) {
       setRunning(false);
       const message = err instanceof Error ? err.message : String(err);
+      if (isTransientConnectionMessage(message)) {
+        setError(null);
+        return;
+      }
       setError(message);
       appendSystem(message);
     }
@@ -2305,6 +2386,7 @@ export default function ChatPage() {
               onResolveSitePreview={resolveBusinessSitePreview}
               productPublicUrl={productPublicUrl}
               scope={scopeState}
+              takyonProgress={takyonProgress}
             />
           ) : (
             <GlobalLaunchpad
@@ -3009,6 +3091,7 @@ function CompanyWorkspace({
   onResolveSitePreview,
   productPublicUrl,
   scope,
+  takyonProgress,
 }: {
   deliverables: Deliverable[];
   onCommand: (line: string) => void;
@@ -3017,6 +3100,7 @@ function CompanyWorkspace({
   onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
   productPublicUrl: string;
   scope: ScopeState;
+  takyonProgress: TakyonProgressState | null;
 }) {
   const overview = scope.overview || {};
   const product = overview.product || {};
@@ -3054,6 +3138,13 @@ function CompanyWorkspace({
   useEffect(() => {
     setViewer(null);
   }, [scope.business]);
+
+  const progressLine =
+    takyonProgress?.active &&
+    normalizeBusinessLookup(takyonProgress.business || "") ===
+      normalizeBusinessLookup(scope.business || "")
+      ? (takyonProgress.lines[takyonProgress.lines.length - 1] || "").trim()
+      : "";
 
   const openSitePreview = useCallback(
     (path?: string, label?: string) => {
@@ -3152,8 +3243,14 @@ function CompanyWorkspace({
                     : " is live — start distribution to bring in customers."
                   : deliverables.length
                     ? " is taking shape — deliverables are landing."
-                    : " is just getting started. Ask the CEO to research and build."}
+                  : " is just getting started. Ask the CEO to research and build."}
           </p>
+          {progressLine && (
+            <p className="td-defer-note" style={{ marginTop: 10 }}>
+              <span className="td-dotline" />
+              {progressLine}
+            </p>
+          )}
         </div>
 
         <div className="td-kpis">

@@ -5898,8 +5898,17 @@ def _takyon_operator_user_id(session: dict | None) -> str:
 
 def _takyon_store(session: dict | None):
     from plugins.takyon.cli import TakyonStore
-
-    return TakyonStore(operator_user_id=_takyon_operator_user_id(session) or None)
+    operator_user_id = _takyon_operator_user_id(session) or None
+    if not isinstance(session, dict):
+        return TakyonStore(operator_user_id=operator_user_id)
+    cached = session.get("takyon_store")
+    if isinstance(cached, TakyonStore):
+        cached_user_id = str(getattr(cached, "_operator_user_id", "") or "").strip() or None
+        if cached_user_id == operator_user_id:
+            return cached
+    store = TakyonStore(operator_user_id=operator_user_id)
+    session["takyon_store"] = store
+    return store
 
 
 def _takyon_businesses_for_session(
