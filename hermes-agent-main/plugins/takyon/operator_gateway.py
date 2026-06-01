@@ -499,7 +499,12 @@ def _response_headers(headers: httpx.Headers, *, streaming: bool) -> dict[str, s
     out: dict[str, str] = {}
     for key, value in headers.items():
         lowered = key.lower()
-        if lowered in {"connection", "content-length", "transfer-encoding"}:
+        if lowered in {
+            "connection",
+            "content-encoding",
+            "content-length",
+            "transfer-encoding",
+        }:
             continue
         out[key] = value
     if streaming:
