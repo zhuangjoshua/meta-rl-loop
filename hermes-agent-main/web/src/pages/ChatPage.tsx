@@ -933,6 +933,7 @@ export default function ChatPage() {
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const connectionStateRef = useRef<ConnectionState>("idle");
   const sessionIdRef = useRef<string | null>(null);
   const scopeBusinessRef = useRef<string>("");
   const pendingBusinessSlugRef = useRef<string | null>(null);
@@ -945,6 +946,10 @@ export default function ChatPage() {
       setOperatorAccount((prev) => prev || { available: false, reason: "request_failed" });
     }
   }, []);
+
+  useEffect(() => {
+    connectionStateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -980,7 +985,7 @@ export default function ChatPage() {
   }, [createInTestMode]);
 
   const refreshBusinessSurfaces = useCallback(async () => {
-    if (!canUseConnection(state) || !sessionIdRef.current) return;
+    if (!canUseConnection(connectionStateRef.current) || !sessionIdRef.current) return;
     try {
       const scope = normalizeScopeState(
         await gw.request<ScopeState>(
@@ -1006,7 +1011,7 @@ export default function ChatPage() {
     } catch {
       /* detached surface refresh is best effort */
     }
-  }, [gw, state]);
+  }, [gw]);
 
   const scheduleTakyonRefresh = useCallback(() => {
     if (takyonRefreshTimerRef.current !== null) return;
