@@ -606,6 +606,7 @@ def _scope_for_business(slug: str) -> str:
 def _business_workspace_execution_context(slug: str, *, operator_user_id: str | None = None):
     from . import storage
 
+    load_takyon_env()
     selected_backend = str(os.getenv("TAKYON_STORAGE_BACKEND") or "").strip().lower()
     if not selected_backend:
         yield None

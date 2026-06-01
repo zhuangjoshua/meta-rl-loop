@@ -3582,6 +3582,7 @@ class TakyonStore:
             return
         from . import storage
 
+        load_takyon_env()
         backend = storage.get_storage_backend()
         if backend.name != "supabase_s3":
             return
