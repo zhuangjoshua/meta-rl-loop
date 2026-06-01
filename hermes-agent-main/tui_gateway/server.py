@@ -6164,7 +6164,6 @@ def _(rid, params: dict) -> dict:
                 "size": size,
                 "content": raw.decode("utf-8", errors="replace"),
                 "truncated": size > _TAKYON_MAX_FILE_READ_BYTES,
-                **_takyon_scope_payload(session),
             },
         )
     except Exception as e:
@@ -6203,7 +6202,6 @@ def _(rid, params: dict) -> dict:
                 "media_type": mime,
                 "size": size,
                 "url": f"data:{mime};base64,{encoded}",
-                **_takyon_scope_payload(session),
             },
         )
     except Exception as e:
@@ -6257,7 +6255,6 @@ def _(rid, params: dict) -> dict:
                 "path": rel,
                 "size": len(html_text.encode("utf-8")),
                 "url": f"data:text/html;charset=utf-8;base64,{encoded}",
-                **_takyon_scope_payload(session),
             },
         )
     except Exception as e:
