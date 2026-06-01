@@ -28,6 +28,7 @@ from fastapi import FastAPI
 
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
 from .control_api import build_control_router, get_control_conn
+from .creative_gateway import build_creative_gateway_router
 
 # DATABASE_URL is canonical; POSTGRES_URL / POSTGRES_PRISMA_URL are the platform-managed aliases
 # (Supabase / Vercel). Kept identical to core.py's "database" provider aliases on purpose, so one
@@ -86,6 +87,7 @@ def build_runtime_app(*, database_url: str | None = None) -> FastAPI:
 
     app.include_router(build_control_router())
     app.include_router(build_ai_gateway_router())
+    app.include_router(build_creative_gateway_router())
     # Both routers open the SAME kind of per-request connection to the SAME database, so one
     # connection factory serves both seams. get_provider_caller is deliberately NOT overridden:
     # its default resolves the real shared provider key server-side (invariant #8 blocks when none

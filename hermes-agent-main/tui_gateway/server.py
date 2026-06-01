@@ -1,6 +1,7 @@
 import atexit
 import base64
 import concurrent.futures
+import contextlib
 import contextvars
 import copy
 import json
@@ -32,6 +33,19 @@ from tui_gateway.transport import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TAKYON_AGENT_TOOLSETS = ["takyon", "web", "skills", "todo"]
+_TAKYON_DISABLED_TOOLSETS = [
+    "browser",
+    "code_execution",
+    "cronjob",
+    "file",
+    "memory",
+    "messaging",
+    "session_search",
+    "takyon-authority",
+    "terminal",
+]
 
 _takyon_home = get_takyon_home()
 load_takyon_dotenv(
@@ -707,11 +721,22 @@ def _save_cfg(cfg: dict):
             _cfg_mtime = None
 
 
-def _set_session_context(session_key: str, *, operator_user_id: str = "") -> list:
+def _set_session_context(
+    session_key: str,
+    *,
+    operator_user_id: str = "",
+    workspace_root: str = "",
+    business_slug: str = "",
+) -> list:
     try:
         from gateway.session_context import set_session_vars
 
-        return set_session_vars(session_key=session_key, user_id=operator_user_id or "")
+        return set_session_vars(
+            session_key=session_key,
+            user_id=operator_user_id or "",
+            workspace_root=workspace_root or "",
+            business_slug=business_slug or "",
+        )
     except Exception:
         return []
 
@@ -1930,7 +1955,8 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         verbose_logging=_load_tool_progress_mode() == "verbose",
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(),
+        enabled_toolsets=list(_TAKYON_AGENT_TOOLSETS),
+        disabled_toolsets=list(_TAKYON_DISABLED_TOOLSETS),
         platform="tui",
         session_id=session_id or key,
         session_db=_get_db(),
@@ -3270,16 +3296,13 @@ def _run_prompt_submit(
                 set_current_session_key,
             )
             from plugins.takyon.cli import (
+                _business_workspace_execution_context,
                 _operator_budget_finalize,
                 _operator_budget_reserve,
                 _resolved_operator_user_id,
             )
 
             approval_token = set_current_session_key(session["session_key"])
-            session_tokens = _set_session_context(
-                session["session_key"],
-                operator_user_id=_takyon_operator_user_id(session),
-            )
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
@@ -3379,10 +3402,11 @@ def _run_prompt_submit(
             resolved_operator_user_id = _resolved_operator_user_id(
                 _takyon_operator_user_id(session)
             )
+            current_business = str(session.get("takyon_current_business") or "").strip()
             if resolved_operator_user_id:
                 reservation_key, reserved_cents = _operator_budget_reserve(
                     operator_user_id=resolved_operator_user_id,
-                    business_slug=str(session.get("takyon_current_business") or "").strip() or None,
+                    business_slug=current_business or None,
                     reservation_key=f"tui-turn:{sid}:{uuid.uuid4().hex}",
                 )
                 turn_cost_before_usd = float(
@@ -3395,11 +3419,26 @@ def _run_prompt_submit(
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
-            result = agent.run_conversation(
-                run_message,
-                conversation_history=list(history),
-                stream_callback=_stream,
+            workspace_context = (
+                _business_workspace_execution_context(
+                    current_business,
+                    operator_user_id=resolved_operator_user_id,
+                )
+                if current_business
+                else contextlib.nullcontext(None)
             )
+            with workspace_context as workspace_home:
+                session_tokens = _set_session_context(
+                    session["session_key"],
+                    operator_user_id=_takyon_operator_user_id(session),
+                    workspace_root=str(workspace_home or ""),
+                    business_slug=current_business,
+                )
+                result = agent.run_conversation(
+                    run_message,
+                    conversation_history=list(history),
+                    stream_callback=_stream,
+                )
 
             last_reasoning = None
             status_note = None

@@ -7,6 +7,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+from gateway.session_context import get_session_env
+from plugins.takyon import storage
 from tui_gateway import server
 from tui_gateway.transport import bind_transport, reset_transport
 
@@ -3634,6 +3636,64 @@ class _ImmediateThread:
         self._target()
 
 
+def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    bucket = home / "storage"
+    seed = tmp_path / "seed"
+    (seed / "research").mkdir(parents=True, exist_ok=True)
+    (seed / "research" / "seed.md").write_text("seed\n")
+    storage.sync_up(storage.LocalStorageBackend(bucket), "acme", seed)
+
+    monkeypatch.setenv("TAKYON_HOME", str(home))
+    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    monkeypatch.delenv("TAKYON_STORAGE_LOCAL_DIR", raising=False)
+
+    seen: dict[str, str] = {}
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            workspace_root = get_session_env("TAKYON_SESSION_WORKSPACE_ROOT")
+            seen["workspace_root"] = workspace_root
+            seen["business_slug"] = get_session_env("TAKYON_SESSION_BUSINESS_SLUG")
+            workspace = Path(workspace_root) / "businesses" / "acme"
+            assert (workspace / "research" / "seed.md").read_text() == "seed\n"
+            (workspace / "metrics").mkdir(parents=True, exist_ok=True)
+            (workspace / "metrics" / "turn.md").write_text("fresh\n")
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "hello"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert seen["business_slug"] == "acme"
+        assert seen["workspace_root"]
+        assert not Path(seen["workspace_root"]).exists()
+
+        resumed = tmp_path / "resumed"
+        storage.sync_down(storage.LocalStorageBackend(bucket), "acme", resumed)
+        assert (resumed / "metrics" / "turn.md").read_text() == "fresh\n"
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
     """maybe_auto_title is called after a successful (complete) prompt."""
 
@@ -4677,6 +4737,19 @@ def test_make_agent_defaults_to_90(monkeypatch):
         server._make_agent("sid1", "key1")
 
     assert mock_agent.call_args.kwargs["max_iterations"] == 90
+
+
+def test_make_agent_restricts_takyon_toolsets(monkeypatch):
+    _setup_make_agent_mocks(monkeypatch, {})
+
+    with patch("run_agent.AIAgent") as mock_agent:
+        server._make_agent("sid1", "key1")
+
+    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["takyon", "web", "skills", "todo"]
+    assert "takyon-authority" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
+    assert "terminal" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
+    assert "file" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
+    assert "code_execution" in (mock_agent.call_args.kwargs["disabled_toolsets"] or [])
 
 
 def test_make_agent_handles_null_agent_config(monkeypatch):

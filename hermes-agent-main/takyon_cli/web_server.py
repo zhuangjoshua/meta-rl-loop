@@ -484,6 +484,7 @@ def _auth0_public_path(path: str) -> bool:
         "/dashboard-plugins/",
         "/v1/",
         "/internal/ai-gateway/",
+        "/internal/creative-gateway/",
     ))
 
 
@@ -1892,6 +1893,74 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "owned_business_count": len(principal.business_slugs),
             "status": principal.status,
             "user_id": str(principal.user_id),
+        }
+
+
+@app.get("/api/takyon/businesses/{slug}/creative-credits")
+async def get_takyon_business_creative_credits(request: Request, slug: str) -> dict[str, Any]:
+    """Read-only business creative-credit snapshot for the dashboard UI."""
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        return {
+            "available": False,
+            "business_slug": slug,
+            "reason": "operator_principal_unavailable",
+        }
+    if slug not in principal.business_slugs:
+        return {
+            "available": False,
+            "business_slug": slug,
+            "reason": "not_found",
+        }
+    try:
+        from plugins.takyon import business_credits
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return {
+                "available": False,
+                "business_slug": slug,
+                "reason": "postgres_required",
+            }
+
+        import psycopg
+
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured:
+            return {
+                "available": False,
+                "business_slug": slug,
+                "reason": "database_unconfigured",
+            }
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
+            if row is None:
+                return {
+                    "available": False,
+                    "business_slug": slug,
+                    "reason": "not_found",
+                }
+            balances = business_credits.get_business_credit_balances(conn, slug)
+        finally:
+            conn.close()
+
+        return {
+            "available": True,
+            "business_slug": slug,
+            "balance_credits": int(balances.balance_credits),
+            "reserved_credits": int(balances.reserved_credits),
+        }
+    except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
+        _log.warning("dashboard business creative credits read failed for %s: %s", slug, exc)
+        return {
+            "available": False,
+            "business_slug": slug,
+            "reason": "read_failed",
         }
 
 
@@ -6041,6 +6110,7 @@ def _mount_postgres_runtime_routes() -> None:
 
         from plugins.takyon.ai_gateway import build_ai_gateway_router, get_gateway_conn
         from plugins.takyon.control_api import build_control_router, get_control_conn
+        from plugins.takyon.creative_gateway import build_creative_gateway_router
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
@@ -6048,7 +6118,7 @@ def _mount_postgres_runtime_routes() -> None:
         except RuntimeNotConfigured:
             _log.warning(
                 "Postgres backend enabled but no DATABASE_URL is configured; "
-                "skipping /v1 and /internal/ai-gateway mount"
+                "skipping /v1, /internal/ai-gateway, and /internal/creative-gateway mount"
             )
             return
 
@@ -6061,10 +6131,13 @@ def _mount_postgres_runtime_routes() -> None:
 
         app.include_router(build_control_router())
         app.include_router(build_ai_gateway_router())
+        app.include_router(build_creative_gateway_router())
         app.dependency_overrides[get_control_conn] = control_conn
         app.dependency_overrides[get_gateway_conn] = control_conn
         _POSTGRES_RUNTIME_ROUTES_MOUNTED = True
-        _log.info("Mounted Postgres control and AI gateway routers into the dashboard host.")
+        _log.info(
+            "Mounted Postgres control, AI gateway, and creative gateway routers into the dashboard host."
+        )
     except Exception as exc:  # noqa: BLE001 - do not prevent the dashboard from starting
         _log.warning("Failed to mount Postgres control/gateway routers: %s", exc)
 

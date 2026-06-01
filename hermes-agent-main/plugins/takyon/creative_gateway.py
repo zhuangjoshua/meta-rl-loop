@@ -1,0 +1,636 @@
+"""Internal creative gateway — the server-side broker for live creative/ad actions.
+
+This mirrors the AI gateway pattern narrowly for spendful creative operations: the caller keeps
+local planning, dry-run, receipts, and asset records, while the gateway owns the live provider
+credential use plus creative-credit reserve/commit/release.
+
+Calls are machine-facing only and require the dashboard session token header. The gateway never
+returns provider secrets; it returns only the result payload needed for the caller to persist
+durable Takyon truth outside this boundary.
+"""
+
+from __future__ import annotations
+
+import hmac
+import json
+import mimetypes
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends, Header, HTTPException
+
+from .control_api import get_control_conn
+
+_SESSION_HEADER_NAME = "X-Takyon-Session-Token"
+_UNAUTH_HEADERS = {"WWW-Authenticate": _SESSION_HEADER_NAME}
+
+
+def _core():
+    from . import core
+
+    return core
+
+
+def _expected_session_token() -> str:
+    token = str(os.getenv("TAKYON_DASHBOARD_SESSION_TOKEN") or "").strip()
+    if token:
+        return token
+    home = Path(os.getenv("TAKYON_HOME") or (Path.home() / ".takyon"))
+    try:
+        return (home / "dashboard_session_token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _require_internal_session(
+    session_token: str | None = Header(default=None, alias=_SESSION_HEADER_NAME),
+) -> None:
+    expected = _expected_session_token()
+    if not expected:
+        raise HTTPException(status_code=503, detail="dashboard_session_token_unavailable")
+    supplied = str(session_token or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_dashboard_session_token",
+            headers=_UNAUTH_HEADERS,
+        )
+
+
+def build_creative_gateway_router() -> APIRouter:
+    router = APIRouter(prefix="/internal/creative-gateway")
+
+    @router.post("/ugc-render")
+    def ugc_render(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        credits = core._creative_credit_backend()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="idempotency_key is required")
+
+        brief_rel = core._safe_relpath(str(body.get("brief_path") or "").strip(), field="brief_path").as_posix()
+        script_raw = str(body.get("script_path") or "").strip()
+        script_rel = core._safe_relpath(script_raw, field="script_path").as_posix() if script_raw else ""
+        slug = core._file_slug(
+            str(body.get("slug") or Path(script_rel or brief_rel).stem or "ugc-ad"),
+            "ugc-ad",
+        )
+        brief_abs = store._resolve_business_file(business, brief_rel)
+        if not brief_abs.is_file():
+            raise HTTPException(status_code=400, detail=f"brief file not found: {brief_rel}")
+        if script_rel:
+            script_abs = store._resolve_business_file(business, script_rel)
+            if not script_abs.is_file():
+                raise HTTPException(status_code=400, detail=f"script file not found: {script_rel}")
+
+        script_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "ugc-video-ad"
+            / "scripts"
+            / "build_ad.py"
+        )
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--brief",
+            brief_rel,
+            "--out-root",
+            "product",
+            "--slug",
+            slug,
+            "--transition-mode",
+            str(body.get("transition_mode") or "continuity"),
+            "--env-file",
+            str(body.get("env_file") or ".env"),
+        ]
+        if script_rel:
+            cmd.extend(["--script", script_rel])
+        if core._boolish(body.get("jumpcuts"), default=False):
+            cmd.append("--jumpcuts")
+        if core._boolish(body.get("skip_post"), default=False):
+            cmd.append("--skip-post")
+        if body.get("workdir"):
+            cmd.extend(["--workdir", str(body.get("workdir"))])
+
+        reservation_key = f"{idempotency_key}:creative-credits"
+        try:
+            credits.open_business_credit_account(conn, business)
+            credits.reserve_credits(
+                conn,
+                business,
+                core._creative_credit_total_cost("ugc_ad_generate"),
+                reservation_key,
+                metadata={
+                    "action": "ugc_ad_generate",
+                    "slug": slug,
+                    "brief_path": brief_rel,
+                    "script_path": script_rel or None,
+                },
+            )
+        except credits.InsufficientCreativeCredits as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_insufficient_creative_credits",
+                "requested_credits": core._creative_credit_total_cost("ugc_ad_generate"),
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+
+        finalized = False
+        try:
+            run = subprocess.run(
+                cmd,
+                cwd=str(store._business_root(business)),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if run.returncode != 0:
+                balances = credits.release_credits(
+                    conn,
+                    reservation_key,
+                    metadata={
+                        "action": "ugc_ad_generate",
+                        "slug": slug,
+                        "error": run.stderr or run.stdout or f"exit {run.returncode}",
+                    },
+                )
+                finalized = True
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "stdout": run.stdout,
+                    "stderr": run.stderr,
+                    "error": run.stderr or run.stdout or f"ugc-video-ad exited {run.returncode}",
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
+                }
+
+            payload = core._parse_ugc_write_payload(run.stdout)
+            balances = credits.commit_credits(
+                conn,
+                reservation_key,
+                metadata={
+                    "action": "ugc_ad_generate",
+                    "slug": slug,
+                    "provider": "openai+fal",
+                },
+            )
+            finalized = True
+            return {
+                "success": True,
+                "status": "created",
+                "write_payload": payload,
+                "credits_charged": core._creative_credit_total_cost("ugc_ad_generate"),
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "stdout": run.stdout,
+                "stderr": run.stderr,
+            }
+        except Exception as exc:
+            if not finalized:
+                try:
+                    credits.release_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "ugc_ad_generate",
+                            "slug": slug,
+                            "error": str(exc),
+                        },
+                    )
+                except Exception:
+                    pass
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post("/static-render")
+    def static_render(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        credits = core._creative_credit_backend()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="idempotency_key is required")
+
+        input_rel = core._safe_relpath(str(body.get("input_path") or "").strip(), field="input_path").as_posix()
+        input_abs = store._resolve_business_file(business, input_rel)
+        if not input_abs.exists():
+            raise HTTPException(status_code=400, detail=f"static ad input not found: {input_rel}")
+
+        slug = core._file_slug(str(body.get("slug") or Path(input_rel).stem or "static-ad"), "static-ad")
+        publication_rel = f"product/static-ads/{slug}"
+        requested = max(1, core._count_static_specs(input_abs))
+
+        script_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "static-ad-creative-generator"
+            / "scripts"
+            / "batch_generate.py"
+        )
+        backend = str(body.get("backend") or "openai")
+        cmd = [
+            sys.executable,
+            str(script_path),
+            input_rel,
+            "-o",
+            publication_rel,
+            "--backend",
+            backend,
+            "--quality",
+            str(body.get("quality") or "high"),
+        ]
+        if core._boolish(body.get("crop"), default=False):
+            cmd.append("--crop")
+        if core._boolish(body.get("strict"), default=False):
+            cmd.append("--strict")
+        if core._boolish(body.get("stop_on_error"), default=False):
+            cmd.append("--stop-on-error")
+        if body.get("aspect_ratio"):
+            cmd.extend(["--aspect-ratio", str(body.get("aspect_ratio"))])
+        if body.get("max"):
+            cmd.extend(["--max", str(body.get("max"))])
+
+        reservation_key = f"{idempotency_key}:creative-credits"
+        requested_credits = core._creative_credit_total_cost("static_ad_generate", units=requested)
+        try:
+            credits.open_business_credit_account(conn, business)
+            credits.reserve_credits(
+                conn,
+                business,
+                requested_credits,
+                reservation_key,
+                metadata={
+                    "action": "static_ad_generate",
+                    "slug": slug,
+                    "input_path": input_rel,
+                    "requested_creatives": requested,
+                },
+            )
+        except credits.InsufficientCreativeCredits as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_insufficient_creative_credits",
+                "requested_credits": requested_credits,
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+
+        finalized = False
+        try:
+            run = subprocess.run(
+                cmd,
+                cwd=str(store._business_root(business)),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            manifest_rel = f"{publication_rel}/manifest.json"
+            manifest_abs = store._resolve_business_file(business, manifest_rel)
+            manifest: dict[str, Any] = {}
+            if manifest_abs.is_file():
+                try:
+                    manifest = json.loads(manifest_abs.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = {}
+            succeeded = int(manifest.get("succeeded") or 0)
+            failed = int(manifest.get("failed") or 0)
+            if run.returncode != 0:
+                if succeeded > 0:
+                    balances = credits.commit_credits(
+                        conn,
+                        reservation_key,
+                        actual_credits=core._creative_credit_total_cost(
+                            "static_ad_generate", units=succeeded
+                        ),
+                        metadata={
+                            "action": "static_ad_generate",
+                            "slug": slug,
+                            "input_path": input_rel,
+                            "requested_creatives": requested,
+                            "succeeded_creatives": succeeded,
+                        },
+                    )
+                else:
+                    balances = credits.release_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "static_ad_generate",
+                            "slug": slug,
+                            "error": run.stderr or run.stdout or f"exit {run.returncode}",
+                        },
+                    )
+                finalized = True
+                return {
+                    "success": False,
+                    "status": "partial_failed" if succeeded > 0 else "failed",
+                    "manifest": manifest_rel if manifest_abs.is_file() else None,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "requested_credits": requested_credits,
+                    "credits_charged": core._creative_credit_total_cost(
+                        "static_ad_generate", units=succeeded
+                    ),
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
+                    "stdout": run.stdout,
+                    "stderr": run.stderr,
+                    "error": run.stderr or run.stdout or f"static ad generator exited {run.returncode}",
+                }
+
+            charged_units = max(1, succeeded or requested)
+            balances = credits.commit_credits(
+                conn,
+                reservation_key,
+                actual_credits=core._creative_credit_total_cost(
+                    "static_ad_generate", units=charged_units
+                ),
+                metadata={
+                    "action": "static_ad_generate",
+                    "slug": slug,
+                    "input_path": input_rel,
+                    "requested_creatives": requested,
+                    "succeeded_creatives": charged_units,
+                    "provider": backend,
+                },
+            )
+            finalized = True
+            return {
+                "success": True,
+                "status": "created",
+                "manifest": manifest_rel if manifest_abs.is_file() else None,
+                "succeeded": succeeded or requested,
+                "failed": failed,
+                "credits_charged": core._creative_credit_total_cost(
+                    "static_ad_generate", units=charged_units
+                ),
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "stdout": run.stdout,
+                "stderr": run.stderr,
+            }
+        except Exception as exc:
+            if not finalized:
+                try:
+                    credits.release_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "static_ad_generate",
+                            "slug": slug,
+                            "error": str(exc),
+                        },
+                    )
+                except Exception:
+                    pass
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post("/meta-launch")
+    def meta_launch(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        credits = core._creative_credit_backend()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        mode = str(body.get("mode") or "launch").strip().lower()
+        cfg = core._meta_config(require_token=True)
+        if mode == "preflight":
+            identity = core._meta_graph("GET", "me", {"fields": "id,name"}, cfg)
+            accounts = core._meta_graph(
+                "GET",
+                "me/adaccounts",
+                {"fields": "id,account_id,name,account_status,currency,is_prepay_account"},
+                cfg,
+            )
+            return {
+                "success": True,
+                "mode": "preflight",
+                "read_only": True,
+                "business": business,
+                "graph_version": cfg["version"],
+                "identity": identity,
+                "ad_accounts": accounts.get("data") if isinstance(accounts, dict) else None,
+                "default_ad_account_id": cfg.get("ad_account_id") or None,
+                "default_page_id": cfg.get("page_id") or None,
+            }
+
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="idempotency_key is required")
+        plan = core._meta_launch_plan(body, cfg)
+        if not plan["ad_account_id"]:
+            raise HTTPException(status_code=400, detail="live launch requires META_AD_ACCOUNT_ID or ad_account_id")
+        if not plan["page_id"]:
+            raise HTTPException(status_code=400, detail="live launch requires META_PAGE_ID or ad.page_id")
+
+        video_abs: Path | None = None
+        image_abs: Path | None = None
+        if plan["asset_kind"] == "video":
+            video_abs = store._resolve_business_file(business, plan["ad_video_path"])
+            if not video_abs.is_file():
+                raise HTTPException(status_code=400, detail=f"ad video not found at {plan['ad_video_path']}")
+        else:
+            image_abs = store._resolve_business_file(business, str(plan["ad_image_path"] or ""))
+            if not image_abs.is_file():
+                raise HTTPException(status_code=400, detail=f"ad image not found at {plan['ad_image_path']}")
+
+        cfg["ad_account_id"] = plan["ad_account_id"]
+        acct = core._meta_account_path(plan["ad_account_id"])
+        reservation_key = f"{idempotency_key}:creative-credits"
+        requested_credits = core._creative_credit_total_cost("meta_ad_launch")
+        try:
+            credits.open_business_credit_account(conn, business)
+            credits.reserve_credits(
+                conn,
+                business,
+                requested_credits,
+                reservation_key,
+                metadata={
+                    "action": "meta_ad_launch",
+                    "slug": plan["slug"],
+                    "asset_kind": plan["asset_kind"],
+                    "ad_video_path": plan["ad_video_path"],
+                    "ad_image_path": plan.get("ad_image_path"),
+                },
+            )
+        except credits.InsufficientCreativeCredits as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_insufficient_creative_credits",
+                "requested_credits": requested_credits,
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+
+        created: dict[str, Any] = {}
+        finalized = False
+        try:
+            if plan["asset_kind"] == "video":
+                created["video_id"] = core._meta_upload_advideo(video_abs, cfg, name=plan["ad_name"])
+                image_url = plan["image_url"] or core._meta_video_thumbnail(created["video_id"], cfg)
+                if not image_url:
+                    raise RuntimeError(
+                        "Meta requires a thumbnail for a video creative but none was ready yet; "
+                        "pass ad.image_url or retry shortly after the video finishes processing"
+                    )
+                story_spec = {
+                    "page_id": plan["page_id"],
+                    "video_data": {
+                        "video_id": created["video_id"],
+                        "message": plan["message"],
+                        "image_url": image_url,
+                        "call_to_action": {
+                            "type": plan["call_to_action"],
+                            "value": {"link": plan["link"]},
+                        },
+                    },
+                }
+            else:
+                uploaded = core._meta_upload_adimage(image_abs, cfg)
+                created["image_hash"] = uploaded["hash"]
+                image_url = plan["image_url"] or uploaded.get("url")
+                story_spec = {
+                    "page_id": plan["page_id"],
+                    "link_data": {
+                        "link": plan["link"],
+                        "message": plan["message"],
+                        "image_hash": uploaded["hash"],
+                        "call_to_action": {
+                            "type": plan["call_to_action"],
+                            "value": {"link": plan["link"]},
+                        },
+                    },
+                }
+
+            creative = core._meta_graph("POST", f"{acct}/adcreatives", {
+                "name": f"{plan['ad_name']} creative",
+                "object_story_spec": json.dumps(story_spec),
+            }, cfg)
+            created["creative_id"] = str(creative.get("id") or "").strip()
+
+            campaign = core._meta_graph("POST", f"{acct}/campaigns", {
+                "name": plan["campaign_name"],
+                "objective": plan["objective"],
+                "status": "PAUSED",
+                "special_ad_categories": "[]",
+            }, cfg)
+            created["campaign_id"] = str(campaign.get("id") or "").strip()
+
+            adset = core._meta_graph("POST", f"{acct}/adsets", {
+                "name": plan["adset_name"],
+                "campaign_id": created["campaign_id"],
+                "status": "PAUSED",
+                "daily_budget": plan["daily_budget_cents"],
+                "billing_event": plan["billing_event"],
+                "optimization_goal": plan["optimization_goal"],
+                "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+                "targeting": json.dumps(plan["targeting"]),
+            }, cfg)
+            created["adset_id"] = str(adset.get("id") or "").strip()
+
+            ad = core._meta_graph("POST", f"{acct}/ads", {
+                "name": plan["ad_name"],
+                "adset_id": created["adset_id"],
+                "status": "PAUSED",
+                "creative": json.dumps({"creative_id": created["creative_id"]}),
+            }, cfg)
+            created["ad_id"] = str(ad.get("id") or "").strip()
+
+            balances = credits.commit_credits(
+                conn,
+                reservation_key,
+                metadata={
+                    "action": "meta_ad_launch",
+                    "slug": plan["slug"],
+                    "asset_kind": plan["asset_kind"],
+                    "provider": "meta",
+                    "ids": created,
+                },
+            )
+            finalized = True
+            return {
+                "success": True,
+                "status": "created_paused",
+                "paused": True,
+                "ids": created,
+                "thumbnail_url": image_url,
+                "graph_version": cfg["version"],
+                "ad_account_id": acct,
+                "page_id": plan["page_id"],
+                "credits_charged": requested_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+            }
+        except Exception as exc:
+            try:
+                if created:
+                    balances = credits.commit_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "meta_ad_launch",
+                            "status": "partial_failed",
+                            "created": created,
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    balances = credits.release_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "meta_ad_launch",
+                            "status": "failed",
+                            "error": str(exc),
+                        },
+                    )
+                finalized = True
+                return {
+                    "success": False,
+                    "status": "partial_failed" if created else "failed",
+                    "paused": True,
+                    "ids": created or None,
+                    "error": str(exc),
+                    "credits_charged": requested_credits if created else 0,
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
+                }
+            except Exception as release_exc:
+                if not finalized:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"{exc} (credit finalization also failed: {release_exc})",
+                    ) from exc
+                raise
+
+    return router

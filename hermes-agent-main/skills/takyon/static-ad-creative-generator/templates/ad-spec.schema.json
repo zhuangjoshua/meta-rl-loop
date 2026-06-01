@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://static-ad-creative-generator/ad-spec.schema.json",
+  "title": "Static Ad Creative Spec",
+  "description": "Strict, backend-agnostic specification for a single static performance-ad creative. Strategy is decided here BEFORE any image model is called. The image backend never invents marketing strategy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "creative_id",
+    "platform",
+    "placement",
+    "aspect_ratio",
+    "goal",
+    "audience",
+    "strategy",
+    "visual",
+    "product",
+    "copy",
+    "layout",
+    "prompting",
+    "qa"
+  ],
+  "properties": {
+    "creative_id": {
+      "type": "string",
+      "description": "Stable, filesystem-safe id. Convention: <angle>-<nn>, e.g. pain-agitation-01.",
+      "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["meta", "reddit"],
+      "description": "Distribution platform. 'meta' covers Facebook + Instagram."
+    },
+    "placement": {
+      "type": "string",
+      "enum": ["feed", "story", "reels", "reddit_feed", "reddit_comments"],
+      "description": "Surface inside the platform. Must be consistent with platform and aspect_ratio (see references/platform-specs.md)."
+    },
+    "aspect_ratio": {
+      "type": "string",
+      "pattern": "^[0-9]{1,2}(\\.[0-9]{1,2})?:[0-9]{1,2}(\\.[0-9]{1,2})?$",
+      "description": "Target aspect ratio as 'W:H' (decimals allowed, e.g. 1.91:1). Any ratio from 1:3 to 3:1 is supported and sized automatically for gpt-image-2. Common ad ratios — Meta feed: 1:1, 4:5, 1.91:1; Meta story/reels: 9:16; Reddit: 1:1, 4:5, 1.91:1. One creative can be rendered at several ratios via the generator's --aspect-ratio flag. See references/platform-specs.md."
+    },
+    "goal": {
+      "type": "string",
+      "enum": ["clicks", "leads", "trials", "purchases", "awareness"],
+      "description": "Primary conversion objective this creative is optimized for."
+    },
+    "audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["persona", "pain", "desire", "awareness_level"],
+      "properties": {
+        "persona": { "type": "string", "minLength": 3, "description": "Who this speaks to, in their own self-image." },
+        "pain": { "type": "string", "minLength": 3, "description": "The concrete problem state they feel." },
+        "desire": { "type": "string", "minLength": 3, "description": "The end state they actually want." },
+        "awareness_level": {
+          "type": "string",
+          "enum": ["unaware", "problem_aware", "solution_aware", "product_aware", "most_aware"],
+          "description": "Eugene Schwartz awareness stage. Drives how much the creative must educate vs. close."
+        }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["angle", "hook", "promise", "objection_addressed", "proof_type"],
+      "properties": {
+        "angle": {
+          "type": "string",
+          "minLength": 3,
+          "description": "One of the angles in references/angle-taxonomy.md (e.g. pain_agitation, before_after, fake_ui, founder_confession, reddit_native, imessage, product_proof, social_proof, comparison, contrarian, meme_native, objection_handling, urgency_offer, transformation)."
+        },
+        "hook": { "type": "string", "minLength": 3, "description": "The single scroll-stopping idea, in the audience's language." },
+        "promise": { "type": "string", "minLength": 3, "description": "The payoff if they engage." },
+        "objection_addressed": { "type": "string", "description": "The specific doubt this creative defuses." },
+        "proof_type": {
+          "type": "string",
+          "enum": ["demo", "testimonial", "stat", "visual_metaphor", "comparison", "social_proof", "founder"],
+          "description": "The form of evidence carrying the claim."
+        }
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["template", "style", "scene", "subject", "composition", "focal_point", "props", "background", "lighting"],
+      "properties": {
+        "template": { "type": "string", "description": "A template id from references/visual-templates.md (e.g. hero_product, before_after_split, stat_card, native_social_post)." },
+        "style": { "type": "string", "description": "Art direction / aesthetic (e.g. 'candid iPhone UGC, slightly imperfect', 'clean editorial studio')." },
+        "scene": { "type": "string", "description": "What is literally happening in frame." },
+        "subject": { "type": "string", "description": "The primary subject (person, product, UI, object)." },
+        "composition": { "type": "string", "description": "Framing, rule-of-thirds, negative space for text, shot type." },
+        "focal_point": { "type": "string", "description": "The one thing the eye must land on first." },
+        "props": { "type": "array", "items": { "type": "string" }, "description": "Supporting objects. Keep the count low (entity-limit rule)." },
+        "background": { "type": "string", "description": "Environment / backdrop." },
+        "lighting": { "type": "string", "description": "Light direction, quality, mood." }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["representation", "must_show", "must_not_show"],
+      "properties": {
+        "representation": { "type": "string", "description": "How the product appears (packshot, in-hand, on-screen UI, result-only, implied)." },
+        "must_show": { "type": "array", "items": { "type": "string" }, "description": "Non-negotiable on-brand elements (logo, signature color, real UI label)." },
+        "must_not_show": { "type": "array", "items": { "type": "string" }, "description": "Hard exclusions: competitor marks, fake third-party logos, fabricated endorsements, off-brand colors, policy-risky imagery." }
+      }
+    },
+    "copy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overlay_text", "headline", "primary_text", "cta"],
+      "properties": {
+        "overlay_text": { "type": "string", "description": "Text BAKED INTO the image. Keep it short enough to read at thumb-stopping speed (see platform-specs.md)." },
+        "headline": { "type": "string", "description": "Platform headline field (outside the image)." },
+        "primary_text": { "type": "string", "description": "Platform primary/body text (outside the image)." },
+        "cta": { "type": "string", "description": "Call to action (button label or in-copy)." }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["overlay_position", "typography", "safe_zones", "logo_position"],
+      "properties": {
+        "overlay_position": {
+          "type": "string",
+          "enum": ["top", "center", "bottom", "left", "right"],
+          "description": "Where overlay_text sits in frame."
+        },
+        "typography": { "type": "string", "description": "Type direction: weight, case, scale, contrast treatment for legibility." },
+        "safe_zones": { "type": "string", "description": "Areas to keep clear of platform UI chrome (see platform-specs.md)." },
+        "logo_position": { "type": "string", "description": "Where brand mark sits, or 'none'." }
+      }
+    },
+    "prompting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final_image_prompt", "negative_constraints", "reference_images"],
+      "properties": {
+        "final_image_prompt": {
+          "type": "string",
+          "description": "The art-directed scene description (no strategy invention). The prompt compiler wraps this with structural directives; may be left empty for the compiler to synthesize from visual.*."
+        },
+        "negative_constraints": { "type": "array", "items": { "type": "string" }, "description": "Things to avoid (garbled text, extra fingers, fake logos, busy backgrounds)." },
+        "reference_images": { "type": "array", "items": { "type": "string" }, "description": "Local paths/URLs of reference/brand images for image-to-image (used via the edits endpoint)." }
+      }
+    },
+    "qa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readability_check", "native_platform_check", "policy_risks", "iteration_notes"],
+      "properties": {
+        "readability_check": { "type": "string", "description": "Verdict on whether the hook reads in-feed at thumbnail size." },
+        "native_platform_check": { "type": "string", "description": "Verdict on whether it looks native vs. like an ad." },
+        "policy_risks": { "type": "array", "items": { "type": "string" }, "description": "Flagged policy concerns from references/policy-checks.md (empty array = none found)." },
+        "iteration_notes": { "type": "string", "description": "What to try next / known weaknesses." }
+      }
+    }
+  }
+}

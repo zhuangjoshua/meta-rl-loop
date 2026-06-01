@@ -11,8 +11,16 @@ metadata:
     category: takyon
     tags: [ugc, video, ad, kling, marketing]
     related_skills: []
-    requires_toolsets: []
-    requires_tools: [business_ugc_ad_write]
+    requires_toolsets: [takyon]
+    requires_tools: [business_ugc_ad_generate]
+    routing:
+      owns: per-business UGC video ad asset generation from brief to finished mp4, script, and reference image
+      when_to_use:
+        - the business needs a short social talking-head video ad
+        - the asset should be published under `product/ugc-ads/` as a business-scoped creative deliverable
+      do_not_use_for:
+        - screen-recording or UI-demo videos
+        - non-business or multi-business assets
   takyon:
     scope: business
     allowed_roots: [product]
@@ -59,7 +67,7 @@ multi-business assets (this skill is business-scoped).
 
 - Primary root: `product/`
 - Publication paths: `product/ugc-ads/<slug>/ad.mp4`, `.../script.json`, `.../reference.png`
-- Tool used by this skill: **`business_ugc_ad_write`**
+- Tool used by this skill: **`business_ugc_ad_generate`** for the live path (`business_ugc_ad_write` is committed internally by that tool)
 - Main entrypoint: `${HERMES_SKILL_DIR}/scripts/build_ad.py`
 - Free planning: `build_ad.py --brief <brief> --dry-run` (no API calls, no spend)
 
@@ -69,9 +77,9 @@ multi-business assets (this skill is business-scoped).
 - **`FAL_KEY`** — Kling image-to-video via fal.ai (env or `.env`).
 - **`ffmpeg` + `ffprobe`** on `PATH` — stitching and post.
 - Python deps for the live path: `httpx`, `fal-client`. (`--dry-run` needs neither.)
-- The **`business_ugc_ad_write`** tool must be registered (gated in frontmatter
-  `metadata.hermes.requires_tools`). The agent calls it to record the published asset;
-  the scripts never call it themselves.
+- The **`business_ugc_ad_generate`** tool must be registered (gated in frontmatter
+  `metadata.hermes.requires_tools`). Use it for any live spendful generation so creative
+  credits and the canonical receipt path stay truthful.
 
 ## References
 
@@ -100,10 +108,7 @@ Common path:
 python ${HERMES_SKILL_DIR}/scripts/build_ad.py \
   --brief assets/example-brief.json --dry-run
 
-# 2) FULL: generate + stitch + post + publish into product/ugc-ads/<slug>/.
-python ${HERMES_SKILL_DIR}/scripts/build_ad.py \
-  --brief path/to/brief.json --script path/to/script.json
-# (omit --script if the brief embeds a "script" key)
+# 2) LIVE / CANONICAL: call business_ugc_ad_generate so credits + receipt are enforced.
 ```
 
 Useful flags: `--jumpcuts` (extra silence-drop reframe cuts in post), `--skip-post`,

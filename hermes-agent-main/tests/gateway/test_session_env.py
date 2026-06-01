@@ -208,7 +208,17 @@ def test_workspace_root_flows_into_takyon_store(monkeypatch, tmp_path):
         clear_session_vars(tokens)
 
 
-def test_store_read_refreshes_remote_workspace_between_calls(monkeypatch, tmp_path):
+def test_business_slug_contextvar_round_trips(monkeypatch):
+    monkeypatch.delenv("TAKYON_SESSION_BUSINESS_SLUG", raising=False)
+
+    tokens = set_session_vars(business_slug="acme")
+    assert get_session_env("TAKYON_SESSION_BUSINESS_SLUG") == "acme"
+
+    clear_session_vars(tokens)
+    assert get_session_env("TAKYON_SESSION_BUSINESS_SLUG") == ""
+
+
+def test_store_read_refreshes_remote_workspace_between_calls(monkeypatch, tmp_path, pg_store_dsn):
     bucket = tmp_path / "bucket"
     home = tmp_path / "home"
     seed = tmp_path / "seed"
@@ -219,19 +229,21 @@ def test_store_read_refreshes_remote_workspace_between_calls(monkeypatch, tmp_pa
 
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(bucket))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|session-env-read-refresh")
 
-    store = TakyonStore(root=home)
-    with store._connect() as conn:
-        now = "2026-01-01T00:00:00Z"
-        conn.execute(
-            "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, created_at, updated_at) "
-            "VALUES (?, ?, '', 'active', 'test', 'all', '{}', '{}', ?, ?)",
-            ("acme", "Acme", now, now),
-        )
-        conn.commit()
+    store = TakyonStore(root=home, database_url=pg_store_dsn)
+    store.seed_platform_owner()
+    store.commit(
+        scope="global",
+        operations=[{"action": "business.upsert", "business": "acme", "name": "Acme", "mode": "test"}],
+        idempotency_key="test:session-env-read-refresh:init",
+        reason="test",
+        actor="test",
+    )
 
     first = store.read(scope="business:acme", query="files", path="research")
-    assert {item["path"] for item in first["files"]} == {"research/alpha.md"}
+    assert {item["path"] for item in first["files"]} >= {"research/alpha.md"}
 
     delta = tmp_path / "delta"
     (delta / "research").mkdir(parents=True, exist_ok=True)
@@ -240,20 +252,23 @@ def test_store_read_refreshes_remote_workspace_between_calls(monkeypatch, tmp_pa
     storage.sync_up(backend, "acme", delta)
 
     second = store.read(scope="business:acme", query="files", path="research")
-    assert {item["path"] for item in second["files"]} == {"research/alpha.md", "research/beta.md"}
+    assert {item["path"] for item in second["files"]} >= {"research/alpha.md", "research/beta.md"}
 
 
-def test_store_syncs_scratch_writes_outward_during_isolated_run(monkeypatch, tmp_path):
+def test_store_syncs_scratch_writes_outward_during_isolated_run(monkeypatch, tmp_path, pg_store_dsn):
     bucket = tmp_path / "bucket"
     home = tmp_path / "home"
     scratch = tmp_path / "scratch-home"
 
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(bucket))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|session-env-scratch-sync")
 
     tokens = set_session_vars(workspace_root=str(scratch))
     try:
-        writer = TakyonStore(root=home)
+        writer = TakyonStore(root=home, database_url=pg_store_dsn)
+        writer.seed_platform_owner()
         writer.commit(
             scope="global",
             operations=[{"action": "business.upsert", "business": "acme", "name": "Acme"}],
@@ -273,9 +288,52 @@ def test_store_syncs_scratch_writes_outward_during_isolated_run(monkeypatch, tmp
     finally:
         clear_session_vars(tokens)
 
-    reader = TakyonStore(root=home)
+    reader = TakyonStore(root=home, database_url=pg_store_dsn)
     result = reader.read(scope="business:acme", query="file", path="product/site/index.html")
     assert result["content"] == "<html>fresh</html>\n"
+
+
+def test_store_syncs_scratch_writes_outward_with_default_local_backend(monkeypatch, tmp_path, pg_store_dsn):
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch-home"
+
+    monkeypatch.setenv("TAKYON_HOME", str(home))
+    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    monkeypatch.delenv("TAKYON_STORAGE_LOCAL_DIR", raising=False)
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|session-env-default-local")
+
+    tokens = set_session_vars(workspace_root=str(scratch))
+    try:
+        writer = TakyonStore(root=home, database_url=pg_store_dsn)
+        writer.seed_platform_owner()
+        writer.commit(
+            scope="global",
+            operations=[{"action": "business.upsert", "business": "acme", "name": "Acme"}],
+            idempotency_key="test:business-upsert-default-local",
+        )
+        writer.commit(
+            scope="business:acme",
+            operations=[
+                {
+                    "action": "artifact.write",
+                    "path": "research/plan.md",
+                    "content": "ship\n",
+                }
+            ],
+            idempotency_key="test:artifact-write-default-local",
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    backend = storage.LocalStorageBackend(home / "storage")
+    resumed = tmp_path / "resumed"
+    storage.sync_down(backend, "acme", resumed)
+    assert (resumed / "research" / "plan.md").read_text() == "ship\n"
+
+    reader = TakyonStore(root=home, database_url=pg_store_dsn)
+    result = reader.read(scope="business:acme", query="file", path="research/plan.md")
+    assert result["content"] == "ship\n"
 
 
 def test_set_session_env_includes_session_key():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -22,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 try:
     from dotenv import load_dotenv
@@ -50,6 +51,7 @@ from tools.registry import tool_error, tool_result
 
 
 TAKYON_TOOLSET = "takyon"
+TAKYON_AUTHORITY_TOOLSET = "takyon-authority"
 DEFAULT_TAKYON_DIRNAME = "takyon"
 DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-7"
 MAX_READ_CHARS = 64_000
@@ -58,6 +60,34 @@ CURRENT_BUSINESS_SCHEMA_VERSION = 1
 CURRENT_BUSINESS_CAPABILITY_VERSION = 1
 BUSINESS_UPGRADE_RECEIPT = "metrics/receipts/upgrades/takyon-business-upgrade-v1.json"
 TAKYON_BUSINESS_ROOTS = ("product", "distribution", "research", "metrics")
+TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
+    {
+        "business_list_businesses",
+        "business_check_runtime_capabilities",
+        "business_upsert_business",
+        "business_delete_business",
+        "business_set_mode",
+        "business_allocate_budget",
+        "business_configure_app_budget",
+        "business_verify_product_surface",
+        "business_upsert_app_plan",
+        "business_upsert_app_customer",
+        "business_grant_app_entitlement",
+        "business_request_app_magic_link",
+        "business_verify_app_magic_link",
+        "business_read_app_account",
+        "business_create_app_checkout",
+        "business_record_stripe_webhook",
+        "business_record_app_usage",
+        "business_ugc_ad_generate",
+        "business_static_ad_generate",
+        "business_meta_ad_launch",
+        "business_set_control",
+        "business_schedule_ceo_wakeup",
+        "business_gc",
+        "business_upgrade_businesses",
+    }
+)
 NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - You are not allowed to invent backend behavior.
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
@@ -695,6 +725,58 @@ def _slugify(value: str) -> str:
             "business slug must start with a lowercase letter/number and contain only a-z, 0-9, '_' or '-'"
         )
     return raw
+
+
+def takyon_toolset_name(name: str) -> str:
+    return TAKYON_AUTHORITY_TOOLSET if str(name or "") in TAKYON_AUTHORITY_TOOL_NAMES else TAKYON_TOOLSET
+
+
+def _session_business_slug() -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        raw = get_session_env("TAKYON_SESSION_BUSINESS_SLUG", "")
+    except Exception:
+        raw = os.getenv("TAKYON_SESSION_BUSINESS_SLUG", "")
+    raw = str(raw or "").strip()
+    return _slugify(raw) if raw else ""
+
+
+def _resolved_business_slug(args: Mapping[str, Any] | None = None, *, required: bool = False) -> str:
+    args = args or {}
+    requested = str(args.get("business") or args.get("business_slug") or "").strip()
+    requested_slug = _slugify(requested) if requested else ""
+    session_slug = _session_business_slug()
+    if session_slug:
+        if requested_slug and requested_slug != session_slug:
+            raise TakyonError(f"business is bound to the current session: {session_slug}")
+        business = session_slug
+    else:
+        business = requested_slug
+    if required and not business:
+        raise TakyonError("business is required")
+    return business
+
+
+def _business_slug(args: Mapping[str, Any] | None, *, required: bool = False) -> str:
+    return _resolved_business_slug(args or {}, required=required)
+
+
+def _normalize_business_scope(scope: str | None, *, business: str = "") -> str:
+    requested_scope = str(scope or "").strip()
+    session_slug = _session_business_slug()
+    if session_slug:
+        allowed_root = f"business:{session_slug}"
+        if requested_scope:
+            if requested_scope != allowed_root and not requested_scope.startswith(f"{allowed_root}/"):
+                raise TakyonError(f"scope is bound to the current session business: {allowed_root}")
+            return requested_scope
+        return allowed_root
+    if requested_scope:
+        return requested_scope
+    if business:
+        return f"business:{business}"
+    return "global"
 
 
 def _normalize_work_focus(value: Any, *, default: str | None = "all") -> str | None:
@@ -2120,6 +2202,22 @@ def _canonical_business_relpath(rel: str) -> str:
     return normalized
 
 
+def _canonical_business_output_relpath(rel: str, *, field: str = "business path") -> str:
+    normalized = _canonical_business_relpath(rel)
+    if normalized in {"", "."}:
+        raise TakyonError(
+            f"{field} must stay under one of "
+            + ", ".join(f"{root}/" for root in TAKYON_BUSINESS_ROOTS)
+        )
+    parts = Path(normalized).parts
+    if not parts or parts[0] not in TAKYON_BUSINESS_ROOTS:
+        raise TakyonError(
+            f"{field} must stay under one of "
+            + ", ".join(f"{root}/" for root in TAKYON_BUSINESS_ROOTS)
+        )
+    return normalized
+
+
 def _validate_brain_index_completion_gate(rel: str, content: str) -> None:
     if rel != "research/index.md":
         return
@@ -2973,13 +3071,20 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
 
 
 def _db_backend() -> str:
-    """Which engine the operator store opens. Default ``sqlite`` keeps every existing call site and
-    the whole test suite on the historical engine; an explicit ``TAKYON_DB_BACKEND=postgres`` opts a
-    process onto the Postgres-backed seam (the operator tables ported by migration 0011). Deliberately
-    a separate, explicit flag — NOT auto-detected from DATABASE_URL — so a developer or CI run that
-    merely *has* DATABASE_URL set for the leaf modules does not silently flip the operator store onto
-    Postgres. Parallels storage.py's ``TAKYON_STORAGE_BACKEND``."""
-    return (os.getenv("TAKYON_DB_BACKEND") or "sqlite").strip().lower()
+    """The Takyon operator/business store is Postgres-only.
+
+    ``TAKYON_DB_BACKEND`` now exists only as a loud stale-config guard: any non-empty value other than
+    ``postgres`` is rejected instead of silently reviving the retired SQLite control plane.
+    ``DATABASE_URL`` / ``POSTGRES_URL`` / ``POSTGRES_PRISMA_URL`` remain the canonical runtime DSN
+    inputs via ``resolve_database_url``.
+    """
+    raw = str(os.getenv("TAKYON_DB_BACKEND") or "").strip().lower()
+    if raw and raw != "postgres":
+        raise RuntimeError(
+            "legacy Takyon SQLite backend has been removed; "
+            "unset TAKYON_DB_BACKEND or set it to 'postgres'"
+        )
+    return "postgres"
 
 
 class _PGConn:
@@ -3051,7 +3156,7 @@ class _PGConn:
 
 
 class TakyonStore:
-    """File + SQLite store for isolated business state and scoped workspaces."""
+    """File + Postgres-backed store for isolated business state and scoped workspaces."""
 
     def __init__(
         self,
@@ -3063,8 +3168,7 @@ class TakyonStore:
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
         self.root = base.resolve()
         self.db_path = self.root / "state.sqlite3"
-        # Explicit Postgres DSN for the postgres backend (tests point this at a throwaway DB). When
-        # None, the postgres path resolves DATABASE_URL/POSTGRES_URL via runtime_app. Unused on SQLite.
+        # Explicit Postgres DSN for tests/callers that want a throwaway DB instead of the runtime env.
         self._database_url = database_url
         session_user_id = ""
         session_workspace_root = ""
@@ -3094,23 +3198,18 @@ class TakyonStore:
         )
         self._workspace_sync_cache: set[str] = set()
 
-    def _connect(self) -> "sqlite3.Connection | _PGConn":
-        # The per-business filesystem half of the store is used on both backends, so make root first.
+    def _connect(self) -> "_PGConn":
+        # The per-business filesystem half of the store remains local/object-backed, so make root first.
         self.root.mkdir(parents=True, exist_ok=True)
-        if _db_backend() == "postgres":
-            return self._connect_postgres()
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        self._init_db(conn)
-        return conn
+        _db_backend()
+        return self._connect_postgres()
 
     def _connect_postgres(self) -> "_PGConn":
         """Open the Postgres-backed connection seam. Lazy-imports psycopg and the canonical URL factory
-        so the default SQLite path stays dependency-free. No schema bootstrap here: migration runner
-        ``plugins/takyon/db/runner.py`` owns all DDL, so ``_init_db``/``_migrate_db`` are intentionally
-        NOT called (their SQLite-only PRAGMA/ALTER logic would not even parse on Postgres)."""
+        so the store only depends on psycopg when a connection is actually opened. No schema bootstrap
+        here: migration runner ``plugins/takyon/db/runner.py`` owns all DDL, so ``_init_db``/
+        ``_migrate_db`` are intentionally NOT called (their retired SQLite PRAGMA/ALTER logic would not
+        even parse on Postgres)."""
         import psycopg
         from psycopg.rows import dict_row
 
@@ -3134,10 +3233,9 @@ class TakyonStore:
 
     def seed_platform_owner(self) -> tuple[str | None, str | None]:
         """Idempotently provision the single platform/operator owner — the Phase-8 serving-flip
-        startup seed (mediationplan.md owner-wiring finding, step 3→4). No-op off Postgres (returns
-        ``(None, None)``): the SQLite era has no ``users`` table to seed and never needed an owner.
+        startup seed (mediationplan.md owner-wiring finding, step 3→4).
 
-        On Postgres this is the ONE place a key is minted as a side effect of *serving*: it opens one
+        This is the ONE place a key is minted as a side effect of *serving*: it opens one
         store transaction and delegates to ``control_plane.ensure_platform_owner`` over the RAW psycopg
         connection lent by ``_leaf_conn`` (control_plane speaks native ``%s`` + positional rows, so it
         must bypass the ``?``-translating ``_PGConn`` wrapper, exactly like the app-leaf delegations).
@@ -3146,8 +3244,6 @@ class TakyonStore:
         Deliberately separate from ``business.upsert`` (which resolves the owner *read-only* and blocks
         if unprovisioned, invariant #8) so no secret ever rides through a business commit, event
         payload, or file mirror. Idempotent and race-safe via ``provision_user_on_first_login``."""
-        if _db_backend() != "postgres":
-            return (None, None)
         try:
             from . import control_plane
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
@@ -3157,7 +3253,7 @@ class TakyonStore:
                 return control_plane.ensure_platform_owner(raw)
 
     def _active_operator_user_id(self) -> str:
-        return self._operator_user_id if _db_backend() == "postgres" else ""
+        return self._operator_user_id
 
     def _enforce_operator_business_access(
         self,
@@ -3178,24 +3274,19 @@ class TakyonStore:
             raise TakyonError(f"access denied for business:{business_slug}")
 
     def _work_requests_table(self) -> str:
-        """Physical table name for the operator's *work-request record* store. On SQLite that is the
-        historical ``jobs`` table (bootstrapped by ``_init_db``). On Postgres it is ``business_work_requests``
-        — migration 0011's exact 1:1 column port of the SQLite operator ``jobs`` — which ISOLATES it from
+        """Physical table name for the operator's *work-request record* store.
+
+        This is ``business_work_requests`` — migration 0011's exact 1:1 column port of the retired
+        SQLite operator ``jobs`` — which ISOLATES it from
         the 0010 ``jobs`` worker-plane *execution queue* (a different table with uuid/jsonb/SKIP-LOCKED
         shape). The store only enqueues/counts/lists/GCs this record; it never drains it, so this is a pure
         storage retarget, not the deferred worker-plane consolidation. Interpolated into the operator-jobs
         SQL so every existing ``conn.execute`` stays otherwise unchanged."""
-        return "business_work_requests" if _db_backend() == "postgres" else "jobs"
+        return "business_work_requests"
 
     def _app_user_metadata_select(self) -> str:
-        """Column expression for the sub-user metadata blob in the two operator reads that list it
-        explicitly (``_rewrite_app_files``/``_app_summary``). On SQLite the column is TEXT ``metadata_json``,
-        which ``_row_to_dict`` decodes back to a ``metadata`` dict; on Postgres (leaf migration 0005) the
-        column is ``jsonb metadata`` that already deserializes to a dict and has no ``_json`` suffix. Both
-        forms therefore surface as ``row['metadata']`` after ``_row_to_dict`` — identical output shape — so
-        only the SELECT text differs by backend. Every other operator app read uses ``SELECT *`` and needs
-        no such switch."""
-        return "metadata" if _db_backend() == "postgres" else "metadata_json"
+        """Column expression for the sub-user metadata blob in the operator reads that list it explicitly."""
+        return "metadata"
 
     @contextmanager
     def _leaf_conn(self, conn: "_PGConn"):
@@ -3635,13 +3726,9 @@ class TakyonStore:
             return
         from . import storage
 
-        load_takyon_env()
-        backend = storage.get_storage_backend()
+        backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
-        local_bucket = str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip()
         if backend_name not in {"supabase_s3", "local"}:
-            return
-        if backend_name == "local" and not local_bucket:
             return
         # Refresh from the durable backend once per store instance. A scope read fans out through
         # multiple helpers (`summary`, `list_files`, pulse, product surface reads), and each one may
@@ -3650,23 +3737,36 @@ class TakyonStore:
         storage.sync_down(backend, normalized, root, delete_local=True)
         self._workspace_sync_cache.add(normalized)
 
-    def _sync_business_workspace_remote(self, slug: str) -> None:
-        if self._workspace_root_override is None:
-            return
+    def _workspace_storage_backend(self) -> Any:
         from . import storage
 
         load_takyon_env()
-        backend = storage.get_storage_backend()
+        backend_kind = (os.getenv("TAKYON_STORAGE_BACKEND") or "local").strip().lower()
+        local_root = None
+        if backend_kind == "local" and not str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip():
+            local_root = self.root / "storage"
+        return storage.get_storage_backend(root=local_root)
+
+    def _sync_business_workspace_remote(self, slug: str) -> None:
+        from . import storage
+
+        backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
-        local_bucket = str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip()
         if backend_name not in {"supabase_s3", "local"}:
             return
-        if backend_name == "local" and not local_bucket:
-            return
-        workspace = self._workspace_root_override / "businesses" / _slugify(slug)
+        base = self._workspace_root_override or self.root
+        workspace = base / "businesses" / _slugify(slug)
         if not workspace.exists():
             return
         storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
+
+    def _delete_business_workspace_remote(self, slug: str) -> None:
+        from . import storage
+
+        backend = self._workspace_storage_backend()
+        prefix = storage.object_prefix(_slugify(slug))
+        for key in sorted(backend.list_digests(prefix)):
+            backend.delete(key)
 
     def _business_root(self, slug: str) -> Path:
         base = self._workspace_root_override or self.root
@@ -3674,9 +3774,14 @@ class TakyonStore:
         self._sync_business_workspace_cache(slug, root)
         return root
 
-    def _resolve_business_file(self, slug: str, rel: str) -> Path:
+    def _resolve_business_file(self, slug: str, rel: str, *, require_output_root: bool = False, field: str = "business path") -> Path:
         root = self._business_root(slug)
-        path = (root / _canonical_business_relpath(rel)).resolve()
+        relative = (
+            _canonical_business_output_relpath(rel, field=field)
+            if require_output_root
+            else _canonical_business_relpath(rel)
+        )
+        path = (root / relative).resolve()
         if root.resolve() not in (path, *path.parents):
             raise TakyonError("path escaped business root")
         return path
@@ -4984,6 +5089,8 @@ class TakyonStore:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
             result["published_site"] = {**published_site_summary, "removed": False, "skipped": True}
+        if delete_files:
+            self._delete_business_workspace_remote(slug)
 
         deleted = self._delete_business_db_rows(conn, slug)
         result["database"] = {"candidates": db_counts, "deleted": deleted}
@@ -5013,6 +5120,7 @@ class TakyonStore:
         include: Iterable[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
+        self._workspace_sync_cache.clear()
         parsed = _scope_parts(scope)
         query = str(query or "summary").strip().lower()
         include_set = {str(item).strip().lower() for item in (include or []) if str(item).strip()}
@@ -5215,6 +5323,7 @@ class TakyonStore:
         reason: str = "",
         actor: str = "agent",
     ) -> dict[str, Any]:
+        self._workspace_sync_cache.clear()
         if not idempotency_key or not str(idempotency_key).strip():
             raise TakyonError("idempotency_key is required for every durable Takyon write")
         idempotency_key = str(idempotency_key).strip()
@@ -5362,7 +5471,7 @@ class TakyonStore:
                     "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
                     (name, goal, mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
-            elif _db_backend() == "postgres":
+            else:
                 # PG businesses.owner_user_id is NOT NULL (0001 spine; 0011 enrich). The operator store
                 # has no Auth0/login context, so a single platform owner (control_plane, keyed by
                 # TAKYON_PLATFORM_OWNER_SUB) owns every shell/CEO-created business. Resolve it READ-ONLY
@@ -5386,11 +5495,6 @@ class TakyonStore:
                 conn.execute(
                     "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
                     (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), owner_user_id, now, now),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-                    (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), now, now),
                 )
             root = self._business_root(slug)
             root.mkdir(parents=True, exist_ok=True)
@@ -5985,7 +6089,10 @@ class TakyonStore:
             return {"action": action, "business": slug, "usage_event": event_id, "actual_cost_microusd": actual}
 
         if action == "workspace.upsert":
-            path_text = _canonical_business_relpath(str(op.get("path") or op.get("workspace") or ""))
+            path_text = _canonical_business_output_relpath(
+                str(op.get("path") or op.get("workspace") or ""),
+                field="workspace path",
+            )
             rel = Path(path_text)
             kind = str(op.get("kind") or "workspace")
             status = str(op.get("status") or "active")
@@ -6008,7 +6115,12 @@ class TakyonStore:
             raw_path = str(op.get("path") or "")
             if action == "memory.write" and not raw_path.startswith("research/"):
                 raw_path = f"research/{raw_path}"
-            file_path = self._resolve_business_file(slug, raw_path)
+            file_path = self._resolve_business_file(
+                slug,
+                raw_path,
+                require_output_root=True,
+                field="artifact path",
+            )
             content = str(op.get("content") or "")
             mode = str(op.get("mode") or "replace").strip().lower()
             if mode == "append" and file_path.exists():
@@ -6037,7 +6149,12 @@ class TakyonStore:
             return {"action": action, "business": slug, "path": rel}
 
         if action == "artifact.patch":
-            file_path = self._resolve_business_file(slug, str(op.get("path") or ""))
+            file_path = self._resolve_business_file(
+                slug,
+                str(op.get("path") or ""),
+                require_output_root=True,
+                field="artifact path",
+            )
             if not file_path.exists():
                 raise TakyonError(f"cannot patch missing file: {op.get('path')}")
             old = str(op.get("old") or "")
@@ -6433,7 +6550,7 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, publication, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
-            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect them directly with takyon-x or takyon-reddit when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
+            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle Reddit/forum threads in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -6547,30 +6664,8 @@ def _store() -> TakyonStore:
     return TakyonStore()
 
 
-def _session_business_slug() -> str:
-    try:
-        from gateway.session_context import get_session_env
-
-        raw = get_session_env("TAKYON_SESSION_BUSINESS_SLUG", "")
-    except Exception:
-        raw = os.getenv("TAKYON_SESSION_BUSINESS_SLUG", "")
-    raw = str(raw or "").strip()
-    return _slugify(raw) if raw else ""
-
-
-def _business_slug(args: dict, *, required: bool = False) -> str:
-    requested = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-    session_slug = _session_business_slug()
-    if session_slug and requested and requested != session_slug:
-        raise TakyonError(f"business is bound to the current session: {session_slug}")
-    business = session_slug or requested
-    if required and not business:
-        raise TakyonError("business is required")
-    return business
-
-
 def _business_scope(args: dict) -> str:
-    return f"business:{_business_slug(args, required=True)}"
+    return _normalize_business_scope(None, business=_resolved_business_slug(args, required=True))
 
 
 def _commit_tool_data(
@@ -6821,13 +6916,15 @@ def handle_business_read_file(args: dict, **_: Any) -> str:
 
 def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
     try:
-        return tool_result(_store().calculate_pulse(str(args.get("business") or ""), limit=args.get("limit") or 10))
+        return tool_result(_store().calculate_pulse(_resolved_business_slug(args, required=True), limit=args.get("limit") or 10))
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
 
 def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
     try:
+        if _session_business_slug():
+            raise TakyonError("runtime capability provisioning is available only on the authority tool surface")
         requested = [
             str(item).strip()
             for item in _as_list(args.get("capabilities") or args.get("commands"))
@@ -7019,7 +7116,7 @@ def _verified_business_file_mutation_response(
 
 
 def handle_business_write_file(args: dict, **_: Any) -> str:
-    business = _business_slug(args, required=True)
+    business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
     content = str(args.get("content") or "")
@@ -7029,7 +7126,11 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
         str(args.get("path") or ""),
         action="artifact.write",
     )
-    previous_content = file_path.read_text(encoding="utf-8", errors="replace") if file_path.exists() else ""
+    previous_content = (
+        file_path.read_text(encoding="utf-8", errors="replace")
+        if file_path.exists()
+        else ""
+    )
     expected_content = previous_content + content if mode == "append" and file_path.exists() else content
     operation = {
         "action": "artifact.write",
@@ -7049,7 +7150,7 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
 
 
 def handle_business_patch_file(args: dict, **_: Any) -> str:
-    business = _business_slug(args, required=True)
+    business = _resolved_business_slug(args, required=True)
     store = _store()
     _, file_path = _resolved_business_output_path_for_action(
         store,
@@ -7083,7 +7184,7 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
 
 
 def handle_business_record_memory(args: dict, **_: Any) -> str:
-    business = _business_slug(args, required=True)
+    business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
     content = str(args.get("content") or "")
@@ -7093,7 +7194,11 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
         str(args.get("path") or ""),
         action="memory.write",
     )
-    previous_content = file_path.read_text(encoding="utf-8", errors="replace") if file_path.exists() else ""
+    previous_content = (
+        file_path.read_text(encoding="utf-8", errors="replace")
+        if file_path.exists()
+        else ""
+    )
     expected_content = previous_content + content if mode == "append" and file_path.exists() else content
     operation = {
         "action": "memory.write",
@@ -7305,9 +7410,9 @@ def _product_surface_verification_operations(
 def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
-        business = _slugify(str(args.get("business") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        if _session_business_slug():
+            raise TakyonError("trusted product surface verification is available only on the authority tool surface")
+        business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
@@ -7862,9 +7967,7 @@ def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
 def handle_business_publish_outreach(args: dict, **_: Any) -> str:
     try:
         store = _store()
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        business = _resolved_business_slug(args, required=True)
         body = _normalize_outreach_body(args.get("body") or args.get("content"))
         if not body:
             raise TakyonError("body is required")
@@ -7947,12 +8050,235 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _creative_credit_backend():
+    try:
+        from . import business_credits as credits_backend
+    except Exception:
+        from plugins.takyon import business_credits as credits_backend
+    return credits_backend
+
+
+def _creative_credit_unit_cost(action: str) -> int:
+    env_name = _CREATIVE_CREDIT_COST_ENVS.get(action, "")
+    raw = os.getenv(env_name or "")
+    try:
+        value = int(raw) if raw not in (None, "") else _CREATIVE_CREDIT_COST_DEFAULTS[action]
+    except (TypeError, ValueError, KeyError):
+        value = _CREATIVE_CREDIT_COST_DEFAULTS.get(action, 0)
+    return max(0, value)
+
+
+def _creative_credit_total_cost(action: str, *, units: int = 1) -> int:
+    return _creative_credit_unit_cost(action) * max(1, int(units or 1))
+
+
+def _creative_credit_balances(business: str) -> Any:
+    store = _store()
+    credits_backend = _creative_credit_backend()
+    with store._connect() as conn:
+        credits_backend.open_business_credit_account(conn, business)
+        return credits_backend.get_business_credit_balances(conn, business)
+
+
+def _dashboard_runtime_base_url() -> str:
+    raw = str(os.getenv("TAKYON_DASHBOARD_URL") or "http://127.0.0.1:9119").strip()
+    return raw.rstrip("/")
+
+
+def _dashboard_session_token_value() -> str:
+    load_takyon_env()
+    token = str(os.getenv("TAKYON_DASHBOARD_SESSION_TOKEN") or "").strip()
+    if token:
+        return token
+    token_path = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser() / "dashboard_session_token"
+    try:
+        return token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _call_creative_runtime_gateway(endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        import httpx
+    except Exception as exc:  # pragma: no cover - dependency missing
+        raise TakyonError("creative authority runtime requires the httpx package") from exc
+
+    token = _dashboard_session_token_value()
+    if not token:
+        raise TakyonError(
+            "creative authority runtime unavailable: missing dashboard session token; "
+            "start `takyon dashboard` or set TAKYON_DASHBOARD_URL / TAKYON_DASHBOARD_SESSION_TOKEN"
+        )
+
+    url = f"{_dashboard_runtime_base_url()}/internal/creative-gateway/{endpoint.lstrip('/')}"
+    try:
+        resp = httpx.post(
+            url,
+            json=payload,
+            headers={"X-Takyon-Session-Token": token},
+            timeout=300.0,
+        )
+    except Exception as exc:
+        raise TakyonError(
+            f"creative authority runtime unavailable at {url}: {exc}"
+        ) from exc
+
+    if resp.status_code == 401:
+        raise TakyonError("creative authority runtime rejected the dashboard session token")
+    if resp.status_code >= 400:
+        detail = ""
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict):
+                detail = str(payload.get("detail") or "").strip()
+        except Exception:
+            detail = resp.text.strip()
+        raise TakyonError(
+            f"creative authority runtime failed ({resp.status_code})"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise TakyonError("creative authority runtime returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise TakyonError("creative authority runtime returned an unexpected payload")
+    return data
+
+
+def _reserve_creative_credits(
+    business: str,
+    *,
+    action: str,
+    reservation_key: str,
+    units: int = 1,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    credits_backend = _creative_credit_backend()
+    requested = _creative_credit_total_cost(action, units=units)
+    if requested <= 0:
+        return {
+            "reservation_key": reservation_key,
+            "requested_credits": 0,
+            "balance_credits": 0,
+            "reserved_credits": 0,
+        }
+    store = _store()
+    with store._connect() as conn:
+        credits_backend.open_business_credit_account(conn, business)
+        reservation = credits_backend.reserve_credits(
+            conn,
+            business,
+            requested,
+            reservation_key,
+            metadata=metadata or {},
+        )
+        balances = credits_backend.get_business_credit_balances(conn, business)
+    return {
+        "reservation_key": reservation.key,
+        "requested_credits": reservation.reserved_credits,
+        "balance_credits": balances.balance_credits,
+        "reserved_credits": balances.reserved_credits,
+    }
+
+
+def _commit_creative_credits(
+    reservation_key: str,
+    *,
+    action: str,
+    actual_units: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    credits_backend = _creative_credit_backend()
+    actual_credits = None
+    if actual_units is not None:
+        actual_credits = _creative_credit_total_cost(action, units=max(0, int(actual_units)))
+    store = _store()
+    with store._connect() as conn:
+        balances = credits_backend.commit_credits(
+            conn,
+            reservation_key,
+            actual_credits=actual_credits,
+            metadata=metadata or {},
+        )
+    return {
+        "balance_credits": balances.balance_credits,
+        "reserved_credits": balances.reserved_credits,
+        "actual_credits": actual_credits,
+    }
+
+
+def _release_creative_credits(
+    reservation_key: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    credits_backend = _creative_credit_backend()
+    store = _store()
+    with store._connect() as conn:
+        balances = credits_backend.release_credits(
+            conn,
+            reservation_key,
+            metadata=metadata or {},
+        )
+    return {
+        "balance_credits": balances.balance_credits,
+        "reserved_credits": balances.reserved_credits,
+    }
+
+
+def _business_mode(store: "TakyonStore", business: str) -> str:
+    with store._connect() as conn:
+        business_row = store._ensure_business(conn, business)
+        return str(business_row.get("mode") or "live")
+
+
+def _read_existing_receipt(path: Path, idempotency_key: str) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        prior = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(prior, dict) and prior.get("idempotency_key") == idempotency_key:
+        return prior
+    return None
+
+
+def _count_static_specs(path: Path) -> int:
+    if path.is_dir():
+        total = 0
+        for child in sorted(path.iterdir()):
+            if child.suffix.lower() == ".json" and not child.name.endswith(".schema.json"):
+                total += _count_static_specs(child)
+        return total
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return len(data)
+    creatives = data.get("creatives") if isinstance(data, dict) else None
+    if isinstance(creatives, list):
+        return len(creatives)
+    return 1
+
+
+def _parse_ugc_write_payload(stdout: str) -> dict[str, Any]:
+    match = re.search(
+        r"--- business_ugc_ad_write payload \(agent must call this tool\) ---\s*(\{.*?\})\s*--- end payload ---",
+        stdout,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise TakyonError("ugc-video-ad build completed but did not print a business_ugc_ad_write payload")
+    payload = json.loads(match.group(1))
+    if not isinstance(payload, dict):
+        raise TakyonError("ugc-video-ad payload was not a JSON object")
+    return payload
+
+
 def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
     try:
         store = _store()
-        business = _slugify(str(args.get("business") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
@@ -8009,12 +8335,562 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
+    store = _store()
+    business = ""
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        brief_raw = str(args.get("brief_path") or args.get("brief") or "").strip()
+        if not brief_raw:
+            raise TakyonError("brief_path is required")
+        brief_rel = _safe_relpath(brief_raw, field="brief_path").as_posix()
+        script_raw = str(args.get("script_path") or args.get("script") or "").strip()
+        script_rel = _safe_relpath(script_raw, field="script_path").as_posix() if script_raw else ""
+        slug = _file_slug(
+            str(args.get("slug") or Path(script_rel or brief_rel).stem or "ugc-ad"),
+            "ugc-ad",
+        )
+        publication_rel = f"product/ugc-ads/{slug}"
+        receipt_rel = f"{publication_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_ugc_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        business_root = store._business_root(business)
+        brief_abs = store._resolve_business_file(business, brief_rel)
+        if not brief_abs.is_file():
+            raise TakyonError(f"brief file not found: {brief_rel}")
+        script_abs: Path | None = None
+        if script_rel:
+            script_abs = store._resolve_business_file(business, script_rel)
+            if not script_abs.is_file():
+                raise TakyonError(f"script file not found: {script_rel}")
+
+        business_mode = _business_mode(store, business)
+        dry_run = _boolish(args.get("dry_run"), default=False) or business_mode == "test"
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "brief_path": brief_rel,
+            "script_path": script_rel or None,
+            "publication_dir": publication_rel,
+            "business_mode": business_mode,
+            "created_at": _now(),
+        }
+
+        script_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "ugc-video-ad"
+            / "scripts"
+            / "build_ad.py"
+        )
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--brief",
+            brief_rel,
+            "--out-root",
+            "product",
+            "--slug",
+            slug,
+            "--transition-mode",
+            str(args.get("transition_mode") or "continuity"),
+            "--env-file",
+            str(args.get("env_file") or ".env"),
+        ]
+        if script_rel:
+            cmd.extend(["--script", script_rel])
+        if _boolish(args.get("jumpcuts"), default=False):
+            cmd.append("--jumpcuts")
+        if _boolish(args.get("skip_post"), default=False):
+            cmd.append("--skip-post")
+        if args.get("workdir"):
+            cmd.extend(["--workdir", str(args.get("workdir"))])
+        if dry_run:
+            cmd.append("--dry-run")
+
+        if dry_run:
+            run = subprocess.run(
+                cmd,
+                cwd=str(business_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            status = "suppressed_test_mode" if business_mode == "test" else "dry_run_planned"
+            receipt = {
+                **base_receipt,
+                "success": run.returncode == 0,
+                "status": status if run.returncode == 0 else "dry_run_failed",
+                "external_side_effects": "suppressed",
+                "stdout": run.stdout,
+                "stderr": run.stderr,
+                "command": cmd,
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": run.returncode == 0,
+                    "action": "business_ugc_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "stdout": run.stdout,
+                    "stderr": run.stderr,
+                    "value": receipt,
+                }
+            )
+
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "ugc-render",
+                {
+                    "business": business,
+                    "idempotency_key": idempotency_key,
+                    "brief_path": brief_rel,
+                    "script_path": script_rel or None,
+                    "slug": slug,
+                    "transition_mode": str(args.get("transition_mode") or "continuity"),
+                    "env_file": str(args.get("env_file") or ".env"),
+                    "jumpcuts": _boolish(args.get("jumpcuts"), default=False),
+                    "skip_post": _boolish(args.get("skip_post"), default=False),
+                    "workdir": str(args.get("workdir") or ""),
+                },
+            )
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_ugc_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "error": str(exc),
+                    "value": receipt,
+                }
+            )
+
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": gateway_result.get("status") or "failed",
+                "requested_credits": gateway_result.get("requested_credits"),
+                "credits_charged": gateway_result.get("credits_charged"),
+                "available_credits": gateway_result.get("available_credits"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "stdout": gateway_result.get("stdout"),
+                "stderr": gateway_result.get("stderr"),
+                "error": gateway_result.get("error") or "ugc render failed",
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_ugc_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
+                    "error": receipt["error"],
+                    "value": receipt,
+                }
+            )
+
+        payload = gateway_result.get("write_payload") or {}
+        payload["business"] = business
+        payload["idempotency_key"] = f"{idempotency_key}:asset-record"
+        write_result = json.loads(handle_business_ugc_ad_write(payload))
+        if not write_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": "asset_record_failed",
+                "path": payload.get("path"),
+                "requested_credits": _creative_credit_total_cost("ugc_ad_generate"),
+                "credits_charged": gateway_result.get("credits_charged"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "error": write_result.get("error") or "ugc asset record failed",
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_ugc_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
+                    "error": receipt["error"],
+                    "value": receipt,
+                }
+            )
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "status": "created",
+            "path": write_result.get("path"),
+            "files": write_result.get("files") or [],
+            "credits_charged": gateway_result.get("credits_charged"),
+            "balance_credits": gateway_result.get("balance_credits"),
+            "reserved_credits": gateway_result.get("reserved_credits"),
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:ugc-ads/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "ugc_ad.generate",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "record ugc video ad generation",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_ugc_ad_generate",
+                "business": business,
+                "slug": slug,
+                "status": "created",
+                "path": write_result.get("path"),
+                "publication_dir": publication_rel,
+                "receipt": receipt_rel,
+                "balance_credits": receipt["balance_credits"],
+                "reserved_credits": receipt["reserved_credits"],
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
+    store = _store()
+    business = ""
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        input_raw = str(
+            args.get("input_path") or args.get("spec_path") or args.get("batch_path") or ""
+        ).strip()
+        if not input_raw:
+            raise TakyonError("input_path is required")
+        input_rel = _safe_relpath(input_raw, field="input_path").as_posix()
+        input_abs = store._resolve_business_file(business, input_rel)
+        if not input_abs.exists():
+            raise TakyonError(f"static ad input not found: {input_rel}")
+
+        slug = _file_slug(
+            str(args.get("slug") or Path(input_rel).stem or "static-ad"),
+            "static-ad",
+        )
+        publication_rel = f"product/static-ads/{slug}"
+        receipt_rel = f"{publication_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_static_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        requested = max(1, _count_static_specs(input_abs))
+        business_mode = _business_mode(store, business)
+        dry_run_requested = _boolish(args.get("dry_run"), default=False)
+        suppressed = business_mode == "test" or dry_run_requested
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "input_path": input_rel,
+            "publication_dir": publication_rel,
+            "business_mode": business_mode,
+            "requested_creatives": requested,
+            "created_at": _now(),
+        }
+
+        script_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "static-ad-creative-generator"
+            / "scripts"
+            / "batch_generate.py"
+        )
+        cmd = [
+            sys.executable,
+            str(script_path),
+            input_rel,
+            "-o",
+            publication_rel,
+            "--backend",
+            "mock" if suppressed else str(args.get("backend") or "openai"),
+            "--quality",
+            str(args.get("quality") or "high"),
+        ]
+        if suppressed:
+            cmd.append("--dry-run")
+        if _boolish(args.get("crop"), default=False):
+            cmd.append("--crop")
+        if _boolish(args.get("strict"), default=False):
+            cmd.append("--strict")
+        if _boolish(args.get("stop_on_error"), default=False):
+            cmd.append("--stop-on-error")
+        if args.get("aspect_ratio"):
+            cmd.extend(["--aspect-ratio", str(args.get("aspect_ratio"))])
+        if args.get("max"):
+            cmd.extend(["--max", str(args.get("max"))])
+
+        if suppressed:
+            run = subprocess.run(
+                cmd,
+                cwd=str(store._business_root(business)),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            manifest_abs = store._resolve_business_file(business, f"{publication_rel}/manifest.json")
+            manifest: dict[str, Any] = {}
+            if manifest_abs.is_file():
+                try:
+                    manifest = json.loads(manifest_abs.read_text(encoding="utf-8"))
+                except Exception:
+                    manifest = {}
+            succeeded = int(manifest.get("succeeded") or 0)
+            failed = int(manifest.get("failed") or 0)
+            status = "suppressed_test_mode" if business_mode == "test" else "generated_dry_run"
+            success = run.returncode == 0
+            receipt = {
+                **base_receipt,
+                "success": success,
+                "status": status if success else "dry_run_failed",
+                "external_side_effects": "suppressed",
+                "manifest": f"{publication_rel}/manifest.json" if manifest_abs.is_file() else None,
+                "succeeded": succeeded,
+                "failed": failed,
+                "stdout": run.stdout,
+                "stderr": run.stderr,
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": success,
+                    "action": "business_static_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "publication_dir": publication_rel,
+                    "manifest": receipt.get("manifest"),
+                    "receipt": receipt_rel,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "value": receipt,
+                }
+            )
+
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "static-render",
+                {
+                    "business": business,
+                    "idempotency_key": idempotency_key,
+                    "input_path": input_rel,
+                    "slug": slug,
+                    "backend": str(args.get("backend") or "openai"),
+                    "quality": str(args.get("quality") or "high"),
+                    "crop": _boolish(args.get("crop"), default=False),
+                    "strict": _boolish(args.get("strict"), default=False),
+                    "stop_on_error": _boolish(args.get("stop_on_error"), default=False),
+                    "aspect_ratio": str(args.get("aspect_ratio") or ""),
+                    "max": str(args.get("max") or ""),
+                },
+            )
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_static_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "error": str(exc),
+                    "value": receipt,
+                }
+            )
+
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": gateway_result.get("status") or "failed",
+                "manifest": gateway_result.get("manifest"),
+                "requested_credits": gateway_result.get("requested_credits"),
+                "credits_charged": gateway_result.get("credits_charged"),
+                "available_credits": gateway_result.get("available_credits"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "succeeded": gateway_result.get("succeeded") or 0,
+                "failed": gateway_result.get("failed") or 0,
+                "stdout": gateway_result.get("stdout"),
+                "stderr": gateway_result.get("stderr"),
+                "error": gateway_result.get("error") or "static ad generation failed",
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_static_ad_generate",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "publication_dir": publication_rel,
+                    "manifest": receipt.get("manifest"),
+                    "receipt": receipt_rel,
+                    "succeeded": receipt["succeeded"],
+                    "failed": receipt["failed"],
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
+                    "error": receipt["error"],
+                    "value": receipt,
+                }
+            )
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "status": "created",
+            "manifest": gateway_result.get("manifest"),
+            "credits_charged": gateway_result.get("credits_charged"),
+            "balance_credits": gateway_result.get("balance_credits"),
+            "reserved_credits": gateway_result.get("reserved_credits"),
+            "succeeded": gateway_result.get("succeeded") or requested,
+            "failed": gateway_result.get("failed") or 0,
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:static-ads/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "static_ad.generate",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "record static ad generation",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_static_ad_generate",
+                "business": business,
+                "slug": slug,
+                "status": "created",
+                "publication_dir": publication_rel,
+                "manifest": receipt.get("manifest"),
+                "receipt": receipt_rel,
+                "succeeded": receipt["succeeded"],
+                "failed": receipt["failed"],
+                "balance_credits": receipt["balance_credits"],
+                "reserved_credits": receipt["reserved_credits"],
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_VALID_CTA = {
     "LEARN_MORE", "SHOP_NOW", "SIGN_UP", "DOWNLOAD", "GET_OFFER", "SUBSCRIBE",
     "BOOK_TRAVEL", "CONTACT_US", "APPLY_NOW", "GET_QUOTE", "WATCH_MORE",
     "NO_BUTTON", "ORDER_NOW", "SEE_MENU", "INSTALL_MOBILE_APP",
+}
+_CREATIVE_CREDIT_COST_DEFAULTS = {
+    "ugc_ad_generate": 8,
+    "static_ad_generate": 2,
+    "meta_ad_launch": 1,
+}
+_CREATIVE_CREDIT_COST_ENVS = {
+    "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
+    "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
+    "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
 }
 
 
@@ -8120,6 +8996,41 @@ def _meta_upload_advideo(video_path: Path, cfg: dict[str, Any], *, name: str) ->
     return video_id
 
 
+def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Upload a local image as an AdImage. Returns the uploaded image hash and URL when present."""
+    acct = _meta_account_path(cfg["ad_account_id"])
+    url = f"https://graph.facebook.com/{cfg['version']}/{acct}/adimages"
+    try:
+        import httpx  # lazy: only the live multipart upload needs it
+    except Exception as exc:  # pragma: no cover - dependency missing
+        raise TakyonError("Meta image upload requires the httpx package") from exc
+    content_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
+    try:
+        with image_path.open("rb") as handle:
+            resp = httpx.post(
+                url,
+                data={"access_token": cfg["token"], "name": image_path.name},
+                files={"image_file": (image_path.name, handle, content_type)},
+                timeout=180.0,
+            )
+    except httpx.HTTPError as exc:
+        raise TakyonError(f"Meta image upload connection error: {exc}") from exc
+    if resp.status_code >= 400:
+        raise TakyonError(f"Meta image upload failed: {resp.status_code} {resp.text}")
+    payload = resp.json() or {}
+    images = payload.get("images") if isinstance(payload, dict) else None
+    if not isinstance(images, dict) or not images:
+        raise TakyonError(f"Meta image upload returned no image hash: {resp.text}")
+    first = next(iter(images.values()))
+    image_hash = str((first or {}).get("hash") or "").strip()
+    if not image_hash:
+        raise TakyonError(f"Meta image upload returned no image hash: {resp.text}")
+    return {
+        "hash": image_hash,
+        "url": str((first or {}).get("url") or "").strip() or None,
+    }
+
+
 def _meta_video_thumbnail(video_id: str, cfg: dict[str, Any]) -> str | None:
     try:
         data = _meta_graph("GET", f"{video_id}/thumbnails", {"fields": "uri,is_preferred"}, cfg)
@@ -8139,16 +9050,33 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
             "business_meta_ad_launch only creates PAUSED objects; activation is intentionally not supported by this tool"
         )
 
-    ad_video_path = _safe_relpath(str(args.get("ad_video_path") or ""), field="ad_video_path").as_posix()
-    if Path(ad_video_path).suffix.lower() != ".mp4":
-        raise TakyonError("ad_video_path must point to an .mp4 produced by the ugc-video-ad skill")
+    asset_kind = str(args.get("asset_kind") or "").strip().lower() or "video"
+    if asset_kind not in {"video", "image"}:
+        raise TakyonError("asset_kind must be 'video' or 'image'")
+    ad_video_raw = str(args.get("ad_video_path") or "").strip()
+    ad_image_raw = str(args.get("ad_image_path") or "").strip()
+    ad_video_path = _safe_relpath(ad_video_raw, field="ad_video_path").as_posix() if ad_video_raw else ""
+    ad_image_path = _safe_relpath(ad_image_raw, field="ad_image_path").as_posix() if ad_image_raw else ""
+    if asset_kind == "video":
+        if Path(ad_video_path).suffix.lower() != ".mp4":
+            raise TakyonError("ad_video_path must point to an .mp4 produced by the ugc-video-ad skill")
+    else:
+        if not ad_image_path:
+            raise TakyonError("ad_image_path is required when asset_kind='image'")
+        if Path(ad_image_path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise TakyonError("ad_image_path must point to a .png, .jpg, .jpeg, or .webp image")
 
     campaign = args.get("campaign") if isinstance(args.get("campaign"), dict) else {}
     adset = args.get("adset") if isinstance(args.get("adset"), dict) else {}
     ad = args.get("ad") if isinstance(args.get("ad"), dict) else {}
 
     slug = _file_slug(
-        str(args.get("slug") or campaign.get("name") or Path(ad_video_path).parent.name or "meta-ad"),
+        str(
+            args.get("slug")
+            or campaign.get("name")
+            or Path(ad_video_path or ad_image_path).parent.name
+            or "meta-ad"
+        ),
         "meta-ad",
     )
 
@@ -8177,7 +9105,9 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "slug": slug,
+        "asset_kind": asset_kind,
         "ad_video_path": ad_video_path,
+        "ad_image_path": ad_image_path or None,
         "objective": str(campaign.get("objective") or "OUTCOME_TRAFFIC").strip().upper(),
         "campaign_name": str(campaign.get("name") or f"{slug} campaign").strip(),
         "adset_name": str(adset.get("name") or f"{slug} ad set").strip(),
@@ -8197,15 +9127,12 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
 
 
 def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
-    """Preflight or launch a PAUSED Meta ad from a UGC video. Never activates; never spends."""
-    created: dict[str, Any] = {}
+    """Preflight or launch a PAUSED Meta ad from a UGC video or static image. Never activates."""
     receipt_rel: str | None = None
     business = ""
     try:
         store = _store()
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
@@ -8215,70 +9142,65 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             business_row = store._ensure_business(conn, business)
             business_mode = str(business_row.get("mode") or "live")
 
-        cfg = _meta_config(require_token=(mode == "preflight" or business_mode != "test"))
-
         # ── read-only preflight: verify token + list ad accounts, create nothing ──
         if mode == "preflight":
-            identity = _meta_graph("GET", "me", {"fields": "id,name"}, cfg)
-            accounts = _meta_graph(
-                "GET",
-                "me/adaccounts",
-                {"fields": "id,account_id,name,account_status,currency,is_prepay_account"},
-                cfg,
-            )
-            return tool_result({
-                "success": True,
-                "action": "business_meta_ad_launch",
-                "mode": "preflight",
-                "read_only": True,
-                "business": business,
-                "business_mode": business_mode,
-                "graph_version": cfg["version"],
-                "identity": identity,
-                "ad_accounts": accounts.get("data") if isinstance(accounts, dict) else None,
-                "default_ad_account_id": cfg.get("ad_account_id") or None,
-                "default_page_id": cfg.get("page_id") or None,
-            })
+            try:
+                result = _call_creative_runtime_gateway(
+                    "meta-launch",
+                    {"business": business, "mode": "preflight"},
+                )
+            except Exception as exc:
+                return tool_error(str(exc), success=False)
+            result["action"] = "business_meta_ad_launch"
+            result["business_mode"] = business_mode
+            return tool_result(result)
+
+        cfg = _meta_config(require_token=(mode == "preflight" or business_mode != "test"))
 
         # ── launch (always PAUSED) ──
         plan = _meta_launch_plan(args, cfg)
         slug = plan["slug"]
-        video_abs = store._resolve_business_file(business, plan["ad_video_path"])
-        if not video_abs.is_file():
-            raise TakyonError(
-                f"ad video not found at {plan['ad_video_path']}; build it with the ugc-video-ad skill first"
-            )
+        video_abs: Path | None = None
+        image_abs: Path | None = None
+        if plan["asset_kind"] == "video":
+            video_abs = store._resolve_business_file(business, plan["ad_video_path"])
+            if not video_abs.is_file():
+                raise TakyonError(
+                    f"ad video not found at {plan['ad_video_path']}; build it with the ugc-video-ad skill first"
+                )
+        else:
+            image_abs = store._resolve_business_file(business, str(plan["ad_image_path"] or ""))
+            if not image_abs.is_file():
+                raise TakyonError(
+                    f"ad image not found at {plan['ad_image_path']}; build it with the static-ad-creative-generator skill first"
+                )
 
         pub_rel = f"distribution/meta-ads/{slug}"
         receipt_rel = f"{pub_rel}/receipt.json"
         receipt_abs = store._resolve_business_file(business, receipt_rel)
 
-        # Idempotency guard: a receipt already written for this key means the Graph
-        # objects exist — return it instead of creating duplicates on a retry.
-        if receipt_abs.is_file():
-            try:
-                prior = json.loads(receipt_abs.read_text(encoding="utf-8"))
-            except Exception:
-                prior = None
-            if isinstance(prior, dict) and prior.get("idempotency_key") == idempotency_key:
-                return tool_result({
-                    "success": True,
-                    "action": "business_meta_ad_launch",
-                    "business": business,
-                    "slug": slug,
-                    "idempotent": True,
-                    "status": prior.get("status"),
-                    "paused": True,
-                    "receipt": receipt_rel,
-                    "value": prior,
-                })
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "idempotent": True,
+                "status": prior.get("status"),
+                "paused": True,
+                "receipt": receipt_rel,
+                "value": prior,
+            })
 
         base_receipt = {
             "idempotency_key": idempotency_key,
             "business": business,
             "slug": slug,
             "paused": True,
+            "asset_kind": plan["asset_kind"],
             "ad_video_path": plan["ad_video_path"],
+            "ad_image_path": plan.get("ad_image_path"),
             "objective": plan["objective"],
             "daily_budget_usd": plan["daily_budget_usd"],
             "link": plan["link"],
@@ -8290,6 +9212,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         if business_mode == "test":
             receipt = {
                 **base_receipt,
+                "success": True,
                 "mode": "test",
                 "status": "suppressed_test_mode",
                 "external_side_effects": "suppressed",
@@ -8322,81 +9245,79 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             })
 
         # ── live mode: create everything PAUSED (no spend) ──
-        if not plan["ad_account_id"]:
-            raise TakyonError("live launch requires META_AD_ACCOUNT_ID or ad_account_id")
-        if not plan["page_id"]:
-            raise TakyonError("live launch requires META_PAGE_ID or ad.page_id (creatives must be tied to a Page)")
-        cfg["ad_account_id"] = plan["ad_account_id"]
-        acct = _meta_account_path(plan["ad_account_id"])
-
-        # 1) upload the UGC mp4 as an AdVideo
-        created["video_id"] = _meta_upload_advideo(video_abs, cfg, name=plan["ad_name"])
-
-        # 2) creative (Meta requires a thumbnail image for a video creative)
-        image_url = plan["image_url"] or _meta_video_thumbnail(created["video_id"], cfg)
-        if not image_url:
-            raise TakyonError(
-                "Meta requires a thumbnail for a video creative but none was ready yet; "
-                "pass ad.image_url or retry shortly after the video finishes processing"
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "meta-launch",
+                {**args, "business": business, "idempotency_key": idempotency_key},
             )
-        story_spec = {
-            "page_id": plan["page_id"],
-            "video_data": {
-                "video_id": created["video_id"],
-                "message": plan["message"],
-                "image_url": image_url,
-                "call_to_action": {"type": plan["call_to_action"], "value": {"link": plan["link"]}},
-            },
-        }
-        creative = _meta_graph("POST", f"{acct}/adcreatives", {
-            "name": f"{plan['ad_name']} creative",
-            "object_story_spec": json.dumps(story_spec),
-        }, cfg)
-        created["creative_id"] = str(creative.get("id") or "").strip()
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "status": receipt["status"],
+                "paused": True,
+                "receipt": receipt_rel,
+                "error": str(exc),
+                "value": receipt,
+            })
 
-        # 3) campaign (PAUSED)
-        campaign = _meta_graph("POST", f"{acct}/campaigns", {
-            "name": plan["campaign_name"],
-            "objective": plan["objective"],
-            "status": "PAUSED",
-            "special_ad_categories": "[]",
-        }, cfg)
-        created["campaign_id"] = str(campaign.get("id") or "").strip()
-
-        # 4) ad set (PAUSED, with its own daily budget)
-        adset = _meta_graph("POST", f"{acct}/adsets", {
-            "name": plan["adset_name"],
-            "campaign_id": created["campaign_id"],
-            "status": "PAUSED",
-            "daily_budget": plan["daily_budget_cents"],
-            "billing_event": plan["billing_event"],
-            "optimization_goal": plan["optimization_goal"],
-            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
-            "targeting": json.dumps(plan["targeting"]),
-        }, cfg)
-        created["adset_id"] = str(adset.get("id") or "").strip()
-
-        # 5) ad (PAUSED)
-        ad = _meta_graph("POST", f"{acct}/ads", {
-            "name": plan["ad_name"],
-            "adset_id": created["adset_id"],
-            "status": "PAUSED",
-            "creative": json.dumps({"creative_id": created["creative_id"]}),
-        }, cfg)
-        created["ad_id"] = str(ad.get("id") or "").strip()
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "requested_credits": gateway_result.get("requested_credits"),
+                "credits_charged": gateway_result.get("credits_charged"),
+                "available_credits": gateway_result.get("available_credits"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "ids": gateway_result.get("ids"),
+                "error": gateway_result.get("error") or "meta launch failed",
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "status": receipt["status"],
+                "paused": True,
+                "receipt": receipt_rel,
+                "balance_credits": receipt.get("balance_credits"),
+                "reserved_credits": receipt.get("reserved_credits"),
+                "error": receipt["error"],
+                "value": receipt,
+            })
 
         receipt = {
             **base_receipt,
+            "success": True,
             "mode": "live",
             "status": "created_paused",
             "external_side_effects": "created_paused_no_spend",
-            "ad_account_id": acct,
+            "ad_account_id": gateway_result.get("ad_account_id"),
             "page_id": plan["page_id"],
-            "graph_version": cfg["version"],
-            "ids": created,
-            "thumbnail_url": image_url,
+            "graph_version": gateway_result.get("graph_version"),
+            "ids": gateway_result.get("ids") or {},
+            "thumbnail_url": gateway_result.get("thumbnail_url"),
+            "credits_charged": gateway_result.get("credits_charged"),
             "note": "All objects created PAUSED; nothing serves or spends until explicitly activated.",
         }
+        receipt["balance_credits"] = gateway_result.get("balance_credits")
+        receipt["reserved_credits"] = gateway_result.get("reserved_credits")
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         store.commit(
             scope=f"business:{business}/distribution:meta-ads/{slug}",
@@ -8418,29 +9339,14 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "mode": "live",
             "status": "created_paused",
             "paused": True,
-            "ids": created,
+            "ids": receipt["ids"],
             "receipt": receipt_rel,
+            "balance_credits": receipt.get("balance_credits"),
+            "reserved_credits": receipt.get("reserved_credits"),
             "value": receipt,
         })
     except Exception as exc:
-        # Honest partial receipt: if some Meta objects were created before a later
-        # step failed, persist what exists so it can be cleaned up — never fake success.
-        if created and receipt_rel and business:
-            try:
-                partial_abs = _store()._resolve_business_file(business, receipt_rel)
-                _atomic_write_text(
-                    partial_abs,
-                    json.dumps({
-                        "status": "partial_failed",
-                        "paused": True,
-                        "ids": created,
-                        "error": str(exc),
-                        "created_at": _now(),
-                    }, ensure_ascii=False, indent=2) + "\n",
-                )
-            except Exception:
-                pass
-        return tool_error(str(exc), success=False, created=created or None)
+        return tool_error(str(exc), success=False)
 
 
 def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
@@ -8459,9 +9365,7 @@ def handle_business_upsert_conversation_thread(args: dict, **_: Any) -> str:
 def handle_business_list_conversation_messages(args: dict, **_: Any) -> str:
     store = _store()
     try:
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        business = _resolved_business_slug(args, required=True)
 
         direction = str(args.get("direction") or "inbound").strip().lower()
         status = str(args.get("status") or "needs_response").strip().lower()
@@ -8541,9 +9445,7 @@ def handle_business_list_conversation_messages(args: dict, **_: Any) -> str:
 def handle_business_read_conversation_thread(args: dict, **_: Any) -> str:
     store = _store()
     try:
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
-        if not business:
-            raise TakyonError("business is required")
+        business = _resolved_business_slug(args, required=True)
 
         thread_id = str(args.get("thread_id") or "").strip()
         source_filter = str(args.get("source") or "").strip()
@@ -8910,7 +9812,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
     try:
-        business = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+        business = _resolved_business_slug(args, required=True)
+        worker_session_bound = bool(_session_business_slug())
         instruction = str(args.get("instruction") or "").strip()
         if not instruction:
             raise TakyonError("instruction is required")
@@ -8918,12 +9821,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
+        if worker_session_bound and args.get("verify_surface"):
+            raise TakyonError("trusted product surface verification is available only on the authority tool surface")
 
         workspace_raw = str(args.get("workspace") or ".").strip() or "."
+        workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
             _enforce_business_work_focus(
-                {"action": "workspace.upsert", "business": business, "workspace": workspace_raw},
+                {"action": "workspace.upsert", "business": business, "workspace": workspace_rel},
                 str(business_row.get("work_focus") or "all"),
             )
         load_takyon_env()
@@ -8933,10 +9839,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
 
         business_root = store._business_root(business).resolve()
-        workspace_path = business_root if workspace_raw in {".", ""} else store._resolve_business_file(business, workspace_raw).resolve()
+        workspace_path = store._resolve_business_file(
+            business,
+            workspace_rel,
+            require_output_root=True,
+            field="workspace",
+        ).resolve()
         workspace_path.mkdir(parents=True, exist_ok=True)
         if not workspace_path.is_dir():
-            raise TakyonError(f"workspace is not a directory: {workspace_raw}")
+            raise TakyonError(f"workspace is not a directory: {workspace_rel}")
         if business_root not in (workspace_path, *workspace_path.parents):
             raise TakyonError("workspace escaped business root")
 
@@ -8974,7 +9885,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "currency": "USD",
                     "kind": "claude_agent_sdk",
                     "status": "spent",
-                    "purpose": f"Claude Agent SDK task in {workspace_raw}",
+                    "purpose": f"Claude Agent SDK task in {workspace_rel}",
                     "requires_api": ["anthropic"],
                 }
             ],
@@ -8993,13 +9904,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip()
         guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
         resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
-        workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_raw)
+        workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_rel)
         worker_instruction_parts = [instruction.rstrip()]
         if guidance_block:
             worker_instruction_parts.append(guidance_block)
-        if _workspace_needs_customer_ai_copy_contract(workspace_raw):
+        if _workspace_needs_customer_ai_copy_contract(workspace_rel):
             worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
-        if _workspace_needs_runtime_ui_contract(workspace_raw):
+        if _workspace_needs_runtime_ui_contract(workspace_rel):
             runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
             if runtime_ui_contract:
                 worker_instruction_parts.append(runtime_ui_contract)
@@ -9007,9 +9918,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
         payload = {
             "business": business,
-            "workspace": workspace_raw,
+            "workspace": workspace_rel,
             "cwd": str(workspace_path),
-            "root": str(business_root),
+            "root": str(workspace_path),
             "instruction": worker_instruction,
             "model": model,
             "maxTurns": max_turns,
@@ -9036,7 +9947,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             sdk_result.setdefault("success", False)
             sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
         if sdk_result.get("success"):
-            prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_raw)
+            prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
             if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
                 sdk_result["workspace_prefix_repair"] = prefix_repair
             if prefix_repair.get("blocked"):
@@ -9055,9 +9966,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
             )
         verification: dict[str, Any] | None = None
-        verify_surface = bool(args.get("verify_surface"))
-        if not args.get("verify_surface") and workspace_raw not in {".", ""}:
-            normalized_workspace = workspace_raw.strip("/").lower()
+        verify_surface = False if worker_session_bound else bool(args.get("verify_surface"))
+        if not worker_session_bound and not args.get("verify_surface"):
+            normalized_workspace = workspace_rel.strip("/").lower()
             verify_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
         if sdk_result.get("success") and verify_surface:
             summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -9067,12 +9978,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 surface = {}
             requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
             publish_policy = "publish_after_verify" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
-            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_raw}".encode("utf-8")).hexdigest()[:32]
+            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_rel}".encode("utf-8")).hexdigest()[:32]
             verification = _finalize_product_surface_verification(
                 store=store,
                 business=business,
                 surface=surface,
-                source_path=workspace_raw,
+                source_path=workspace_rel,
                 publish_target=_product_publish_target(business, surface.get("publish_target")),
                 requested_publish_policy=requested_publish_policy,
                 publish_policy=publish_policy,
@@ -9102,12 +10013,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             {
                 "action": "agent.record",
                 "business": business,
-                "scope": f"business:{business}/workspace:{workspace_raw}",
+                "scope": f"business:{business}/workspace:{workspace_rel}",
                 "status": status,
                 "prompt": worker_instruction,
                 "result": {
                     "source": "claude-agent-sdk",
-                    "workspace": workspace_raw,
+                    "workspace": workspace_rel,
                     "model": model,
                     "guidance_skills": resolved_guidance_skills,
                     "summary": sdk_result.get("summary") or "",
@@ -9130,7 +10041,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             {
                 "success": bool(sdk_result.get("success")),
                 "business": business,
-                "workspace": workspace_raw,
+                "workspace": workspace_rel,
                 "source": "claude-agent-sdk",
                 "model": model,
                 "guidance_skills": resolved_guidance_skills,
@@ -9499,18 +10410,69 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
+        "name": "business_ugc_ad_generate",
+        "description": "Generate a business-scoped UGC video ad publication under product/ugc-ads/<slug>/ with creative-credit gating on the live path; test mode and dry-run record suppressed receipts without provider spend.",
+        "handler": handle_business_ugc_ad_generate,
+        "schema": _schema(
+            "business_ugc_ad_generate",
+            "Generate a scoped ugc-video-ad publication.",
+            {
+                "business": _BUSINESS_PROP,
+                "brief_path": {"type": "string", "description": "Business-relative brief JSON path used by the copied ugc-video-ad pipeline."},
+                "script_path": {"type": "string", "description": "Optional business-relative script JSON path; when omitted the brief must embed script data."},
+                "slug": {"type": "string", "description": "Optional publication slug under product/ugc-ads/<slug>/."},
+                "dry_run": {"type": "boolean", "description": "Plan only; no provider calls and no creative credits."},
+                "transition_mode": {"type": "string", "enum": ["continuity", "jumpcut"], "description": "continuity chains clips; jumpcut re-anchors each clip from the reference image."},
+                "jumpcuts": {"type": "boolean", "description": "Enable extra postpass jump cuts."},
+                "skip_post": {"type": "boolean", "description": "Skip the grain/jump-cut postpass."},
+                "workdir": {"type": "string", "description": "Optional scratch directory for intermediate files."},
+                "env_file": {"type": "string", "description": "Optional local .env filename for the copied script; defaults to .env."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "brief_path", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_static_ad_generate",
+        "description": "Generate business-scoped static ad creative bundles under product/static-ads/<slug>/ with creative-credit gating on the live path; test mode and dry-run use the mock backend and record truthful receipts.",
+        "handler": handle_business_static_ad_generate,
+        "schema": _schema(
+            "business_static_ad_generate",
+            "Generate scoped static ad creative bundles.",
+            {
+                "business": _BUSINESS_PROP,
+                "input_path": {"type": "string", "description": "Business-relative spec JSON, batch JSON, or directory path consumed by the copied static-ad pipeline."},
+                "slug": {"type": "string", "description": "Optional publication slug under product/static-ads/<slug>/."},
+                "dry_run": {"type": "boolean", "description": "Force the mock backend and skip creative-credit charges."},
+                "backend": {"type": "string", "description": "Optional backend override; live mode defaults to openai, suppressed mode uses mock."},
+                "quality": {"type": "string", "description": "Optional image quality override (low, medium, high, auto)."},
+                "aspect_ratio": {"type": "string", "description": "Optional comma-separated ratio override such as 1:1,9:16,1.91:1."},
+                "crop": {"type": "boolean", "description": "Center-crop outputs to the exact aspect ratio."},
+                "strict": {"type": "boolean", "description": "Treat lint warnings as errors."},
+                "stop_on_error": {"type": "boolean", "description": "Abort the batch on the first failed creative."},
+                "max": {"type": "integer", "description": "Optional cap on the number of creatives generated from the input."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "input_path", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_meta_ad_launch",
         "description": (
-            "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video. "
+            "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video or static image. "
             "mode=preflight verifies the access token and lists ad accounts (read-only, creates nothing). "
-            "mode=launch creates a video AdCreative + Campaign + AdSet + Ad, ALWAYS PAUSED (it never serves or spends); "
+            "mode=launch creates an AdCreative + Campaign + AdSet + Ad, ALWAYS PAUSED (it never serves or spends); "
             "test-mode businesses suppress everything to a local receipt with no Meta calls. "
             "Activation is intentionally not supported by this tool."
         ),
         "handler": handle_business_meta_ad_launch,
         "schema": _schema(
             "business_meta_ad_launch",
-            "Preflight or create a PAUSED Meta ad from a UGC video.",
+            "Preflight or create a PAUSED Meta ad from a UGC video or static image.",
             {
                 "business": _BUSINESS_PROP,
                 "mode": {
@@ -9518,13 +10480,22 @@ TAKYON_TOOL_DEFINITIONS = [
                     "enum": ["preflight", "launch"],
                     "description": "preflight = read-only token/account check; launch = create PAUSED objects. Default launch.",
                 },
+                "asset_kind": {
+                    "type": "string",
+                    "enum": ["video", "image"],
+                    "description": "Choose whether launch consumes a UGC .mp4 or a static image asset. Default video.",
+                },
                 "ad_video_path": {
                     "type": "string",
-                    "description": "Business-relative path to the UGC .mp4, e.g. product/ugc-ads/<slug>/ad.mp4. Required for launch.",
+                    "description": "Business-relative path to the UGC .mp4, e.g. product/ugc-ads/<slug>/ad.mp4. Required when asset_kind=video.",
+                },
+                "ad_image_path": {
+                    "type": "string",
+                    "description": "Business-relative path to the static image creative, e.g. product/static-ads/<slug>/<creative>.png. Required when asset_kind=image.",
                 },
                 "slug": {
                     "type": "string",
-                    "description": "Publication slug under distribution/meta-ads/<slug>/; defaults from the campaign name or the video folder.",
+                    "description": "Publication slug under distribution/meta-ads/<slug>/; defaults from the campaign name or asset folder.",
                 },
                 "ad_account_id": {
                     "type": "string",
@@ -9540,7 +10511,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 },
                 "ad": {
                     "type": "object",
-                    "description": "{name, message, link (required), call_to_action, page_id, image_url}; image_url is an optional thumbnail fallback.",
+                    "description": "{name, message, link (required), call_to_action, page_id, image_url}; image_url is an optional video thumbnail fallback or static creative URL hint.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,

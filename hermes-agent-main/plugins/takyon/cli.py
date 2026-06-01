@@ -607,10 +607,6 @@ def _business_workspace_execution_context(slug: str, *, operator_user_id: str | 
     from . import storage
 
     load_takyon_env()
-    selected_backend = str(os.getenv("TAKYON_STORAGE_BACKEND") or "").strip().lower()
-    if not selected_backend:
-        yield None
-        return
     backend = storage.get_storage_backend()
     with storage.isolated_business_workspace(
         backend,
@@ -911,7 +907,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in research/strategy.md.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, load",
         "takyon-conversation-followup and use its published follow-up note before deciding.",
-        "For channel-native public execution, prefer takyon-x for X and takyon-reddit for Reddit instead of stretching the broad distribution skill.",
+        "For channel-native public execution, prefer takyon-x for X; keep Reddit and other forum-style public execution in takyon-distribution.",
         "Call business_calculate_pulse and use takyon-business-metrics to establish the first metrics baseline in metrics/summary.md and research/strategy.md.",
         "Seed or update compact wake notes in metrics/wake-history.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
@@ -2542,6 +2538,7 @@ def _run_agent_with_meta(
                         session_key="",
                         user_id=resolved_operator_user_id,
                         workspace_root=str(workspace_home or ""),
+                        business_slug=current_business or "",
                     )
                 except Exception:
                     session_context_tokens = []

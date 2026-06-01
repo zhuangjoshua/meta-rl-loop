@@ -150,6 +150,7 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     import plugins.takyon.ai_gateway as ai_gateway
     import plugins.takyon.control_api as control_api
     import plugins.takyon.core as core
+    import plugins.takyon.creative_gateway as creative_gateway
     import takyon_cli.web_server as web_server
 
     mounted: list[str] = []
@@ -159,6 +160,7 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
     monkeypatch.setattr(control_api, "build_control_router", lambda: "control-router")
     monkeypatch.setattr(ai_gateway, "build_ai_gateway_router", lambda: "gateway-router")
+    monkeypatch.setattr(creative_gateway, "build_creative_gateway_router", lambda: "creative-router")
     monkeypatch.setattr(web_server.app, "include_router", lambda router: mounted.append(router))
     monkeypatch.setattr(web_server.app, "dependency_overrides", overrides, raising=False)
     monkeypatch.setattr(web_server, "_POSTGRES_RUNTIME_ROUTES_MOUNTED", False)
@@ -166,7 +168,7 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     web_server._mount_postgres_runtime_routes()
     web_server._mount_postgres_runtime_routes()
 
-    assert mounted == ["control-router", "gateway-router"]
+    assert mounted == ["control-router", "gateway-router", "creative-router"]
     assert control_api.get_control_conn in overrides
     assert ai_gateway.get_gateway_conn in overrides
 
@@ -176,9 +178,10 @@ def test_auth0_public_path_allows_machine_facing_pg_routes():
 
     assert web_server._auth0_public_path("/v1/me") is True
     assert web_server._auth0_public_path("/internal/ai-gateway/messages") is True
+    assert web_server._auth0_public_path("/internal/creative-gateway/meta-launch") is True
 
 
-def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch):
+def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg_store_dsn):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
@@ -191,10 +194,13 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch):
         "<!doctype html><title>Latexflow</title><main>Write LaTeX without tickets</main>",
         encoding="utf-8",
     )
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|web-server-subdomain")
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    store = TakyonStore(tmp_path)
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
     store.commit(
         scope="business:latexflow",
         operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
@@ -307,15 +313,18 @@ def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monk
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
 
 
-def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch):
+def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch, pg_store_dsn):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
     from plugins.takyon.core import TakyonStore
 
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|web-server-tls-ask")
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    store = TakyonStore(tmp_path)
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
     store.commit(
         scope="business:latexflow",
         operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],

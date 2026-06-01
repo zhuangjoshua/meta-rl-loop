@@ -24,7 +24,11 @@ import {
 import { useSearchParams } from "react-router-dom";
 
 import { Markdown } from "@/components/Markdown";
-import { api, type TakyonOperatorAccountResponse } from "@/lib/api";
+import {
+  api,
+  type TakyonBusinessCreativeCreditsResponse,
+  type TakyonOperatorAccountResponse,
+} from "@/lib/api";
 import {
   GatewayClient,
   type ConnectionState,
@@ -1038,6 +1042,8 @@ export default function ChatPage() {
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
     useState<TakyonOperatorAccountResponse | null>(null);
+  const [creativeCredits, setCreativeCredits] =
+    useState<TakyonBusinessCreativeCreditsResponse | null>(null);
   const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [blockedBootBusinessSlug, setBlockedBootBusinessSlug] = useState<string | null>(null);
@@ -1134,6 +1140,22 @@ export default function ChatPage() {
     }
   }, []);
 
+  const refreshCreativeCredits = useCallback(async (business: string) => {
+    if (!business) {
+      setCreativeCredits(null);
+      return;
+    }
+    try {
+      setCreativeCredits(await api.getTakyonBusinessCreativeCredits(business));
+    } catch {
+      setCreativeCredits((prev) =>
+        prev && prev.business_slug === business
+          ? prev
+          : { available: false, business_slug: business, reason: "request_failed" },
+      );
+    }
+  }, []);
+
   useEffect(() => {
     connectionStateRef.current = state;
   }, [state]);
@@ -1164,6 +1186,10 @@ export default function ChatPage() {
   }, [refreshOperatorAccount]);
 
   useEffect(() => {
+    void refreshCreativeCredits(scopeState.business || "");
+  }, [refreshCreativeCredits, scopeState.business]);
+
+  useEffect(() => {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
   }, [createInTestMode]);
 
@@ -1179,6 +1205,7 @@ export default function ChatPage() {
       );
       setScopeState(scope);
       if (scope.business) {
+        void refreshCreativeCredits(scope.business);
         try {
           const res = await gw.request<BusinessOutputsResponse>(
             "takyon.outputs.list",
@@ -1191,12 +1218,15 @@ export default function ChatPage() {
           /* detached output refresh is best effort */
         }
       }
+      if (!scope.business) {
+        setCreativeCredits(null);
+      }
     } catch (err) {
       if (isMissingSessionError(err)) {
         recoverMissingSession(scopeBusinessRef.current || businessFromLocationSearch() || undefined);
       }
     }
-  }, [gw, recoverMissingSession]);
+  }, [gw, recoverMissingSession, refreshCreativeCredits]);
 
   const scheduleTakyonRefresh = useCallback(() => {
     if (takyonRefreshTimerRef.current !== null) return;
@@ -2427,6 +2457,7 @@ export default function ChatPage() {
 
           {inBusiness ? (
             <CompanyWorkspace
+              creativeCredits={creativeCredits}
               deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
@@ -3283,6 +3314,7 @@ function deliverableActionFor(item: Deliverable): DeliverableAction {
 }
 
 function CompanyWorkspace({
+  creativeCredits,
   deliverables,
   onReadFile,
   onResolveMedia,
@@ -3291,6 +3323,7 @@ function CompanyWorkspace({
   scope,
   takyonProgress,
 }: {
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   deliverables: Deliverable[];
   onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
@@ -3320,6 +3353,14 @@ function CompanyWorkspace({
   const outreachStatus = (outreach.status || "").trim();
   const distActive =
     posts.length > 0 || publishedCount > 0 || (!!outreachStatus && outreachStatus !== "missing");
+  const creativeBalance =
+    creativeCredits?.available && typeof creativeCredits.balance_credits === "number"
+      ? creativeCredits.balance_credits
+      : null;
+  const creativeReserved =
+    creativeCredits?.available && typeof creativeCredits.reserved_credits === "number"
+      ? creativeCredits.reserved_credits
+      : null;
 
   // Progressive disclosure: a section only appears once it actually exists.
   // Product shows when live or a built site/preview exists; Distribution when
@@ -3471,10 +3512,25 @@ function CompanyWorkspace({
         {/* Metric ledger — one ruled stat strip. Values are honest deferred
             dashes (no number) until the billing control plane is live. */}
         <div className="td-ledger">
-          {["MRR", "Paying", "Signups", "Net revenue"].map((label) => (
-            <div className="td-led" key={label}>
-              <div className="td-led-k">{label}</div>
-              <div className="td-led-v">—</div>
+          {[
+            { label: "MRR", value: "—" },
+            { label: "Paying", value: "—" },
+            { label: "Signups", value: "—" },
+            { label: "Net revenue", value: "—" },
+            {
+              label: "Creative credits",
+              value:
+                creativeBalance === null ? "—" : String(Math.max(0, Math.trunc(creativeBalance))),
+            },
+            {
+              label: "Reserved",
+              value:
+                creativeReserved === null ? "—" : String(Math.max(0, Math.trunc(creativeReserved))),
+            },
+          ].map((item) => (
+            <div className="td-led" key={item.label}>
+              <div className="td-led-k">{item.label}</div>
+              <div className="td-led-v">{item.value}</div>
             </div>
           ))}
         </div>

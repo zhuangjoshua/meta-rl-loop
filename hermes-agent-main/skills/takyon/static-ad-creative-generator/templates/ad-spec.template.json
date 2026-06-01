@@ -1,0 +1,59 @@
+{
+  "creative_id": "<angle>-01",
+  "platform": "meta",
+  "placement": "feed",
+  "aspect_ratio": "4:5",
+  "goal": "clicks",
+  "audience": {
+    "persona": "<who they are in their own words>",
+    "pain": "<the felt problem>",
+    "desire": "<the end state they want>",
+    "awareness_level": "problem_aware"
+  },
+  "strategy": {
+    "angle": "pain_agitation",
+    "hook": "<one scroll-stopping idea in their language>",
+    "promise": "<the payoff>",
+    "objection_addressed": "<the doubt this defuses>",
+    "proof_type": "demo"
+  },
+  "visual": {
+    "template": "hero_product",
+    "style": "<aesthetic / art direction>",
+    "scene": "<what is happening in frame>",
+    "subject": "<primary subject>",
+    "composition": "<framing + negative space for text>",
+    "focal_point": "<the one thing the eye lands on>",
+    "props": [],
+    "background": "<environment>",
+    "lighting": "<light direction + mood>"
+  },
+  "product": {
+    "representation": "<packshot | in-hand | on-screen UI | result-only | implied>",
+    "must_show": [],
+    "must_not_show": ["fabricated third-party logos", "invented endorsements"]
+  },
+  "copy": {
+    "overlay_text": "<short text baked into the image>",
+    "headline": "<platform headline, outside the image>",
+    "primary_text": "<platform body text>",
+    "cta": "<call to action>"
+  },
+  "layout": {
+    "overlay_position": "bottom",
+    "typography": "<weight, case, scale, contrast treatment>",
+    "safe_zones": "<areas to keep clear of platform UI>",
+    "logo_position": "<corner | none>"
+  },
+  "prompting": {
+    "final_image_prompt": "",
+    "negative_constraints": ["garbled or misspelled text", "extra fingers", "fake brand logos", "cluttered background"],
+    "reference_images": []
+  },
+  "qa": {
+    "readability_check": "",
+    "native_platform_check": "",
+    "policy_risks": [],
+    "iteration_notes": ""
+  }
+}

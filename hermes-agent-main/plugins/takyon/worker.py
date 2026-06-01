@@ -217,6 +217,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             tokens = set_session_vars(
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),
+                business_slug=slug,
             )
             final_response, cost_usd, cost_status = _run_ceo_turn(
                 slug=slug,

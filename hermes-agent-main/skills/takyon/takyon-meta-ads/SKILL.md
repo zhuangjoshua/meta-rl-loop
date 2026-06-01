@@ -1,6 +1,6 @@
 ---
 name: takyon-meta-ads
-description: Launch a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video — preflight the access token, then create a PAUSED Campaign/AdSet/Ad with the UGC mp4 as the video creative. Never serves or spends; activation is out of scope. Test-mode businesses suppress everything to a local receipt.
+description: Launch a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the access token, then create a PAUSED Campaign/AdSet/Ad. Never serves or spends; activation is out of scope. Test-mode businesses suppress everything to a local receipt.
 version: 1.0.0
 author: Four Manifold
 license: Proprietary
@@ -9,15 +9,22 @@ platforms: [linux, macos]
 metadata:
   hermes:
     category: takyon
-    tags: [takyon, meta, facebook, instagram, ads, paid, distribution, ugc]
-    related_skills: [ugc-video-ad, takyon-distribution, takyon-business-metrics]
+    tags: [takyon, meta, facebook, instagram, ads, paid, distribution, ugc, image]
+    related_skills: [ugc-video-ad, static-ad-creative-generator, takyon-distribution, takyon-business-metrics]
     requires_toolsets: [takyon]
     requires_tools:
       [
         business_read_business,
-        business_ugc_ad_write,
         business_meta_ad_launch,
       ]
+    routing:
+      owns: Meta ad launch staging from a finished UGC or static-image asset, including preflight and paused Campaign/AdSet/Ad creation
+      when_to_use:
+        - a finished UGC or static ad asset needs to be staged as a paused Meta campaign
+        - Meta token or ad-account preflight is needed before launch work
+      do_not_use_for:
+        - activating live spend or changing live budgets
+        - building the video asset itself
   takyon:
     scope: business
     allowed_roots: [product, distribution, metrics]
@@ -34,16 +41,16 @@ required_credential_files: []
 
 ## Overview
 
-Turn a finished UGC video into a **paid Meta ad** for one business. This skill is the
-**distribution** half of the UGC pipeline: the `ugc-video-ad` skill produces
-`product/ugc-ads/<slug>/ad.mp4` (the *product* asset); this skill uploads that mp4 as a
-Meta **AdVideo**, wraps it in an **AdCreative**, and builds a **Campaign → AdSet → Ad** —
-**always PAUSED**.
+Turn a finished UGC video or static image bundle into a **paid Meta ad** for one business.
+This skill is the **distribution** half of the creative pipeline: `ugc-video-ad` produces
+`product/ugc-ads/<slug>/ad.mp4`, while `static-ad-creative-generator` produces
+`product/static-ads/<slug>/...png`. This skill turns one of those assets into a Meta
+**AdCreative** and builds a **Campaign → AdSet → Ad** — **always PAUSED**.
 
 Two hard layers stay separate:
 
-- **Asset layer** — the video. Owned by `ugc-video-ad`, lives under `product/`. This skill
-  never regenerates or edits it; it only consumes `ad.mp4`.
+- **Asset layer** — the video or image. Owned by `ugc-video-ad` / `static-ad-creative-generator`,
+  lives under `product/`. This skill never regenerates or edits it; it only consumes the finished asset.
 - **Launch layer** — the campaign objects + spend. Owned here, lives under `distribution/`,
   and runs through the guarded **`business_meta_ad_launch`** tool.
 
@@ -52,22 +59,22 @@ Flipping an ad live (the actual spend decision) is deliberately not part of this
 
 ## When to Use
 
-- A business has a UGC ad at `product/ugc-ads/<slug>/ad.mp4` and wants it running as a Meta
-  (Facebook/Instagram) ad.
+- A business has a UGC ad at `product/ugc-ads/<slug>/ad.mp4` or a static image under
+  `product/static-ads/<slug>/` and wants it staged as a Meta (Facebook/Instagram) ad.
 - You need to verify the Meta access token / which ad accounts it can touch (preflight)
   before spending any effort.
 - You want to stage a campaign safely (PAUSED) for human review before it ever serves.
 
 **Do not use for:** activating/un-pausing ads or changing live budgets (out of scope —
-spend is a separate, human-gated decision); non-Meta channels (use `takyon-x`,
-`takyon-reddit`, or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
+spend is a separate, human-gated decision); non-Meta channels (use `takyon-x`
+or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
 
 ## Quick Reference
 
 - Primary root: `distribution/`
 - Publication paths: `distribution/meta-ads/<slug>/plan.json`, `distribution/meta-ads/<slug>/receipt.json`
 - Tool used by this skill: **`business_meta_ad_launch`** (preflight + PAUSED launch)
-- Upstream asset: `product/ugc-ads/<slug>/ad.mp4` from the `ugc-video-ad` skill
+- Upstream assets: `product/ugc-ads/<slug>/ad.mp4` from `ugc-video-ad` or a local image from `product/static-ads/<slug>/`
 - Safety: every object is created `PAUSED`; `daily_budget_usd` is capped by
   `TAKYON_META_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Meta.
 

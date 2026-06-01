@@ -1,0 +1,8 @@
+# Image backend (default: OpenAI gpt-image-2). Required only for real generation.
+openai>=1.40.0
+
+# Optional but recommended:
+#   Pillow  -> exact --crop to 1:1 / 4:5 / 9:16, and nicer --dry-run placeholders
+#   jsonschema -> richer structural validation (validate_spec.py falls back without it)
+Pillow>=10.0.0
+jsonschema>=4.0.0

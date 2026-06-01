@@ -6,7 +6,7 @@ module provides scoped durable state, safety checks, and a CLI entrypoint.
 
 from __future__ import annotations
 
-from .core import TAKYON_TOOL_DEFINITIONS
+from .core import TAKYON_TOOL_DEFINITIONS, takyon_toolset_name
 from .cli import register_cli, takyon_command, takyon_slash_command
 
 
@@ -14,7 +14,7 @@ def register(ctx) -> None:
     for tool in TAKYON_TOOL_DEFINITIONS:
         ctx.register_tool(
             name=tool["name"],
-            toolset="takyon",
+            toolset=takyon_toolset_name(tool["name"]),
             schema=tool["schema"],
             handler=tool["handler"],
             description=tool["description"],

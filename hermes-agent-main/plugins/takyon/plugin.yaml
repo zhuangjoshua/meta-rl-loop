@@ -34,6 +34,9 @@ provides_tools:
   - business_publish_outreach
   - business_publish_test_outreach
   - business_ugc_ad_write
+  - business_ugc_ad_generate
+  - business_static_ad_generate
+  - business_meta_ad_launch
   - business_claude_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message

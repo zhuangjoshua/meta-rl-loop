@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from gateway.session_context import clear_session_vars, set_session_vars
+from plugins.takyon import business_credits as takyon_business_credits
 from plugins.takyon import core as takyon_core
+from plugins.takyon import storage
 from plugins.takyon.core import (
     TAKYON_TOOL_DEFINITIONS,
     TakyonError,
@@ -22,9 +25,12 @@ from plugins.takyon.core import (
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
+    handle_business_write_file,
     handle_business_meta_ad_launch,
     handle_business_publish_outreach,
     handle_business_request_app_magic_link,
+    handle_business_static_ad_generate,
+    handle_business_ugc_ad_generate,
     handle_business_ugc_ad_write,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
@@ -32,6 +38,7 @@ from plugins.takyon.core import (
     handle_business_read_conversation_thread,
     handle_business_upsert_app_surface_contract,
     handle_business_upsert_business,
+    takyon_toolset_name,
     handle_business_verify_product_surface,
 )
 
@@ -39,6 +46,7 @@ from plugins.takyon.core import (
 class _FakePluginContext:
     def __init__(self):
         self.tools = []
+        self.tool_defs = []
         self.skills = []
         self.commands = []
         self.slash_commands = {}
@@ -46,6 +54,7 @@ class _FakePluginContext:
 
     def register_tool(self, **kwargs):
         self.tools.append(kwargs["name"])
+        self.tool_defs.append(dict(kwargs))
 
     def register_skill(self, **kwargs):
         self.skills.append(kwargs["name"])
@@ -59,6 +68,13 @@ class _FakePluginContext:
     def inject_message(self, content, role="user"):
         self.injected.append((role, content))
         return True
+
+
+@pytest.fixture(autouse=True)
+def _isolated_takyon_pg_env(monkeypatch, tmp_path, pg_store_dsn):
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|takyon-plugin-tests")
+    TakyonStore(root=tmp_path, database_url=pg_store_dsn).seed_platform_owner()
 
 
 def _commit(store: TakyonStore, scope: str, operations: list[dict], key: str):
@@ -79,10 +95,31 @@ def test_plugin_registers_tools_and_commands():
     assert set(ctx.slash_commands) == {"takyon"}
 
 
+def test_plugin_registers_authority_tools_on_separate_toolset():
+    import plugins.takyon as takyon
+
+    ctx = _FakePluginContext()
+    takyon.register(ctx)
+    toolsets = {item["name"]: item["toolset"] for item in ctx.tool_defs}
+
+    assert toolsets["business_write_file"] == "takyon"
+    assert toolsets["business_publish_outreach"] == "takyon"
+    assert toolsets["business_allocate_budget"] == "takyon-authority"
+    assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
+    assert toolsets["business_static_ad_generate"] == "takyon-authority"
+    assert toolsets["business_meta_ad_launch"] == "takyon-authority"
+    assert toolsets["business_verify_product_surface"] == "takyon-authority"
+    assert toolsets["business_check_runtime_capabilities"] == "takyon-authority"
+    assert takyon_toolset_name("business_gc") == "takyon-authority"
+    assert takyon_toolset_name("business_record_event") == "takyon"
+
+
 def test_bundled_takyon_skills_exist():
     skills_root = Path(__file__).resolve().parents[2] / "skills" / "takyon"
     skill_files = {path.parent.name: path for path in skills_root.glob("*/SKILL.md")}
     assert set(skill_files) == {
+        "autonomous-seo-geo-operator",
+        "static-ad-creative-generator",
         "ugc-video-ad",
         "takyon-app-runtime",
         "takyon-build-product",
@@ -92,7 +129,6 @@ def test_bundled_takyon_skills_exist():
         "takyon-distribution",
         "takyon-market-research",
         "takyon-meta-ads",
-        "takyon-reddit",
         "takyon-x",
     }
     for path in skill_files.values():
@@ -952,6 +988,7 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
     assert result["success"] is True
     assert "current working directory is already the requested business workspace: product/site" in instruction
     assert "not `product/site/index.html`" in instruction
+    assert captured["payload"]["root"] == captured["payload"]["cwd"]
     assert (tmp_path / "businesses" / "latexflow" / "product" / "site" / "index.html").exists()
     assert not (tmp_path / "businesses" / "latexflow" / "product" / "site" / "product" / "site").exists()
 
@@ -2239,6 +2276,46 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
     assert cron_jobs.list_jobs(include_disabled=True) == []
 
 
+def test_delete_business_removes_remote_workspace_copy(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-delete-remote",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "path": "research/spec.md", "content": "# Spec\n"}],
+        "write-delete-remote",
+    )
+
+    backend = storage.LocalStorageBackend(tmp_path / "storage")
+    resumed = tmp_path / "resumed-before-delete"
+    storage.sync_down(backend, "latexflow", resumed)
+    assert (resumed / "research" / "spec.md").read_text() == "# Spec\n"
+
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.delete",
+                "business": "latexflow",
+                "confirm": True,
+                "delete_domains": False,
+            }
+        ],
+        "delete-remote",
+    )
+
+    emptied = tmp_path / "resumed-after-delete"
+    report = storage.sync_down(backend, "latexflow", emptied)
+    assert report.downloaded == ()
+    assert not (emptied / "research" / "spec.md").exists()
+
+
 def test_tool_handlers_return_json(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     create = json.loads(
@@ -2267,6 +2344,132 @@ def test_tool_handlers_return_json(tmp_path, monkeypatch):
     )
     assert preview["success"] is True
     assert preview["results"][0]["dry_run"] is True
+
+
+def test_business_session_binding_scopes_file_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        "init-alpha",
+    )
+    _commit(
+        store,
+        "business:beta",
+        [{"action": "business.upsert", "business": "beta", "name": "Beta"}],
+        "init-beta",
+    )
+
+    tokens = set_session_vars(business_slug="alpha")
+    try:
+        wrote = json.loads(
+            handle_business_write_file(
+                {
+                    "path": "research/session-note.md",
+                    "content": "alpha-only\n",
+                    "idempotency_key": "write-alpha",
+                }
+            )
+        )
+        assert wrote["success"] is True
+        assert (store._business_root("alpha") / "research" / "session-note.md").read_text(encoding="utf-8") == "alpha-only\n"
+
+        blocked = json.loads(
+            handle_business_write_file(
+                {
+                    "business": "beta",
+                    "path": "research/session-note.md",
+                    "content": "beta\n",
+                    "idempotency_key": "write-beta",
+                }
+            )
+        )
+        assert blocked["success"] is False
+        assert "bound to the current session" in str(blocked.get("error") or "")
+        assert not (store._business_root("beta") / "research" / "session-note.md").exists()
+    finally:
+        clear_session_vars(tokens)
+
+
+def test_store_rejects_noncanonical_business_output_paths(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        "init-alpha",
+    )
+
+    with pytest.raises(TakyonError, match="must stay under one of"):
+        _commit(
+            store,
+            "business:alpha",
+            [{"action": "workspace.upsert", "path": "scratch"}],
+            "bad-workspace",
+        )
+
+    with pytest.raises(TakyonError, match="must stay under one of"):
+        _commit(
+            store,
+            "business:alpha",
+            [{"action": "artifact.write", "path": "scratch/note.md", "content": "nope"}],
+            "bad-artifact",
+        )
+
+
+def test_claude_agent_task_rejects_noncanonical_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha", "budget": {"amount": 25}}],
+        "init-alpha",
+    )
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "alpha",
+                "workspace": "scratch",
+                "instruction": "Write a file.",
+                "idempotency_key": "bad-workspace",
+            }
+        )
+    )
+    assert result["success"] is False
+    assert "must stay under one of" in str(result.get("error") or "")
+
+
+def test_business_session_blocks_trusted_surface_verification(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        "init-alpha",
+    )
+
+    tokens = set_session_vars(business_slug="alpha")
+    try:
+        result = json.loads(
+            handle_business_claude_agent_task(
+                {
+                    "business": "alpha",
+                    "workspace": "product/site",
+                    "instruction": "Update the product surface.",
+                    "verify_surface": True,
+                    "idempotency_key": "claude-verify-blocked",
+                }
+            )
+        )
+        assert result["success"] is False
+        assert "authority tool surface" in str(result.get("error") or "")
+    finally:
+        clear_session_vars(tokens)
 
 
 def test_conversation_messages_append_permanent_corpus(tmp_path):
@@ -2468,6 +2671,214 @@ def test_business_ugc_ad_write_records_existing_publication(tmp_path, monkeypatc
     assert payload["script"] == script
 
 
+def test_business_static_ad_generate_test_mode_writes_mock_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "test"}],
+        "init-frameforge",
+    )
+    example_spec = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "takyon"
+        / "static-ad-creative-generator"
+        / "examples"
+        / "example-spec.json"
+    ).read_text(encoding="utf-8")
+    spec_path = tmp_path / "businesses" / "frameforge" / "research" / "example-spec.json"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(example_spec, encoding="utf-8")
+
+    result = json.loads(
+        handle_business_static_ad_generate(
+            {
+                "business": "frameforge",
+                "input_path": "research/example-spec.json",
+                "slug": "frameforge-static",
+                "idempotency_key": "frameforge-static-test-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    manifest = tmp_path / "businesses" / "frameforge" / "product" / "static-ads" / "frameforge-static" / "manifest.json"
+    receipt = tmp_path / "businesses" / "frameforge" / result["receipt"]
+    assert manifest.is_file()
+    assert receipt.is_file()
+
+
+def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "live"}],
+        "init-frameforge-live",
+    )
+    _grant_creative_credits(store, "frameforge", 10, "frameforge-grant")
+    spec_path = tmp_path / "businesses" / "frameforge" / "research" / "example-spec.json"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(
+        (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "static-ad-creative-generator"
+            / "examples"
+            / "example-spec.json"
+        ).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "created",
+            "manifest": "product/static-ads/frameforge-static-live/manifest.json",
+            "succeeded": 1,
+            "failed": 0,
+            "credits_charged": 2,
+            "balance_credits": 8,
+            "reserved_credits": 0,
+        },
+    )
+
+    result = json.loads(
+        handle_business_static_ad_generate(
+            {
+                "business": "frameforge",
+                "input_path": "research/example-spec.json",
+                "slug": "frameforge-static-live",
+                "idempotency_key": "frameforge-static-live-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created"
+    assert result["balance_credits"] == 8
+    receipt = json.loads(
+        (
+            tmp_path
+            / "businesses"
+            / "frameforge"
+            / "product"
+            / "static-ads"
+            / "frameforge-static-live"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["credits_charged"] == 2
+
+
+def test_business_ugc_ad_generate_blocks_without_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:clipbook",
+        [{"action": "business.upsert", "business": "clipbook", "name": "Clipbook", "mode": "live"}],
+        "init-clipbook-live",
+    )
+    brief_path = tmp_path / "businesses" / "clipbook" / "research" / "brief.json"
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(json.dumps({"business": "clipbook", "product": "demo"}), encoding="utf-8")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": False,
+            "status": "blocked_insufficient_creative_credits",
+            "requested_credits": 8,
+            "available_credits": 0,
+            "balance_credits": 0,
+            "reserved_credits": 0,
+            "error": "insufficient_creative_credits",
+        },
+    )
+
+    result = json.loads(
+        handle_business_ugc_ad_generate(
+            {
+                "business": "clipbook",
+                "brief_path": "research/brief.json",
+                "slug": "clipbook-demo",
+                "idempotency_key": "clipbook-ugc-live-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert "insufficient_creative_credits" in result["error"]
+
+
+def test_business_ugc_ad_generate_live_charges_credits_and_records_asset(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:clipbook",
+        [{"action": "business.upsert", "business": "clipbook", "name": "Clipbook", "mode": "live"}],
+        "init-clipbook-live-success",
+    )
+    _grant_creative_credits(store, "clipbook", 20, "clipbook-grant")
+    brief_path = tmp_path / "businesses" / "clipbook" / "research" / "brief.json"
+    script_path = tmp_path / "businesses" / "clipbook" / "research" / "script.json"
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(json.dumps({"business": "clipbook", "product": "demo"}), encoding="utf-8")
+    script = {"dialogue_action": [{"dialogue": "Try Clipbook", "action": "holding the product"}]}
+    script_path.write_text(json.dumps(script), encoding="utf-8")
+
+    def fake_gateway(endpoint, payload):
+        publication_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "clipbook-demo"
+        publication_dir.mkdir(parents=True, exist_ok=True)
+        (publication_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+        (publication_dir / "reference.png").write_bytes(b"fake png bytes")
+        (publication_dir / "script.json").write_text(json.dumps(script), encoding="utf-8")
+        return {
+            "success": True,
+            "status": "created",
+            "write_payload": {
+                "value": {
+                    "slug": "clipbook-demo",
+                    "path": "product/ugc-ads/clipbook-demo/ad.mp4",
+                    "seconds": 12.0,
+                    "n_clips": 2,
+                    "script": script,
+                }
+            },
+            "credits_charged": 8,
+            "balance_credits": 12,
+            "reserved_credits": 0,
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(
+        handle_business_ugc_ad_generate(
+            {
+                "business": "clipbook",
+                "brief_path": "research/brief.json",
+                "script_path": "research/script.json",
+                "slug": "clipbook-demo",
+                "idempotency_key": "clipbook-ugc-live-success-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created"
+    assert result["path"] == "product/ugc-ads/clipbook-demo/ad.mp4"
+    assert result["balance_credits"] == 12
+
+
 def _meta_test_business(tmp_path, monkeypatch, *, slug="clipbook", mode="test"):
     """Set up a temp TAKYON_HOME + a business for the Meta ad launch tests."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
@@ -2477,6 +2888,11 @@ def _meta_test_business(tmp_path, monkeypatch, *, slug="clipbook", mode="test"):
         upsert["mode"] = mode
     _commit(store, f"business:{slug}", [upsert], f"init-{slug}")
     return store
+
+
+def _grant_creative_credits(store: TakyonStore, business: str, credits: int, key: str) -> None:
+    with store._connect() as conn:
+        takyon_business_credits.grant_credits(conn, business, credits, idempotency_key=key)
 
 
 def _meta_launch_args(**overrides):
@@ -2574,10 +2990,17 @@ def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
     assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads").exists()
 
 
-def test_business_meta_ad_launch_preflight_requires_token(tmp_path, monkeypatch):
+def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, monkeypatch):
     for var in ("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: (_ for _ in ()).throw(
+            TakyonError("Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN")
+        ),
+    )
 
     result = json.loads(
         handle_business_meta_ad_launch(
@@ -2587,6 +3010,125 @@ def test_business_meta_ad_launch_preflight_requires_token(tmp_path, monkeypatch)
 
     assert result["success"] is False
     assert "META_ACCESS_TOKEN" in result["error"]
+
+
+def test_business_meta_ad_launch_test_mode_supports_image_asset(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image",
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    receipt = json.loads(
+        (
+            tmp_path
+            / "businesses"
+            / "clipbook"
+            / "distribution"
+            / "meta-ads"
+            / "demo-image"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["asset_kind"] == "image"
+    assert receipt["ad_image_path"] == "product/static-ads/demo-image/creative.png"
+
+
+def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": False,
+            "status": "blocked_insufficient_creative_credits",
+            "requested_credits": 1,
+            "available_credits": 0,
+            "balance_credits": 0,
+            "reserved_credits": 0,
+            "error": "insufficient_creative_credits",
+        },
+    )
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-live",
+            )
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert "insufficient_creative_credits" in result["error"]
+
+
+def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 5, "clipbook-meta-grant")
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "created_paused",
+            "ad_account_id": "act_123456",
+            "graph_version": "v23.0",
+            "ids": {
+                "image_hash": "hash123",
+                "creative_id": "creative-1",
+                "campaign_id": "campaign-1",
+                "adset_id": "adset-1",
+                "ad_id": "ad-1",
+            },
+            "thumbnail_url": "https://example.com/image.png",
+            "credits_charged": 1,
+            "balance_credits": 4,
+            "reserved_credits": 0,
+        },
+    )
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-live",
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created_paused"
+    assert result["balance_credits"] == 4
 
 
 def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):

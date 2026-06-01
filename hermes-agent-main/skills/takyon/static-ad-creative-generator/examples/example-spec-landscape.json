@@ -1,0 +1,59 @@
+{
+  "creative_id": "comparison-landscape-01",
+  "platform": "meta",
+  "placement": "feed",
+  "aspect_ratio": "1.91:1",
+  "goal": "clicks",
+  "audience": {
+    "persona": "busy professional who suspects small recurring charges are adding up",
+    "pain": "auditing statements by hand is tedious, so it never gets done",
+    "desire": "the same answer without spending an evening on a spreadsheet",
+    "awareness_level": "solution_aware"
+  },
+  "strategy": {
+    "angle": "comparison",
+    "hook": "Spreadsheet vs. Tally.",
+    "promise": "Same answer in about a minute, not an evening.",
+    "objection_addressed": "Can't I just check my statements myself?",
+    "proof_type": "comparison"
+  },
+  "visual": {
+    "template": "this_vs_that",
+    "style": "clean editorial split-frame, single teal accent, light background",
+    "scene": "a wide split frame contrasting a cluttered manual spreadsheet with the clean Tally dashboard",
+    "subject": "a side-by-side 'by hand' vs 'Tally' comparison",
+    "composition": "wide landscape split down the center, simple labels along the top, a clean band along the bottom reserved for overlay text",
+    "focal_point": "the clean Tally side with the highlighted monthly total",
+    "props": ["a messy spreadsheet on the left", "a Tally app card on the right"],
+    "background": "plain off-white studio backdrop",
+    "lighting": "soft, even studio light across both halves"
+  },
+  "product": {
+    "representation": "the advertiser's own app UI on the right half (Tally)",
+    "must_show": ["Tally logo", "teal accent color", "highlighted monthly total"],
+    "must_not_show": ["fabricated third-party brand logos", "invented endorsements", "real bank names", "named competitor products"]
+  },
+  "copy": {
+    "overlay_text": "Spreadsheet vs. Tally",
+    "headline": "Stop auditing statements by hand",
+    "primary_text": "Combing your statements by hand works — once. Tally finds the same recurring charges in about a minute, every month.",
+    "cta": "Try Tally Free"
+  },
+  "layout": {
+    "overlay_position": "bottom",
+    "typography": "bold sans, high contrast, generous size",
+    "safe_zones": "keep labels and key UI within the central 90%; clear ~6% on every edge; reserve the bottom band for overlay text",
+    "logo_position": "bottom-right"
+  },
+  "prompting": {
+    "final_image_prompt": "A wide landscape split-frame comparison on a plain off-white background. Left half labeled 'By hand': a cluttered, messy spreadsheet of rows and numbers. Right half labeled 'Tally': a clean mobile app dashboard card showing a highlighted monthly total '$312/mo' in teal with a small 'Tally' wordmark. A clear vertical divider down the center, simple labels at the top, and a clean empty band along the bottom for overlay text. Soft, even studio lighting.",
+    "negative_constraints": ["garbled or misspelled text", "real bank or brand logos", "named competitor products", "extra fingers", "cluttered right side"],
+    "reference_images": []
+  },
+  "qa": {
+    "readability_check": "Two-side contrast reads instantly even at small size; the clean Tally side wins the eye.",
+    "native_platform_check": "Editorial but candid; fits Meta feed and landscape/right-column placements.",
+    "policy_risks": ["Compares against the generic 'by hand' method, not a named competitor; the dollar figure is illustrative sample data, not a real user's result."],
+    "iteration_notes": "Test a 1:1 crop of the Tally half as a standalone; A/B the top labels."
+  }
+}

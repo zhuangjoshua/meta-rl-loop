@@ -1,0 +1,61 @@
+{
+  "_note": "Example product intake (creative brief) for a FICTIONAL product, 'Tally'. All figures here are illustrative placeholders, not real metrics or testimonials. This is the input to the strategy stage; it is not an ad spec.",
+  "product": {
+    "name": "Tally",
+    "url": "https://example.com/tally",
+    "one_liner": "Tally scans your accounts and surfaces the recurring charges quietly draining your money.",
+    "category": "personal finance / subscription manager app",
+    "value_proposition": "See every recurring charge in one place and cancel what you don't use in a tap.",
+    "differentiation": "Read-only scan, no spreadsheets, finds trials that auto-converted to paid.",
+    "offer_type": "free trial",
+    "offer": "Free to scan; Pro is $4/mo billed annually.",
+    "landing_page_promise": "Find the subscriptions you forgot you were paying for."
+  },
+  "audience": {
+    "persona": "busy professional who feels money quietly leaks out of their account",
+    "pain": "small recurring charges and forgotten free-trials keep billing unnoticed",
+    "desire": "stop paying for things they don't use, without a budgeting chore",
+    "awareness_level": "solution_aware",
+    "objections": [
+      "Another finance app I'll download and never open?",
+      "I don't have time to audit my statements.",
+      "Is it safe to connect my accounts?"
+    ],
+    "voice_of_customer": [
+      "where is all my money going",
+      "I forgot I was even paying for that",
+      "nickel-and-dimed by subscriptions"
+    ]
+  },
+  "proof": {
+    "available_proof_types": ["demo", "stat", "social_proof"],
+    "testimonials": "[FICTIONAL PLACEHOLDER] No real testimonials supplied for this example.",
+    "hard_metrics": "[ILLUSTRATIVE] sample dashboards show totals like $312/mo; not a real user result.",
+    "brand_assets": {
+      "logo": "assets/tally-logo.png (not included in this example)",
+      "brand_colors": ["#0FB5A3 (teal)", "#0B1F2A (ink)"],
+      "fonts": ["Inter"],
+      "product_ui_screens": "available"
+    },
+    "mandatory_elements": ["Tally logo", "teal accent color"],
+    "never_show": ["real bank names", "real card numbers", "third-party brand logos"]
+  },
+  "platform": {
+    "platforms": ["meta", "reddit"],
+    "placements": ["feed", "reddit_feed"],
+    "aspect_ratios": ["1:1", "4:5"],
+    "goal": "clicks"
+  },
+  "constraints": {
+    "brand_voice": ["plain-spoken", "reassuring", "a little wry"],
+    "regulated_claims": "Finance category — avoid guaranteed savings; keep figures illustrative and typical.",
+    "competitor_references": "Position against manual spreadsheets and 'just check your statements', not a named competitor.",
+    "performance_data": "none yet (first launch)"
+  },
+  "angle_shortlist": [
+    { "angle": "product_proof", "reason": "the dashboard itself is the proof; strong for solution-aware." },
+    { "angle": "pain_agitation", "reason": "dramatizes the slow leak of forgotten charges." },
+    { "angle": "reddit_native", "reason": "fits r/personalfinance voice; native post format." },
+    { "angle": "comparison", "reason": "Tally vs. manually auditing statements." }
+  ]
+}

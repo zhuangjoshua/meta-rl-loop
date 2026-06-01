@@ -63,8 +63,31 @@ async function getSessionToken(): Promise<string> {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+  getDashboardAuthState: async () => {
+    const headers = new Headers();
+    const token = window.__TAKYON_SESSION_TOKEN__;
+    if (token) {
+      setSessionHeader(headers, token);
+    }
+    const res = await fetch(`${BASE}/auth/me`, { headers });
+    if (res.status === 401) {
+      return {
+        authenticated: false,
+        auth0_required: true,
+      } satisfies DashboardAuthStateResponse;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    return res.json() as Promise<DashboardAuthStateResponse>;
+  },
   getTakyonOperatorAccount: () =>
     fetchJSON<TakyonOperatorAccountResponse>("/api/takyon/operator/account"),
+  getTakyonBusinessCreativeCredits: (slug: string) =>
+    fetchJSON<TakyonBusinessCreativeCreditsResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits`,
+    ),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
@@ -384,6 +407,16 @@ export interface StatusResponse {
   version: string;
 }
 
+export interface DashboardAuthStateResponse {
+  authenticated: boolean;
+  auth0_required: boolean;
+  user?: {
+    email?: string;
+    name?: string;
+    sub?: string;
+  };
+}
+
 export interface TakyonOperatorAccountResponse {
   available: boolean;
   user_id?: string;
@@ -395,6 +428,14 @@ export interface TakyonOperatorAccountResponse {
   topup_balance_cents?: number;
   reserved_cents?: number;
   spendable_cents?: number;
+  reason?: string;
+}
+
+export interface TakyonBusinessCreativeCreditsResponse {
+  available: boolean;
+  business_slug: string;
+  balance_credits?: number;
+  reserved_credits?: number;
   reason?: string;
 }
 

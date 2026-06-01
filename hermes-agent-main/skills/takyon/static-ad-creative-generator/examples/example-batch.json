@@ -1,0 +1,179 @@
+[
+  {
+    "creative_id": "product-proof-01",
+    "platform": "meta",
+    "placement": "feed",
+    "aspect_ratio": "4:5",
+    "goal": "clicks",
+    "audience": {
+      "persona": "busy professional who feels money quietly leaks out of their account",
+      "pain": "forgotten subscriptions and lapsed free-trials keep charging every month",
+      "desire": "see and stop wasted recurring spend in minutes, without a budgeting chore",
+      "awareness_level": "solution_aware"
+    },
+    "strategy": {
+      "angle": "product_proof",
+      "hook": "See exactly where your money leaks.",
+      "promise": "Find the subscriptions you forgot in about a minute.",
+      "objection_addressed": "Another finance app I'll download and never open?",
+      "proof_type": "demo"
+    },
+    "visual": {
+      "template": "ui_screenshot",
+      "style": "clean editorial product UI, single teal accent, soft shadows, light background",
+      "scene": "a realistic Tally mobile app dashboard listing recurring subscriptions with one monthly total highlighted",
+      "subject": "the Tally app dashboard shown on a phone-sized card",
+      "composition": "app card centered slightly high; clean negative space reserved in the bottom third for overlay text",
+      "focal_point": "the highlighted monthly total '$312/mo'",
+      "props": ["one phone-sized app frame"],
+      "background": "plain off-white studio backdrop",
+      "lighting": "soft, even studio light with a gentle shadow beneath the card"
+    },
+    "product": {
+      "representation": "on-screen UI of the advertiser's own app (Tally)",
+      "must_show": ["Tally logo", "teal accent color", "subscription list with a highlighted monthly total"],
+      "must_not_show": ["fabricated third-party brand logos", "invented endorsements", "real bank names or card numbers"]
+    },
+    "copy": {
+      "overlay_text": "Find the subscriptions you forgot about",
+      "headline": "Stop paying for subscriptions you forgot",
+      "primary_text": "Tally finds recurring charges quietly draining your account, then helps you cancel what you don't use.",
+      "cta": "Try Tally Free"
+    },
+    "layout": {
+      "overlay_position": "bottom",
+      "typography": "bold condensed sans, high-contrast dark text, generous size",
+      "safe_zones": "keep key UI and text within the central 90%; clear the bottom ~15% for platform primary text and CTA",
+      "logo_position": "bottom-left"
+    },
+    "prompting": {
+      "final_image_prompt": "A realistic, clean mobile finance app dashboard for an app called 'Tally', shown as a single phone-sized card floating on a plain off-white studio background. The screen lists a few recurring subscriptions with short generic placeholder names and small prices, and one large highlighted monthly total reading '$312/mo' in a teal accent. A small 'Tally' wordmark sits at the top of the app screen. Soft, even studio lighting with a gentle shadow under the card. Minimal and editorial, single teal accent color, with clean empty space in the lower third of the frame.",
+      "negative_constraints": ["garbled or misspelled text", "real bank or brand logos", "fake play buttons or cursors", "cluttered UI", "extra fingers"],
+      "reference_images": []
+    },
+    "qa": {
+      "readability_check": "Overlay reads in one glance; dark text on light UI passes the thumbnail squint test.",
+      "native_platform_check": "Reads like a real product screenshot, native to Meta feed; not stocky or corporate.",
+      "policy_risks": ["Dollar figures shown in the UI are illustrative sample data, not a specific user's result — keep them clearly representative, never presented as a testimonial."],
+      "iteration_notes": "Test a 1:1 variant and a version with the total in the upper third; A/B the headline against a question hook."
+    }
+  },
+  {
+    "creative_id": "pain-agitation-01",
+    "platform": "meta",
+    "placement": "feed",
+    "aspect_ratio": "4:5",
+    "goal": "clicks",
+    "audience": {
+      "persona": "person who suspects small recurring charges are adding up but hasn't looked",
+      "pain": "free trials that auto-converted and old subscriptions keep charging unnoticed",
+      "desire": "stop paying for things they no longer use",
+      "awareness_level": "problem_aware"
+    },
+    "strategy": {
+      "angle": "pain_agitation",
+      "hook": "Still paying for that 2021 free trial?",
+      "promise": "Tally surfaces what you forgot so you can cancel it.",
+      "objection_addressed": "I don't have time to audit my bank statements.",
+      "proof_type": "visual_metaphor"
+    },
+    "visual": {
+      "template": "pain_metaphor",
+      "style": "clean conceptual still life, single bold accent, editorial",
+      "scene": "a long printed receipt spilling and tangling out of a smartphone, symbolizing money quietly leaking",
+      "subject": "one smartphone with a long printed receipt tangling outward and down",
+      "composition": "phone in the upper-middle, receipt spilling down through the frame; clean negative space reserved at the top for overlay text",
+      "focal_point": "the long, tangled receipt",
+      "props": ["one smartphone", "one long paper receipt"],
+      "background": "plain warm off-white surface",
+      "lighting": "soft top light with a soft shadow"
+    },
+    "product": {
+      "representation": "implied (named in copy; UI not shown)",
+      "must_show": ["small Tally wordmark, bottom"],
+      "must_not_show": ["fabricated third-party logos", "invented endorsements", "real bank names"]
+    },
+    "copy": {
+      "overlay_text": "Still paying for that 2021 free trial?",
+      "headline": "Cancel subscriptions you forgot about",
+      "primary_text": "Old free trials and forgotten subscriptions keep charging your card. Tally spots them so you can cancel in a tap.",
+      "cta": "Find Them Free"
+    },
+    "layout": {
+      "overlay_position": "top",
+      "typography": "bold sans, high contrast, generous size",
+      "safe_zones": "clear the top ~10% and bottom ~15% for platform chrome",
+      "logo_position": "bottom-left"
+    },
+    "prompting": {
+      "final_image_prompt": "",
+      "negative_constraints": ["garbled text", "real brand logos", "extra fingers", "cluttered background"],
+      "reference_images": []
+    },
+    "qa": {
+      "readability_check": "Single bold question reads instantly at the top; strong figure-ground contrast.",
+      "native_platform_check": "Conceptual but candid; reads native to feed, not stocky.",
+      "policy_risks": [],
+      "iteration_notes": "Test a receipt-pile vs. a single glowing recurring charge; cut a 9:16 story variant."
+    }
+  },
+  {
+    "creative_id": "reddit-native-01",
+    "platform": "reddit",
+    "placement": "reddit_feed",
+    "aspect_ratio": "1:1",
+    "goal": "clicks",
+    "audience": {
+      "persona": "Redditor in a personal-finance community who hates wasting money",
+      "pain": "small recurring charges add up unnoticed over months",
+      "desire": "an easy, no-spreadsheet way to catch them",
+      "awareness_level": "problem_aware"
+    },
+    "strategy": {
+      "angle": "reddit_native",
+      "hook": "What finally stopped my subscription creep",
+      "promise": "A 60-second scan that surfaces the leaks.",
+      "objection_addressed": "Is this just another budgeting app?",
+      "proof_type": "social_proof"
+    },
+    "visual": {
+      "template": "native_social_post",
+      "style": "authentic Reddit post card UI, neutral light mode, believable",
+      "scene": "a Reddit-style post card with a placeholder subreddit label, a bold title, an upvote arrow, and two short lines of body text",
+      "subject": "the post card",
+      "composition": "the post card fills the frame with small even margins",
+      "focal_point": "the bold post title",
+      "props": [],
+      "background": "light neutral UI background",
+      "lighting": "flat UI lighting"
+    },
+    "product": {
+      "representation": "implied (mentioned in the post body; no product UI shown)",
+      "must_show": ["generic, clearly-placeholder Reddit-style UI"],
+      "must_not_show": ["real subreddit names presented as authentic", "real usernames or avatars", "fabricated third-party logos", "invented endorsements", "upvote counts presented as real"]
+    },
+    "copy": {
+      "overlay_text": "What finally stopped my subscription creep",
+      "headline": "How I caught my forgotten subscriptions",
+      "primary_text": "Posting in case it helps someone: I kept getting nickel-and-dimed by trials I forgot about. A quick scan surfaced them all.",
+      "cta": "See How It Works"
+    },
+    "layout": {
+      "overlay_position": "center",
+      "typography": "native Reddit post typography, bold title weight",
+      "safe_zones": "keep title and body within the central 88%",
+      "logo_position": "none"
+    },
+    "prompting": {
+      "final_image_prompt": "A clean, believable Reddit-style post card in light mode: a generic, clearly-placeholder subreddit label (not a real community name), a small upvote arrow, a bold post title, and two short lines of body text in a neutral sans-serif. No real usernames, no real avatars, no specific vote numbers. Plain light background around the card.",
+      "negative_constraints": ["garbled or misspelled text", "real usernames or avatars", "vote counts implied as authentic", "real brand logos"],
+      "reference_images": []
+    },
+    "qa": {
+      "readability_check": "Title legible at thumbnail size; clean native Reddit look.",
+      "native_platform_check": "Reads as a native Reddit post in the community's voice, not an obvious ad.",
+      "policy_risks": ["Illustrative/representative post — not a real user testimonial and not a real subreddit; rendered as a clearly-placeholder card with no real vote counts."],
+      "iteration_notes": "Test a contrarian title; cut a Meta-feed screenshot variant of the same card."
+    }
+  }
+]

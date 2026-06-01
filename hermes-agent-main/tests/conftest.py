@@ -26,6 +26,8 @@ import re
 import signal
 import sys
 import tempfile
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,6 +37,54 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+_TAKYON_TEST_PG_DSN = os.environ.get("TAKYON_TEST_PG_DSN")
+
+
+def _apply_takyon_pg_migrations(conn) -> None:
+    from plugins.takyon.db.runner import run_migrations
+
+    run_migrations(conn)
+
+
+@contextmanager
+def _throwaway_takyon_pg_db(worker_id: str):
+    import psycopg
+
+    if not _TAKYON_TEST_PG_DSN:
+        pytest.skip("TAKYON_TEST_PG_DSN not set; Postgres integration test skipped")
+    dbname = f"takyon_test_{worker_id}_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(_TAKYON_TEST_PG_DSN, autocommit=True) as admin:
+        admin.execute(f'create database "{dbname}"')
+    conn = psycopg.connect(_TAKYON_TEST_PG_DSN, dbname=dbname, autocommit=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+        with psycopg.connect(_TAKYON_TEST_PG_DSN, autocommit=True) as admin:
+            admin.execute(f'drop database if exists "{dbname}" with (force)')
+
+
+@pytest.fixture
+def pg_conn(worker_id):
+    with _throwaway_takyon_pg_db(worker_id) as conn:
+        _apply_takyon_pg_migrations(conn)
+        yield conn
+
+
+@pytest.fixture
+def pg_conn_raw(worker_id):
+    with _throwaway_takyon_pg_db(worker_id) as conn:
+        yield conn
+
+
+@pytest.fixture
+def pg_store_dsn(worker_id):
+    from psycopg.conninfo import make_conninfo
+
+    with _throwaway_takyon_pg_db(worker_id) as conn:
+        _apply_takyon_pg_migrations(conn)
+        yield make_conninfo(_TAKYON_TEST_PG_DSN, dbname=conn.info.dbname)
 
 
 # ── Credential env-var filter ──────────────────────────────────────────────
