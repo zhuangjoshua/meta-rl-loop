@@ -1180,12 +1180,27 @@ export default function ChatPage() {
             );
         if (cancelled) return;
         const nextScope = normalizeScopeState(scope);
+        console.info("[takyon-scope] hydrateScope", {
+          bootBusiness,
+          nextBusiness: nextScope.business,
+          sessionId: nextSessionId,
+        });
         setScopeState(nextScope);
         if (bootBusiness && nextScope.business !== bootBusiness) {
+          console.info("[takyon-scope] hydrateScope pending fallback", {
+            bootBusiness,
+            nextBusiness: nextScope.business,
+            sessionId: nextSessionId,
+          });
           setPendingBusinessSlug(bootBusiness);
         }
       } catch (err) {
         if (!cancelled && bootBusiness) {
+          console.info("[takyon-scope] hydrateScope error", {
+            bootBusiness,
+            sessionId: nextSessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
           setPendingBusinessSlug(bootBusiness);
         }
         throw err;
@@ -1262,6 +1277,13 @@ export default function ChatPage() {
     );
     if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
     if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
+    console.info("[takyon-scope] url fallback pending", {
+      sessionId,
+      state,
+      urlBusiness,
+      scopeBusiness: scopeState.business,
+      pendingBusinessSlug,
+    });
     setPendingBusinessSlug(urlBusiness);
   }, [pendingBusinessSlug, scopeState.business, searchParams, sessionId, state]);
 
@@ -1504,6 +1526,12 @@ export default function ChatPage() {
 
     const confirmScope = async () => {
       attempts += 1;
+      console.info("[takyon-scope] confirmScope attempt", {
+        attempts,
+        pendingBusinessSlug,
+        sessionId,
+        state,
+      });
       try {
         const res = await gw.request<ScopeState>(
           "takyon.scope.set",
@@ -1512,12 +1540,23 @@ export default function ChatPage() {
         );
         if (cancelled) return;
         const nextScope = normalizeScopeState(res);
+        console.info("[takyon-scope] confirmScope result", {
+          attempts,
+          pendingBusinessSlug,
+          nextBusiness: nextScope.business,
+          sessionId,
+        });
         if (nextScope.business === pendingBusinessSlug) {
           setScopeState(nextScope);
           setPendingBusinessSlug(null);
           return;
         }
       } catch {
+        console.info("[takyon-scope] confirmScope error", {
+          attempts,
+          pendingBusinessSlug,
+          sessionId,
+        });
         /* create may still be registering the business; keep the optimistic page */
       }
 
