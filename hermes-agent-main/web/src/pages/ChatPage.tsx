@@ -868,6 +868,7 @@ export default function ChatPage() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const bootBusinessParamRef = useRef(initialBusinessParam);
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -1164,10 +1165,11 @@ export default function ChatPage() {
     );
 
     const hydrateScope = async (nextSessionId: string) => {
-      const scope = !resumeParam && initialBusinessParam
+      const bootBusiness = bootBusinessParamRef.current;
+      const scope = !resumeParam && bootBusiness
         ? await gw.request<ScopeState>(
             "takyon.scope.set",
-            { session_id: nextSessionId, business: initialBusinessParam },
+            { session_id: nextSessionId, business: bootBusiness },
             10_000,
           )
         : await gw.request<ScopeState>(
@@ -1240,7 +1242,7 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, initialBusinessParam, refreshOperatorAccount, resumeParam]);
+  }, [gw, refreshOperatorAccount, resumeParam]);
 
   useEffect(() => {
     if (state === "open") {
