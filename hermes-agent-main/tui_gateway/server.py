@@ -2175,6 +2175,11 @@ def _(rid, params: dict) -> dict:
             from plugins.takyon.cli import _slugify
 
             slug = _slugify(boot_business)
+            logger.warning(
+                "takyon session.create boot requested business=%s operator_user_id=%s",
+                slug,
+                operator_user_id,
+            )
             boot_result["requested_business"] = slug
             if _takyon_can_access_business(session, slug):
                 session["takyon_current_business"] = slug
@@ -6042,6 +6047,11 @@ def _(rid, params: dict) -> dict:
         from plugins.takyon.cli import _slugify
 
         slug = _slugify(business)
+        logger.warning(
+            "takyon scope.set requested business=%s operator_user_id=%s",
+            slug,
+            _takyon_operator_user_id(session) or "",
+        )
         exists = _takyon_can_access_business(session, slug)
         if not exists:
             businesses = [
