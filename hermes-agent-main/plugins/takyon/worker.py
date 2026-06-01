@@ -11,8 +11,9 @@ each loop tick:
   3. drains the queue one job at a time through ``jobs.run_one`` — which keeps the FULL contract:
      ``FOR UPDATE SKIP LOCKED`` claim → flow-A reserve → handler → settle/refund, at-least-once, and
      never a fake ``completed`` (a partial/failed turn is ``blocked``/``failed``, invariant #8);
-  4. dispatches each job KIND to its handler. Today the only handler is ``ceo_wake`` — a scheduled
-     CEO turn, the Postgres-native replacement for the legacy file-cron ``takyon-ceo:<slug>`` job.
+  4. dispatches each job KIND to its handler. Today the active handlers are ``ceo_wake`` — a
+     scheduled CEO turn, the Postgres-native replacement for the legacy file-cron
+     ``takyon-ceo:<slug>`` job — and ``ceo_bootstrap`` for durable create-time business bootstrap.
 
 Money: ``run_one`` only reserves/settles when the job payload carries ``estimate_cents`` (>0), which
 rides onto the job from ``wake_schedules.payload``. The ``ceo_wake`` handler therefore ALWAYS reports
@@ -58,6 +59,104 @@ _STALE_SECONDS = 900
 # ── the ceo_wake handler ────────────────────────────────────────────────────────────────────────
 
 
+def _record_runtime_event(
+    slug: str,
+    *,
+    kind: str,
+    status: str,
+    detail: str = "",
+    line: str = "",
+    command: str = "",
+) -> None:
+    from .core import TakyonStore
+
+    payload = {
+        "kind": kind,
+        "status": status,
+        "detail": detail,
+        "line": line,
+        "command": command,
+    }
+    try:
+        store = TakyonStore()
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}/runtime",
+                business_slug=slug,
+                event_type=f"dashboard.run.{status}",
+                payload=payload,
+            )
+    except Exception as exc:  # pragma: no cover - best-effort trace only
+        _log.debug("failed to record worker runtime event for %s: %s", slug, exc)
+
+
+class _RuntimeProgress:
+    def __init__(self, *, slug: str, kind: str, command: str):
+        self.slug = slug
+        self.kind = kind
+        self.command = command
+        self._last_activity = ""
+        self._last_tool_generating = ""
+
+    def emit(self, line: str) -> None:
+        text = str(line or "").strip()
+        if not text:
+            return
+        _record_runtime_event(
+            self.slug,
+            kind=self.kind,
+            status="output",
+            detail=text,
+            line=text,
+            command=self.command,
+        )
+
+    def tool_generating(self, name: str) -> None:
+        if not name or name == self._last_tool_generating:
+            return
+        self._last_tool_generating = name
+        self.emit(f"preparing tool -> {name}")
+
+    def activity(self, desc: str) -> None:
+        text = str(desc or "").strip()
+        if not text or text == self._last_activity:
+            return
+        self._last_activity = text
+        self.emit(f"agent -> {text}")
+
+    def tool_progress(
+        self,
+        event_type: str,
+        name: str | None = None,
+        preview: str | None = None,
+        args: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> None:
+        if not name:
+            return
+        if event_type == "tool.started":
+            self._last_tool_generating = ""
+            suffix = f" · {preview}" if preview else ""
+            self.emit(f"tool started -> {name}{suffix}")
+        elif event_type == "tool.completed":
+            duration = kwargs.get("duration")
+            suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
+            self.emit(f"tool completed -> {name}{suffix}")
+
+    def tool_completed(
+        self,
+        _tool_id: str,
+        name: str,
+        args: dict[str, object],
+        result: object,
+    ) -> None:
+        from .cli import _tool_progress_lines
+
+        for line in _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)[:2]:
+            self.emit(line)
+
+
 def _run_ceo_turn(
     *,
     slug: str,
@@ -66,6 +165,7 @@ def _run_ceo_turn(
     toolsets: list[str],
     max_turns: int,
     inactivity_limit: float,
+    progress: _RuntimeProgress | None = None,
 ) -> tuple[str, float, str]:
     """Run ONE CEO wake turn for ``business:<slug>`` and return ``(final_response, cost_usd,
     cost_status)``.
@@ -124,11 +224,15 @@ def _run_ceo_turn(
             "skip_context_files": True,
             "platform": "takyon",
             "quiet_mode": True,
+            "tool_progress_callback": progress.tool_progress if progress is not None else None,
+            "tool_gen_callback": progress.tool_generating if progress is not None else None,
+            "tool_complete_callback": progress.tool_completed if progress is not None else None,
         },
     )
     agent._memory_nudge_interval = 0
     agent._skill_nudge_interval = 0
     agent.suppress_status_output = True
+    agent.activity_callback = progress.activity if progress is not None else None
 
     # Run on a worker thread and watch the agent's own activity tracker, so a hung turn is caught
     # without killing a healthy long-running one. (Mirrors cron/scheduler.py's inactivity guard.)
@@ -211,6 +315,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     toolsets = store._ceo_cron_toolsets()
     system_prompt = _load_ceo_prompt()
     owner_user_id = _business_owner_user_id(slug)
+    progress = _RuntimeProgress(slug=slug, kind="ceo_wake", command=f"/wake {slug}")
 
     payload = job.payload or {}
     try:
@@ -221,6 +326,13 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
 
     tokens: list[object] = []
     try:
+        _record_runtime_event(
+            slug,
+            kind="ceo_wake",
+            status="started",
+            detail="CEO wake is running.",
+            command=f"/wake {slug}",
+        )
         with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
             tokens = set_session_vars(
                 user_id=owner_user_id,
@@ -234,11 +346,28 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                 toolsets=toolsets,
                 max_turns=max_turns,
                 inactivity_limit=inactivity_limit,
+                progress=progress,
             )
+    except Exception as exc:
+        _record_runtime_event(
+            slug,
+            kind="ceo_wake",
+            status="failed",
+            detail=str(exc),
+            command=f"/wake {slug}",
+        )
+        raise
     finally:
         if tokens:
             clear_session_vars(tokens)
     cents = max(0, int(round(cost_usd * 100)))
+    _record_runtime_event(
+        slug,
+        kind="ceo_wake",
+        status="completed",
+        detail="CEO wake completed.",
+        command=f"/wake {slug}",
+    )
     return JobRunResult(
         result={
             "business_slug": slug,
@@ -250,8 +379,113 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     )
 
 
+def ceo_bootstrap_handler(job: Job) -> JobRunResult:
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    from .cli import (
+        _business_bootstrap_instruction,
+        _business_workspace_execution_context,
+        _load_ceo_prompt,
+    )
+    from .core import TakyonStore
+
+    slug = job.business_slug
+    store = TakyonStore()
+    summary = store.read(scope=f"business:{slug}", query="summary")
+    business = summary.get("business") if isinstance(summary.get("business"), dict) else {}
+    active_mode = str((business or {}).get("mode") or (job.payload or {}).get("mode") or "live")
+    goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
+    user_prompt = _business_bootstrap_instruction(slug, goal, active_mode)
+    system_prompt = _load_ceo_prompt()
+    owner_user_id = _business_owner_user_id(slug)
+    payload = job.payload or {}
+    try:
+        max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
+    except (TypeError, ValueError):
+        max_turns = _DEFAULT_MAX_TURNS
+    inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
+    schedule = str(payload.get("schedule") or "").strip()
+    command = f"/create {slug}"
+    progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
+
+    tokens: list[object] = []
+    try:
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="started",
+            detail="CEO bootstrap is running.",
+            command=command,
+        )
+        with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
+            tokens = set_session_vars(
+                user_id=owner_user_id,
+                workspace_root=str(workspace_home or ""),
+                business_slug=slug,
+            )
+            final_response, cost_usd, cost_status = _run_ceo_turn(
+                slug=slug,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                toolsets=["takyon", "web", "skills", "todo"],
+                max_turns=max_turns,
+                inactivity_limit=inactivity_limit,
+                progress=progress,
+            )
+    except Exception as exc:
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="failed",
+            detail=str(exc),
+            command=command,
+        )
+        raise
+    finally:
+        if tokens:
+            clear_session_vars(tokens)
+
+    wake_result: dict[str, object] | None = None
+    if schedule:
+        wake_result = store.commit(
+            scope=f"business:{slug}",
+            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+            idempotency_key=f"{job.id}:bootstrap-wake:{schedule}",
+            reason="bootstrap completed and enabled CEO wake loop",
+            actor="worker",
+        )
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="output",
+            detail=f"wake schedule -> business:{slug} {schedule}",
+            line=f"wake schedule -> business:{slug} {schedule}",
+            command=command,
+        )
+
+    cents = max(0, int(round(cost_usd * 100)))
+    _record_runtime_event(
+        slug,
+        kind="ceo_bootstrap",
+        status="completed",
+        detail="CEO bootstrap completed.",
+        command=command,
+    )
+    return JobRunResult(
+        result={
+            "business_slug": slug,
+            "final_response": final_response[:4000],
+            "cost_usd": round(cost_usd, 6),
+            "cost_status": cost_status,
+            "wake": wake_result,
+        },
+        actual_cost_cents=cents,
+    )
+
+
 # The kind→handler registry the drain consults. New job kinds register here.
 HANDLERS: dict[str, jobs.Handler] = {
+    "ceo_bootstrap": ceo_bootstrap_handler,
     "ceo_wake": ceo_wake_handler,
 }
 

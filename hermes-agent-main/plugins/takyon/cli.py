@@ -1012,6 +1012,59 @@ def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
     }
 
 
+def _enqueue_pg_ceo_bootstrap(
+    store: TakyonStore,
+    slug: str,
+    *,
+    goal: str,
+    mode: str,
+    schedule: str | None,
+    max_turns: int,
+) -> dict[str, Any]:
+    try:
+        from . import jobs
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import jobs
+
+    payload: dict[str, Any] = {
+        "goal": goal,
+        "mode": mode,
+        "max_turns": max(1, int(max_turns or 1)),
+        "estimate_cents": _operator_turn_estimate_cents(),
+    }
+    if schedule:
+        payload["schedule"] = schedule
+
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            for existing in jobs.list_jobs(raw, slug, limit=20):
+                if existing.kind == "ceo_bootstrap" and existing.status in {"queued", "running"}:
+                    return {
+                        "action": "ceo_bootstrap.enqueue",
+                        "business": slug,
+                        "job_id": str(existing.id),
+                        "status": str(existing.status),
+                        "created": False,
+                        "schedule": schedule or "",
+                    }
+            job = jobs.enqueue(
+                raw,
+                slug,
+                "ceo_bootstrap",
+                idempotency_key=_idempotency_key("operator-bootstrap", slug, uuid.uuid4().hex),
+                payload=payload,
+                max_attempts=1,
+            )
+    return {
+        "action": "ceo_bootstrap.enqueue",
+        "business": slug,
+        "job_id": str(job.id),
+        "status": str(job.status),
+        "created": True,
+        "schedule": schedule or "",
+    }
+
+
 def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[str, Any]:
     return store.commit(
         scope=scope,
@@ -2971,34 +3024,21 @@ def run_takyon_command(
             raise RuntimeError(f"business creation did not persist for {slug}")
         active_mode = str(business_record.get("mode") or mode or "live")
         if auto_start:
-            instruction = _business_bootstrap_instruction(slug, goal, active_mode)
-            agent_response = _run_agent(
-                _operator_context_message(instruction, slug),
-                model=model or os.getenv("TAKYON_MODEL", ""),
+            bootstrap_job = _enqueue_pg_ceo_bootstrap(
+                store,
+                slug,
+                goal=goal,
+                mode=active_mode,
+                schedule=schedule if should_schedule else None,
                 max_turns=int(max_turns or 30),
-                show_activity=show_activity,
-                show_indicator=show_indicator,
-                shell_history=shell_history,
-                operator_user_id=resolved_operator_user_id,
-                current_business=slug,
             )
-            cron_result = None
-            if should_schedule:
-                cron_result = store.commit(
-                    scope=_scope_for_business(slug),
-                    operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
-                    idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
-                    reason="operator initialized business CEO wake loop",
-                    actor="operator",
-                )
             return {
                 "success": True,
                 "business": slug,
                 "mode": active_mode,
-                "schedule": schedule,
+                "schedule": schedule if should_schedule else "",
                 "init": business_result,
-                "wake": cron_result,
-                "agent_response": agent_response,
+                "bootstrap_job": bootstrap_job,
             }
         if not should_schedule:
             return business_result

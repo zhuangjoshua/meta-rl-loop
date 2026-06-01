@@ -183,6 +183,10 @@ def test_handlers_registry_maps_ceo_wake():
     assert worker.HANDLERS["ceo_wake"] is worker.ceo_wake_handler
 
 
+def test_handlers_registry_maps_ceo_bootstrap():
+    assert worker.HANDLERS["ceo_bootstrap"] is worker.ceo_bootstrap_handler
+
+
 def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     # The handler converts the turn's true USD cost to integer cents for settlement and packages the
     # response. $0.0734 → 7 cents.

@@ -5028,6 +5028,10 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
 
     def job_label(kind: Any) -> str:
         value = brief_text(kind)
+        if value == "ceo_bootstrap":
+            return "CEO bootstrap"
+        if value == "ceo_wake":
+            return "CEO wake"
         if value == "product.deploy":
             return "Publish product site"
         if value == "product.build":
@@ -5051,6 +5055,18 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             if brief_text(item)
         ]
         blocked_reason = brief_text(payload.get("blocked_reason") or payload.get("error") or payload.get("note"))
+        if kind == "ceo_bootstrap":
+            if status == "queued":
+                return "Bootstrap is queued and waiting for the worker."
+            if status == "running":
+                return "Bootstrap is running and will sync durable results back when complete."
+            return blocked_reason or f"CEO bootstrap is {status}."
+        if kind == "ceo_wake":
+            if status == "queued":
+                return "CEO wake is queued."
+            if status == "running":
+                return "CEO wake is running."
+            return blocked_reason or f"CEO wake is {status}."
         if kind == "product.deploy":
             if blockers:
                 return "Website is local; deploy waits on " + ", ".join(blockers[:3]) + "."
@@ -5268,6 +5284,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         for row in event_rows:
             event = as_dict(store._row_to_dict(row))
             payload = as_dict(event.get("payload"))
+            event_kind = brief_text(payload.get("kind"))
             status = brief_text(payload.get("status") or event.get("event_type")).replace("dashboard.run.", "")
             if status == "heartbeat":
                 continue
@@ -5276,16 +5293,20 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 continue
             seen_runtime_details.add(detail)
             label = "CEO live trace"
+            if event_kind == "ceo_bootstrap":
+                label = "CEO bootstrap"
+            elif event_kind == "ceo_wake":
+                label = "CEO wake"
             lower_detail = detail.lower()
-            if lower_detail.startswith("agent ->"):
+            if label == "CEO live trace" and lower_detail.startswith("agent ->"):
                 label = "Agent"
-            elif "preparing tool ->" in lower_detail:
+            elif label == "CEO live trace" and "preparing tool ->" in lower_detail:
                 label = "Preparing tool"
-            elif "tool started ->" in lower_detail:
+            elif label == "CEO live trace" and "tool started ->" in lower_detail:
                 label = "Tool started"
-            elif "tool completed ->" in lower_detail:
+            elif label == "CEO live trace" and "tool completed ->" in lower_detail:
                 label = "Tool completed"
-            elif lower_detail.startswith("product verification"):
+            elif label == "CEO live trace" and lower_detail.startswith("product verification"):
                 label = "Product verification"
             runtime_events.append(
                 {
@@ -5926,7 +5947,7 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
 
     if command in {"create", "build", "init"}:
         try:
-            from plugins.takyon.cli import TakyonStore, _parse_business_start_args
+            from plugins.takyon.cli import _parse_business_start_args
 
             # Match the interactive shell path, which normalizes create/build/init
             # through the canonical /create parser before running the business start.
@@ -5938,15 +5959,7 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
         except Exception:
             return None
         if auto_start and not no_auto and slug:
-            target_slug = str(slug)
-            if not str(current_business or "").strip():
-                target_slug = _takyon_unique_business_slug(TakyonStore(), target_slug)
-                business_index = _takyon_create_business_arg_index(tokens)
-                if business_index is not None:
-                    tokens = [*tokens]
-                    tokens[business_index] = target_slug
-            tokens = ["create", *tokens[1:]]
-            return ("create", target_slug, "/" + shlex.join(tokens))
+            return None
 
     return None
 
@@ -6516,14 +6529,6 @@ def _(rid, params: dict) -> dict:
                 access_error = _takyon_require_business_access(session, target_business)
                 if access_error:
                     return _err(rid, 4041, access_error)
-            if detached_kind == "create" and target_business:
-                try:
-                    data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
-                    session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
-                except Exception:
-                    session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
-                session["takyon_pending_business_create"] = True
-                session["takyon_pending_business_create_at"] = time.time()
             background_run = {
                 "kind": detached_kind,
                 "business": target_business,
@@ -6705,16 +6710,10 @@ def _(rid, params: dict) -> dict:
                 name=f"takyon-{detached_kind}-{target_business or current_business or 'global'}",
                 daemon=True,
             ).start()
-            if detached_kind == "create":
-                message = (
-                    f"Create started for business:{target_business}. The CEO bootstrap is running in the background; "
-                    "open the business after a moment to see files, blockers, and deliverables."
-                )
-            else:
-                message = (
-                    f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
-                    "to see files, blockers, and deliverables."
-                )
+            message = (
+                f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
+                "to see files, blockers, and deliverables."
+            )
             return _ok(
                 rid,
                 {

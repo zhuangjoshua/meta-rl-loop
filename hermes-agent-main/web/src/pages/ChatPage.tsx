@@ -746,6 +746,36 @@ function latestTakyonProgressLine(
   return (progress.lines[progress.lines.length - 1] || "").trim();
 }
 
+function syncTakyonProgressFromTask(
+  current: TakyonProgressState | null,
+  business: string,
+  detail: string,
+): TakyonProgressState {
+  const normalizedBusiness = normalizeBusinessLookup(business);
+  const sameBusiness =
+    normalizeBusinessLookup(current?.business || "") === normalizedBusiness;
+  const previousLines =
+    sameBusiness && current?.active ? current.lines || [] : [];
+  const deduped =
+    previousLines.length && previousLines[previousLines.length - 1] === detail
+      ? previousLines
+      : [...previousLines, detail].slice(-TAKYON_PROGRESS_MAX_LINES);
+  if (
+    sameBusiness &&
+    current?.active &&
+    deduped.length === (current.lines || []).length &&
+    deduped[deduped.length - 1] === (current.lines || [])[deduped.length - 1]
+  ) {
+    return current;
+  }
+  return {
+    business,
+    lines: deduped,
+    active: true,
+    status: "streaming",
+  };
+}
+
 function recentToolLabels(tools: ToolEntry[] | undefined): string[] {
   const now = Date.now();
   const recent = (tools || [])
@@ -1788,24 +1818,32 @@ export default function ChatPage() {
   }, [refreshBusinessSurfaces, sessionId, state, takyonProgress]);
 
   useEffect(() => {
-    const runtimeTask = (scopeState.overview?.tasks || []).find(
+    const progressTask = (scopeState.overview?.tasks || []).find(
       (task) =>
-        task?.source === "runtime" &&
-        (task.status || "").toLowerCase() === "running" &&
+        (task?.source === "runtime" || task?.source === "job") &&
+        ["queued", "running"].includes((task.status || "").toLowerCase()) &&
         /CEO (bootstrap|wake)/i.test(task.label || ""),
     );
-    if (!runtimeTask || takyonProgress?.active) return;
     const business = scopeState.business || pendingBusinessSlug || businessFromLocationSearch();
     if (!business) return;
-    const detail = cleanText(`${runtimeTask.label || "CEO run"}: ${runtimeTask.detail || "Running"}`).trim();
+    if (!progressTask) {
+      setTakyonProgress((prev) => {
+        if (
+          !prev?.active ||
+          normalizeBusinessLookup(prev.business || "") !== normalizeBusinessLookup(business)
+        ) {
+          return prev;
+        }
+        return { ...prev, active: false, status: "complete" };
+      });
+      return;
+    }
+    const detail = cleanText(
+      `${progressTask.label || "CEO run"}: ${progressTask.detail || "Running"}`,
+    ).trim();
     if (!detail) return;
-    setTakyonProgress({
-      business,
-      lines: [detail],
-      active: true,
-      status: "streaming",
-    });
-  }, [pendingBusinessSlug, scopeState.business, scopeState.overview, takyonProgress?.active]);
+    setTakyonProgress((prev) => syncTakyonProgressFromTask(prev, business, detail));
+  }, [pendingBusinessSlug, scopeState.business, scopeState.overview]);
 
   useEffect(() => {
     if (!canUseConnection(state) || !sessionId || !scopeState.business) return;

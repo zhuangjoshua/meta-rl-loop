@@ -5244,6 +5244,28 @@ class TakyonStore:
                     (slug, limit),
                 ).fetchall()
             ]
+            if _db_backend() == "postgres":
+                try:
+                    worker_jobs = [
+                        self._row_to_dict(row)
+                        for row in conn.execute(
+                            "SELECT * FROM jobs WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?",
+                            (slug, limit),
+                        ).fetchall()
+                    ]
+                except Exception:
+                    worker_jobs = []
+                if worker_jobs:
+                    seen_job_ids: set[str] = set()
+                    merged_jobs: list[dict[str, Any]] = []
+                    for item in [*worker_jobs, *jobs]:
+                        job_id = str((item or {}).get("id") or "").strip()
+                        if job_id and job_id in seen_job_ids:
+                            continue
+                        if job_id:
+                            seen_job_ids.add(job_id)
+                        merged_jobs.append(item)
+                    jobs = merged_jobs[:limit]
             controls = [
                 self._row_to_dict(row)
                 for row in conn.execute(
