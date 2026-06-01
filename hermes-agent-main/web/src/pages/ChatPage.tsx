@@ -784,6 +784,12 @@ function normalizeBusinessLookup(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function businessFromLocationSearch(): string {
+  if (typeof window === "undefined") return "";
+  const params = new URLSearchParams(window.location.search);
+  return normalizeBusinessLookup(params.get("business") || params.get("scope") || "");
+}
+
 function naturalScopeChange(text: string, scope: ScopeState): string | undefined {
   const trimmed = text.trim().replace(/[.!?]+$/g, "");
   const lower = trimmed.toLowerCase();
@@ -828,7 +834,7 @@ export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
   const initialBusinessParam = useMemo(
-    () => normalizeBusinessLookup(searchParams.get("business") || searchParams.get("scope") || ""),
+    () => businessFromLocationSearch(),
     [searchParams],
   );
   const [version, setVersion] = useState(0);
@@ -1272,9 +1278,7 @@ export default function ChatPage() {
   }, [gw, refreshOperatorAccount, resumeParam]);
 
   useEffect(() => {
-    const urlBusiness = normalizeBusinessLookup(
-      searchParams.get("business") || searchParams.get("scope") || "",
-    );
+    const urlBusiness = businessFromLocationSearch();
     if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
     if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
     console.info("[takyon-scope] url fallback pending", {
