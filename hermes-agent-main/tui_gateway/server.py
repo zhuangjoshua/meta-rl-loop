@@ -2137,6 +2137,8 @@ def _(rid, params: dict) -> dict:
         operator_user_id = str(getattr(principal, "user_id", "") or "").strip()
     if not operator_user_id:
         operator_user_id = str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
+    if not operator_user_id:
+        logger.warning("takyon session.create without operator_user_id")
 
     ready = threading.Event()
 
@@ -5997,6 +5999,17 @@ def _(rid, params: dict) -> dict:
         slug = _slugify(business)
         exists = _takyon_can_access_business(session, slug)
         if not exists and not _takyon_get_background_run(slug):
+            businesses = [
+                str(item.get("slug") or "").strip()
+                for item in _takyon_businesses_for_session(session)
+                if isinstance(item, dict)
+            ]
+            logger.warning(
+                "takyon scope.set denied business=%s operator_user_id=%s visible_businesses=%s",
+                slug,
+                _takyon_operator_user_id(session) or "",
+                businesses,
+            )
             return _err(rid, 4041, f"access denied for business:{slug}")
         session["takyon_current_business"] = slug
         return _ok(rid, _takyon_scope_payload(session))
