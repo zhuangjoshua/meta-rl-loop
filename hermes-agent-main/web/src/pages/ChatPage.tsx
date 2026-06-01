@@ -1184,6 +1184,7 @@ export default function ChatPage() {
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
   const sessionRecoveryInFlightRef = useRef(false);
+  const sessionBootstrapRef = useRef<Promise<string | null> | null>(null);
   const requestedBusinessSlug = useMemo(
     () =>
       normalizeBusinessLookup(
@@ -1336,6 +1337,36 @@ export default function ChatPage() {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
   }, [createInTestMode]);
 
+  const ensureDashboardSession = useCallback(
+    async (requestedBusiness?: string): Promise<string | null> => {
+      if (sessionIdRef.current) return sessionIdRef.current;
+      if (!canUseConnection(connectionStateRef.current)) return null;
+      if (sessionBootstrapRef.current) return await sessionBootstrapRef.current;
+      const bootstrap = (async () => {
+        const bootBusiness = normalizeBusinessLookup(
+          requestedBusiness ||
+            pendingBusinessSlugRef.current ||
+            businessFromLocationSearch() ||
+            "",
+        );
+        const res = await gw.request<SessionCreateResponse>("session.create", {
+          cols: 100,
+          _takyon_boot_business: bootBusiness || undefined,
+        });
+        if (!res.session_id) return null;
+        sessionIdRef.current = res.session_id;
+        setSessionId(res.session_id);
+        setInfo((prev) => ({ ...prev, ...res.info }));
+        return res.session_id;
+      })();
+      sessionBootstrapRef.current = bootstrap.finally(() => {
+        sessionBootstrapRef.current = null;
+      });
+      return await sessionBootstrapRef.current;
+    },
+    [gw],
+  );
+
   const loadDashboardState = useCallback(
     async (
       requestedBusiness?: string,
@@ -1344,8 +1375,6 @@ export default function ChatPage() {
         syncUrl?: boolean;
       },
     ): Promise<ScopeState | null> => {
-      const activeSessionId = options?.sessionId || sessionIdRef.current;
-      if (!activeSessionId || !canUseConnection(connectionStateRef.current)) return null;
       const locationBusiness = businessFromLocationSearch();
       const business = normalizeBusinessLookup(
         requestedBusiness !== undefined
@@ -1355,6 +1384,11 @@ export default function ChatPage() {
               scopeBusinessRef.current ||
               "",
       );
+      let activeSessionId = options?.sessionId || sessionIdRef.current;
+      if (!activeSessionId && canUseConnection(connectionStateRef.current)) {
+        activeSessionId = await ensureDashboardSession(business || undefined);
+      }
+      if (!activeSessionId || !canUseConnection(connectionStateRef.current)) return null;
       const shouldRequestBusiness =
         requestedBusiness !== undefined ||
         !!normalizeBusinessLookup(pendingBusinessSlugRef.current || "") ||
@@ -1421,6 +1455,7 @@ export default function ChatPage() {
       }
     },
     [
+      ensureDashboardSession,
       gw,
       noteBootIssue,
       recoverMissingSession,
@@ -1894,7 +1929,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
-    if (!urlBusiness || !sessionId || !canUseConnection(state)) return;
+    if (!urlBusiness || !canUseConnection(state)) return;
     if (scopeHydrationInFlightRef.current) return;
     if (blockedBootBusinessSlug === urlBusiness) return;
     if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
