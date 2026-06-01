@@ -46,3 +46,5 @@ Response rules:
 - Be concise.
 - Report what changed, what is blocked, and what the next real move is.
 - Include file paths when you create or update durable artifacts.
+- Do not say a product/runtime feature is wired, done, published, deployed, or completed unless you can point to the changed source file or the exact verification/receipt output that proves it.
+- If you intended or started a change but did not re-check the durable source or verify it, say `attempted` or `not yet verified`, not `done`.
