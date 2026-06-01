@@ -342,8 +342,44 @@ interface TakyonShellResponse extends ScopeState {
   output?: string;
 }
 
-interface BusinessOutputsResponse extends ScopeState {
+interface TakyonBackgroundRun {
+  kind?: string;
+  business?: string;
+  status?: string;
+  started_at?: number;
+  finished_at?: number;
+  detail?: string;
+  job_id?: string;
+}
+
+interface TakyonDashboardWorkspaceResponse {
+  business_slug?: string;
+  current?: BusinessSummary;
+  overview?: BusinessOverview;
   outputs?: Deliverable[];
+  background_run?: TakyonBackgroundRun | null;
+}
+
+interface TakyonDashboardStateResponse extends TakyonDashboardWorkspaceResponse {
+  scope?: string;
+  business?: string;
+  businesses?: BusinessSummary[];
+  auto_switched_business?: string;
+  auto_scope_warning?: string;
+}
+
+interface TakyonDashboardCreateResponse extends TakyonDashboardWorkspaceResponse {
+  business_slug: string;
+  business_name?: string;
+  goal?: string;
+  mode?: string;
+  job_id?: string;
+  job_kind?: string;
+  job_status?: string;
+  lifecycle_state?: string;
+  output?: string;
+  scope?: string;
+  businesses?: BusinessSummary[];
 }
 
 interface BusinessMediaResponse extends ScopeState {
@@ -521,13 +557,6 @@ function naturalToolLabel(tool: ToolEntry, registry?: RegistryDisplayPayload): s
   if (/cron|wake|schedule/.test(text)) return "Checking schedule";
   if (/shell|exec|command/.test(text)) return "Running command";
   return humanizeJobKind(tool.name || "Action");
-}
-
-function quoteTakyonArg(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return '""';
-  if (/^[a-zA-Z0-9._:/-]+$/.test(trimmed)) return trimmed;
-  return `"${trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function friendlyError(message?: string | null): string {
@@ -928,6 +957,56 @@ function normalizeScopeState(value: Partial<ScopeState> | null | undefined): Sco
   };
 }
 
+function normalizeWorkspaceSnapshot(
+  value: Partial<TakyonDashboardWorkspaceResponse> | null | undefined,
+): TakyonDashboardWorkspaceResponse | null {
+  const business = normalizeBusinessLookup(value?.business_slug || "");
+  if (!business) return null;
+  return {
+    business_slug: business,
+    current:
+      value?.current && typeof value.current === "object" ? value.current : {},
+    overview:
+      value?.overview && typeof value.overview === "object"
+        ? value.overview
+        : undefined,
+    outputs: Array.isArray(value?.outputs) ? value.outputs : [],
+    background_run:
+      value?.background_run && typeof value.background_run === "object"
+        ? value.background_run
+        : null,
+  };
+}
+
+function normalizeDashboardState(
+  value: Partial<TakyonDashboardStateResponse> | null | undefined,
+): ScopeState {
+  return normalizeScopeState({
+    scope: value?.scope,
+    business:
+      typeof value?.business_slug === "string"
+        ? value.business_slug
+        : typeof value?.business === "string"
+          ? value.business
+          : "",
+    businesses: Array.isArray(value?.businesses) ? value.businesses : [],
+    current:
+      value?.current && typeof value.current === "object" ? value.current : {},
+    overview:
+      value?.overview && typeof value.overview === "object"
+        ? value.overview
+        : undefined,
+    auto_switched_business:
+      typeof value?.auto_switched_business === "string"
+        ? value.auto_switched_business
+        : undefined,
+    auto_scope_warning:
+      typeof value?.auto_scope_warning === "string"
+        ? value.auto_scope_warning
+        : undefined,
+  });
+}
+
 function scopeName(scope: ScopeState): string {
   if (!scope.business) return "Global";
   const currentName = scope.current?.name || scope.current?.slug || scope.business;
@@ -1068,6 +1147,8 @@ export default function ChatPage() {
     business: string;
     items: Deliverable[];
   }>({ business: "", items: [] });
+  const [workspaceSnapshot, setWorkspaceSnapshot] =
+    useState<TakyonDashboardWorkspaceResponse | null>(null);
   const [statusItems, setStatusItems] = useState<string[]>([]);
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
@@ -1103,7 +1184,34 @@ export default function ChatPage() {
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
   const sessionRecoveryInFlightRef = useRef(false);
-  const wakeCron = useMemo(() => selectWakeCron(scopeState.overview), [scopeState.overview]);
+  const activeBusinessSlug = useMemo(
+    () =>
+      normalizeBusinessLookup(
+        scopeState.business || pendingBusinessSlug || businessFromLocationSearch(),
+      ),
+    [pendingBusinessSlug, scopeState.business, searchParams],
+  );
+  const displayScope = useMemo(() => {
+    if (!activeBusinessSlug) return scopeState;
+    const snapshot =
+      workspaceSnapshot &&
+      normalizeBusinessLookup(workspaceSnapshot.business_slug || "") === activeBusinessSlug
+        ? workspaceSnapshot
+        : null;
+    return normalizeScopeState({
+      ...scopeState,
+      business: activeBusinessSlug,
+      current:
+        snapshot?.current && Object.keys(snapshot.current).length
+          ? snapshot.current
+          : scopeState.current,
+      overview:
+        snapshot?.overview && Object.keys(snapshot.overview).length
+          ? snapshot.overview
+          : scopeState.overview,
+    });
+  }, [activeBusinessSlug, scopeState, workspaceSnapshot]);
+  const wakeCron = useMemo(() => selectWakeCron(displayScope.overview), [displayScope.overview]);
 
   const recoverMissingSession = useCallback(
     (
@@ -1160,7 +1268,7 @@ export default function ChatPage() {
     setCronOpen(false);
     setCronSaving(false);
     setCronError(null);
-  }, [scopeState.business]);
+  }, [activeBusinessSlug]);
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -1195,8 +1303,8 @@ export default function ChatPage() {
   }, [sessionId]);
 
   useEffect(() => {
-    scopeBusinessRef.current = scopeState.business;
-  }, [scopeState.business]);
+    scopeBusinessRef.current = activeBusinessSlug;
+  }, [activeBusinessSlug]);
 
   useEffect(() => {
     pendingBusinessSlugRef.current = pendingBusinessSlug;
@@ -1216,47 +1324,107 @@ export default function ChatPage() {
   }, [refreshOperatorAccount]);
 
   useEffect(() => {
-    void refreshCreativeCredits(scopeState.business || "");
-  }, [refreshCreativeCredits, scopeState.business]);
+    void refreshCreativeCredits(activeBusinessSlug || "");
+  }, [activeBusinessSlug, refreshCreativeCredits]);
 
   useEffect(() => {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
   }, [createInTestMode]);
 
-  const refreshBusinessSurfaces = useCallback(async () => {
-    if (!canUseConnection(connectionStateRef.current) || !sessionIdRef.current) return;
-    try {
-      const scope = normalizeScopeState(
-        await gw.request<ScopeState>(
-          "takyon.scope.get",
-          { session_id: sessionIdRef.current },
-          10_000,
-        ),
+  const loadDashboardState = useCallback(
+    async (
+      requestedBusiness?: string,
+      options?: {
+        sessionId?: string;
+        syncUrl?: boolean;
+      },
+    ): Promise<ScopeState | null> => {
+      const activeSessionId = options?.sessionId || sessionIdRef.current;
+      if (!activeSessionId || !canUseConnection(connectionStateRef.current)) return null;
+      const hasExplicitBusiness = requestedBusiness !== undefined;
+      const business = normalizeBusinessLookup(
+        requestedBusiness ??
+          scopeBusinessRef.current ??
+          pendingBusinessSlugRef.current ??
+          businessFromLocationSearch(),
       );
-      setScopeState(scope);
-      if (scope.business) {
-        void refreshCreativeCredits(scope.business);
-        try {
-          const res = await gw.request<BusinessOutputsResponse>(
-            "takyon.outputs.list",
-            { session_id: sessionIdRef.current, limit: 50 },
-            10_000,
-          );
-          const outputs = Array.isArray(res.outputs) ? res.outputs : [];
-          setHistoricalOutputs({ business: scope.business, items: outputs });
-        } catch {
-          /* detached output refresh is best effort */
+      try {
+        const state = await gw.request<TakyonDashboardStateResponse>(
+          "takyon.dashboard.state",
+          {
+            session_id: activeSessionId,
+            ...(hasExplicitBusiness
+              ? { business_slug: business || "global" }
+              : {}),
+            limit: 50,
+          },
+          10_000,
+        );
+        const nextScope = normalizeDashboardState(state);
+        const snapshot = normalizeWorkspaceSnapshot(state);
+        setScopeState(nextScope);
+        setWorkspaceSnapshot(snapshot);
+        if (nextScope.business && snapshot) {
+          setHistoricalOutputs({
+            business: nextScope.business,
+            items: Array.isArray(snapshot.outputs) ? snapshot.outputs : [],
+          });
+          void refreshCreativeCredits(nextScope.business);
+        } else {
+          setHistoricalOutputs({ business: "", items: [] });
+          setCreativeCredits(null);
         }
+        if (nextScope.business) {
+          setBlockedBootBusinessSlug((current) =>
+            current === nextScope.business ? null : current,
+          );
+          setBlockedBootMessage((current) =>
+            current && current.includes(`business:${nextScope.business}`) ? null : current,
+          );
+        }
+        setPendingBusinessSlug(null);
+        if (options?.syncUrl) {
+          const params = new URLSearchParams(searchParams);
+          if (nextScope.business) params.set("business", nextScope.business);
+          else params.delete("business");
+          setSearchParams(params, { replace: true });
+        }
+        return nextScope;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isMissingSessionError(err)) {
+          recoverMissingSession(
+            business || scopeBusinessRef.current || businessFromLocationSearch() || undefined,
+          );
+          return null;
+        }
+        if (hasExplicitBusiness && isBusinessScopeDeniedMessage(message)) {
+          noteBootIssue(business, message);
+          return null;
+        }
+        throw err;
       }
-      if (!scope.business) {
-        setCreativeCredits(null);
+    },
+    [
+      gw,
+      noteBootIssue,
+      recoverMissingSession,
+      refreshCreativeCredits,
+      searchParams,
+      setSearchParams,
+    ],
+  );
+
+  const refreshBusinessSurfaces = useCallback(
+    async (requestedBusiness?: string) => {
+      try {
+        await loadDashboardState(requestedBusiness);
+      } catch {
+        /* best effort refresh */
       }
-    } catch (err) {
-      if (isMissingSessionError(err)) {
-        recoverMissingSession(scopeBusinessRef.current || businessFromLocationSearch() || undefined);
-      }
-    }
-  }, [gw, recoverMissingSession, refreshCreativeCredits]);
+    },
+    [loadDashboardState],
+  );
 
   const scheduleTakyonRefresh = useCallback(() => {
     if (takyonRefreshTimerRef.current !== null) return;
@@ -1300,18 +1468,9 @@ export default function ChatPage() {
     const cleanup: Array<() => void> = [];
 
     const refreshScope = () => {
-      const activeSessionId = sessionIdRef.current;
-      if (!activeSessionId) return;
-      void gw
-        .request<ScopeState>(
-          "takyon.scope.get",
-          { session_id: activeSessionId },
-          10_000,
-        )
-        .then((scope) => {
-          if (cancelled) return;
-          const nextScope = normalizeScopeState(scope);
-          setScopeState(nextScope);
+      void loadDashboardState(undefined)
+        .then((nextScope) => {
+          if (cancelled || !nextScope) return;
           if (nextScope.auto_switched_business) {
             setMessages((prev) => [
               ...prev,
@@ -1335,12 +1494,8 @@ export default function ChatPage() {
             }
           }
         })
-        .catch((err) => {
-          if (isMissingSessionError(err)) {
-            recoverMissingSession(
-              scopeBusinessRef.current || businessFromLocationSearch() || undefined,
-            );
-          }
+        .catch(() => {
+          /* missing-session and access paths are handled inside loadDashboardState */
         });
     };
 
@@ -1396,9 +1551,14 @@ export default function ChatPage() {
             setStatusItems((prev) => [ev.payload!.warning!, ...prev].slice(0, 5));
           }
           refreshScope();
-          void refreshOperatorAccount();
         },
       ),
+    );
+
+    cleanup.push(
+      gw.on("takyon.operator.account", () => {
+        void refreshOperatorAccount();
+      }),
     );
 
     cleanup.push(
@@ -1553,25 +1713,22 @@ export default function ChatPage() {
         noteBootIssue(bootBusiness, bootIssue);
       }
       try {
-        const scope = !resumeParam && bootBusiness && !bootIssue && !boot?.accepted
-          ? await gw.request<ScopeState>(
-              "takyon.scope.set",
-              { session_id: nextSessionId, business: bootBusiness },
-              10_000,
-            )
-          : await gw.request<ScopeState>(
-              "takyon.scope.get",
-              { session_id: nextSessionId },
-              10_000,
-            );
+        const nextScope = await loadDashboardState(
+          !resumeParam && bootBusiness && !bootIssue && !boot?.accepted
+            ? bootBusiness
+            : undefined,
+          {
+            sessionId: nextSessionId,
+            syncUrl: Boolean(bootBusiness && !bootIssue),
+          },
+        );
         if (cancelled) return;
-        const nextScope = normalizeScopeState(scope);
+        if (!nextScope) return;
         console.info("[takyon-scope] hydrateScope", {
           bootBusiness,
           nextBusiness: nextScope.business,
           sessionId: nextSessionId,
         });
-        setScopeState(nextScope);
         if (nextScope.business) {
           setBlockedBootBusinessSlug((current) =>
             current === nextScope.business ? null : current,
@@ -1580,13 +1737,16 @@ export default function ChatPage() {
             current && current.includes(`business:${nextScope.business}`) ? null : current,
           );
         }
-        if (bootBusiness && nextScope.business !== bootBusiness && !bootIssue) {
+        if (bootBusiness && nextScope.business !== bootBusiness && !bootIssue && !boot?.accepted) {
           console.info("[takyon-scope] hydrateScope pending fallback", {
             bootBusiness,
             nextBusiness: nextScope.business,
             sessionId: nextSessionId,
           });
-          setPendingBusinessSlug(bootBusiness);
+          await loadDashboardState(bootBusiness, {
+            sessionId: nextSessionId,
+            syncUrl: true,
+          });
         }
       } catch (err) {
         if (!cancelled && bootBusiness) {
@@ -1707,7 +1867,15 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, recoverMissingSession, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh]);
+  }, [
+    gw,
+    loadDashboardState,
+    noteBootIssue,
+    recoverMissingSession,
+    refreshOperatorAccount,
+    resumeParam,
+    scheduleTakyonRefresh,
+  ]);
 
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
@@ -1723,7 +1891,16 @@ export default function ChatPage() {
       pendingBusinessSlug,
     });
     setPendingBusinessSlug(urlBusiness);
-  }, [blockedBootBusinessSlug, pendingBusinessSlug, scopeState.business, searchParams, sessionId, state]);
+    void loadDashboardState(urlBusiness, { syncUrl: true });
+  }, [
+    blockedBootBusinessSlug,
+    loadDashboardState,
+    pendingBusinessSlug,
+    scopeState.business,
+    searchParams,
+    sessionId,
+    state,
+  ]);
 
   useEffect(() => {
     if (state === "open") {
@@ -1771,24 +1948,15 @@ export default function ChatPage() {
             .filter((message): message is ChatMessage => !!message);
           setMessages((prev) => mergePolledMessages(prev, polled));
           setRunning(Boolean(res.running));
-          if (scopeState.business) {
-            void gw
-              .request<ScopeState>(
-                "takyon.scope.get",
-                { session_id: sessionId },
-                10_000,
-              )
-              .then((scope) => {
-                if (!cancelled) setScopeState(normalizeScopeState(scope));
-              })
-              .catch(() => {
-                /* scope refresh is best effort */
-              });
+          if (scopeBusinessRef.current) {
+            void refreshBusinessSurfaces(scopeBusinessRef.current);
           }
         })
         .catch((err) => {
           if (isMissingSessionError(err)) {
-            recoverMissingSession(scopeState.business || businessFromLocationSearch() || undefined);
+            recoverMissingSession(
+              scopeBusinessRef.current || businessFromLocationSearch() || undefined,
+            );
           }
         });
     };
@@ -1799,7 +1967,7 @@ export default function ChatPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [gw, recoverMissingSession, running, scopeState.business, sessionId, state]);
+  }, [gw, recoverMissingSession, refreshBusinessSurfaces, running, sessionId, state]);
 
   useEffect(() => {
     if (!takyonProgress?.active || !takyonProgress.business) return;
@@ -1818,13 +1986,13 @@ export default function ChatPage() {
   }, [refreshBusinessSurfaces, sessionId, state, takyonProgress]);
 
   useEffect(() => {
-    const progressTask = (scopeState.overview?.tasks || []).find(
+    const progressTask = (displayScope.overview?.tasks || []).find(
       (task) =>
         (task?.source === "runtime" || task?.source === "job") &&
         ["queued", "running"].includes((task.status || "").toLowerCase()) &&
         /CEO (bootstrap|wake)/i.test(task.label || ""),
     );
-    const business = scopeState.business || pendingBusinessSlug || businessFromLocationSearch();
+    const business = activeBusinessSlug;
     if (!business) return;
     if (!progressTask) {
       setTakyonProgress((prev) => {
@@ -1843,54 +2011,12 @@ export default function ChatPage() {
     ).trim();
     if (!detail) return;
     setTakyonProgress((prev) => syncTakyonProgressFromTask(prev, business, detail));
-  }, [pendingBusinessSlug, scopeState.business, scopeState.overview]);
+  }, [activeBusinessSlug, displayScope.overview]);
 
   useEffect(() => {
-    if (!canUseConnection(state) || !sessionId || !scopeState.business) return;
-    let cancelled = false;
-    void gw
-      .request<BusinessOutputsResponse>(
-        "takyon.outputs.list",
-        { session_id: sessionId, limit: 50 },
-        10_000,
-      )
-      .then((res) => {
-        if (cancelled) return;
-        const outputs = Array.isArray(res.outputs) ? res.outputs : [];
-        setHistoricalOutputs({ business: scopeState.business, items: outputs });
-      })
-      .catch(() => {
-        /* historical outputs are best effort */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [gw, scopeState.business, sessionId, state]);
-
-  useEffect(() => {
-    if (!canUseConnection(state) || !sessionId || !scopeState.business) return;
-    let cancelled = false;
-    const refresh = () => {
-      void gw
-        .request<ScopeState>(
-          "takyon.scope.get",
-          { session_id: sessionId },
-          10_000,
-        )
-        .then((scope) => {
-          if (!cancelled) setScopeState(normalizeScopeState(scope));
-        })
-        .catch((err) => {
-          if (isMissingSessionError(err)) {
-            recoverMissingSession(scopeState.business || businessFromLocationSearch() || undefined);
-          }
-        });
-    };
-    refresh();
-    return () => {
-      cancelled = true;
-    };
-  }, [gw, recoverMissingSession, scopeState.business, sessionId, state]);
+    if (!canUseConnection(state) || !sessionId || !activeBusinessSlug) return;
+    void refreshBusinessSurfaces(activeBusinessSlug);
+  }, [activeBusinessSlug, refreshBusinessSurfaces, sessionId, state]);
 
   useEffect(() => {
     if (!canUseConnection(state) || !sessionId || !isSlashCommandPrefix(input)) {
@@ -2009,6 +2135,7 @@ export default function ChatPage() {
         );
       } else {
         setPendingBusinessSlug(null);
+        setWorkspaceSnapshot(null);
         setScopeState((prev) =>
           normalizeScopeState({
             ...prev,
@@ -2018,17 +2145,23 @@ export default function ChatPage() {
           }),
         );
       }
-      const params = new URLSearchParams(searchParams);
-      if (business) params.set("business", business);
-      else params.delete("business");
-      setSearchParams(params, { replace: true });
       requestAnimationFrame(() => inputRef.current?.focus());
-      let res: ScopeState;
       try {
-        res = await gw.request<ScopeState>(
-          "takyon.scope.set",
-          { session_id: sessionId, business },
-          10_000,
+        const nextScope = await loadDashboardState(business, { syncUrl: true });
+        if (!nextScope) return;
+        setPendingBusinessSlug(null);
+        if (nextScope.business) {
+          setBlockedBootBusinessSlug((current) =>
+            current === nextScope.business ? null : current,
+          );
+          setBlockedBootMessage((current) =>
+            current && current.includes(`business:${nextScope.business}`) ? null : current,
+          );
+        }
+        appendSystem(
+          nextScope.business
+            ? `Using business:${nextScope.business}`
+            : "Using global scope",
         );
       } catch (err) {
         if (isMissingSessionError(err)) {
@@ -2037,120 +2170,15 @@ export default function ChatPage() {
         }
         throw err;
       }
-      const nextScope = normalizeScopeState(res);
-      setScopeState(nextScope);
-      setPendingBusinessSlug(null);
-      if (nextScope.business) {
-        setBlockedBootBusinessSlug((current) =>
-          current === nextScope.business ? null : current,
-        );
-        setBlockedBootMessage((current) =>
-          current && current.includes(`business:${nextScope.business}`) ? null : current,
-        );
-      }
-      appendSystem(
-        nextScope.business
-          ? `Using business:${nextScope.business}`
-          : "Using global scope",
-      );
     },
-    [appendSystem, gw, recoverMissingSession, scopeState.businesses, searchParams, sessionId, setSearchParams],
+    [
+      appendSystem,
+      loadDashboardState,
+      recoverMissingSession,
+      scopeState.businesses,
+      sessionId,
+    ],
   );
-
-  const enterPendingBusiness = useCallback(
-    (business: string, _mode: "test" | "live", _goal?: string) => {
-      const slug = normalizeBusinessLookup(business);
-      if (!slug) return;
-      setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
-      setBlockedBootMessage((current) =>
-        current && current.includes(`business:${slug}`) ? null : current,
-      );
-      setPendingBusinessSlug(slug);
-      setScopeState((prev) => normalizeScopeState({ ...prev }));
-      setStatusItems((prev) =>
-        [`Create requested for business:${slug}. Waiting for durable business state…`, ...prev].slice(0, 5),
-      );
-      requestAnimationFrame(() => inputRef.current?.focus());
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!canUseConnection(state) || !sessionId || !pendingBusinessSlug) return;
-    let cancelled = false;
-    let attempts = 0;
-    let timer: number | undefined;
-    let lastDeniedMessage = "";
-
-    const confirmScope = async () => {
-      attempts += 1;
-      console.warn(
-        `[takyon-debug] confirmScope attempt business=${pendingBusinessSlug} attempts=${attempts} session=${sessionId} state=${state}`,
-      );
-      try {
-        const res = await gw.request<ScopeState>(
-          "takyon.scope.set",
-          { session_id: sessionId, business: pendingBusinessSlug },
-          10_000,
-        );
-        if (cancelled) return;
-        const nextScope = normalizeScopeState(res);
-        console.warn(
-          `[takyon-debug] confirmScope result business=${pendingBusinessSlug} attempts=${attempts} next=${nextScope.business || "<none>"} session=${sessionId}`,
-        );
-        if (nextScope.business === pendingBusinessSlug) {
-          setScopeState(nextScope);
-          setBlockedBootBusinessSlug((current) =>
-            current === pendingBusinessSlug ? null : current,
-          );
-          setBlockedBootMessage((current) =>
-            current && current.includes(`business:${pendingBusinessSlug}`) ? null : current,
-          );
-          const params = new URLSearchParams(searchParams);
-          params.set("business", pendingBusinessSlug);
-          setSearchParams(params, { replace: true });
-          setPendingBusinessSlug(null);
-          return;
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[takyon-debug] confirmScope error business=${pendingBusinessSlug} attempts=${attempts} session=${sessionId} message=${message}`,
-        );
-        if (isMissingSessionError(err)) {
-          recoverMissingSession(pendingBusinessSlug);
-          return;
-        }
-        if (isBusinessScopeDeniedMessage(message)) {
-          lastDeniedMessage = message;
-          setStatusItems((prev) =>
-            [
-              `Waiting for durable business state for business:${pendingBusinessSlug}…`,
-              ...prev.filter((item) => item !== `Waiting for durable business state for business:${pendingBusinessSlug}…`),
-            ].slice(0, 5),
-          );
-        } else {
-          /* create may still be registering the business; keep the optimistic page */
-        }
-      }
-
-      if (!cancelled && attempts < 120) {
-        timer = window.setTimeout(confirmScope, 1500);
-      } else if (!cancelled) {
-        if (lastDeniedMessage) {
-          noteBootIssue(pendingBusinessSlug, lastDeniedMessage);
-          return;
-        }
-        setPendingBusinessSlug(null);
-      }
-    };
-
-    void confirmScope();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [gw, pendingBusinessSlug, recoverMissingSession, searchParams, sessionId, setSearchParams, state]);
 
   const applySlashCompletion = useCallback((item: SlashCompletionItem) => {
     const next = `${item.text} `;
@@ -2220,6 +2248,11 @@ export default function ChatPage() {
       );
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
+      if (nextScope.business) {
+        void refreshBusinessSurfaces(nextScope.business);
+      } else {
+        setWorkspaceSnapshot(null);
+      }
       void refreshOperatorAccount();
       if (/^\s*\/?(?:create|build|init)(?:\s|$)/i.test(effectiveText) && nextScope.business) {
         setPendingBusinessSlug(nextScope.business);
@@ -2247,34 +2280,110 @@ export default function ChatPage() {
     ],
   );
 
-  const runTakyonLine = useCallback(
-    async (line: string) => {
+  const createTakyonBusiness = useCallback(
+    async ({
+      goal,
+      mode,
+      name,
+      slug,
+    }: {
+      goal: string;
+      mode: "test" | "live";
+      name: string;
+      slug: string;
+    }) => {
+      if (!sessionId) throw new Error("Chat is still connecting.");
+      const res = await gw.request<TakyonDashboardCreateResponse>(
+        "takyon.dashboard.create",
+        {
+          session_id: sessionId,
+          business: slug,
+          business_name: name,
+          goal,
+          mode,
+          limit: 50,
+        },
+        600_000,
+      );
+      const createdBusiness = normalizeBusinessLookup(res.business_slug || slug);
+      const snapshot = normalizeWorkspaceSnapshot(res);
+      if (snapshot) {
+        setWorkspaceSnapshot(snapshot);
+        setHistoricalOutputs({
+          business: snapshot.business_slug || createdBusiness,
+          items: Array.isArray(snapshot.outputs) ? snapshot.outputs : [],
+        });
+      }
+      setScopeState(
+        normalizeScopeState({
+          ...res,
+          business: createdBusiness,
+          current: res.current || snapshot?.current || {},
+          overview: res.overview || snapshot?.overview,
+          businesses: Array.isArray(res.businesses) ? res.businesses : scopeState.businesses,
+        }),
+      );
+      setPendingBusinessSlug(createdBusiness || null);
+      setBlockedBootBusinessSlug((current) =>
+        current === createdBusiness ? null : current,
+      );
+      setBlockedBootMessage((current) =>
+        current && current.includes(`business:${createdBusiness}`) ? null : current,
+      );
+      const params = new URLSearchParams(searchParams);
+      params.set("business", createdBusiness);
+      setSearchParams(params, { replace: true });
+      if (res.output) {
+        setStatusItems((prev) => [cleanText(res.output || ""), ...prev].slice(0, 5));
+      }
+      void refreshOperatorAccount();
+      void refreshBusinessSurfaces(createdBusiness);
+    },
+    [
+      gw,
+      refreshBusinessSurfaces,
+      refreshOperatorAccount,
+      scopeState.businesses,
+      searchParams,
+      sessionId,
+      setSearchParams,
+    ],
+  );
+
+  const submitCreateBusiness = useCallback(
+    async (request: {
+      name: string;
+      slug: string;
+      goal: string;
+      mode: "test" | "live";
+    }) => {
       if (!canUseConnection(state)) return;
       setTools([]);
       setStatusItems([]);
-      setMessages((prev) => [...prev, makeMessage("user", line)]);
       setRunning(true);
       setError(null);
       try {
-        await executeTakyonSlash(line);
+        await createTakyonBusiness(request);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
-        appendSystem(message);
+        setStatusItems((prev) => [friendlyError(message), ...prev].slice(0, 5));
       } finally {
         setRunning(false);
-        requestAnimationFrame(() => inputRef.current?.focus());
       }
     },
-    [appendSystem, executeTakyonSlash, state],
+    [createTakyonBusiness, state],
   );
 
   const resolveBusinessMedia = useCallback(
-    async (path: string): Promise<BusinessMediaResponse> => {
+    async (path: string, business?: string): Promise<BusinessMediaResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
+      const targetBusiness = normalizeBusinessLookup(
+        business || scopeBusinessRef.current || pendingBusinessSlugRef.current || "",
+      );
       return await gw.request<BusinessMediaResponse>(
         "takyon.file.media",
-        { session_id: sessionId, path },
+        { session_id: sessionId, business_slug: targetBusiness, path },
         20_000,
       );
     },
@@ -2282,11 +2391,14 @@ export default function ChatPage() {
   );
 
   const readBusinessFile = useCallback(
-    async (path: string): Promise<BusinessFileReadResponse> => {
+    async (path: string, business?: string): Promise<BusinessFileReadResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
+      const targetBusiness = normalizeBusinessLookup(
+        business || scopeBusinessRef.current || pendingBusinessSlugRef.current || "",
+      );
       return await gw.request<BusinessFileReadResponse>(
         "takyon.file.read",
-        { session_id: sessionId, path },
+        { session_id: sessionId, business_slug: targetBusiness, path },
         20_000,
       );
     },
@@ -2294,11 +2406,14 @@ export default function ChatPage() {
   );
 
   const resolveBusinessSitePreview = useCallback(
-    async (path?: string): Promise<BusinessSitePreviewResponse> => {
+    async (path?: string, business?: string): Promise<BusinessSitePreviewResponse> => {
       if (!sessionId) throw new Error("Chat is still connecting.");
+      const targetBusiness = normalizeBusinessLookup(
+        business || scopeBusinessRef.current || pendingBusinessSlugRef.current || "",
+      );
       return await gw.request<BusinessSitePreviewResponse>(
         "takyon.site.preview",
-        { session_id: sessionId, path },
+        { session_id: sessionId, business_slug: targetBusiness, path },
         20_000,
       );
     },
@@ -2407,15 +2522,15 @@ export default function ChatPage() {
 
   const canAct = canUseConnection(state) && (!!input.trim() || running);
   const canInteract = canUseConnection(state) && !!sessionId;
-  const inBusiness = !!scopeState.business;
+  const inBusiness = !!activeBusinessSlug;
   const scopedHistoricalOutputs =
-    historicalOutputs.business === scopeState.business
+    historicalOutputs.business === activeBusinessSlug
       ? historicalOutputs.items
       : [];
 
-  const overviewForShell = scopeState.overview || {};
+  const overviewForShell = displayScope.overview || {};
   const productPublicUrl = customerWebsiteUrl({
-    business: scopeState.business,
+    business: displayScope.business,
     product: overviewForShell.product || {},
     website: overviewForShell.artifacts?.website || {},
   });
@@ -2441,16 +2556,16 @@ export default function ChatPage() {
           }}
           operatorAccount={operatorAccount}
           onSelect={setTakyonScope}
-          scope={scopeState}
+          scope={displayScope}
           state={state}
         />
 
         <main className="td-main">
           <div className="td-topbar">
             <div className="td-title">
-              <h1>{inBusiness ? scopeName(scopeState) : "Portfolio"}</h1>
+              <h1>{inBusiness ? scopeName(displayScope) : "Portfolio"}</h1>
               {inBusiness ? (
-                <BusinessStatusPill scope={scopeState} />
+                <BusinessStatusPill scope={displayScope} />
               ) : (
                 <span className="td-meta">account scope</span>
               )}
@@ -2507,19 +2622,19 @@ export default function ChatPage() {
           {inBusiness ? (
             <CompanyWorkspace
               creativeCredits={creativeCredits}
+              businessSlug={activeBusinessSlug}
               deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
               productPublicUrl={productPublicUrl}
-              scope={scopeState}
+              scope={displayScope}
               takyonProgress={takyonProgress}
             />
           ) : (
             <GlobalLaunchpad
               error={error || blockedBootMessage}
-              onCreate={runTakyonLine}
-              onEnterPendingBusiness={enterPendingBusiness}
+              onCreate={submitCreateBusiness}
               operatorAccount={operatorAccount}
               running={running}
               state={state}
@@ -2542,7 +2657,7 @@ export default function ChatPage() {
             <IntercomPanel
               onClose={() => setRightOpen(false)}
               running={running}
-              scope={scopeState}
+              scope={displayScope}
               sessionId={sessionId}
               showClose={rightOpen}
             >
@@ -2550,7 +2665,7 @@ export default function ChatPage() {
                 error={error}
                 messages={messages}
                 running={running}
-                scope={scopeState}
+                scope={displayScope}
                 scrollerRef={scrollerRef}
                 statusItems={statusItems}
                 takyonProgress={takyonProgress}
@@ -2577,7 +2692,7 @@ export default function ChatPage() {
 
         {inBusiness && cronOpen && (
           <CronScheduleModal
-            business={scopeState.business}
+            business={displayScope.business}
             canInteract={canInteract}
             cron={wakeCron}
             error={cronError}
@@ -2590,7 +2705,7 @@ export default function ChatPage() {
             onSave={() => void saveCronSchedule()}
             saving={cronSaving}
             value={cronSchedule}
-            wakeHealth={scopeState.overview?.wake_health}
+            wakeHealth={displayScope.overview?.wake_health}
           />
         )}
       </div>
@@ -2912,7 +3027,6 @@ function CronScheduleModal({
 function GlobalLaunchpad({
   error,
   onCreate,
-  onEnterPendingBusiness,
   operatorAccount,
   running,
   state,
@@ -2921,8 +3035,12 @@ function GlobalLaunchpad({
   tools,
 }: {
   error: string | null;
-  onCreate: (line: string) => Promise<void>;
-  onEnterPendingBusiness: (business: string, mode: "test" | "live", goal?: string) => void;
+  onCreate: (request: {
+    name: string;
+    slug: string;
+    goal: string;
+    mode: "test" | "live";
+  }) => Promise<void>;
   operatorAccount: TakyonOperatorAccountResponse | null;
   running: boolean;
   state: ConnectionState;
@@ -2954,11 +3072,12 @@ function GlobalLaunchpad({
     const rawName = name.trim() || goal.trim().split(/\s+/).slice(0, 3).join(" ");
     const slug = normalizeBusinessLookup(rawName);
     if (!slug) return;
-    const parts = ["/create", mode === "test" ? "--test" : "--live"];
-    parts.push(slug);
-    if (goal.trim()) parts.push(quoteTakyonArg(goal));
-    onEnterPendingBusiness(slug, mode, goal.trim());
-    void onCreate(parts.join(" "));
+    void onCreate({
+      goal: goal.trim(),
+      mode,
+      name: rawName,
+      slug,
+    });
   };
 
   return (
@@ -3363,6 +3482,7 @@ function deliverableActionFor(item: Deliverable): DeliverableAction {
 }
 
 function CompanyWorkspace({
+  businessSlug,
   creativeCredits,
   deliverables,
   onReadFile,
@@ -3372,11 +3492,12 @@ function CompanyWorkspace({
   scope,
   takyonProgress,
 }: {
+  businessSlug: string;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   deliverables: Deliverable[];
-  onReadFile: (path: string) => Promise<BusinessFileReadResponse>;
-  onResolveMedia: (path: string) => Promise<BusinessMediaResponse>;
-  onResolveSitePreview: (path?: string) => Promise<BusinessSitePreviewResponse>;
+  onReadFile: (path: string, business?: string) => Promise<BusinessFileReadResponse>;
+  onResolveMedia: (path: string, business?: string) => Promise<BusinessMediaResponse>;
+  onResolveSitePreview: (path?: string, business?: string) => Promise<BusinessSitePreviewResponse>;
   productPublicUrl: string;
   scope: ScopeState;
   takyonProgress: TakyonProgressState | null;
@@ -3467,7 +3588,7 @@ function CompanyWorkspace({
       if (!targetPath) return;
       const title = label || compactPath(targetPath);
       setViewer({ loading: true, path: targetPath, title });
-      void onResolveSitePreview(targetPath)
+      void onResolveSitePreview(targetPath, businessSlug)
         .then((res) =>
           setViewer({
             loading: false,
@@ -3499,7 +3620,7 @@ function CompanyWorkspace({
       }
       setViewer({ loading: true, path, title });
       if (mediaKindForPath(path)) {
-        void onResolveMedia(path)
+        void onResolveMedia(path, businessSlug)
           .then((media) =>
             setViewer({ loading: false, media, path: media.path || path, title }),
           )
@@ -3513,7 +3634,7 @@ function CompanyWorkspace({
           );
         return;
       }
-      void onReadFile(path)
+      void onReadFile(path, businessSlug)
         .then((res) =>
           setViewer({
             content: res.content || "",

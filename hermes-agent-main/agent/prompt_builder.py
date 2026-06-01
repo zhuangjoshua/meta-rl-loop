@@ -13,10 +13,11 @@ from collections import OrderedDict
 from pathlib import Path
 
 from takyon_constants import get_takyon_home, get_skills_dir, is_wsl
-from typing import Optional
+from typing import Any, Optional
 
 from agent.skill_utils import (
     extract_skill_conditions,
+    extract_skill_routing,
     extract_skill_description,
     get_all_skills_dirs,
     get_disabled_skill_names,
@@ -838,7 +839,7 @@ CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -933,6 +934,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "routing": extract_skill_routing(frontmatter),
     }
 
 
@@ -990,6 +992,51 @@ def _skill_should_show(
     return True
 
 
+def _format_skill_routing_block(
+    routing_by_category: dict[str, list[tuple[str, dict[str, Any]]]],
+) -> str:
+    """Render a compact ownership/routing summary from skill frontmatter."""
+    if not routing_by_category:
+        return ""
+
+    lines = [
+        "## Skill Routing",
+        "Use these ownership boundaries to choose between adjacent skills before loading one.",
+        "<skill_routing>",
+    ]
+    any_entries = False
+    for category in sorted(routing_by_category.keys()):
+        rows = routing_by_category.get(category) or []
+        seen: set[str] = set()
+        category_lines: list[str] = []
+        for name, routing in sorted(rows, key=lambda item: item[0]):
+            if name in seen:
+                continue
+            seen.add(name)
+            owns = str((routing or {}).get("owns") or "").strip().rstrip(".")
+            if not owns:
+                continue
+            line = f"    - {name} owns {owns}."
+            when_to_use = [str(item).strip().rstrip(".") for item in (routing or {}).get("when_to_use") or [] if str(item).strip()]
+            if when_to_use:
+                line += f" Use when: {'; '.join(when_to_use)}."
+            do_not_use_for = [str(item).strip().rstrip(".") for item in (routing or {}).get("do_not_use_for") or [] if str(item).strip()]
+            if do_not_use_for:
+                line += f" Do not use for: {'; '.join(do_not_use_for)}."
+            category_lines.append(line)
+        if not category_lines:
+            continue
+        any_entries = True
+        lines.append(f"  {category}:")
+        lines.extend(category_lines)
+
+    if not any_entries:
+        return ""
+
+    lines.append("</skill_routing>")
+    return "\n".join(lines)
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1043,6 +1090,7 @@ def build_skills_system_prompt(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
+    routing_by_category: dict[str, list[tuple[str, dict[str, Any]]]] = {}
 
     if snapshot is not None:
         # Fast path: use pre-parsed metadata from disk
@@ -1063,9 +1111,14 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
+            routing = entry.get("routing") if isinstance(entry.get("routing"), dict) else {}
             skills_by_category.setdefault(category, []).append(
                 (frontmatter_name, entry.get("description", ""))
             )
+            if routing:
+                routing_by_category.setdefault(category, []).append(
+                    (frontmatter_name, routing)
+                )
         category_descriptions = {
             str(k): str(v)
             for k, v in (snapshot.get("category_descriptions") or {}).items()
@@ -1091,6 +1144,11 @@ def build_skills_system_prompt(
             skills_by_category.setdefault(entry["category"], []).append(
                 (entry["frontmatter_name"], entry["description"])
             )
+            routing = extract_skill_routing(frontmatter)
+            if routing.get("owns"):
+                routing_by_category.setdefault(entry["category"], []).append(
+                    (entry["frontmatter_name"], routing)
+                )
 
         # Read category-level DESCRIPTION.md files
         for desc_file in iter_skill_index_files(skills_dir, "DESCRIPTION.md"):
@@ -1147,6 +1205,11 @@ def build_skills_system_prompt(
                 skills_by_category.setdefault(entry["category"], []).append(
                     (frontmatter_name, entry["description"])
                 )
+                routing = extract_skill_routing(frontmatter)
+                if routing.get("owns"):
+                    routing_by_category.setdefault(entry["category"], []).append(
+                        (frontmatter_name, routing)
+                    )
             except Exception as e:
                 logger.debug("Error reading external skill %s: %s", skill_file, e)
 
@@ -1168,6 +1231,7 @@ def build_skills_system_prompt(
         result = ""
     else:
         index_lines = []
+        routing_block = _format_skill_routing_block(routing_by_category)
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
             if cat_desc:
@@ -1206,12 +1270,17 @@ def build_skills_system_prompt(
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
             "pitfalls you discovered, update it before finishing.\n"
-            "\n"
+        )
+        if routing_block:
+            result += "\n" + routing_block + "\n\n"
+        else:
+            result += "\n"
+        result += (
             "<available_skills>\n"
             + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
-            "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
+            + "</available_skills>\n"
+            + "\n"
+            + "Only proceed without loading a skill if genuinely none are relevant to the task."
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────

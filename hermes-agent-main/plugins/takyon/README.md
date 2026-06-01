@@ -75,7 +75,6 @@ skills/takyon/takyon-build-product/
 skills/takyon/takyon-app-runtime/
 skills/takyon/takyon-distribution/
 skills/takyon/takyon-x/
-skills/takyon/takyon-reddit/
 skills/takyon/takyon-conversation-followup/
 skills/takyon/takyon-business-metrics/
 skills/takyon/takyon-claude-agent-sdk/

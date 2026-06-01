@@ -19,6 +19,13 @@ metadata:
         business_read_conversation_thread,
         business_write_file,
       ]
+    routing:
+      owns: noisy reply triage, thread review, and follow-up decisions for unresolved business conversations
+      when_to_use:
+        - unresolved inbound messages are blocking the next move
+        - reply volume is too large or noisy for direct inspection alone
+      do_not_use_for:
+        - claiming a real external send or post happened
   takyon:
     scope: business
     allowed_roots: [metrics, research]

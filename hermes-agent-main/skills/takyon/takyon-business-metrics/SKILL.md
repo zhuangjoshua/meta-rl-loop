@@ -12,6 +12,13 @@ metadata:
     related_skills: [takyon-market-research, takyon-distribution, takyon-build-product, takyon-conversation-followup]
     requires_toolsets: [takyon]
     requires_tools: [business_calculate_pulse, business_read_business, business_write_file]
+    routing:
+      owns: metrics summaries, wake history, and unresolved inbound visibility
+      when_to_use:
+        - every `/wake` and the first `/create` baseline
+        - current users, revenue, usage, or unresolved replies materially affect the next move
+      do_not_use_for:
+        - inventing strategy from missing metrics
   takyon:
     scope: business
     allowed_roots: [metrics, research]

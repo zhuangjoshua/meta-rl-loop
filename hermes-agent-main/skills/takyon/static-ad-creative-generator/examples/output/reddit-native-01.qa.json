@@ -1,0 +1,64 @@
+{
+  "creative_id": "reddit-native-01",
+  "stage": "pre_generation",
+  "checks": [
+    {
+      "id": 1,
+      "name": "hook_readable",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 2,
+      "name": "communicates_in_2s",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 3,
+      "name": "native_to_platform",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 4,
+      "name": "overlay_short",
+      "result": "pass",
+      "note": "42 chars"
+    },
+    {
+      "id": 5,
+      "name": "not_generic",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 6,
+      "name": "policy_clear",
+      "result": "pass",
+      "note": "no policy lint flags (confirm visually)"
+    },
+    {
+      "id": 7,
+      "name": "click_worthy",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 8,
+      "name": "matches_angle",
+      "result": "review",
+      "note": "decide from spec/brief"
+    },
+    {
+      "id": 9,
+      "name": "matches_spec",
+      "result": "review",
+      "note": "decide from spec/brief"
+    }
+  ],
+  "policy_gate": "clear",
+  "verdict": "iterate",
+  "recommended_next_iteration": "Test a contrarian title; cut a Meta-feed screenshot variant of the same card.",
+  "format_warnings": []
+}

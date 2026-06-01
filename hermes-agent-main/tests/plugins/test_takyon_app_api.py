@@ -33,9 +33,12 @@ def test_microusd_cost_blocks_unknown_anthropic_model():
         _microusd_cost("claude-imaginary-99", 100, 20)
 
 
-def test_app_budget_remaining_counts_recorded_usage(tmp_path, monkeypatch):
+def test_app_budget_remaining_counts_recorded_usage(tmp_path, monkeypatch, pg_store_dsn):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    store = TakyonStore(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|takyon-app-api")
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
     store.commit(
         scope="business:clipbook",
         operations=[{"action": "business.upsert", "business": "clipbook", "name": "Clipbook"}],

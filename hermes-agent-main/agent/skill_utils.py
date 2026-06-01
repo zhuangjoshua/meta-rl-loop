@@ -284,20 +284,75 @@ def get_all_skills_dirs() -> List[Path]:
 # ── Condition extraction ──────────────────────────────────────────────────
 
 
-def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
-    """Extract conditional activation fields from parsed frontmatter."""
+def _normalize_metadata_mapping(frontmatter: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Return ``metadata.<key>`` as a dict, or ``{}`` when missing/malformed."""
     metadata = frontmatter.get("metadata")
-    # Handle cases where metadata is not a dict (e.g., a string from malformed YAML)
     if not isinstance(metadata, dict):
-        metadata = {}
-    takyon = metadata.get("takyon") or {}
-    if not isinstance(takyon, dict):
-        takyon = {}
+        return {}
+    value = metadata.get(key) or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _normalize_string_list(value: Any) -> List[str]:
+    """Normalize a scalar-or-list frontmatter field into deduped strings."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    result: List[str] = []
+    for item in value:
+        text = str(item).strip().strip("'\"")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
+    """Extract conditional activation fields from parsed frontmatter.
+
+    Modern skills declare these under ``metadata.hermes.*``. We also honor the
+    older ``metadata.takyon.*`` location as a backward-compatible fallback.
+    """
+    hermes = _normalize_metadata_mapping(frontmatter, "hermes")
+    takyon = _normalize_metadata_mapping(frontmatter, "takyon")
+
+    def _merged_list(field: str) -> List[str]:
+        merged: List[str] = []
+        for source in (hermes, takyon):
+            for item in _normalize_string_list(source.get(field)):
+                if item not in merged:
+                    merged.append(item)
+        return merged
+
     return {
-        "fallback_for_toolsets": takyon.get("fallback_for_toolsets", []),
-        "requires_toolsets": takyon.get("requires_toolsets", []),
-        "fallback_for_tools": takyon.get("fallback_for_tools", []),
-        "requires_tools": takyon.get("requires_tools", []),
+        "fallback_for_toolsets": _merged_list("fallback_for_toolsets"),
+        "requires_toolsets": _merged_list("requires_toolsets"),
+        "fallback_for_tools": _merged_list("fallback_for_tools"),
+        "requires_tools": _merged_list("requires_tools"),
+    }
+
+
+def extract_skill_routing(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract routing metadata used for dynamic ownership/handoff summaries."""
+    hermes = _normalize_metadata_mapping(frontmatter, "hermes")
+    takyon = _normalize_metadata_mapping(frontmatter, "takyon")
+
+    routing = hermes.get("routing")
+    if not isinstance(routing, dict):
+        routing = takyon.get("routing")
+    if not isinstance(routing, dict):
+        routing = {}
+
+    owns = str(routing.get("owns") or "").strip().strip("'\"")
+    return {
+        "owns": owns,
+        "when_to_use": _normalize_string_list(routing.get("when_to_use")),
+        "do_not_use_for": _normalize_string_list(routing.get("do_not_use_for")),
     }
 
 

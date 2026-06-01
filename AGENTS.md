@@ -92,6 +92,17 @@ For the operator/dashboard path, the canonical spend gate is the top-level Takyo
 - Do not expose user-editable wake cadence or legacy budget fields in the dashboard create UI. The operator UI may show read-only budget state and can rely on backend/default wake policy, but should not present those as normal editable setup knobs.
 - For business/product runtime spend, use the real downstream rail instead: `app_usage.py` for product usage budgets, and the creative-credit rail for fixed-price creative/ad actions.
 
+## Safebox Authority
+
+Safebox is the canonical authority boundary for secrets, auth, funding, and spendful tool control.
+
+- All secrets, API keys, OAuth tokens, session auth state, funding authority, billing authority, credit balances, paid-provider credentials, and tools/actions that can directly spend money or consume paid credits/budgets must live behind Safebox-owned rails.
+- Non-Safebox tools, skills, prompts, UI code, workers, and business files may orchestrate around those rails, but they must not directly create, edit, mint, rotate, reveal, persist, or bypass that authority.
+- Do not duplicate secret/auth/funding state into prompts, skill-local stores, business files, client-editable payloads, ad hoc env mirrors, or alternate mutable tables just because a higher-level flow needs to read or route on it.
+- A path does not become acceptable merely because inference, routing, or a worker call passed through Safebox first; if the mutable target is secrets/auth/funding/spend authority, the canonical write and enforcement point must still remain inside Safebox and be uneditable by every other tool or skill.
+- When adding a new provider, credentialed backend, or money-costing tool, put the credential gate, spend permission, reservation/settlement authority, and irreversible side-effect approval in Safebox first; then expose only the minimum guarded interface and receipts to the rest of Takyon.
+- If an existing tool or skill can directly mutate those surfaces outside Safebox, treat that as a bug to remove, not an allowed second path.
+
 ## Operating Model
 
 Takyon should be a skill-based Hermes CEO system, not a fixed workflow cockpit.
@@ -144,6 +155,8 @@ When the operator asks to add a normal new Takyon feature or skill, always use t
 For every new feature, skill, or tool, first understand when it should be used and verify that the existing Takyon piping will let it be used in those places without hardcoding a deterministic workflow. Check the relevant routing and discovery surfaces: the initial/bootstrap prompt, `plugins/takyon/prompts/ceo.md`, related skills' `SKILL.md` files, the runtime Hermes skills index, shell/harness metadata, and any canonical tools or runtime rails. Update only the surfaces that genuinely need to know about the feature; do not duplicate routing rules across prompts, skills, or UI code.
 
 Takyon skills must keep rich normal-Hermes operational detail. Do not collapse `How to Run`, `Procedure`, or `Verification Checklist` into generic prompt prose. Those sections should explicitly name the exact tool names used, the files or state checked first, the expected outputs, the branch points for test/live or present/missing state, and the receipts or file paths that prove success. Converting a good Hermes skill into a Takyon skill means adding `metadata.takyon.*` and `## Publication`, not removing the concrete operational detail.
+
+When a skill or tool claims to create, update, publish, launch, charge, or otherwise mutate business or provider state, every mutating path must leave canonical durable truth, including test-mode suppressed paths and update paths. That durable truth does not have to be a row in the `ledger` table specifically: it may be a shared-store commit such as `ledger.allocate` or `agent.record`, a guarded `business_*` tool receipt/event/state write, or an exact `business_*` tool payload that the agent must call in the same turn after a local script prepares files. Read-only, planning, and draft-only paths may remain advisory. But do not allow a mutating path to stop at provider readback, stdout, or ad hoc file output without a canonical Takyon receipt, event, or tool-backed commit.
 
 Before adding a feature, skill, tool, store, command, metric, or prompt rule, perform a redundancy and conflict check against the active Takyon/Hermes trunk. Report to the operator whether the proposal is new, partially redundant, or better implemented by extending an existing skill/tool/rail; name the overlapping surfaces and explain the chosen canonical home. Also check whether the change conflicts with initial bootstrap, scheduled wakes, manual CEO turns, work focus, test/live mode, business isolation, app-runtime rails, cron behavior, or slash-command policy. If the feature is valid, describe the non-deterministic call points where the CEO or shell can discover and use it through the Hermes skills index, tool schemas, metrics evidence, business state, or related skill guidance.
 

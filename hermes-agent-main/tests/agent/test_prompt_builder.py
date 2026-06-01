@@ -1065,6 +1065,47 @@ class TestBuildSkillsSystemPromptConditional:
         )
         assert "openhue" in result
 
+    def test_requires_skill_hidden_when_hermes_toolset_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "iot" / "openhue"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: openhue\ndescription: Hue lights\nmetadata:\n  hermes:\n    requires_toolsets: [terminal]\n---\n"
+        )
+        result = build_skills_system_prompt(
+            available_tools=set(),
+            available_toolsets=set(),
+        )
+        assert "openhue" not in result
+
+    def test_routing_block_rendered_from_hermes_metadata(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "takyon" / "publisher"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: publisher\n"
+            "description: Publish things honestly\n"
+            "metadata:\n"
+            "  hermes:\n"
+            "    category: takyon\n"
+            "    routing:\n"
+            "      owns: outbound publication truth\n"
+            "      when_to_use:\n"
+            "        - a business needs a real publish path\n"
+            "      do_not_use_for:\n"
+            "        - drafts with no publication state\n"
+            "---\n"
+        )
+        result = build_skills_system_prompt(
+            available_tools=set(),
+            available_toolsets=set(),
+        )
+        assert "## Skill Routing" in result
+        assert "publisher owns outbound publication truth." in result
+        assert "Use when: a business needs a real publish path." in result
+        assert "Do not use for: drafts with no publication state." in result
+
     def test_unconditional_skill_always_shown(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "general" / "notes"
@@ -1192,6 +1233,5 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 

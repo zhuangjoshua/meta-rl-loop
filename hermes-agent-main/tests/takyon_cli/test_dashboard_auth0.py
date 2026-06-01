@@ -68,11 +68,15 @@ def test_app_host_protects_public_status_endpoint_when_auth0_applies(auth0_env):
     assert resp.json()["detail"] == "Auth0 login required"
 
 
-def test_product_tls_ask_bypasses_auth0_for_caddy(auth0_env, tmp_path, monkeypatch):
+def test_product_tls_ask_bypasses_auth0_for_caddy(auth0_env, tmp_path, monkeypatch, pg_store_dsn):
     from plugins.takyon.core import TakyonStore
 
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|dashboard-auth0")
     monkeypatch.setattr(auth0_env, "get_takyon_home", lambda: tmp_path)
-    TakyonStore(tmp_path).commit(
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
+    store.commit(
         scope="business:latexflow",
         operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
         idempotency_key="auth0-tls-ask-business",
@@ -140,6 +144,71 @@ def test_auth0_callback_sets_dashboard_session_for_fourmanifold_email(
 
     status = client.get("/api/status")
     assert status.status_code == 200
+
+
+def test_auth0_me_reports_current_dashboard_user(auth0_env, monkeypatch):
+    client = _client(auth0_env)
+    login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
+    state = _state_from_login(login)
+
+    async def fake_exchange(cfg, *, code, redirect_uri):
+        return {"id_token": "id-token"}
+
+    def fake_verify(cfg, *, id_token, expected_nonce):
+        return {
+            "sub": "auth0|me",
+            "email": "operator@fourmanifold.com",
+            "email_verified": True,
+            "name": "Operator Me",
+        }
+
+    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+
+    resp = client.get(f"/auth/callback?code=ok&state={state}", follow_redirects=False)
+
+    assert resp.status_code == 302
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json() == {
+        "authenticated": True,
+        "auth0_required": True,
+        "user": {
+            "email": "operator@fourmanifold.com",
+            "name": "Operator Me",
+            "sub": "auth0|me",
+        },
+    }
+
+
+def test_auth0_logout_clears_dashboard_session(auth0_env, monkeypatch):
+    client = _client(auth0_env)
+    login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
+    state = _state_from_login(login)
+
+    async def fake_exchange(cfg, *, code, redirect_uri):
+        return {"id_token": "id-token"}
+
+    def fake_verify(cfg, *, id_token, expected_nonce):
+        return {
+            "sub": "auth0|logout",
+            "email": "operator@fourmanifold.com",
+            "email_verified": True,
+            "name": "Operator Logout",
+        }
+
+    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+
+    resp = client.get(f"/auth/callback?code=ok&state={state}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert client.get("/api/status").status_code == 200
+
+    logout = client.get("/auth/logout?return_to=/chat", follow_redirects=False)
+
+    assert logout.status_code == 302
+    assert logout.headers["location"].startswith("https://fourmanifold.auth0.com/v2/logout?")
+    assert client.get("/api/status").status_code == 401
 
 
 def test_auth0_callback_rejects_non_fourmanifold_email(auth0_env, monkeypatch):

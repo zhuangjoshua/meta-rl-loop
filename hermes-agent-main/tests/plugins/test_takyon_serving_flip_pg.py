@@ -7,7 +7,7 @@ Two proofs, both against a real migrated throwaway Postgres (never mocks):
   * **Real-shell operator lifecycle on Postgres** — drive the ACTUAL shell parser/router
     (``cli._handle_shell_line``, the same function the interactive ``./takyon`` shell calls per typed
     line) for the model-free operator commands (``/create``, ``/status``, ``/pulse``, ``/test``,
-    ``/show``) with ``TAKYON_DB_BACKEND=postgres``. This exercises the slash-command parsing, scoped
+    ``/show``) against the Postgres-backed runtime. This exercises the slash-command parsing, scoped
     routing, and ``run_takyon_command`` → ``TakyonStore`` path end-to-end on PG — not just the store
     API the other PG tests call directly. The platform owner is seeded exactly as shell startup does
     (``cli._seed_platform_owner_at_startup``), so ``business.upsert`` resolves a real owner.
@@ -58,7 +58,6 @@ def _tree(root: Path) -> dict[str, bytes]:
 def test_shell_operator_lifecycle_on_postgres(pg_store_dsn, tmp_path, monkeypatch):
     # The full serving flip: the operator store backend AND the URL the shell's own TakyonStore()
     # resolves both point at the migrated throwaway DB; TAKYON_HOME isolates the business filesystem.
-    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|e2e-operator")
@@ -104,7 +103,6 @@ def test_shell_operator_lifecycle_on_postgres(pg_store_dsn, tmp_path, monkeypatc
 
 
 def test_no_fleet_resume_via_operator_store_on_postgres(pg_store_dsn, tmp_path, monkeypatch):
-    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|nofleet-operator")
 

@@ -2,10 +2,10 @@
 (mediationplan.md > Phase 8 store-seam finding, 2026-05-31).
 
 Proves the operator store runs its SQLite-shaped SQL UNCHANGED on Postgres through the thin
-``_PGConn`` translating wrapper plus the ``TAKYON_DB_BACKEND=postgres`` switch — without rewriting a
-single one of the store's ~150 ``conn.execute`` call sites:
+``_PGConn`` translating wrapper — without rewriting a single one of the store's ~150
+``conn.execute`` call sites:
 
-  1. Backend switch: with the flag set + a DSN, ``store._connect()`` returns a ``_PGConn`` (psycopg),
+  1. Backend default: with a DSN, ``store._connect()`` returns a ``_PGConn`` (psycopg),
      and it does NOT bootstrap schema — the migration runner owns DDL, so the wrapper's
      ``executescript`` (only reachable from the skipped ``_init_db``) fails loud if ever called.
   2. The ``?`` → ``%s`` translation, ``dict_row`` reads-by-name, and the one-atomic-transaction model
@@ -17,7 +17,8 @@ single one of the store's ~150 ``conn.execute`` call sites:
      the business CEO-cron path.
   4. Idempotency replay: re-committing the same key is one effect (second call returns the stored
      result, writes no new rows), proving the transaction commits exactly once.
-  5. The default (no flag) keeps a SQLite store, so the switch is genuinely opt-in.
+  5. A stale ``TAKYON_DB_BACKEND=sqlite`` env is rejected loudly instead of silently reviving the
+     retired local authority path.
 
 P8.3 owner wiring is exercised at the bottom (``test_business_upsert_*`` / ``test_ensure_platform_owner_*``):
 the store's ``business.upsert`` is the first write that needs an ``owner_user_id`` (PG
@@ -50,8 +51,6 @@ is set (the pg_store_dsn fixture skips on its own when unset).
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
@@ -76,24 +75,13 @@ def _seed_owned_business(dsn: str, slug: str, *, mode: str = "test") -> None:
 
 
 @pytest.fixture
-def pg_store(pg_store_dsn, tmp_path, monkeypatch):
-    """A TakyonStore wired to the Postgres backend + a migrated throwaway DB. The flag is set via
-    monkeypatch (auto-undone after the test) so no other test in the suite sees the postgres backend;
-    _db_backend() reads it lazily at _connect() time, so it is in force for every commit/read here."""
-    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+def pg_store(pg_store_dsn, tmp_path):
+    """A TakyonStore wired to a migrated throwaway Postgres DB."""
     return takyon_core.TakyonStore(root=tmp_path, database_url=pg_store_dsn)
 
 
-def test_default_backend_is_sqlite(tmp_path, monkeypatch):
-    # With no flag, _connect stays on the historical engine — the switch is opt-in, not auto-detected.
-    monkeypatch.delenv("TAKYON_DB_BACKEND", raising=False)
-    store = takyon_core.TakyonStore(root=tmp_path)
-    with store._connect() as conn:
-        assert isinstance(conn, sqlite3.Connection)
-
-
-def test_backend_switch_returns_pg_wrapper_without_bootstrapping(pg_store):
-    # The flag flips _connect onto psycopg behind the _PGConn adapter, and it does NOT run schema
+def test_default_backend_returns_pg_wrapper_without_bootstrapping(pg_store):
+    # The default store backend is the psycopg-backed _PGConn adapter, and it does NOT run schema
     # bootstrap: a ?-parametrized, dict_row read works, and executescript fails loud if ever reached.
     with pg_store._connect() as conn:
         assert isinstance(conn, takyon_core._PGConn)
@@ -106,6 +94,19 @@ def test_backend_switch_returns_pg_wrapper_without_bootstrapping(pg_store):
     # Bootstrap really was skipped: the guard table the executescript tried to make is absent.
     with psycopg.connect(pg_store._database_url, autocommit=True) as raw:
         assert raw.execute("select to_regclass('public.should_not_exist')").fetchone()[0] is None
+
+
+def test_stale_sqlite_backend_env_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_DB_BACKEND", "sqlite")
+    with pytest.raises(RuntimeError, match="legacy Takyon SQLite backend has been removed"):
+        takyon_core._db_backend()
+
+
+def test_explicit_postgres_backend_env_is_still_accepted(pg_store_dsn, tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+    store = takyon_core.TakyonStore(root=tmp_path, database_url=pg_store_dsn)
+    with store._connect() as conn:
+        assert isinstance(conn, takyon_core._PGConn)
 
 
 def test_multi_op_commit_round_trips_operator_tables(pg_store, pg_store_dsn):
@@ -727,9 +728,8 @@ def test_seed_platform_owner_via_store_is_idempotent_and_enables_create(pg_store
         assert row is not None and str(row[0]) == uid1
 
 
-def test_seed_platform_owner_is_noop_off_postgres(tmp_path, monkeypatch):
-    # Guarded no-op on the default SQLite backend: no users table to seed and the SQLite era never
-    # needed an owner, so the serving-flip seed returns (None, None) and opens no connection.
-    monkeypatch.delenv("TAKYON_DB_BACKEND", raising=False)
+def test_seed_platform_owner_rejects_stale_sqlite_backend_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_DB_BACKEND", "sqlite")
     store = takyon_core.TakyonStore(root=tmp_path)
-    assert store.seed_platform_owner() == (None, None)
+    with pytest.raises(RuntimeError, match="legacy Takyon SQLite backend has been removed"):
+        store.seed_platform_owner()

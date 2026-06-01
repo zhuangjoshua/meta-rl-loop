@@ -2239,6 +2239,12 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
         )
+        if isinstance(result, dict) and result.get("bootstrap_job"):
+            return (
+                f"Create started for business:{slug}. Refresh status or open the business after a moment "
+                "to see files, blockers, and deliverables.",
+                slug,
+            )
         return _format_cli_value(result), slug
 
     harness_command = _get_harness_command(command)

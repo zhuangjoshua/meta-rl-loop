@@ -12,6 +12,13 @@ metadata:
     related_skills: [takyon-build-product, takyon-business-metrics, takyon-distribution]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_write_file]
+    routing:
+      owns: customer, competitor, channel, pricing, and demand evidence
+      when_to_use:
+        - evidence is weak or stale, especially on `/create`
+        - ICP, channel, offer, or pricing decisions need fresh truth
+      do_not_use_for:
+        - cosmetic copy changes that do not change the business decision
   takyon:
     scope: business
     allowed_roots: [research, metrics]

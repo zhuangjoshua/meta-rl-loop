@@ -9,9 +9,17 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, distribution, outreach, campaigns]
-    related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, takyon-reddit, ugc-video-ad]
+    related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, ugc-video-ad]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_create_workspace, business_publish_outreach]
+    routing:
+      owns: campaign work, lane planning, campaign artifacts, and broader demand-creation coordination
+      when_to_use:
+        - the business needs outbound demand creation or campaign iteration
+        - the operator asks to launch, continue, or review outreach or campaigns
+      do_not_use_for:
+        - channel-native X drafting or X thread handling
+        - product-surface changes
   takyon:
     scope: business
     allowed_roots: [distribution, metrics, research]
@@ -34,7 +42,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Use when the business needs outbound demand creation or campaign iteration.
 - Use when the operator asks to launch, continue, or review outreach or campaigns.
 - Use when the business needs a visible campaign workspace, lane plan, or campaign update that spans more than one post or reply.
-- Do not use this skill for channel-native X or Reddit drafting or thread handling; use `takyon-x` or `takyon-reddit`.
+- Do not use this skill for channel-native X drafting or X thread handling; use `takyon-x`.
 - Do not use for product-surface changes that belong in `takyon-build-product`.
 
 ## Quick Reference
@@ -50,7 +58,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - The Takyon toolset must be available.
 - Start with `business_read_business` and usually `business_calculate_pulse` so you know whether replies are waiting and what campaign state already exists.
 - If you need to inspect specific campaign files, use `business_read_file` or `business_list_files` instead of guessing the current state.
-- If the work turns into X-native or Reddit-native drafting or reply handling, switch to `takyon-x` or `takyon-reddit`.
+- If the work turns into X-native drafting or reply handling, switch to `takyon-x`.
 - If replies are large or noisy and you first need a compact triage, load `takyon-conversation-followup` before deciding whether the campaign should change.
 - If a provider-backed publish path is blocked, use the publish tools or `business_enqueue_job` to record the real blocker; do not hand-claim success.
 
@@ -68,7 +76,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 - Call `business_read_business` first to inspect current campaign state, conversation state, and existing publication artifacts.
 - Call `business_calculate_pulse` when you need the latest unresolved inbound or recent activity before deciding whether the campaign should change.
-- If replies are the main issue, use `takyon-x`, `takyon-reddit`, or `takyon-conversation-followup` instead of drafting a broad campaign memo first.
+- If replies are the main issue, use `takyon-x` for X or `takyon-conversation-followup` when the inbox is too noisy to inspect directly before drafting a broad campaign memo.
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only the legacy `distribution/phase-1-outreach/` tree exists, migrate or merge that visible campaign state into `distribution/campaign/` before adding new work.
 - Use `templates/campaign.md` for the visible campaign workspace and `templates/reply-draft.md` only for generic, non-channel-specific draft notes.
 - For broader forum-style replies that are not yet split into their own skill, use `templates/forum-reply.md`.
@@ -79,8 +87,8 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 ## Procedure
 
-1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. Determine whether the real need is a campaign update, a lane change, a broader distribution plan, or a channel-native X/Reddit move.
-2. If unresolved replies are the main issue, hand off to `takyon-x`, `takyon-reddit`, or `takyon-conversation-followup` before expanding the campaign.
+1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. Determine whether the real need is a campaign update, a lane change, a broader distribution plan, a Reddit/forum move that should stay here, or a channel-native X move.
+2. If unresolved replies are the main issue, hand off X work to `takyon-x` or load `takyon-conversation-followup` before expanding the campaign.
 3. Inspect the current campaign workspace. `distribution/campaign/` is canonical. If only the legacy `distribution/phase-1-outreach/` tree exists, move or merge that visible campaign state into `distribution/campaign/` first. If `distribution/campaign/` is missing or too stale to trust after that check, create or refresh it with `business_create_workspace` and write the current campaign files there.
 4. Update the visible campaign artifacts: objective, audience, lanes, assets, current blockers, and next iteration. Keep them business-scoped and durable instead of burying them in chat output.
 5. If the campaign needs the copied UGC video ad path, run `ugc-video-ad`, then store the resulting `product/ugc-ads/<slug>/` publication path in the campaign workspace after `business_ugc_ad_write` records it.
@@ -102,7 +110,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 ## Common Pitfalls
 
-- Treating a channel-native X or Reddit move as if it belonged in the broad campaign layer
+- Treating a channel-native X move as if it belonged in the broad campaign layer
 - Launching more outward work while unresolved replies are obviously waiting
 - Treating drafted copy as if it was already sent
 - Scattering campaign assets outside `distribution/`
@@ -112,7 +120,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - [ ] Current campaign assets are visible under `distribution/campaign/`
 - [ ] Any claimed send, post, or publish has a corresponding tool result, local artifact, queued job, or receipt
 - [ ] `distribution/local-published/` contains the expected suppressed artifact in test-mode publication paths
-- [ ] Channel-native X/Reddit work was delegated to the dedicated skill when appropriate
+- [ ] Channel-native X work was delegated to `takyon-x` when appropriate
 
 ## Rules
 
@@ -120,12 +128,12 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 2. In test mode, use local publication paths and suppressed receipts.
 3. Prefer reply handling before more outward distribution when people are waiting.
 4. Keep visible campaign artifacts in `distribution/campaign/`.
-5. Use `takyon-x` or `takyon-reddit` for channel-native post and reply work.
+5. Use `takyon-x` for channel-native X post and reply work.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| The work is really a channel-native X or Reddit move | Switch to `takyon-x` or `takyon-reddit` instead of stretching the campaign skill |
+| The work is really a channel-native X move | Switch to `takyon-x` instead of stretching the campaign skill |
 | No publish provider is available | Use local publication if allowed, otherwise record the blocker |
 | There are unresolved replies | Handle them directly or use `takyon-conversation-followup` before expanding new outreach |

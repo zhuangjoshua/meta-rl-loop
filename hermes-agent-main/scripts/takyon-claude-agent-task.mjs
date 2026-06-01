@@ -154,7 +154,7 @@ async function main() {
               if (outside) {
                 return {
                   behavior: "deny",
-                  message: "Takyon Claude SDK tasks may only access files inside the business workspace.",
+                  message: "Takyon Claude SDK tasks may only access files inside the requested workspace.",
                   toolUseID: options.toolUseID
                 };
               }

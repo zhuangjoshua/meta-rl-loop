@@ -12,6 +12,13 @@ metadata:
     related_skills: [takyon-build-product, takyon-business-metrics]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_upsert_app_plan, business_request_app_magic_link, business_create_app_checkout]
+    routing:
+      owns: auth, sessions, checkout, entitlements, billing, usage, and runtime wiring for the business app
+      when_to_use:
+        - real app customer state, pricing, checkout, or entitlements must be wired honestly
+        - usage tracking or app budget gates materially affect the product
+      do_not_use_for:
+        - pure page or layout work unless the runtime contract itself is changing
   takyon:
     scope: business
     allowed_roots: [product, metrics]

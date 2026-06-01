@@ -1,0 +1,27 @@
+ART-DIRECTION BRIEF — STATIC AD CREATIVE
+
+OBJECTIVE: A clicks-focused static ad for "Redditor in a personal-finance community who hates wasting money". Express the "reddit_native" angle. Hook: "What finally stopped my subscription creep". Promise: "A 60-second scan that surfaces the leaks". Render this strategy faithfully; do not change the marketing idea or add other claims.
+
+PLATFORM & PLACEMENT: reddit / reddit_feed. Make it look native to that surface, not like a polished stock banner ad.
+
+FORMAT: 1:1 aspect ratio (1024x1024).
+
+VISUAL STYLE: Authentic Reddit post card UI, neutral light mode, believable.
+
+SCENE & SUBJECT: A clean, believable Reddit-style post card in light mode: a generic, clearly-placeholder subreddit label (not a real community name), a small upvote arrow, a bold post title, and two short lines of body text in a neutral sans-serif. No real usernames, no real avatars, no specific vote numbers. Plain light background around the card. Focal point: the bold post title.
+
+COMPOSITION: The post card fills the frame with small even margins. Reserve clean negative space in the center for the overlay text. Keep key elements inside the safe zone: keep title and body within the central 88%.
+
+LIGHTING & BACKGROUND: Flat UI lighting. Light neutral UI background.
+
+PRODUCT: Implied (mentioned in the post body; no product UI shown). Must include: generic, clearly-placeholder Reddit-style UI.
+
+OVERLAY TEXT: Render exactly the words "What finally stopped my subscription creep" in the center of the frame. Spell every word correctly. Keep it short and legible at thumbnail size.
+
+TYPOGRAPHY & LAYOUT: Native Reddit post typography, bold title weight. Overlay at center. Logo: none.
+
+BRAND CONSTRAINTS: Stay on brand. Show: generic, clearly-placeholder Reddit-style UI.
+
+REALISM: Photographic, real-world rendering. Exact quantities of every object and person. No garbled, misspelled, or invented text. No extra fingers, hands, or limbs. Clean, intentional, on-brief — not a busy collage.
+
+AVOID: real subreddit names presented as authentic, real usernames or avatars, fabricated third-party logos, invented endorsements, upvote counts presented as real, garbled or misspelled text, real usernames or avatars, vote counts implied as authentic, real brand logos

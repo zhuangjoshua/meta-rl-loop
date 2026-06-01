@@ -31,7 +31,25 @@ When filling that template in, keep `How to Run`, `Procedure`, and `Verification
 - name the exact tool names used
 - say what file or business state to inspect first
 - say what to do if the needed state is missing
-- say what file, mirror, or receipt proves success
+- say what file, tool result, or receipt proves success
+- if the skill needs a new canonical mutation, add the `business_*` tool in the same change; skill authors are also tool authors when necessary
+
+Every Takyon skill should also declare a compact routing contract in frontmatter under `metadata.hermes.routing`:
+
+- `owns` = one sentence naming the business method or truth surface this skill owns
+- `when_to_use` = 1-3 concrete trigger bullets
+- `do_not_use_for` = nearby work that should route elsewhere
+
+That routing metadata is the source of truth for the dynamic ownership summary injected into Takyon CEO/skills prompts. Do not re-hardcode skill ownership lists in `ceo.md` when the metadata can express it.
+
+## Minimal Guidance
+
+- Start from canonical state. Skills should usually begin with `business_read_business`, then use `business_read_file` or `business_list_files` for the specific business roots they touch instead of guessing from stale artifacts or chat history.
+- Keep `metadata.hermes.routing` aligned with the body `## When to Use` section. If they disagree, fix the metadata in the same change.
+- If the skill only reads, drafts, or summarizes, it does not need a new tool.
+- If the skill changes canonical business or provider state, it must call an existing `business_*` tool or add a new one if none exists.
+- Only mention test mode when business mode changes a real external side effect.
+- Keep the durable outputs in the canonical business roots and prove success with a file, tool result, or receipt.
 
 After editing a skill, start a fresh `./takyon` run or relaunch the shell so bundled Takyon skills sync automatically and Hermes rebuilds the runtime skills index.
 
@@ -42,6 +60,8 @@ Return:
 - one Python handler function for `hermes-agent-main/plugins/takyon/core.py`
 - one matching `TAKYON_TOOL_DEFINITIONS` entry in the same file
 - focused tests for `hermes-agent-main/tests/plugins/test_takyon_plugin.py`
+
+If a skill needs a new canonical mutation, add the `business_*` tool in the same change. Start by copying the handler template below and keep the `return _commit_tool(...)` line unless the tool truly needs custom logic.
 
 Handler template:
 
@@ -79,3 +99,9 @@ Definition template:
 ```
 
 If a skill uses the tool, mention the tool by name in `## Prerequisites`, `## How to Run`, or `## Procedure`.
+
+Mutating tools should follow these rules:
+
+- Usually copy the handler template shape and keep the `return _commit_tool(...)` line.
+- Keep the tool business-scoped and idempotent.
+- Add focused tests for the normal path and any real blocked/test variant.

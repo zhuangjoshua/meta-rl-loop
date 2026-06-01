@@ -172,7 +172,16 @@ _LONG_HANDLERS = frozenset(
         "shell.exec",
         "skills.manage",
         "slash.exec",
+        "takyon.dashboard.create",
+        "takyon.dashboard.state",
+        "takyon.dashboard.workspace",
+        "takyon.file.media",
+        "takyon.file.read",
+        "takyon.files.list",
+        "takyon.outputs.list",
         "takyon.shell.exec",
+        "takyon.site.preview",
+        "takyon.scope.get",
     }
 )
 
@@ -6118,6 +6127,107 @@ def _takyon_require_business_access(
     return f"access denied for business:{slug}"
 
 
+def _takyon_requested_business(
+    session: dict | None,
+    params: dict | None = None,
+) -> str:
+    raw = ""
+    if isinstance(params, dict):
+        raw = str(
+            params.get("business_slug")
+            or params.get("business")
+            or ""
+        ).strip()
+    if not raw and isinstance(session, dict):
+        raw = str(session.get("takyon_current_business") or "").strip()
+    if raw.lower() in {"global", "root", "none"}:
+        return ""
+    if not raw:
+        return ""
+    try:
+        from plugins.takyon.cli import _slugify
+
+        return _slugify(raw)
+    except Exception:
+        return raw
+
+
+def _takyon_workspace_payload(
+    session: dict | None,
+    business: str,
+    *,
+    output_limit: int = 50,
+) -> dict[str, Any]:
+    slug = str(business or "").strip()
+    if not slug:
+        return {
+            "business_slug": "",
+            "current": {},
+            "overview": {},
+            "outputs": [],
+            "background_run": None,
+        }
+    store = _takyon_store(session)
+    current = _takyon_business_payload(store, slug) or {}
+    overview = _takyon_business_overview_payload(store, slug)
+    outputs = _takyon_historical_outputs_payload(
+        store,
+        slug,
+        limit=max(1, min(int(output_limit or 50), 100)),
+    )
+    return {
+        "business_slug": slug,
+        "current": current,
+        "overview": overview if isinstance(overview, dict) else {},
+        "outputs": outputs if isinstance(outputs, list) else [],
+        "background_run": _takyon_get_background_run(slug),
+    }
+
+
+def _takyon_dashboard_state_payload(
+    session: dict | None,
+    *,
+    explicit_business: bool = False,
+    business: str = "",
+    output_limit: int = 50,
+) -> dict[str, Any]:
+    store = _takyon_store(session)
+    businesses = _takyon_businesses_for_session(session, store=store)
+    auto_slug, auto_warning = _takyon_maybe_auto_enter_created_business(session, businesses)
+
+    if explicit_business:
+        current_business = str(business or "").strip()
+        if isinstance(session, dict):
+            session["takyon_current_business"] = current_business
+    else:
+        current_business = _takyon_requested_business(session)
+        if auto_slug:
+            current_business = auto_slug
+
+    if current_business:
+        access_error = _takyon_require_business_access(session, current_business)
+        if access_error:
+            raise PermissionError(access_error)
+
+    workspace = _takyon_workspace_payload(
+        session,
+        current_business,
+        output_limit=output_limit,
+    )
+    return {
+        "scope": f"business:{current_business}" if current_business else "global",
+        "business": current_business,
+        "business_slug": current_business,
+        "businesses": businesses,
+        "current": workspace.get("current") or {},
+        "overview": workspace.get("overview") or {},
+        "outputs": workspace.get("outputs") or [],
+        "background_run": workspace.get("background_run"),
+        "auto_switched_business": auto_slug or "",
+        "auto_scope_warning": auto_warning or "",
+    }
+
+
 def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
     try:
         from plugins.takyon.cli import _slugify
@@ -6338,7 +6448,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
-    business = str(session.get("takyon_current_business") or "").strip()
+    business = _takyon_requested_business(session, params)
     access_error = _takyon_require_business_access(session, business)
     if access_error:
         return _err(rid, 4004, access_error)
@@ -6360,7 +6470,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
-    business = str(session.get("takyon_current_business") or "").strip()
+    business = _takyon_requested_business(session, params)
     access_error = _takyon_require_business_access(session, business)
     if access_error:
         return _err(rid, 4004, access_error)
@@ -6394,7 +6504,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
-    business = str(session.get("takyon_current_business") or "").strip()
+    business = _takyon_requested_business(session, params)
     access_error = _takyon_require_business_access(session, business)
     if access_error:
         return _err(rid, 4004, access_error)
@@ -6432,7 +6542,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
-    business = str(session.get("takyon_current_business") or "").strip()
+    business = _takyon_requested_business(session, params)
     access_error = _takyon_require_business_access(session, business)
     if access_error:
         return _err(rid, 4004, access_error)
@@ -6485,7 +6595,7 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
-    business = str(session.get("takyon_current_business") or "").strip()
+    business = _takyon_requested_business(session, params)
     if not business:
         return _ok(rid, {"outputs": [], **_takyon_scope_payload(session)})
     access_error = _takyon_require_business_access(session, business)
@@ -6500,6 +6610,146 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"outputs": outputs, **_takyon_scope_payload(session)})
     except Exception as e:
         return _err(rid, 5046, str(e))
+
+
+@method("takyon.dashboard.workspace")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = _takyon_requested_business(session, params)
+    if not business:
+        return _ok(
+            rid,
+            {
+                "business_slug": "",
+                "current": {},
+                "overview": {},
+                "outputs": [],
+                "background_run": None,
+            },
+        )
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
+    try:
+        return _ok(
+            rid,
+            _takyon_workspace_payload(
+                session,
+                business,
+                output_limit=int(params.get("limit") or 50),
+            ),
+        )
+    except Exception as e:
+        return _err(rid, 5050, str(e))
+
+
+@method("takyon.dashboard.state")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    explicit_business = "business_slug" in params or "business" in params
+    business = _takyon_requested_business(session, params)
+    try:
+        return _ok(
+            rid,
+            _takyon_dashboard_state_payload(
+                session,
+                explicit_business=explicit_business,
+                business=business,
+                output_limit=int(params.get("limit") or 50),
+            ),
+        )
+    except PermissionError as e:
+        return _err(rid, 4041, str(e))
+    except Exception as e:
+        return _err(rid, 5052, str(e))
+
+
+@method("takyon.dashboard.create")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    try:
+        from plugins.takyon.cli import TakyonStore, _slugify, run_takyon_command
+
+        requested_name = str(
+            params.get("name")
+            or params.get("business_name")
+            or params.get("slug")
+            or params.get("business")
+            or ""
+        ).strip()
+        requested_goal = str(params.get("goal") or "").strip()
+        requested_mode = str(params.get("mode") or "test").strip().lower()
+        if requested_mode not in {"test", "live"}:
+            return _err(rid, 4004, "mode must be test or live")
+        slug_source = requested_name or requested_goal
+        slug = _slugify(str(params.get("slug") or slug_source or "").strip())
+        if not slug:
+            return _err(rid, 4004, "business slug required")
+
+        operator_user_id = _takyon_operator_user_id(session) or None
+        store = TakyonStore(operator_user_id=operator_user_id)
+        slug = _takyon_unique_business_slug(store, slug)
+        command_argv = ["create", f"--{requested_mode}", slug]
+        if requested_goal:
+            command_argv.append(requested_goal)
+        result = run_takyon_command(
+            command_argv,
+            model=os.getenv("TAKYON_MODEL", ""),
+            max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),
+            show_activity=False,
+            show_indicator=True,
+            shell_history=None,
+            operator_user_id=operator_user_id,
+        )
+        bootstrap_job = (result.get("bootstrap_job") or {}) if isinstance(result, dict) else {}
+        active_mode = str(
+            (result.get("mode") if isinstance(result, dict) else "")
+            or requested_mode
+            or "test"
+        )
+        session["takyon_current_business"] = slug
+        session["takyon_pending_business_create"] = True
+        session["takyon_pending_business_create_at"] = time.time()
+        session["takyon_background_run"] = {
+            "kind": "create",
+            "business": slug,
+            "status": "queued",
+            "started_at": time.time(),
+            "detail": "Queued CEO bootstrap job.",
+            "job_id": str(bootstrap_job.get("job_id") or ""),
+        }
+        _takyon_set_background_run(slug, session["takyon_background_run"])
+        workspace = _takyon_workspace_payload(session, slug, output_limit=int(params.get("limit") or 50))
+        return _ok(
+            rid,
+            {
+                "business_slug": slug,
+                "business_name": requested_name or slug,
+                "goal": requested_goal,
+                "mode": active_mode,
+                "job_id": str(bootstrap_job.get("job_id") or ""),
+                "job_kind": str(bootstrap_job.get("kind") or "ceo_bootstrap"),
+                "job_status": str(bootstrap_job.get("status") or "queued"),
+                "lifecycle_state": "queued" if bootstrap_job else "ready",
+                "output": f"Create started for business:{slug}",
+                "scope": f"business:{slug}",
+                "current": workspace.get("current") or {},
+                "overview": workspace.get("overview") or {},
+                "outputs": workspace.get("outputs") or [],
+                "background_run": workspace.get("background_run"),
+                "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
+            },
+        )
+    except SystemExit as e:
+        return _err(rid, 4004, str(e))
+    except Exception as e:
+        return _err(rid, 5051, str(e))
 
 
 @method("takyon.shell.exec")
@@ -6525,6 +6775,33 @@ def _(rid, params: dict) -> dict:
         detached_target = _takyon_detached_shell_target(line, current_business)
         if detached_target:
             detached_kind, target_business, detached_line = detached_target
+            requested_create_slug = ""
+            if detached_kind == "create" and target_business:
+                requested_create_slug = target_business
+                create_store = TakyonStore(operator_user_id=operator_user_id)
+                unique_slug = _takyon_unique_business_slug(create_store, target_business)
+                if unique_slug != target_business:
+                    try:
+                        raw = detached_line.strip().lstrip("/")
+                        tokens = shlex.split(raw)
+                        business_index = _takyon_create_business_arg_index(tokens)
+                        if business_index is not None:
+                            tokens[business_index] = unique_slug
+                            detached_line = "/" + shlex.join(tokens)
+                    except Exception:
+                        pass
+                target_business = unique_slug
+                try:
+                    existing = create_store.read(scope="global", query="list_businesses", limit=200)
+                    session["takyon_businesses_before_prompt"] = sorted(
+                        _takyon_business_slugs(existing.get("businesses"))
+                    )
+                except Exception:
+                    session["takyon_businesses_before_prompt"] = list(
+                        session.get("takyon_known_businesses") or []
+                    )
+                session["takyon_pending_business_create"] = True
+                session["takyon_pending_business_create_at"] = time.time()
             if target_business and detached_kind != "create":
                 access_error = _takyon_require_business_access(session, target_business)
                 if access_error:
@@ -6711,18 +6988,58 @@ def _(rid, params: dict) -> dict:
                 daemon=True,
             ).start()
             message = (
-                f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
-                "to see files, blockers, and deliverables."
+                (
+                    f"Create started for business:{target_business}. Refresh status or open the business after a moment "
+                    "to see files, blockers, and deliverables."
+                )
+                if detached_kind == "create"
+                else (
+                    f"Wake started for business:{target_business}. Refresh status or open the business after a moment "
+                    "to see files, blockers, and deliverables."
+                )
             )
+            result: dict[str, Any] = {
+                "output": message,
+                **_takyon_scope_payload(session),
+            }
+            if detached_kind == "create" and target_business and target_business != requested_create_slug:
+                result["business"] = target_business
             return _ok(
                 rid,
-                {
-                    "output": message,
-                    **_takyon_scope_payload(session),
-                },
+                result,
             )
+        normalized_line = line
+        expected_create_business = ""
+        create_requested = False
+        create_bootstrap_requested = False
+        try:
+            raw = line.strip().lstrip("/")
+            tokens = shlex.split(raw)
+            command = str(tokens[0] or "").lower() if tokens else ""
+            if command in {"create", "build", "init"}:
+                create_requested = True
+                from plugins.takyon.cli import _parse_business_start_args
+
+                slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
+                    ["create", *tokens[1:]],
+                    usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+                    auto_default=True,
+                )
+                create_bootstrap_requested = bool(auto_start and not no_auto)
+                expected_create_business = _takyon_unique_business_slug(
+                    TakyonStore(operator_user_id=operator_user_id),
+                    slug,
+                )
+                if expected_create_business != slug:
+                    business_index = _takyon_create_business_arg_index(tokens)
+                    if business_index is not None:
+                        tokens[business_index] = expected_create_business
+                        normalized_line = "/" + shlex.join(tokens)
+        except Exception:
+            expected_create_business = ""
+            create_requested = False
         output, next_business = _handle_shell_line(
-            line,
+            normalized_line,
             current_business=current_business,
             store=TakyonStore(operator_user_id=operator_user_id),
             model=os.getenv("TAKYON_MODEL", ""),
@@ -6730,9 +7047,20 @@ def _(rid, params: dict) -> dict:
             shell_history=history if isinstance(history, list) else None,
             operator_user_id=operator_user_id,
         )
+        if create_requested:
+            next_business = next_business or expected_create_business
+            if (
+                create_bootstrap_requested
+                and next_business
+                and not re.match(r"^Create started for business:", str(output or ""), re.I)
+            ):
+                output = (
+                    f"Create started for business:{next_business}. Refresh status or open the business after a moment "
+                    "to see files, blockers, and deliverables."
+                )
         session["takyon_current_business"] = next_business or ""
         if isinstance(history, list):
-            _record_shell_turn(history, line, output)
+            _record_shell_turn(history, normalized_line, output)
         return _ok(
             rid,
             {

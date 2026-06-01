@@ -1,0 +1,30 @@
+{
+  "creative_id": "pain-agitation-01",
+  "generated_at": "2026-06-01T08:53:45",
+  "backend": "mock",
+  "model": "mock",
+  "dry_run": true,
+  "platform": "meta",
+  "placement": "feed",
+  "aspect_ratio": "4:5",
+  "size": "1024x1280",
+  "angle": "pain_agitation",
+  "image": [
+    "pain-agitation-01.png"
+  ],
+  "spec_file": "pain-agitation-01.spec.json",
+  "prompt_file": "pain-agitation-01.prompt.txt",
+  "qa_file": "pain-agitation-01.qa.json",
+  "suggested_headline": "Cancel subscriptions you forgot about",
+  "suggested_primary_text": "Old free trials and forgotten subscriptions keep charging your card. Tally spots them so you can cancel in a tap.",
+  "cta": "Find Them Free",
+  "qa_notes": {
+    "readability_check": "Single bold question reads instantly at the top; strong figure-ground contrast.",
+    "native_platform_check": "Conceptual but candid; reads native to feed, not stocky.",
+    "policy_risks": [],
+    "verdict": "iterate",
+    "policy_gate": "clear",
+    "lint_warnings": []
+  },
+  "recommended_next_iteration": "Test a receipt-pile vs. a single glowing recurring charge; cut a 9:16 story variant."
+}

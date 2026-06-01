@@ -1867,12 +1867,13 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
         conn = psycopg.connect(url, autocommit=True)
         try:
             balances = billing.get_billing_balances(conn, str(principal.user_id))
+            reconciled = billing.reconcile_billing(conn, str(principal.user_id))
         finally:
             conn.close()
 
         allowance_remaining = max(0, int(balances.allowance_remaining_cents))
         topup_balance = max(0, int(balances.topup_balance_cents))
-        reserved = max(0, int(balances.reserved_cents))
+        reserved = max(0, int(reconciled.get("reserved_cents", balances.reserved_cents)))
         return {
             "available": True,
             "allowance_included_cents": int(balances.allowance_included_cents),

@@ -1,10 +1,12 @@
 """Tests for takyon_cli.web_server and related config utilities."""
 
-import os
+import asyncio
 import json
+import os
 import stat
 import tempfile
 import threading
+import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -171,6 +173,51 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     assert mounted == ["control-router", "gateway-router", "creative-router"]
     assert control_api.get_control_conn in overrides
     assert ai_gateway.get_gateway_conn in overrides
+
+
+def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
+    import plugins.takyon.billing as billing
+    import plugins.takyon.core as core
+    import psycopg
+    import takyon_cli.web_server as web_server
+
+    class _Conn:
+        def close(self):
+            return None
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha", "beta"),
+    )
+    balances = types.SimpleNamespace(
+        allowance_included_cents=2000,
+        allowance_remaining_cents=1900,
+        allowance_used_cents=100,
+        topup_balance_cents=300,
+        reserved_cents=700,
+    )
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: _Conn())
+    monkeypatch.setattr(billing, "get_billing_balances", lambda _conn, _uid: balances)
+    monkeypatch.setattr(
+        billing,
+        "reconcile_billing",
+        lambda _conn, _uid: {"ok": True, "drift": {}, "reserved_cents": 100},
+    )
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "auth0|1"}))
+    result = asyncio.run(web_server.get_takyon_operator_account(request))
+
+    assert result["available"] is True
+    assert result["reserved_cents"] == 100
+    assert result["allowance_remaining_cents"] == 1900
+    assert result["topup_balance_cents"] == 300
+    assert result["spendable_cents"] == 2200
+    assert result["owned_business_count"] == 2
 
 
 def test_auth0_public_path_allows_machine_facing_pg_routes():

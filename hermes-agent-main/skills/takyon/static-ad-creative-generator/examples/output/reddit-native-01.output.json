@@ -1,0 +1,32 @@
+{
+  "creative_id": "reddit-native-01",
+  "generated_at": "2026-06-01T08:53:45",
+  "backend": "mock",
+  "model": "mock",
+  "dry_run": true,
+  "platform": "reddit",
+  "placement": "reddit_feed",
+  "aspect_ratio": "1:1",
+  "size": "1024x1024",
+  "angle": "reddit_native",
+  "image": [
+    "reddit-native-01.png"
+  ],
+  "spec_file": "reddit-native-01.spec.json",
+  "prompt_file": "reddit-native-01.prompt.txt",
+  "qa_file": "reddit-native-01.qa.json",
+  "suggested_headline": "How I caught my forgotten subscriptions",
+  "suggested_primary_text": "Posting in case it helps someone: I kept getting nickel-and-dimed by trials I forgot about. A quick scan surfaced them all.",
+  "cta": "See How It Works",
+  "qa_notes": {
+    "readability_check": "Title legible at thumbnail size; clean native Reddit look.",
+    "native_platform_check": "Reads as a native Reddit post in the community's voice, not an obvious ad.",
+    "policy_risks": [
+      "Illustrative/representative post \u2014 not a real user testimonial and not a real subreddit; rendered as a clearly-placeholder card with no real vote counts."
+    ],
+    "verdict": "iterate",
+    "policy_gate": "clear",
+    "lint_warnings": []
+  },
+  "recommended_next_iteration": "Test a contrarian title; cut a Meta-feed screenshot variant of the same card."
+}

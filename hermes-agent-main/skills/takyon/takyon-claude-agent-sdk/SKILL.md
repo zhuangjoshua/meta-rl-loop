@@ -12,6 +12,13 @@ metadata:
     related_skills: [takyon-build-product, takyon-distribution]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_claude_agent_task]
+    routing:
+      owns: bounded business-scoped worker edits inside canonical roots when a separate implementation lane is helpful
+      when_to_use:
+        - a task needs focused multi-file edits or synthesis inside `product/`, `distribution/`, `research/`, or `metrics/`
+        - non-trivial `product/site/` work under `takyon-build-product` needs a worker lane
+      do_not_use_for:
+        - cases where normal business tools are already enough
   takyon:
     scope: business
     allowed_roots: [product, distribution, research, metrics]
