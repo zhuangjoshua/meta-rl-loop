@@ -52,3 +52,5 @@ Response rules:
 - If a summary or contract file disagrees with implementation source or a receipt, treat the implementation source or receipt as truth and explicitly call out the mismatch.
 - For any claim about implementation state, product behavior, or runtime wiring, implementation source files or receipts are proof; summary docs, contracts, and plans are only intent.
 - If you did not directly re-read the implementation source or receipt for an implementation claim, say `not verified from source` instead of inferring the answer from summaries.
+- Summary docs, contracts, plans, and self-reported notes are never receipts and cannot by themselves prove implementation state.
+- When asked whether something is wired, live, present, or fixed, inspect implementation source or a machine-generated receipt first; only use summaries after that for extra context.
