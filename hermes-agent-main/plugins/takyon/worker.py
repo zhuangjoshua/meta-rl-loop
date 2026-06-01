@@ -571,6 +571,7 @@ def run_worker_loop(
     interval = poll_interval if poll_interval is not None else _env_float(
         "TAKYON_WORKER_POLL_SECONDS", _DEFAULT_POLL_SECONDS
     )
+    concurrency = 1 if once or max_jobs is not None else max(1, _env_int("TAKYON_WORKER_CONCURRENCY", 2))
 
     stop = threading.Event()
 
@@ -587,36 +588,84 @@ def run_worker_loop(
             # Not on the main thread (e.g. under a test harness) — skip signal install.
             pass
 
-    _log.info("worker[%s]: starting (dispatch=%s poll=%.0fs)", worker_id, dispatch, interval)
-    total_drained = 0
-    while not stop.is_set():
-        try:
-            conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
-        except Exception as exc:  # noqa: BLE001 — transient DB outage must not crash the daemon
-            _log.warning("worker[%s]: DB connect failed (%s); retrying in %.0fs", worker_id, exc, interval)
+    def _run_loop(*, thread_worker_id: str, allow_dispatch: bool) -> int:
+        import psycopg
+
+        total_drained = 0
+        while not stop.is_set():
+            try:
+                conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+            except Exception as exc:  # noqa: BLE001 — transient DB outage must not crash the daemon
+                _log.warning(
+                    "worker[%s]: DB connect failed (%s); retrying in %.0fs",
+                    thread_worker_id,
+                    exc,
+                    interval,
+                )
+                stop.wait(interval)
+                continue
+            try:
+                counts = drain_tick(
+                    conn,
+                    worker_id=thread_worker_id,
+                    kinds=kinds,
+                    dispatch=allow_dispatch,
+                    stop=stop,
+                    max_jobs=max_jobs,
+                )
+                total_drained += counts["drained"]
+            except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon
+                _log.exception("worker[%s]: tick failed: %s", thread_worker_id, exc)
+            finally:
+                conn.close()
+
+            if once or (max_jobs is not None and total_drained >= max_jobs):
+                break
             stop.wait(interval)
-            continue
+        _log.info("worker[%s]: stopped (drained %d job(s) this run)", thread_worker_id, total_drained)
+        return total_drained
+
+    _log.info(
+        "worker[%s]: starting (dispatch=%s poll=%.0fs concurrency=%d)",
+        worker_id,
+        dispatch,
+        interval,
+        concurrency,
+    )
+    if concurrency == 1:
+        return _run_loop(thread_worker_id=worker_id, allow_dispatch=dispatch)
+
+    totals = [0 for _ in range(concurrency)]
+    errors: list[BaseException] = []
+
+    def _thread_main(index: int) -> None:
+        thread_worker_id = f"{worker_id}-{index + 1}"
         try:
-            counts = drain_tick(
-                conn,
-                worker_id=worker_id,
-                kinds=kinds,
-                dispatch=dispatch,
-                stop=stop,
-                max_jobs=max_jobs,
+            totals[index] = _run_loop(
+                thread_worker_id=thread_worker_id,
+                allow_dispatch=dispatch and index == 0,
             )
-            total_drained += counts["drained"]
-        except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon
-            _log.exception("worker[%s]: tick failed: %s", worker_id, exc)
-        finally:
-            conn.close()
+        except BaseException as exc:  # pragma: no cover - defensive last resort
+            errors.append(exc)
+            stop.set()
 
-        if once or (max_jobs is not None and total_drained >= max_jobs):
-            break
-        stop.wait(interval)
+    threads = [
+        threading.Thread(
+            target=_thread_main,
+            args=(index,),
+            name=f"takyon-worker-{index + 1}",
+            daemon=True,
+        )
+        for index in range(concurrency)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
-    _log.info("worker[%s]: stopped (drained %d job(s) this run)", worker_id, total_drained)
-    return total_drained
+    if errors:
+        raise errors[0]
+    return sum(totals)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -627,4 +676,15 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except (TypeError, ValueError):
         _log.warning("worker: invalid %s=%r; using default %.0f", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _log.warning("worker: invalid %s=%r; using default %d", name, raw, default)
         return default

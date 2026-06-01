@@ -16,6 +16,7 @@ Two layers:
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -192,7 +193,7 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     # response. $0.0734 → 7 cents.
     captured: dict = {}
 
-    def _fake_turn(*, slug, system_prompt, user_prompt, toolsets, max_turns, inactivity_limit):
+    def _fake_turn(*, slug, system_prompt, user_prompt, toolsets, max_turns, inactivity_limit, **_kw):
         captured.update(slug=slug, toolsets=toolsets, max_turns=max_turns)
         return "the CEO did things", 0.0734, "exact"
 
@@ -277,3 +278,45 @@ def test_run_worker_loop_blocks_without_database_url(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeNotConfigured):
         worker.run_worker_loop(database_url=None, once=True)
+
+
+def test_run_worker_loop_uses_multiple_threads_when_configured(monkeypatch):
+    seen: list[tuple[str, bool]] = []
+    seen_lock = threading.Lock()
+
+    class _FakeConn:
+        def close(self):
+            return None
+
+    import psycopg as _psycopg
+
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(worker, "_env_int", lambda _name, _default: 2)
+    monkeypatch.setattr(
+        __import__("plugins.takyon.runtime_app", fromlist=["resolve_database_url"]),
+        "resolve_database_url",
+        lambda _database_url=None: "postgresql://fake",
+    )
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+
+    def _fake_drain_tick(conn, *, worker_id, dispatch, stop, **_kw):
+        del conn
+        with seen_lock:
+            seen.append((worker_id, dispatch))
+            if len(seen) >= 2:
+                stop.set()
+        return {
+            "dispatched": 0,
+            "requeued": 0,
+            "drained": 0,
+            "completed": 0,
+            "blocked": 0,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+
+    drained = worker.run_worker_loop(database_url="postgresql://fake")
+    assert drained == 0
+    assert len({item[0] for item in seen}) == 2
+    assert sum(1 for _worker_id, dispatch in seen if dispatch) == 1

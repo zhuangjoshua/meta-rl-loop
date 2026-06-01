@@ -2080,6 +2080,7 @@ export default function ChatPage() {
     let cancelled = false;
     let attempts = 0;
     let timer: number | undefined;
+    let lastDeniedMessage = "";
 
     const confirmScope = async () => {
       attempts += 1;
@@ -2121,15 +2122,25 @@ export default function ChatPage() {
           return;
         }
         if (isBusinessScopeDeniedMessage(message)) {
-          noteBootIssue(pendingBusinessSlug, message);
-          return;
+          lastDeniedMessage = message;
+          setStatusItems((prev) =>
+            [
+              `Waiting for durable business state for business:${pendingBusinessSlug}…`,
+              ...prev.filter((item) => item !== `Waiting for durable business state for business:${pendingBusinessSlug}…`),
+            ].slice(0, 5),
+          );
+        } else {
+          /* create may still be registering the business; keep the optimistic page */
         }
-        /* create may still be registering the business; keep the optimistic page */
       }
 
       if (!cancelled && attempts < 120) {
         timer = window.setTimeout(confirmScope, 1500);
       } else if (!cancelled) {
+        if (lastDeniedMessage) {
+          noteBootIssue(pendingBusinessSlug, lastDeniedMessage);
+          return;
+        }
         setPendingBusinessSlug(null);
       }
     };

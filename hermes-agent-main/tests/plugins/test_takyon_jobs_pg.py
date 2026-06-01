@@ -25,6 +25,8 @@ TAKYON_TEST_PG_DSN is set.
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 
 import pytest
@@ -104,6 +106,19 @@ def test_claim_one_filters_by_kind(pg_conn):
     # A worker restricted to ceo_wake skips the older build job and claims the wake.
     claimed = jobs.claim_one(pg_conn, worker_id="w1", kinds=["ceo_wake"])
     assert claimed is not None and claimed.id == wake.id
+
+
+def test_claim_one_serializes_jobs_per_business(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    first = jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="a")
+    second = jobs.enqueue(pg_conn, slug, "ceo_bootstrap", idempotency_key="b")
+    claimed = jobs.claim_one(pg_conn, worker_id="w1")
+    assert claimed is not None and claimed.id == first.id
+    # A second queued job for the same business must wait until the running one finishes.
+    assert jobs.claim_one(pg_conn, worker_id="w2") is None
+    jobs.complete(pg_conn, claimed.id, result={"ok": True})
+    next_job = jobs.claim_one(pg_conn, worker_id="w2")
+    assert next_job is not None and next_job.id == second.id
 
 
 def test_claim_one_skips_rows_locked_by_another_worker(pg_conn):
@@ -256,6 +271,45 @@ def test_zero_estimate_job_completes_without_touching_billing(pg_conn):
     assert outcome.reserved_cents == 0 and outcome.actual_cents == 0
     assert jobs.get_job(pg_conn, outcome.job_id).result == {"woke": True}
     assert billing.get_billing_balances(pg_conn, uid).reserved_cents == 0
+
+
+def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
+    release = threading.Event()
+    heartbeat_calls: list[tuple[str, str]] = []
+    original_heartbeat = jobs.heartbeat
+
+    def _wrapped_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+        heartbeat_calls.append((job_id, worker_id))
+        original_heartbeat(conn, job_id, worker_id=worker_id)
+
+    monkeypatch.setattr(jobs, "heartbeat", _wrapped_heartbeat)
+
+    def _release_after_heartbeat() -> None:
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if heartbeat_calls:
+                release.set()
+                return
+            time.sleep(0.01)
+        release.set()
+
+    threading.Thread(target=_release_after_heartbeat, daemon=True).start()
+
+    class _WaitingHandler:
+        def __call__(self, job: jobs.Job) -> jobs.JobRunResult:
+            release.wait(1.0)
+            return jobs.JobRunResult(result={"ok": job.business_slug}, actual_cost_cents=0)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_wake": _WaitingHandler()},
+        heartbeat_interval_seconds=0.05,
+    )
+    assert outcome is not None and outcome.status == "completed"
+    assert heartbeat_calls and heartbeat_calls[0][1] == "w1"
 
 
 # ── crash recovery ─────────────────────────────────────────────────────────────────────────────────

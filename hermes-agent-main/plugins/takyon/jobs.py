@@ -31,6 +31,8 @@ budget, lifecycle — is real and tested on real Postgres; only the leaf side ef
 from __future__ import annotations
 
 import json
+import concurrent.futures
+import contextvars
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -198,14 +200,24 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
     with conn.transaction():
         if kinds:
             picked = conn.execute(
-                "select id from jobs where status = 'queued' and kind = any(%s) "
-                "order by created_at for update skip locked limit 1",
+                "select j.id from jobs j "
+                "where j.status = 'queued' and j.kind = any(%s) "
+                "and not exists ("
+                "  select 1 from jobs r "
+                "  where r.business_slug = j.business_slug and r.status = 'running'"
+                ") "
+                "order by j.created_at for update skip locked limit 1",
                 (list(kinds),),
             ).fetchone()
         else:
             picked = conn.execute(
-                "select id from jobs where status = 'queued' "
-                "order by created_at for update skip locked limit 1"
+                "select j.id from jobs j "
+                "where j.status = 'queued' "
+                "and not exists ("
+                "  select 1 from jobs r "
+                "  where r.business_slug = j.business_slug and r.status = 'running'"
+                ") "
+                "order by j.created_at for update skip locked limit 1"
             ).fetchone()
         if picked is None:
             return None
@@ -216,6 +228,18 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
             (worker_id, picked[0]),
         ).fetchone()
     return _row_to_job(row)
+
+
+def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+    """Refresh a running job's claim so other workers can distinguish live work from a stale claim."""
+    with conn.transaction():
+        updated = conn.execute(
+            "update jobs set locked_at = now(), updated_at = now() "
+            "where id = %s and status = 'running' and locked_by = %s",
+            (job_id, worker_id),
+        ).rowcount
+    if updated == 0:
+        raise JobNotRunning(job_id)
 
 
 def complete(conn, job_id: str, *, result: dict[str, Any] | None = None) -> None:
@@ -311,6 +335,7 @@ def run_one(
     worker_id: str,
     handlers: Mapping[str, Handler],
     kinds: list[str] | tuple[str, ...] | None = None,
+    heartbeat_interval_seconds: float = 15.0,
 ) -> JobOutcome | None:
     """Claim one job and run it under the full contract; returns its outcome, or None if the queue is
     empty. The pipeline, each step its own transaction on the autocommit conn:
@@ -363,7 +388,25 @@ def run_one(
             return JobOutcome(job.id, job.kind, "blocked", reason="budget_exhausted")
 
     try:
-        run_result = handler(job)
+        wait_timeout = (
+            heartbeat_interval_seconds
+            if heartbeat_interval_seconds and heartbeat_interval_seconds > 0
+            else None
+        )
+        run_result: JobRunResult | None = None
+        ctx = contextvars.copy_context()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(ctx.run, handler, job)
+            while True:
+                if wait_timeout is None:
+                    run_result = future.result()
+                    break
+                done, _ = concurrent.futures.wait({future}, timeout=wait_timeout)
+                if done:
+                    run_result = future.result()
+                    break
+                heartbeat(conn, job.id, worker_id=worker_id)
+        assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         if estimate_cents > 0:
             billing.refund(conn, reservation_key)
