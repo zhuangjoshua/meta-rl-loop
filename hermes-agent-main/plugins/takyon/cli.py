@@ -591,7 +591,7 @@ def _format_operation_result(item: Any) -> str:
 
 
 def _business_root(slug: str) -> Path:
-    return (TakyonStore().root / "businesses" / _slugify(slug)).resolve()
+    return TakyonStore()._business_root(slug).resolve()
 
 
 def _business_artifact_path(slug: str, path: str) -> Path:
@@ -600,6 +600,23 @@ def _business_artifact_path(slug: str, path: str) -> Path:
 
 def _scope_for_business(slug: str) -> str:
     return f"business:{_slugify(slug)}"
+
+
+@contextlib.contextmanager
+def _business_workspace_execution_context(slug: str, *, operator_user_id: str | None = None):
+    from . import storage
+
+    selected_backend = str(os.getenv("TAKYON_STORAGE_BACKEND") or "").strip().lower()
+    if not selected_backend:
+        yield None
+        return
+    backend = storage.get_storage_backend()
+    with storage.isolated_business_workspace(
+        backend,
+        slug,
+        owner_label=str(operator_user_id or slug),
+    ) as workspace_home:
+        yield workspace_home
 
 
 def _parse_business_start_args(
@@ -2498,16 +2515,6 @@ def _run_agent_with_meta(
 
     try:
         if resolved_operator_user_id:
-            try:
-                from gateway.session_context import set_session_vars
-
-                session_context_tokens = set_session_vars(
-                    session_key="",
-                    user_id=resolved_operator_user_id,
-                )
-            except Exception:
-                session_context_tokens = []
-        if resolved_operator_user_id:
             reservation_key, reserved_cents = _operator_budget_reserve(
                 operator_user_id=resolved_operator_user_id,
                 business_slug=current_business,
@@ -2517,12 +2524,32 @@ def _run_agent_with_meta(
                     uuid.uuid4().hex,
                 ),
             )
-        if show_agent_activity:
-            result, actual_cents = invoke()
-        else:
-            with _thinking_indicator(show_indicator and not progress.enabled):
-                with _silence_process_stdio():
-                    result, actual_cents = invoke()
+        workspace_context = (
+            _business_workspace_execution_context(
+                current_business,
+                operator_user_id=resolved_operator_user_id,
+            )
+            if current_business
+            else contextlib.nullcontext(None)
+        )
+        with workspace_context as workspace_home:
+            if resolved_operator_user_id or workspace_home is not None:
+                try:
+                    from gateway.session_context import set_session_vars
+
+                    session_context_tokens = set_session_vars(
+                        session_key="",
+                        user_id=resolved_operator_user_id,
+                        workspace_root=str(workspace_home or ""),
+                    )
+                except Exception:
+                    session_context_tokens = []
+            if show_agent_activity:
+                result, actual_cents = invoke()
+            else:
+                with _thinking_indicator(show_indicator and not progress.enabled):
+                    with _silence_process_stdio():
+                        result, actual_cents = invoke()
         if reservation_key:
             billing_warning = _operator_budget_finalize(
                 operator_user_id=resolved_operator_user_id,

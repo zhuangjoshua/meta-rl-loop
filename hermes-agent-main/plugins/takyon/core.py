@@ -3014,6 +3014,7 @@ class TakyonStore:
         # None, the postgres path resolves DATABASE_URL/POSTGRES_URL via runtime_app. Unused on SQLite.
         self._database_url = database_url
         session_user_id = ""
+        session_workspace_root = ""
         if operator_user_id is None:
             try:
                 from gateway.session_context import get_session_env
@@ -3021,14 +3022,24 @@ class TakyonStore:
                 session_user_id = str(
                     get_session_env("TAKYON_SESSION_USER_ID", "") or ""
                 ).strip()
+                session_workspace_root = str(
+                    get_session_env("TAKYON_SESSION_WORKSPACE_ROOT", "") or ""
+                ).strip()
             except Exception:
                 session_user_id = ""
+                session_workspace_root = ""
         self._operator_user_id = str(
             operator_user_id
             or session_user_id
             or os.getenv("TAKYON_OPERATOR_USER_ID")
             or ""
         ).strip()
+        self._workspace_root_override = (
+            Path(session_workspace_root).expanduser().resolve()
+            if session_workspace_root
+            else None
+        )
+        self._workspace_sync_cache: set[str] = set()
 
     def _connect(self) -> "sqlite3.Connection | _PGConn":
         # The per-business filesystem half of the store is used on both backends, so make root first.
@@ -3563,8 +3574,25 @@ class TakyonStore:
                 (_DEFAULT_PRODUCT_PUBLISH_POLICY, _DEFAULT_PRODUCT_MODE_BEHAVIOR, _DEFAULT_PRODUCT_DONE_GATE),
             )
 
+    def _sync_business_workspace_cache(self, slug: str, root: Path) -> None:
+        if self._workspace_root_override is not None:
+            return
+        normalized = _slugify(slug)
+        if normalized in self._workspace_sync_cache:
+            return
+        from . import storage
+
+        backend = storage.get_storage_backend()
+        if backend.name != "supabase_s3":
+            return
+        storage.sync_down(backend, normalized, root, delete_local=True)
+        self._workspace_sync_cache.add(normalized)
+
     def _business_root(self, slug: str) -> Path:
-        return self.root / "businesses" / _slugify(slug)
+        base = self._workspace_root_override or self.root
+        root = base / "businesses" / _slugify(slug)
+        self._sync_business_workspace_cache(slug, root)
+        return root
 
     def _resolve_business_file(self, slug: str, rel: str) -> Path:
         root = self._business_root(slug)

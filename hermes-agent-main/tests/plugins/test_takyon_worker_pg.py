@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,8 @@ psycopg = pytest.importorskip("psycopg")
 from plugins.takyon import billing, core, jobs, wakes, worker  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import RuntimeNotConfigured  # noqa: E402
+from plugins.takyon import storage  # noqa: E402
+from gateway.session_context import get_session_env  # noqa: E402
 
 
 def _provision_business(conn, *, allowance_cents: int = 0) -> tuple[str, str]:
@@ -189,6 +192,7 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
         captured.update(slug=slug, toolsets=toolsets, max_turns=max_turns)
         return "the CEO did things", 0.0734, "exact"
 
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     job = SimpleNamespace(business_slug="acme", payload={})
     result = worker.ceo_wake_handler(job)
@@ -209,12 +213,50 @@ def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):
         captured["max_turns"] = max_turns
         return "", 0.0, "none"
 
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={"max_turns": 7}))
     assert captured["max_turns"] == 7
 
 
+def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    seed = tmp_path / "seed"
+    (seed / "research").mkdir(parents=True, exist_ok=True)
+    (seed / "research" / "strategy.md").write_text("seed\n")
+    storage.sync_up(backend, "acme", seed)
+
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+
+    seen: dict[str, str] = {}
+
+    def _fake_turn(*, slug, **_kw):
+        workspace_root = get_session_env("TAKYON_SESSION_WORKSPACE_ROOT")
+        seen["workspace_root"] = workspace_root
+        seen["user_id"] = get_session_env("TAKYON_SESSION_USER_ID")
+        workspace = Path(workspace_root) / "businesses" / slug
+        assert (workspace / "research" / "strategy.md").read_text() == "seed\n"
+        (workspace / "metrics").mkdir(parents=True, exist_ok=True)
+        (workspace / "metrics" / "summary.md").write_text("fresh\n")
+        return "ok", 0.0, "none"
+
+    monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
+    result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+
+    assert result.result["business_slug"] == "acme"
+    assert seen["user_id"] == "user-123"
+    assert seen["workspace_root"]
+    assert not Path(seen["workspace_root"]).exists()
+
+    resumed = tmp_path / "resumed"
+    storage.sync_down(backend, "acme", resumed)
+    assert (resumed / "metrics" / "summary.md").read_text() == "fresh\n"
+
+
 def test_zero_cost_turn_reports_zero_cents(monkeypatch):
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none"))
     result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
     assert result.actual_cost_cents == 0

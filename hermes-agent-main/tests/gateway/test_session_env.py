@@ -13,6 +13,7 @@ from gateway.session_context import (
     _VAR_MAP,
     _UNSET,
 )
+from plugins.takyon.core import TakyonStore
 
 
 @pytest.fixture(autouse=True)
@@ -188,6 +189,22 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     # After clear — should return "" (explicitly cleared), not os.environ (#10304)
     clear_session_vars(tokens)
     assert get_session_env("TAKYON_SESSION_KEY") == ""
+
+
+def test_workspace_root_flows_into_takyon_store(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch-home"
+    monkeypatch.delenv("TAKYON_SESSION_WORKSPACE_ROOT", raising=False)
+
+    tokens = set_session_vars(workspace_root=str(scratch))
+    try:
+        store = TakyonStore(root=home)
+        assert store.root == home.resolve()
+        assert store._business_root("acme") == (scratch / "businesses" / "acme").resolve()
+        assert store.db_path == home.resolve() / "state.sqlite3"
+        assert get_session_env("TAKYON_SESSION_WORKSPACE_ROOT") == str(scratch)
+    finally:
+        clear_session_vars(tokens)
 
 
 def test_set_session_env_includes_session_key():

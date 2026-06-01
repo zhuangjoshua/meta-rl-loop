@@ -176,6 +176,15 @@ def _run_ceo_turn(
     return final_response, cost_usd, cost_status
 
 
+def _business_owner_user_id(slug: str) -> str:
+    from .core import TakyonStore
+
+    store = TakyonStore()
+    with store._connect() as conn:
+        business = store._ensure_business(conn, slug)
+    return str(business.get("owner_user_id") or "").strip()
+
+
 def ceo_wake_handler(job: Job) -> JobRunResult:
     """Handle a ``ceo_wake`` job: run the scheduled CEO turn for ``job.business_slug`` and report its
     true model cost as ``actual_cost_cents`` for flow-A settlement.
@@ -183,7 +192,9 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     The wake prompt and toolsets come from the canonical source (``core._ceo_cron_prompt`` /
     ``_ceo_cron_toolsets``) so this never drifts from the legacy/cron wake instructions; the system
     prompt is the stable ``prompts/ceo.md`` via ``cli._load_ceo_prompt``."""
-    from .cli import _load_ceo_prompt
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    from .cli import _business_workspace_execution_context, _load_ceo_prompt
     from .core import TakyonStore
 
     slug = job.business_slug
@@ -191,6 +202,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     user_prompt = store._ceo_cron_prompt(slug)
     toolsets = store._ceo_cron_toolsets()
     system_prompt = _load_ceo_prompt()
+    owner_user_id = _business_owner_user_id(slug)
 
     payload = job.payload or {}
     try:
@@ -199,14 +211,24 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
 
-    final_response, cost_usd, cost_status = _run_ceo_turn(
-        slug=slug,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        toolsets=toolsets,
-        max_turns=max_turns,
-        inactivity_limit=inactivity_limit,
-    )
+    tokens: list[object] = []
+    try:
+        with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
+            tokens = set_session_vars(
+                user_id=owner_user_id,
+                workspace_root=str(workspace_home or ""),
+            )
+            final_response, cost_usd, cost_status = _run_ceo_turn(
+                slug=slug,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                toolsets=toolsets,
+                max_turns=max_turns,
+                inactivity_limit=inactivity_limit,
+            )
+    finally:
+        if tokens:
+            clear_session_vars(tokens)
     cents = max(0, int(round(cost_usd * 100)))
     return JobRunResult(
         result={

@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -119,6 +120,11 @@ def object_prefix(slug: str) -> str:
 def _is_scratch_tempfile(name: str) -> bool:
     # Skip the in-flight temp files atomic writes leave behind (``.<name>.<rand>.tmp``).
     return name.startswith(".") and name.endswith(".tmp")
+
+
+def _safe_owner_label(value: str) -> str:
+    raw = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-_")
+    return raw[:48] or "anon"
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -443,3 +449,47 @@ def with_business_workspace(
     sync_down(backend, slug, root_path, delete_local=delete_local)
     yield root_path
     sync_up(backend, slug, root_path, delete_remote=delete_remote)
+
+
+@contextmanager
+def isolated_business_workspace(
+    backend: StorageBackend,
+    slug: str,
+    *,
+    owner_label: str = "",
+    scratch_parent: str | os.PathLike[str] | None = None,
+    delete_remote: bool = True,
+    delete_local: bool = True,
+) -> Iterator[Path]:
+    """Materialize one business into a private per-run scratch Takyon home.
+
+    The yielded path is a fake ``TAKYON_HOME`` root whose business workspace lives at
+    ``<home>/businesses/<slug>/...``. Callers can point ``TakyonStore`` at this home (or set the
+    session workspace root override) so business tools never write into the shared host tree during a
+    live run. The directory is removed on exit; the durable source of truth is the storage backend.
+    """
+    parent = Path(scratch_parent).expanduser() if scratch_parent else Path(tempfile.gettempdir()) / "takyon-workspaces"
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    safe_slug = _safe_slug(slug)
+    prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
+    home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
+    try:
+        try:
+            os.chmod(home, 0o700)
+        except OSError:
+            pass
+        workspace = home / "businesses" / safe_slug
+        with with_business_workspace(
+            backend,
+            safe_slug,
+            workspace,
+            delete_remote=delete_remote,
+            delete_local=delete_local,
+        ):
+            yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
