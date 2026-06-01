@@ -337,7 +337,7 @@ interface TakyonShellResponse extends ScopeState {
   output?: string;
 }
 
-interface TakyonPromptContextResponse extends ScopeState {
+interface TakyonPromptContextResponse {
   text?: string;
 }
 
@@ -2036,7 +2036,6 @@ export default function ChatPage() {
         { session_id: sessionId, text },
         10_000,
       );
-      setScopeState(normalizeScopeState(res));
       const promptText = res.text || text;
       if (!createInTestMode) return promptText;
       return [

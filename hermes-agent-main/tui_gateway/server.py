@@ -6582,10 +6582,7 @@ def _(rid, params: dict) -> dict:
                 )
         return _ok(
             rid,
-            {
-                "text": prompt_text,
-                **_takyon_scope_payload(session),
-            },
+            {"text": prompt_text},
         )
     except Exception as e:
         return _err(rid, 5044, str(e))

@@ -762,16 +762,12 @@ def test_session_request_reattaches_current_transport_on_reconnect():
 
 def test_prompt_context_wraps_plain_text_in_business_scope(monkeypatch):
     server._sessions["sid"] = _session(takyon_current_business="laser-crm")
+    calls = {"scope": 0}
+
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
-        lambda session: {
-            "scope": "business:laser-crm",
-            "business": "laser-crm",
-            "current": {},
-            "businesses": [],
-            "overview": {},
-        },
+        lambda session: calls.__setitem__("scope", calls["scope"] + 1),
     )
     try:
         resp = server.handle_request(
@@ -784,9 +780,10 @@ def test_prompt_context_wraps_plain_text_in_business_scope(monkeypatch):
                 },
             }
         )
-        assert resp["result"]["business"] == "laser-crm"
         assert resp["result"]["text"].startswith("Scope: business:laser-crm")
         assert "Operator request:\nchange market research" in resp["result"]["text"]
+        assert set(resp["result"].keys()) == {"text"}
+        assert calls["scope"] == 0
     finally:
         server._sessions.pop("sid", None)
 
