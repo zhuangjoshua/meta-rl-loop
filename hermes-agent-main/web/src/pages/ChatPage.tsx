@@ -553,12 +553,26 @@ function isDetachedTakyonProgressMessage(message?: string | null): boolean {
   );
 }
 
+function isToolActivityMessage(message?: string | null): boolean {
+  const text = cleanText(message || "").trim();
+  if (!text) return false;
+  return /^(?:[▶✓✗])\s/.test(text) || /^Tool:/i.test(text);
+}
+
+function isEphemeralGatewayErrorMessage(message?: string | null): boolean {
+  const text = cleanText(message || "").trim();
+  if (!text) return false;
+  return /^(?:\d{3}:|request timed out:|session busy|session not found)/i.test(text);
+}
+
 function isTakyonChatNoiseMessage(message: ChatMessage): boolean {
   if (message.role !== "system") return false;
   return (
     isTransientConnectionMessage(message.content) ||
     isBusinessScopeDeniedMessage(message.content) ||
-    isDetachedTakyonProgressMessage(message.content)
+    isDetachedTakyonProgressMessage(message.content) ||
+    isToolActivityMessage(message.content) ||
+    isEphemeralGatewayErrorMessage(message.content)
   );
 }
 
@@ -650,8 +664,7 @@ function messageFromResume(
   item: GatewayHistoryMessage,
 ): ChatMessage | null {
   if (item.role === "tool") {
-    const label = item.name ? `Tool: ${item.name}` : "Tool";
-    return makeMessage("system", `${label}${item.context ? `: ${item.context}` : ""}`);
+    return null;
   }
   if (item.role === "user" || item.role === "assistant" || item.role === "system") {
     const text = item.text?.trim();
@@ -710,6 +723,19 @@ function updateTakyonProgress(
     active: !terminal,
     status: nextStatus,
   };
+}
+
+function recentToolLabels(tools: ToolEntry[] | undefined): string[] {
+  const now = Date.now();
+  const recent = (tools || [])
+    .filter((tool) => {
+      if (tool.status === "running") return true;
+      if (!tool.completedAt) return false;
+      return now - tool.completedAt <= 12_000;
+    })
+    .slice(-4)
+    .map((tool) => naturalToolLabel(tool));
+  return recent.filter((label, index) => index === 0 || recent[index - 1] !== label);
 }
 
 function extractPaths(text: string): string[] {
@@ -1223,14 +1249,6 @@ export default function ChatPage() {
       gw.on("message.start", () => {
         setRunning(true);
         setError(null);
-        setMessages((prev) =>
-          updateStreamingAssistant(prev, () => ({
-            id: nextId("assistant"),
-            role: "assistant",
-            content: "",
-            status: "streaming",
-          })),
-        );
       }),
     );
 
@@ -1325,7 +1343,6 @@ export default function ChatPage() {
           return;
         }
         setError(message);
-        setMessages((prev) => [...prev, makeMessage("system", message)]);
       }),
     );
 
@@ -1345,21 +1362,6 @@ export default function ChatPage() {
             startedAt: Date.now(),
           };
           setTools((prev) => [...prev, startedTool].slice(-30));
-          const label = naturalToolLabel(startedTool);
-          const ctx = (p.context || "").trim();
-          setMessages((prev) => {
-            const id = `toolmsg-${toolId}`;
-            if (prev.some((m) => m.id === id)) return prev;
-            return [
-              ...prev,
-              {
-                id,
-                role: "system",
-                content: ctx ? `▶ ${label} · ${ctx}` : `▶ ${label}`,
-                status: "streaming",
-              },
-            ];
-          });
         },
       ),
     );
@@ -1423,21 +1425,6 @@ export default function ChatPage() {
                 }
               : tool,
           );
-        });
-        const label = naturalToolLabel(completedTool);
-        const tail = (p.error || p.summary || "").trim();
-        const icon = p.error ? "✗" : "✓";
-        setMessages((prev) => {
-          const id = `toolmsg-${p.tool_id}`;
-          const content = tail ? `${icon} ${label} · ${tail}` : `${icon} ${label}`;
-          const status: ChatMessage["status"] = p.error ? "error" : "complete";
-          const existing = prev.findIndex((m) => m.id === id);
-          if (existing === -1) {
-            return [...prev, { id, role: "system", content, status }];
-          }
-          const next = [...prev];
-          next[existing] = { ...next[existing], content, status };
-          return next;
         });
         setDeliverables((prev) =>
           upsertDeliverables(prev, deliverablesFromTool(completedTool)),
@@ -2080,6 +2067,8 @@ export default function ChatPage() {
         await wait(400);
       }
 
+      setTools([]);
+      setStatusItems([]);
       setRunning(true);
       setError(null);
       const promptText = await contextForPrompt(text);
@@ -2132,6 +2121,8 @@ export default function ChatPage() {
   const runTakyonLine = useCallback(
     async (line: string) => {
       if (!canUseConnection(state)) return;
+      setTools([]);
+      setStatusItems([]);
       setMessages((prev) => [...prev, makeMessage("user", line)]);
       setRunning(true);
       setError(null);
@@ -2218,7 +2209,9 @@ export default function ChatPage() {
         return;
       }
       setError(message);
-      appendSystem(message);
+      if (text.startsWith("/")) {
+        appendSystem(message);
+      }
     }
   }, [
     appendSystem,
@@ -2771,6 +2764,7 @@ function Thread({
 }) {
   const displayError = friendlyError(error);
   const activeTool = (tools || []).slice().reverse().find((tool) => tool.status === "running");
+  const activityLabels = recentToolLabels(tools);
   const workingLabel =
     activeTool?.preview ||
     activeTool?.context ||
@@ -2796,22 +2790,20 @@ function Thread({
           <Message key={message.id} message={message} />
         ))}
         {running && (
-          <div className="td-msg td-ceo">
-            <div className="td-mrole">CEO</div>
-            <div className="td-mbody" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span
-                aria-hidden
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: "50%",
-                  background: "var(--td-up)",
-                  animation: "td-pulse 1.6s ease-in-out infinite",
-                  flexShrink: 0,
-                }}
-              />
+          <div aria-live="polite" className="td-activity">
+            <div className="td-activity-line">
+              <span aria-hidden className="td-activity-dot" />
               <span className="truncate">{workingLabel}</span>
             </div>
+            {activityLabels.length > 0 && (
+              <div className="td-activity-tokens">
+                {activityLabels.map((label) => (
+                  <span className="td-activity-token" key={label}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
