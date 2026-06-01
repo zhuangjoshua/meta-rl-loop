@@ -28,7 +28,10 @@ import json
 import logging
 import os
 import threading
+from datetime import datetime
+from decimal import Decimal
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from uuid import UUID
 
 # Errno values that mean "the peer is gone" rather than "the host has a
 # real I/O problem".  Anything outside this set re-raises so it surfaces
@@ -61,6 +64,36 @@ _DISABLE_FLUSH = (os.environ.get("TAKYON_TUI_GATEWAY_NO_FLUSH", "") or "").strip
     "yes",
     "on",
 }
+
+
+def _json_default(value: Any) -> Any:
+    """Serialize the non-JSON-native scalars the Postgres-backed dashboard now carries.
+
+    The TUI gateway used to see almost entirely string/int payloads from the SQLite
+    path. With the operator principal + Postgres-backed Takyon reads, some responses
+    now carry native ``UUID`` / ``datetime`` / ``Decimal`` objects. Those are valid
+    Python values but crash ``json.dumps`` at the WS/stdio transport boundary, which
+    tears down the live dashboard stream mid-turn.
+
+    We keep this strict: only the handful of known scalar types are normalized. Any
+    genuinely unexpected object still raises ``TypeError`` instead of being silently
+    coerced into a fake string.
+    """
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        return iso()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def dumps_transport_json(obj: dict) -> str:
+    """Canonical JSON serializer for every TUI gateway transport."""
+    return json.dumps(obj, ensure_ascii=False, default=_json_default)
 
 
 @runtime_checkable
@@ -134,7 +167,7 @@ class StdioTransport:
         # block other threads emitting their own frames.  A non-JSON-safe
         # payload is a programming error: re-raise so the crash log
         # captures it instead of silently exiting via the False path.
-        line = json.dumps(obj, ensure_ascii=False) + "\n"
+        line = dumps_transport_json(obj) + "\n"
 
         with self._lock:
             stream = self._stream_getter()

@@ -19,11 +19,12 @@ Actual ``send`` calls run on a daemon thread so the TeeTransport's
 
 from __future__ import annotations
 
-import json
 import logging
 import queue
 import threading
 from typing import Optional
+
+from tui_gateway.transport import dumps_transport_json
 
 try:
     from websockets.sync.client import connect as ws_connect
@@ -91,7 +92,7 @@ class WsPublisherTransport:
         if self._dead or self._ws is None or self._worker is None:
             return False
 
-        line = json.dumps(obj, ensure_ascii=False)
+        line = dumps_transport_json(obj)
 
         try:
             self._q.put_nowait(line)

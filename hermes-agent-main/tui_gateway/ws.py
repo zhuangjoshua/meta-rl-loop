@@ -24,11 +24,11 @@ Mounting
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
 from tui_gateway import server
+from tui_gateway.transport import dumps_transport_json
 
 _log = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class WSTransport:
         if self._closed:
             return False
 
-        line = json.dumps(obj, ensure_ascii=False)
+        line = dumps_transport_json(obj)
 
         try:
             on_loop = asyncio.get_running_loop() is self._loop
@@ -106,7 +106,7 @@ class WSTransport:
         """Send from the owning event loop. Awaits until the frame is on the wire."""
         if self._closed:
             return False
-        await self._safe_send(json.dumps(obj, ensure_ascii=False))
+        await self._safe_send(dumps_transport_json(obj))
         return not self._closed
 
     async def _safe_send(self, line: str) -> None:
