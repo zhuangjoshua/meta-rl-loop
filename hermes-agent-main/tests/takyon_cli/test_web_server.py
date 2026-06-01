@@ -125,6 +125,59 @@ def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
     assert web_server._load_or_create_session_token() == "env-token-that-is-long-enough-1234567890"
 
 
+def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
+    import plugins.takyon.runtime_app as runtime_app
+    import takyon_cli.web_server as web_server
+
+    seen: list[str | None] = []
+
+    def _fake_resolve_database_url(explicit=None):
+        seen.append(explicit)
+        return explicit or "postgres://fallback"
+
+    monkeypatch.setattr(runtime_app, "resolve_database_url", _fake_resolve_database_url)
+    monkeypatch.setattr(
+        web_server,
+        "_env_value",
+        lambda key: "postgres://from-dashboard-env" if key == "DATABASE_URL" else "",
+    )
+
+    assert web_server._resolve_runtime_database_url() == "postgres://from-dashboard-env"
+    assert seen == ["postgres://from-dashboard-env"]
+
+
+def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
+    import plugins.takyon.ai_gateway as ai_gateway
+    import plugins.takyon.control_api as control_api
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    mounted: list[str] = []
+    overrides: dict[object, object] = {}
+
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(control_api, "build_control_router", lambda: "control-router")
+    monkeypatch.setattr(ai_gateway, "build_ai_gateway_router", lambda: "gateway-router")
+    monkeypatch.setattr(web_server.app, "include_router", lambda router: mounted.append(router))
+    monkeypatch.setattr(web_server.app, "dependency_overrides", overrides, raising=False)
+    monkeypatch.setattr(web_server, "_POSTGRES_RUNTIME_ROUTES_MOUNTED", False)
+
+    web_server._mount_postgres_runtime_routes()
+    web_server._mount_postgres_runtime_routes()
+
+    assert mounted == ["control-router", "gateway-router"]
+    assert control_api.get_control_conn in overrides
+    assert ai_gateway.get_gateway_conn in overrides
+
+
+def test_auth0_public_path_allows_machine_facing_pg_routes():
+    import takyon_cli.web_server as web_server
+
+    assert web_server._auth0_public_path("/v1/me") is True
+    assert web_server._auth0_public_path("/internal/ai-gateway/messages") is True
+
+
 def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 

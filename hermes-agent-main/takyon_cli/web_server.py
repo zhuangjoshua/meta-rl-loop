@@ -172,6 +172,8 @@ _AUTH0_NONCE_COOKIE = "takyon_auth0_nonce"
 _AUTH0_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60
 _AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
 _AUTH0_JWKS_CLIENTS: dict[str, Any] = {}
+_RUNTIME_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
+_POSTGRES_RUNTIME_ROUTES_MOUNTED = False
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,19 @@ def _env_value(key: str) -> str:
         return str(load_env().get(key) or "").strip()
     except Exception:
         return ""
+
+
+def _resolve_runtime_database_url() -> str:
+    """Resolve the Postgres runtime URL from the same env sources the dashboard already uses."""
+    explicit = None
+    for key in _RUNTIME_DATABASE_URL_ENV:
+        value = _env_value(key)
+        if value:
+            explicit = value
+            break
+    from plugins.takyon.runtime_app import resolve_database_url
+
+    return resolve_database_url(explicit=explicit)
 
 
 def _env_flag(key: str) -> Optional[bool]:
@@ -467,6 +482,8 @@ def _auth0_public_path(path: str) -> bool:
         "/fonts-terminal/",
         "/ds-assets/",
         "/dashboard-plugins/",
+        "/v1/",
+        "/internal/ai-gateway/",
     ))
 
 
@@ -864,10 +881,10 @@ def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
         import psycopg
 
         from plugins.takyon.control_plane import provision_user_on_first_login
-        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = resolve_database_url()
+            url = _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             _log.error(
                 "Auth0 login on the Postgres backend but no DATABASE_URL configured; "
@@ -911,10 +928,10 @@ def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
         import psycopg
 
         from plugins.takyon.control_plane import resolve_auth0_principal
-        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = resolve_database_url()
+            url = _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             return None
         conn = psycopg.connect(url, autocommit=True)
@@ -1833,10 +1850,10 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
 
         import psycopg
 
-        from plugins.takyon.runtime_app import RuntimeNotConfigured, resolve_database_url
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = resolve_database_url()
+            url = _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             return {
                 "available": False,
@@ -6007,6 +6024,52 @@ def _mount_plugin_api_routes():
         except Exception as exc:
             _log.warning("Failed to load plugin %s API routes: %s", plugin["name"], exc)
 
+
+def _mount_postgres_runtime_routes() -> None:
+    """Expose the existing Postgres control-plane/gateway routers from the live dashboard host."""
+    global _POSTGRES_RUNTIME_ROUTES_MOUNTED
+    if _POSTGRES_RUNTIME_ROUTES_MOUNTED:
+        return
+    try:
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return
+
+        import psycopg
+
+        from plugins.takyon.ai_gateway import build_ai_gateway_router, get_gateway_conn
+        from plugins.takyon.control_api import build_control_router, get_control_conn
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            resolved_url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured:
+            _log.warning(
+                "Postgres backend enabled but no DATABASE_URL is configured; "
+                "skipping /v1 and /internal/ai-gateway mount"
+            )
+            return
+
+        def control_conn():
+            conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+        app.include_router(build_control_router())
+        app.include_router(build_ai_gateway_router())
+        app.dependency_overrides[get_control_conn] = control_conn
+        app.dependency_overrides[get_gateway_conn] = control_conn
+        _POSTGRES_RUNTIME_ROUTES_MOUNTED = True
+        _log.info("Mounted Postgres control and AI gateway routers into the dashboard host.")
+    except Exception as exc:  # noqa: BLE001 - do not prevent the dashboard from starting
+        _log.warning("Failed to mount Postgres control/gateway routers: %s", exc)
+
+
+# Mount the Postgres runtime routers before plugin routes and the SPA catch-all.
+_mount_postgres_runtime_routes()
 
 # Mount plugin API routes before the SPA catch-all.
 _mount_plugin_api_routes()
