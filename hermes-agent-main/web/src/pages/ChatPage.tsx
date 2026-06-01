@@ -833,10 +833,6 @@ const WS_AUTH_RELOAD_KEY = "takyon.dashboard.wsAuthReloaded";
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
-  const initialBusinessParam = useMemo(
-    () => businessFromLocationSearch(),
-    [searchParams],
-  );
   const [version, setVersion] = useState(0);
   const gw = useMemo(() => {
     void version;
@@ -874,7 +870,6 @@ export default function ChatPage() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  const bootBusinessParamRef = useRef(initialBusinessParam);
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -1171,7 +1166,7 @@ export default function ChatPage() {
     );
 
     const hydrateScope = async (nextSessionId: string) => {
-      const bootBusiness = bootBusinessParamRef.current;
+      const bootBusiness = businessFromLocationSearch();
       try {
         const scope = !resumeParam && bootBusiness
           ? await gw.request<ScopeState>(
@@ -1477,6 +1472,10 @@ export default function ChatPage() {
       );
       const nextScope = normalizeScopeState(res);
       setScopeState(nextScope);
+      const params = new URLSearchParams(searchParams);
+      if (nextScope.business) params.set("business", nextScope.business);
+      else params.delete("business");
+      setSearchParams(params, { replace: true });
       appendSystem(
         nextScope.business
           ? `Using business:${nextScope.business}`
@@ -1484,7 +1483,7 @@ export default function ChatPage() {
       );
       requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [appendSystem, gw, sessionId],
+    [appendSystem, gw, searchParams, sessionId, setSearchParams],
   );
 
   const enterPendingBusiness = useCallback(
