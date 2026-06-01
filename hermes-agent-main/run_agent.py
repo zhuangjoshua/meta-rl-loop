@@ -2580,6 +2580,8 @@ class AIAgent:
         return run_codex_create_stream_fallback(self, api_kwargs, client)
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
+        if getattr(self, "_takyon_operator_gateway", False):
+            return False
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
             return False
 
@@ -2654,6 +2656,8 @@ class AIAgent:
         return True
 
     def _try_refresh_nous_client_credentials(self, *, force: bool = True) -> bool:
+        if getattr(self, "_takyon_operator_gateway", False):
+            return False
         if self.api_mode != "chat_completions" or self.provider != "nous":
             return False
 
@@ -2704,6 +2708,8 @@ class AIAgent:
         on 401 so retries recover from stale auth/client state without requiring
         a session restart.
         """
+        if getattr(self, "_takyon_operator_gateway", False):
+            return False
         if self.provider != "copilot":
             return False
 
@@ -2732,6 +2738,8 @@ class AIAgent:
         return True
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
+        if getattr(self, "_takyon_operator_gateway", False):
+            return False
         if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
             return False
         # Only refresh credentials for the native Anthropic provider.
@@ -2826,6 +2834,8 @@ class AIAgent:
                 self._client_kwargs.pop("default_headers", None)
 
     def _swap_credential(self, entry) -> None:
+        if getattr(self, "_takyon_operator_gateway", False):
+            return
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
 
@@ -2899,6 +2909,11 @@ class AIAgent:
         path when an OAuth subscription rejects the 1M-context beta) so the
         rebuilt client carries the reduced beta set.
         """
+        if getattr(self, "_takyon_operator_gateway", False):
+            from plugins.takyon.operator_gateway import rebuild_operator_gateway_transport
+
+            rebuild_operator_gateway_transport(self)
+            return
         _drop_1m = bool(getattr(self, "_oauth_1m_beta_disabled", False))
         if getattr(self, "provider", None) == "bedrock":
             from agent.anthropic_adapter import build_anthropic_bedrock_client

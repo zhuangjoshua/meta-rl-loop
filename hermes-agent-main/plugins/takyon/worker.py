@@ -83,40 +83,48 @@ def _run_ceo_turn(
     import concurrent.futures
     import contextvars
 
-    from run_agent import AIAgent
+    from takyon_cli.runtime_provider import resolve_runtime_provider
 
     from .cli import _read_model_config, _require_agent_model_config
     from .core import TakyonStore, load_takyon_env
+    from .operator_gateway import build_operator_gateway_agent
 
     load_takyon_env()
     model_config = _read_model_config(TakyonStore())
     resolved_model = _require_agent_model_config(model_config)  # raises TakyonError if missing
     provider = model_config.get("provider", "")
-
-    agent = AIAgent(
-        provider=provider or None,
+    runtime = resolve_runtime_provider(
+        requested=provider or None,
+        target_model=resolved_model,
+    )
+    agent = build_operator_gateway_agent(
+        runtime=runtime,
         model=resolved_model,
-        max_iterations=max_turns,
-        enabled_toolsets=list(toolsets),
-        # Same suppressions as the interactive CEO turn: no cron/messaging/clarify side channels,
-        # no memory writes (a wake must not corrupt user representations), no shell-only toolsets.
-        disabled_toolsets=[
-            "cronjob",
-            "messaging",
-            "clarify",
-            "memory",
-            "session_search",
-            "terminal",
-            "file",
-            "browser",
-            "code_execution",
-        ],
-        ephemeral_system_prompt=system_prompt,
-        load_soul_identity=False,
-        skip_memory=True,
-        skip_context_files=True,
-        platform="takyon",
-        quiet_mode=True,
+        operator_user_id=_business_owner_user_id(slug),
+        business_slug=slug,
+        agent_kwargs={
+            "max_iterations": max_turns,
+            "enabled_toolsets": list(toolsets),
+            # Same suppressions as the interactive CEO turn: no cron/messaging/clarify side channels,
+            # no memory writes (a wake must not corrupt user representations), no shell-only toolsets.
+            "disabled_toolsets": [
+                "cronjob",
+                "messaging",
+                "clarify",
+                "memory",
+                "session_search",
+                "terminal",
+                "file",
+                "browser",
+                "code_execution",
+            ],
+            "ephemeral_system_prompt": system_prompt,
+            "load_soul_identity": False,
+            "skip_memory": True,
+            "skip_context_files": True,
+            "platform": "takyon",
+            "quiet_mode": True,
+        },
     )
     agent._memory_nudge_interval = 0
     agent._skill_nudge_interval = 0

@@ -2438,7 +2438,7 @@ def _run_agent_with_meta(
     current_business: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
-    from run_agent import AIAgent
+    from takyon_cli.runtime_provider import resolve_runtime_provider
 
     ceo_prompt = _load_ceo_prompt()
     model_config = _read_model_config(TakyonStore())
@@ -2479,21 +2479,40 @@ def _run_agent_with_meta(
     session_context_tokens: list[Any] = []
 
     def invoke() -> tuple[dict[str, Any], int]:
-        agent = AIAgent(
-            provider=provider or None,
+        from .operator_gateway import build_operator_gateway_agent
+
+        runtime = resolve_runtime_provider(
+            requested=provider or None,
+            target_model=resolved_model,
+        )
+        agent = build_operator_gateway_agent(
+            runtime=runtime,
             model=resolved_model,
-            max_iterations=max_turns,
-            enabled_toolsets=["takyon", "web", "skills", "todo"],
-            disabled_toolsets=["cronjob", "messaging", "memory", "session_search", "terminal", "file", "browser", "code_execution"],
-            ephemeral_system_prompt=ceo_prompt,
-            load_soul_identity=False,
-            skip_memory=True,
-            skip_context_files=True,
-            platform="takyon",
-            quiet_mode=not show_agent_activity,
-            tool_progress_callback=progress.tool_progress if progress.enabled else None,
-            tool_gen_callback=progress.tool_generating if progress.enabled else None,
-            tool_complete_callback=progress.tool_completed if progress.enabled else None,
+            operator_user_id=resolved_operator_user_id,
+            business_slug=current_business,
+            agent_kwargs={
+                "max_iterations": max_turns,
+                "enabled_toolsets": ["takyon", "web", "skills", "todo"],
+                "disabled_toolsets": [
+                    "cronjob",
+                    "messaging",
+                    "memory",
+                    "session_search",
+                    "terminal",
+                    "file",
+                    "browser",
+                    "code_execution",
+                ],
+                "ephemeral_system_prompt": ceo_prompt,
+                "load_soul_identity": False,
+                "skip_memory": True,
+                "skip_context_files": True,
+                "platform": "takyon",
+                "quiet_mode": not show_agent_activity,
+                "tool_progress_callback": progress.tool_progress if progress.enabled else None,
+                "tool_gen_callback": progress.tool_generating if progress.enabled else None,
+                "tool_complete_callback": progress.tool_completed if progress.enabled else None,
+            },
         )
         agent_box["agent"] = agent
         agent._memory_nudge_interval = 0

@@ -2835,6 +2835,76 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypatch):
+    class _Agent:
+        session_estimated_cost_usd = 0.0
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "reply",
+                "messages": [{"role": "assistant", "content": "reply"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    import plugins.takyon.cli as takyon_cli
+
+    session = _session(agent=_Agent(), takyon_operator_user_id="user-1")
+    server._sessions["sid"] = session
+    emitted: list[tuple[str, str, dict]] = []
+    finalized: list[tuple[str, int, int]] = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(
+            server,
+            "_emit",
+            lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+        )
+        monkeypatch.setattr(takyon_cli, "_resolved_operator_user_id", lambda raw=None: str(raw or "").strip())
+        monkeypatch.setattr(takyon_cli, "_operator_budget_reserve", lambda **_kwargs: ("rk-1", 100))
+        monkeypatch.setattr(
+            takyon_cli,
+            "_operator_budget_finalize",
+            lambda **kwargs: finalized.append(
+                (
+                    str(kwargs.get("reservation_key") or ""),
+                    int(kwargs.get("reserved_cents") or 0),
+                    int(kwargs.get("actual_cents") or 0),
+                )
+            )
+            or "",
+        )
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "hi"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+
+        assert finalized == [("rk-1", 100, 0)]
+        event_names = [event for event, _sid, _payload in emitted]
+        assert "message.complete" in event_names
+        assert "takyon.operator.account" in event_names
+        assert event_names.index("message.complete") < event_names.index("takyon.operator.account")
+        account_event = next(payload for event, _sid, payload in emitted if event == "takyon.operator.account")
+        assert account_event == {"actual_cents": 0, "reserved_cents": 100}
+    finally:
+        server._sessions.pop("sid", None)
+
+
 # ---------------------------------------------------------------------------
 # session.interrupt must only cancel pending prompts owned by the calling
 # session — it must not blast-resolve clarify/sudo/secret prompts on
@@ -4693,10 +4763,10 @@ def _setup_make_agent_mocks(monkeypatch, cfg):
     monkeypatch.setattr(
         "takyon_cli.runtime_provider.resolve_runtime_provider",
         lambda requested=None, target_model=None: {
-            "provider": None,
-            "base_url": None,
-            "api_key": None,
-            "api_mode": None,
+            "provider": "openrouter",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "sk-test",
+            "api_mode": "chat_completions",
             "command": None,
             "args": None,
             "credential_pool": None,

@@ -1552,37 +1552,37 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 job_id, _mcp_exc,
             )
 
-        agent = AIAgent(
+        from plugins.takyon.operator_gateway import build_operator_gateway_agent
+
+        agent = build_operator_gateway_agent(
+            runtime=runtime,
             model=model,
-            api_key=runtime.get("api_key"),
-            base_url=runtime.get("base_url"),
-            provider=runtime.get("provider"),
-            api_mode=runtime.get("api_mode"),
-            acp_command=runtime.get("command"),
-            acp_args=runtime.get("args"),
-            max_iterations=max_iterations,
-            reasoning_config=reasoning_config,
-            prefill_messages=prefill_messages,
-            fallback_model=fallback_model,
-            credential_pool=credential_pool,
-            providers_allowed=pr.get("only"),
-            providers_ignored=pr.get("ignore"),
-            providers_order=pr.get("order"),
-            provider_sort=pr.get("sort"),
-            openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-            disabled_toolsets=["cronjob", "messaging", "clarify"],
-            quiet_mode=True,
-            # Cron jobs should always inherit the user's SOUL.md identity from
-            # TAKYON_HOME. When a workdir is configured, also inject project
-            # context files (AGENTS.md / CLAUDE.md / .cursorrules) from there.
-            # Without a workdir, keep cwd context discovery disabled.
-            skip_context_files=not bool(_job_workdir),
-            load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
-            platform="cron",
-            session_id=_cron_session_id,
-            session_db=_session_db,
+            operator_user_id="",
+            business_slug=str(job.get("business") or ""),
+            agent_kwargs={
+                "max_iterations": max_iterations,
+                "reasoning_config": reasoning_config,
+                "prefill_messages": prefill_messages,
+                "fallback_model": fallback_model,
+                "providers_allowed": pr.get("only"),
+                "providers_ignored": pr.get("ignore"),
+                "providers_order": pr.get("order"),
+                "provider_sort": pr.get("sort"),
+                "openrouter_min_coding_score": (_cfg.get("openrouter") or {}).get("min_coding_score"),
+                "enabled_toolsets": _resolve_cron_enabled_toolsets(job, _cfg),
+                "disabled_toolsets": ["cronjob", "messaging", "clarify"],
+                "quiet_mode": True,
+                # Cron jobs should always inherit the user's SOUL.md identity from
+                # TAKYON_HOME. When a workdir is configured, also inject project
+                # context files (AGENTS.md / CLAUDE.md / .cursorrules) from there.
+                # Without a workdir, keep cwd context discovery disabled.
+                "skip_context_files": not bool(_job_workdir),
+                "load_soul_identity": True,
+                "skip_memory": True,
+                "platform": "cron",
+                "session_id": _cron_session_id,
+                "session_db": _session_db,
+            },
         )
         
         # Run the agent with an *inactivity*-based timeout: the job can run

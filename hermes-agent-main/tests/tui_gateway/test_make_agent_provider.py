@@ -1,8 +1,8 @@
-"""Regression test for #11884: _make_agent must resolve runtime provider.
+"""Regression tests for TUI agent runtime resolution.
 
-Without resolve_runtime_provider(), bare-slug models in config
-(e.g. ``claude-opus-4-6`` with ``model.provider: anthropic``) leave
-provider/base_url/api_key empty in AIAgent, causing HTTP 404.
+_make_agent still needs the resolved runtime, but operator-facing agents now
+mask the raw provider credentials behind the operator gateway transport instead
+of injecting them directly into the outer AIAgent instance.
 """
 
 import os
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 
 def test_make_agent_passes_resolved_provider():
-    """_make_agent forwards provider/base_url/api_key/api_mode from
-    resolve_runtime_provider to AIAgent."""
+    """_make_agent resolves the runtime, but hides raw creds behind the
+    operator gateway client config."""
 
     fake_runtime = {
         "provider": "anthropic",
@@ -39,6 +39,10 @@ def test_make_agent_passes_resolved_provider():
             "takyon_cli.runtime_provider.resolve_runtime_provider",
             return_value=fake_runtime,
         ) as mock_resolve,
+        patch(
+            "plugins.takyon.operator_gateway.enable_operator_gateway",
+            side_effect=lambda agent, *_a, **_k: agent,
+        ),
         patch("run_agent.AIAgent") as mock_agent,
     ):
 
@@ -55,8 +59,8 @@ def test_make_agent_passes_resolved_provider():
 
         call_kwargs = mock_agent.call_args
         assert call_kwargs.kwargs["provider"] == "anthropic"
-        assert call_kwargs.kwargs["base_url"] == "https://api.anthropic.com"
-        assert call_kwargs.kwargs["api_key"] == "sk-test-key"
+        assert call_kwargs.kwargs["base_url"] == "https://operator-gateway.local"
+        assert call_kwargs.kwargs["api_key"] == "takyon-operator-gateway"
         assert call_kwargs.kwargs["api_mode"] == "anthropic_messages"
 
 

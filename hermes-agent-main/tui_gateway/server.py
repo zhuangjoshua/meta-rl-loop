@@ -1171,6 +1171,22 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             base_url=result.base_url,
             api_mode=result.api_mode,
         )
+        if getattr(agent, "_takyon_operator_gateway", False):
+            from plugins.takyon.operator_gateway import enable_operator_gateway
+
+            runtime = resolve_runtime_provider(
+                requested=result.target_provider,
+                target_model=result.new_model,
+                explicit_base_url=result.base_url or None,
+            )
+            context = getattr(agent, "_takyon_operator_gateway_context", None)
+            enable_operator_gateway(
+                agent,
+                runtime,
+                operator_user_id=getattr(context, "operator_user_id", ""),
+                business_slug=getattr(context, "business_slug", ""),
+                workspace_root=getattr(context, "workspace_root", ""),
+            )
         _restart_slash_worker(session)
         _emit("session.info", sid, _session_info(agent))
 
@@ -1916,7 +1932,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
 
 
 def _make_agent(sid: str, key: str, session_id: str | None = None):
-    from run_agent import AIAgent
+    from plugins.takyon.operator_gateway import build_operator_gateway_agent
     from takyon_cli.runtime_provider import resolve_runtime_provider
 
     cfg = _load_cfg()
@@ -1941,31 +1957,29 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         requested=requested_provider,
         target_model=model or None,
     )
-    return AIAgent(
+    return build_operator_gateway_agent(
+        runtime=runtime,
         model=model,
-        max_iterations=_cfg_max_turns(cfg, 90),
-        provider=runtime.get("provider"),
-        base_url=runtime.get("base_url"),
-        api_key=runtime.get("api_key"),
-        api_mode=runtime.get("api_mode"),
-        acp_command=runtime.get("command"),
-        acp_args=runtime.get("args"),
-        credential_pool=runtime.get("credential_pool"),
-        quiet_mode=True,
-        verbose_logging=_load_tool_progress_mode() == "verbose",
-        reasoning_config=_load_reasoning_config(),
-        service_tier=_load_service_tier(),
-        enabled_toolsets=list(_TAKYON_AGENT_TOOLSETS),
-        disabled_toolsets=list(_TAKYON_DISABLED_TOOLSETS),
-        platform="tui",
-        session_id=session_id or key,
-        session_db=_get_db(),
-        ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=is_truthy_value(os.environ.get("TAKYON_TUI_CHECKPOINTS")),
-        pass_session_id=is_truthy_value(os.environ.get("TAKYON_TUI_PASS_SESSION_ID")),
-        skip_context_files=is_truthy_value(os.environ.get("TAKYON_IGNORE_RULES")),
-        skip_memory=is_truthy_value(os.environ.get("TAKYON_IGNORE_RULES")),
-        **_agent_cbs(sid),
+        operator_user_id="",
+        business_slug="",
+        agent_kwargs={
+            "max_iterations": _cfg_max_turns(cfg, 90),
+            "quiet_mode": True,
+            "verbose_logging": _load_tool_progress_mode() == "verbose",
+            "reasoning_config": _load_reasoning_config(),
+            "service_tier": _load_service_tier(),
+            "enabled_toolsets": list(_TAKYON_AGENT_TOOLSETS),
+            "disabled_toolsets": list(_TAKYON_DISABLED_TOOLSETS),
+            "platform": "tui",
+            "session_id": session_id or key,
+            "session_db": _get_db(),
+            "ephemeral_system_prompt": system_prompt or None,
+            "checkpoints_enabled": is_truthy_value(os.environ.get("TAKYON_TUI_CHECKPOINTS")),
+            "pass_session_id": is_truthy_value(os.environ.get("TAKYON_TUI_PASS_SESSION_ID")),
+            "skip_context_files": is_truthy_value(os.environ.get("TAKYON_IGNORE_RULES")),
+            "skip_memory": is_truthy_value(os.environ.get("TAKYON_IGNORE_RULES")),
+            **_agent_cbs(sid),
+        },
     )
 
 
@@ -3671,6 +3685,14 @@ def _run_prompt_submit(
                     _emit("error", sid, {"message": f"budget settlement failed: {exc}"})
                 if billing_warning:
                     _emit("status.update", sid, {"kind": "budget", "text": billing_warning})
+                _emit(
+                    "takyon.operator.account",
+                    sid,
+                    {
+                        "actual_cents": turn_actual_cents,
+                        "reserved_cents": reserved_cents,
+                    },
+                )
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
@@ -3883,9 +3905,27 @@ def _(rid, params: dict) -> dict:
         try:
             from run_agent import AIAgent
 
-            result = AIAgent(
-                **_background_agent_kwargs(session["agent"], task_id)
-            ).run_conversation(
+            bg_agent = AIAgent(**_background_agent_kwargs(session["agent"], task_id))
+            parent_agent = session["agent"]
+            if getattr(parent_agent, "_takyon_operator_gateway", False):
+                from plugins.takyon.operator_gateway import enable_operator_gateway
+                from takyon_cli.runtime_provider import resolve_runtime_provider
+
+                context = getattr(parent_agent, "_takyon_operator_gateway_context", None)
+                runtime = resolve_runtime_provider(
+                    requested=getattr(context, "requested_provider", None),
+                    target_model=getattr(bg_agent, "model", None),
+                    explicit_base_url=getattr(context, "upstream_base_url", None) or None,
+                )
+                enable_operator_gateway(
+                    bg_agent,
+                    runtime,
+                    operator_user_id=getattr(context, "operator_user_id", ""),
+                    business_slug=getattr(context, "business_slug", ""),
+                    workspace_root=getattr(context, "workspace_root", ""),
+                )
+
+            result = bg_agent.run_conversation(
                 user_message=text,
                 task_id=task_id,
             )
