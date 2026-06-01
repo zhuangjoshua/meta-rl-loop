@@ -121,9 +121,15 @@ class WSTransport:
         self._closed = True
 
 
-async def handle_ws(ws: Any, *, principal: Any | None = None) -> None:
+async def handle_ws(
+    ws: Any,
+    *,
+    principal: Any | None = None,
+    preaccepted: bool = False,
+) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
-    await ws.accept()
+    if not preaccepted:
+        await ws.accept()
 
     transport = WSTransport(
         ws,

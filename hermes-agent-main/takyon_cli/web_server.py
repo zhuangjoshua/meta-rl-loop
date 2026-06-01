@@ -4986,7 +4986,8 @@ async def gateway_ws(ws: WebSocket) -> None:
         _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
     )
 
-    await handle_ws(ws, principal=principal)
+    await ws.accept()
+    await handle_ws(ws, principal=principal, preaccepted=True)
 
 
 @app.post("/api/tui/rpc")

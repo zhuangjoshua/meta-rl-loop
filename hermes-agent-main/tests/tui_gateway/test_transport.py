@@ -89,3 +89,38 @@ async def test_handle_ws_returns_parse_error_for_bad_json(monkeypatch):
     assert sent[0]["params"]["type"] == "gateway.ready"
     assert sent[1]["error"]["code"] == -32700
     assert sent[1]["error"]["message"] == "parse error"
+
+
+@pytest.mark.asyncio
+async def test_handle_ws_supports_preaccepted_socket(monkeypatch):
+    import tui_gateway.ws as ws_module
+
+    sent: list[dict] = []
+
+    class FakeDisconnect(Exception):
+        pass
+
+    class FakeWS:
+        def __init__(self) -> None:
+            self.accept_calls = 0
+
+        async def accept(self) -> None:
+            self.accept_calls += 1
+
+        async def receive_text(self) -> str:
+            raise FakeDisconnect()
+
+        async def send_text(self, text: str) -> None:
+            sent.append(__import__("json").loads(text))
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ws_module, "_WebSocketDisconnect", FakeDisconnect)
+
+    fake_ws = FakeWS()
+    await handle_ws(fake_ws, preaccepted=True)
+
+    assert fake_ws.accept_calls == 0
+    assert sent[0]["method"] == "event"
+    assert sent[0]["params"]["type"] == "gateway.ready"
