@@ -59,6 +59,15 @@ interface Pending {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const HTTP_PREFERRED_METHODS = new Set([
+  "takyon.dashboard.state",
+  "takyon.dashboard.workspace",
+  "takyon.file.read",
+  "takyon.file.media",
+  "takyon.files.list",
+  "takyon.outputs.list",
+  "takyon.site.preview",
+]);
 
 /** Wildcard listener key: subscribe to every event regardless of type. */
 const ANY = "*";
@@ -258,6 +267,9 @@ export class GatewayClient {
     params: Record<string, unknown> = {},
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
+    if (HTTP_PREFERRED_METHODS.has(method)) {
+      return this.requestHttp<T>(method, params, timeoutMs);
+    }
     if (!this.ws || this._state !== "open") {
       return this.requestHttp<T>(method, params, timeoutMs);
     }
