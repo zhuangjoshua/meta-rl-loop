@@ -174,7 +174,9 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     )
 
     assert response["result"]["output"].startswith("Create started for business:latexflow")
-    assert response["result"]["business"] == "latexflow"
+    assert response["result"]["business"] == ""
+    assert server._sessions[sid]["takyon_current_business"] == ""
+    assert server._sessions[sid]["takyon_pending_business_create"] is True
     assert ran.wait(1)
 
 

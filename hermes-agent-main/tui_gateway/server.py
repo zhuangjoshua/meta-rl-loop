@@ -6048,7 +6048,8 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
             and pending_business == current_business
             and float((pending or {}).get("started_at") or 0) > time.time() - 7200
         )
-        if current_business and not exists and pending_recent:
+        pending_status = str((pending or {}).get("status") or "") if isinstance(pending, dict) else ""
+        if current_business and not exists and pending_recent and pending_status == "running":
             current = {
                 "slug": current_business,
                 "name": current_business,
@@ -6078,7 +6079,6 @@ def _takyon_scope_payload(session: dict | None) -> dict[str, Any]:
                 else {}
             )
             if current_business and pending_recent and isinstance(overview, dict):
-                pending_status = str(pending.get("status") or "")
                 if pending_status == "running":
                     pending_overview = _takyon_pending_scope_overview(
                         str(pending.get("kind") or "run"),
@@ -6445,7 +6445,6 @@ def _(rid, params: dict) -> dict:
                     session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
                 session["takyon_pending_business_create"] = True
                 session["takyon_pending_business_create_at"] = time.time()
-                session["takyon_current_business"] = target_business
             background_run = {
                 "kind": detached_kind,
                 "business": target_business,

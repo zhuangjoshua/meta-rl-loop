@@ -731,6 +731,17 @@ function updateTakyonProgress(
   };
 }
 
+function latestTakyonProgressLine(
+  progress: TakyonProgressState | null | undefined,
+  business?: string | null,
+): string {
+  if (!progress?.active) return "";
+  if (business && normalizeBusinessLookup(progress.business || "") !== normalizeBusinessLookup(business)) {
+    return "";
+  }
+  return (progress.lines[progress.lines.length - 1] || "").trim();
+}
+
 function recentToolLabels(tools: ToolEntry[] | undefined): string[] {
   const now = Date.now();
   const recent = (tools || [])
@@ -1979,7 +1990,7 @@ export default function ChatPage() {
   );
 
   const enterPendingBusiness = useCallback(
-    (business: string, mode: "test" | "live", goal?: string) => {
+    (business: string, _mode: "test" | "live", _goal?: string) => {
       const slug = normalizeBusinessLookup(business);
       if (!slug) return;
       setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
@@ -1987,35 +1998,13 @@ export default function ChatPage() {
         current && current.includes(`business:${slug}`) ? null : current,
       );
       setPendingBusinessSlug(slug);
-      setScopeState((prev) => {
-        const existing = prev.businesses.find(
-          (item) => normalizeBusinessLookup(item.slug || item.name || "") === slug,
-        );
-        const current: BusinessSummary = existing || {
-          slug,
-          name: slug,
-          goal,
-          mode,
-          status: "creating",
-          state: "working",
-          reason: "Create requested from dashboard",
-        };
-        const businesses = existing
-          ? prev.businesses
-          : [current, ...prev.businesses];
-        return normalizeScopeState({
-          ...prev,
-          business: slug,
-          current,
-          businesses,
-        });
-      });
-      const params = new URLSearchParams(searchParams);
-      params.set("business", slug);
-      setSearchParams(params, { replace: true });
+      setScopeState((prev) => normalizeScopeState({ ...prev }));
+      setStatusItems((prev) =>
+        [`Create requested for business:${slug}. Waiting for durable business state…`, ...prev].slice(0, 5),
+      );
       requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [searchParams, setSearchParams],
+    [],
   );
 
   useEffect(() => {
@@ -2048,6 +2037,9 @@ export default function ChatPage() {
           setBlockedBootMessage((current) =>
             current && current.includes(`business:${pendingBusinessSlug}`) ? null : current,
           );
+          const params = new URLSearchParams(searchParams);
+          params.set("business", pendingBusinessSlug);
+          setSearchParams(params, { replace: true });
           setPendingBusinessSlug(null);
           return;
         }
@@ -2079,7 +2071,7 @@ export default function ChatPage() {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [gw, pendingBusinessSlug, recoverMissingSession, sessionId, state]);
+  }, [gw, pendingBusinessSlug, recoverMissingSession, searchParams, sessionId, setSearchParams, state]);
 
   const applySlashCompletion = useCallback((item: SlashCompletionItem) => {
     const next = `${item.text} `;
@@ -2452,6 +2444,7 @@ export default function ChatPage() {
               running={running}
               state={state}
               statusItems={statusItems}
+              takyonProgress={takyonProgress}
               tools={tools}
             />
           )}
@@ -2480,6 +2473,7 @@ export default function ChatPage() {
                 scope={scopeState}
                 scrollerRef={scrollerRef}
                 statusItems={statusItems}
+                takyonProgress={takyonProgress}
                 tools={tools}
               >
                 <Composer
@@ -2843,6 +2837,7 @@ function GlobalLaunchpad({
   running,
   state,
   statusItems,
+  takyonProgress,
   tools,
 }: {
   error: string | null;
@@ -2852,13 +2847,18 @@ function GlobalLaunchpad({
   running: boolean;
   state: ConnectionState;
   statusItems: string[];
+  takyonProgress: TakyonProgressState | null;
   tools: ToolEntry[];
 }) {
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [mode, setMode] = useState<"test" | "live">("test");
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
-  const latestStatus = activeTool?.name || statusItems[0] || "";
+  const latestStatus =
+    latestTakyonProgressLine(takyonProgress) ||
+    activeTool?.name ||
+    statusItems[0] ||
+    "";
   const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
   const displayError = friendlyError(error);
   const spendableCents = operatorSpendableCents(operatorAccount);
@@ -2894,9 +2894,9 @@ function GlobalLaunchpad({
               {displayError}
             </p>
           )}
-          {running && (
+          {latestStatus && (
             <p className="td-meta" style={{ color: "var(--td-up)", marginBottom: 12 }}>
-              {latestStatus || "Working…"}
+              {latestStatus}
             </p>
           )}
 
@@ -2969,6 +2969,7 @@ function Thread({
   scope,
   scrollerRef,
   statusItems,
+  takyonProgress,
   tools,
 }: {
   children: ReactNode;
@@ -2978,16 +2979,20 @@ function Thread({
   scope: ScopeState;
   scrollerRef: RefObject<HTMLDivElement | null>;
   statusItems?: string[];
+  takyonProgress?: TakyonProgressState | null;
   tools?: ToolEntry[];
 }) {
   const displayError = friendlyError(error);
   const activeTool = (tools || []).slice().reverse().find((tool) => tool.status === "running");
   const activityLabels = recentToolLabels(tools);
-  const workingLabel = running ? "Working…" : "";
+  const takyonActivity = latestTakyonProgressLine(takyonProgress, scope.business || "");
+  const showActivity = running || !!takyonActivity;
+  const workingLabel = takyonActivity ? "Activity" : running ? "Working…" : "";
   const activitySummary =
-    activityLabels.length > 0
+    takyonActivity ||
+    (activityLabels.length > 0
       ? activityLabels.join(" · ")
-      : activeTool?.name || (statusItems && statusItems[0]) || "Thinking";
+      : activeTool?.name || (statusItems && statusItems[0]) || "Thinking");
   return (
     <>
       <div ref={scrollerRef} className="td-thread">
@@ -3006,7 +3011,7 @@ function Thread({
         {messages.map((message) => (
           <Message key={message.id} message={message} />
         ))}
-        {running && (
+        {showActivity && (
           <div aria-live="polite" className="td-activity">
             <div className="td-activity-line">
               <span aria-hidden className="td-activity-dot" />

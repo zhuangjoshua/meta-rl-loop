@@ -2949,18 +2949,12 @@ def run_takyon_command(
             reason="operator initialized business",
             actor="operator",
         )
-        if not should_schedule:
-            return business_result
-        cron_result = store.commit(
-            scope=_scope_for_business(slug),
-            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
-            idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
-            reason="operator initialized business CEO wake loop",
-            actor="operator",
-        )
+        active = store.read(scope=_scope_for_business(slug), query="summary")
+        business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
+        if str(business_record.get("slug") or "").strip() != slug:
+            raise RuntimeError(f"business creation did not persist for {slug}")
+        active_mode = str(business_record.get("mode") or mode or "live")
         if auto_start:
-            active = store.read(scope=_scope_for_business(slug), query="summary")
-            active_mode = str((active.get("business") or {}).get("mode") or mode or "live")
             instruction = _business_bootstrap_instruction(slug, goal, active_mode)
             agent_response = _run_agent(
                 _operator_context_message(instruction, slug),
@@ -2972,6 +2966,15 @@ def run_takyon_command(
                 operator_user_id=resolved_operator_user_id,
                 current_business=slug,
             )
+            cron_result = None
+            if should_schedule:
+                cron_result = store.commit(
+                    scope=_scope_for_business(slug),
+                    operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+                    idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
+                    reason="operator initialized business CEO wake loop",
+                    actor="operator",
+                )
             return {
                 "success": True,
                 "business": slug,
@@ -2981,6 +2984,15 @@ def run_takyon_command(
                 "wake": cron_result,
                 "agent_response": agent_response,
             }
+        if not should_schedule:
+            return business_result
+        cron_result = store.commit(
+            scope=_scope_for_business(slug),
+            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+            idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
+            reason="operator initialized business CEO wake loop",
+            actor="operator",
+        )
         return {
             "success": True,
             "results": [
