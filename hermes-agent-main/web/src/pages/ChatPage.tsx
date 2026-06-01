@@ -1252,6 +1252,7 @@ export default function ChatPage() {
 
         const res = await gw.request<SessionCreateResponse>("session.create", {
           cols: 100,
+          _takyon_boot_business: businessFromLocationSearch() || undefined,
         });
         if (cancelled) return;
         setSessionId(res.session_id);

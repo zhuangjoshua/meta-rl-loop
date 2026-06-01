@@ -2129,6 +2129,7 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
+    boot_business = str(params.get("_takyon_boot_business") or "").strip()
     _enable_gateway_prompts()
     transport = current_transport() or _stdio_transport
     operator_user_id = str(params.get("_takyon_operator_user_id") or "").strip()
@@ -2142,7 +2143,7 @@ def _(rid, params: dict) -> dict:
 
     ready = threading.Event()
 
-    _sessions[sid] = {
+    session = {
         "agent": None,
         "agent_error": None,
         "agent_ready": ready,
@@ -2163,6 +2164,16 @@ def _(rid, params: dict) -> dict:
         "tool_started_at": {},
         "transport": transport,
     }
+    _sessions[sid] = session
+    if boot_business:
+        try:
+            from plugins.takyon.cli import _slugify
+
+            slug = _slugify(boot_business)
+            if _takyon_can_access_business(session, slug) or _takyon_get_background_run(slug):
+                session["takyon_current_business"] = slug
+        except Exception:
+            pass
 
     # Return the lightweight session immediately so Ink can paint the composer
     # + skeleton panel, then build the real AIAgent just after this response is
