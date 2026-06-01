@@ -2935,6 +2935,7 @@ function CompanyWorkspace({
     error?: string;
     loading?: boolean;
     media?: BusinessMediaResponse;
+    siteUrl?: string;
     path: string;
     title: string;
     truncated?: boolean;
@@ -2944,11 +2945,42 @@ function CompanyWorkspace({
     setViewer(null);
   }, [scope.business]);
 
+  const openSitePreview = useCallback(
+    (path?: string, label?: string) => {
+      const targetPath = (path || previewPath).trim();
+      if (!targetPath) return;
+      const title = label || compactPath(targetPath);
+      setViewer({ loading: true, path: targetPath, title });
+      void onResolveSitePreview(targetPath)
+        .then((res) =>
+          setViewer({
+            loading: false,
+            path: res.path || targetPath,
+            siteUrl: res.url || "",
+            title,
+          }),
+        )
+        .catch((err) =>
+          setViewer({
+            error: friendlyError(err instanceof Error ? err.message : String(err)),
+            loading: false,
+            path: targetPath,
+            title,
+          }),
+        );
+    },
+    [onResolveSitePreview, previewPath],
+  );
+
   const openDocument = useCallback(
     (doc: { label?: string; path?: string }) => {
       const path = (doc.path || "").trim();
       if (!path) return;
       const title = doc.label || compactPath(path);
+      if (/\.html?$/i.test(path)) {
+        openSitePreview(path, title);
+        return;
+      }
       setViewer({ loading: true, path, title });
       if (mediaKindForPath(path)) {
         void onResolveMedia(path)
@@ -2984,14 +3016,12 @@ function CompanyWorkspace({
           }),
         );
     },
-    [onReadFile, onResolveMedia],
+    [onReadFile, onResolveMedia, openSitePreview],
   );
 
   const openPreview = useCallback(() => {
-    void onResolveSitePreview(previewPath).then((res) => {
-      if (res.url) openUrlInNewTab(res.url);
-    });
-  }, [onResolveSitePreview, previewPath]);
+    openSitePreview(previewPath, `${name} preview`);
+  }, [name, openSitePreview, previewPath]);
 
   return (
     <>
@@ -3291,6 +3321,18 @@ function CompanyWorkspace({
                 <p className="td-meta" style={{ color: "var(--td-accent-ink)" }}>
                   {viewer.error}
                 </p>
+              ) : viewer.siteUrl ? (
+                <iframe
+                  src={viewer.siteUrl}
+                  title={viewer.title}
+                  style={{
+                    background: "#fff",
+                    border: "1px solid var(--td-border)",
+                    borderRadius: 18,
+                    height: "70vh",
+                    width: "100%",
+                  }}
+                />
               ) : viewer.media ? (
                 viewer.media.media_type?.startsWith("video/") ? (
                   <video className="w-full rounded-lg" controls src={viewer.media.url} />
