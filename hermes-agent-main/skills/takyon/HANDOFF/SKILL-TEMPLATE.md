@@ -64,6 +64,7 @@ Use this skill for one bounded Takyon business method. Keep the intro short and 
 - Put the common path first.
 - Mention the exact `business_*` tools or helper scripts used by this skill.
 - If the skill uses bundled helpers, reference them with `${HERMES_SKILL_DIR}/scripts/...`.
+- If this skill claims a durable change, require one last read-back of the exact file, artifact, or receipt before saying `done`, `wired`, `published`, or `completed`.
 
 ## Procedure
 
@@ -71,6 +72,7 @@ Use this skill for one bounded Takyon business method. Keep the intro short and 
 2. Do the smallest honest amount of work that resolves the problem.
 3. Publish the durable output to the exact destination path.
 4. Use business tools for durable state changes or external side effects.
+5. Before claiming success, re-read the exact durable file, artifact, or receipt you just changed and report from that read-back; if it does not match, say `attempted`, `blocked`, or `not verified` instead of `done`.
 
 ## Output Format
 
@@ -94,6 +96,7 @@ Use this skill for one bounded Takyon business method. Keep the intro short and 
 
 - [ ] Outputs are truthful, current, and in the right place
 - [ ] Any claimed side effect is backed by tool truth or receipts
+- [ ] Any claimed completion is backed by a read-back of the exact changed file, artifact, or receipt
 - [ ] No parallel state was created outside the canonical roots
 
 ## Rules

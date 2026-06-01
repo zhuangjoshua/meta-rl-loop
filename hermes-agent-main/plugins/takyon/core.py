@@ -5224,6 +5224,7 @@ class TakyonStore:
             raise TakyonError("operations must be a non-empty list")
         parsed = _scope_parts(scope)
         op_hash = _hash_operation({"scope": scope, "operations": operations, "reason": reason, "actor": actor})
+        warmed_workspaces: set[str] = set()
 
         with self._connect() as conn:
             prior = conn.execute("SELECT * FROM idempotency_keys WHERE key = ?", (idempotency_key,)).fetchone()
@@ -5239,11 +5240,16 @@ class TakyonStore:
                 for item in staged:
                     result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                     results.append(result)
+                    if item.get("action") in {"artifact.write", "artifact.patch", "memory.write", "workspace.upsert"}:
+                        slug = str(item.get("business_slug") or "").strip()
+                        if slug:
+                            warmed_workspaces.add(_slugify(slug))
                 final = {"success": True, "scope": str(parsed["raw"]), "results": results}
                 conn.execute(
                     "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
                     (idempotency_key, op_hash, _json_dumps(final), _now()),
                 )
+            self._workspace_sync_cache.update(warmed_workspaces)
             return final
 
     def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any]) -> dict[str, Any]:
@@ -6567,20 +6573,26 @@ def _business_scope(args: dict) -> str:
     return f"business:{_business_slug(args, required=True)}"
 
 
-def _commit_tool_data(args: dict, operation: dict[str, Any], *, scope: str | None = None) -> dict[str, Any]:
-    normalized_operation = dict(operation)
+def _commit_tool_data(
+    args: dict,
+    operation: dict[str, Any],
+    *,
+    scope: str | None = None,
+    store: "TakyonStore" | None = None,
+) -> dict[str, Any]:
     business = _business_slug(
         {
-            "business": normalized_operation.get("business") or args.get("business"),
+            "business": operation.get("business") or args.get("business"),
             "business_slug": args.get("business_slug"),
         },
         required=False,
     )
+    normalized_operation = dict(operation)
     if business:
         normalized_operation["business"] = business
-    commit_scope = scope or (f"business:{business}" if business else _business_scope(args))
-    return _store().commit(
-        scope=commit_scope,
+    active_store = store or _store()
+    return active_store.commit(
+        scope=scope or (f"business:{business}" if business else _business_scope(args)),
         operations=[normalized_operation],
         idempotency_key=args.get("idempotency_key") or "",
         reason=args.get("reason") or "",
@@ -6588,9 +6600,15 @@ def _commit_tool_data(args: dict, operation: dict[str, Any], *, scope: str | Non
     )
 
 
-def _commit_tool(args: dict, operation: dict[str, Any], *, scope: str | None = None) -> str:
+def _commit_tool(
+    args: dict,
+    operation: dict[str, Any],
+    *,
+    scope: str | None = None,
+    store: "TakyonStore" | None = None,
+) -> str:
     try:
-        result = _commit_tool_data(args, operation, scope=scope)
+        result = _commit_tool_data(args, operation, scope=scope, store=store)
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -6937,8 +6955,14 @@ def _resolved_business_output_path_for_action(store: "TakyonStore", business: st
     requested_path = str(raw_path or "")
     if action == "memory.write" and requested_path and not requested_path.startswith("research/"):
         requested_path = f"research/{requested_path}"
-    file_path = store._resolve_business_file(business, requested_path)
-    rel = str(file_path.relative_to(store._business_root(business)))
+    file_path = store._resolve_business_file(
+        business,
+        requested_path,
+        require_output_root=True,
+        field="artifact path",
+    )
+    base = getattr(store, "_workspace_root_override", None) or store.root
+    rel = str(file_path.relative_to(base / "businesses" / _slugify(business)))
     return rel, file_path
 
 
@@ -6947,6 +6971,7 @@ def _verified_business_file_mutation_response(
     args: dict,
     operation: dict[str, Any],
     expected_content: str,
+    store: "TakyonStore" | None = None,
 ) -> str:
     try:
         business = _business_slug(
@@ -6956,17 +6981,22 @@ def _verified_business_file_mutation_response(
             },
             required=True,
         )
-        store = _store()
-        result = _commit_tool_data(args, operation)
+        active_store = store or _store()
+        result = _commit_tool_data(args, operation, store=active_store)
         rel = str(result.get("path") or "")
         if not rel:
             rel, _ = _resolved_business_output_path_for_action(
-                store,
+                active_store,
                 business,
                 str(operation.get("path") or ""),
                 action=str(operation.get("action") or ""),
             )
-        file_path = store._resolve_business_file(business, rel)
+        _, file_path = _resolved_business_output_path_for_action(
+            active_store,
+            business,
+            rel,
+            action=str(operation.get("action") or ""),
+        )
         actual_content = file_path.read_text(encoding="utf-8", errors="replace")
         verification = {
             "path": rel,
@@ -7014,6 +7044,7 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
         args=args,
         operation=operation,
         expected_content=expected_content,
+        store=store,
     )
 
 
@@ -7047,6 +7078,7 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
         args=args,
         operation=operation,
         expected_content=expected_content,
+        store=store,
     )
 
 
@@ -7074,6 +7106,7 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
         args=args,
         operation=operation,
         expected_content=expected_content,
+        store=store,
     )
 
 

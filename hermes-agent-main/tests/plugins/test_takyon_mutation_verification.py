@@ -19,9 +19,16 @@ class _FakeStore:
         self,
         slug: str,
         rel: str,
+        *,
+        require_output_root: bool = False,
+        field: str = "business path",
     ) -> Path:
         root = self._business_root(slug)
-        relative = takyon_core._canonical_business_relpath(rel)
+        relative = (
+            takyon_core._canonical_business_output_relpath(rel, field=field)
+            if require_output_root
+            else takyon_core._canonical_business_relpath(rel)
+        )
         path = (root / relative).resolve()
         root.mkdir(parents=True, exist_ok=True)
         if root.resolve() not in (path, *path.parents):
@@ -90,5 +97,36 @@ def test_business_write_file_fails_when_postcondition_does_not_land(tmp_path, mo
         assert wrote["success"] is False
         assert "postcondition verification failed" in str(wrote.get("error") or "")
         assert wrote["verification"]["verified"] is False
+    finally:
+        clear_session_vars(tokens)
+
+
+def test_business_write_file_reuses_one_store_for_read_write_verify(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = _FakeStore(tmp_path)
+    calls = {"count": 0}
+
+    def _single_store():
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise AssertionError("unexpected extra _store() call")
+        return store
+
+    monkeypatch.setattr(takyon_core, "_store", _single_store)
+
+    tokens = set_session_vars(business_slug="alpha")
+    try:
+        wrote = json.loads(
+            handle_business_write_file(
+                {
+                    "path": "product/site/index.html",
+                    "content": "<h1>Only once</h1>\n",
+                    "idempotency_key": "single-store-write",
+                }
+            )
+        )
+        assert wrote["success"] is True
+        assert calls["count"] == 1
+        assert store._resolve_business_file("alpha", "product/site/index.html").read_text(encoding="utf-8") == "<h1>Only once</h1>\n"
     finally:
         clear_session_vars(tokens)
