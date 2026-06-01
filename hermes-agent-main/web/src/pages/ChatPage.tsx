@@ -932,6 +932,7 @@ export default function ChatPage() {
   const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [blockedBootBusinessSlug, setBlockedBootBusinessSlug] = useState<string | null>(null);
+  const [blockedBootMessage, setBlockedBootMessage] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -1322,6 +1323,7 @@ export default function ChatPage() {
       const content = message.trim();
       if (!slug || !content) return;
       setBlockedBootBusinessSlug(slug);
+      setBlockedBootMessage(content);
       setPendingBusinessSlug((current) => (current === slug ? null : current));
       setMessages((prev) => {
         if (prev.some((item) => item.role === "system" && item.content === content)) {
@@ -1363,6 +1365,9 @@ export default function ChatPage() {
         if (nextScope.business) {
           setBlockedBootBusinessSlug((current) =>
             current === nextScope.business ? null : current,
+          );
+          setBlockedBootMessage((current) =>
+            current && current.includes(`business:${nextScope.business}`) ? null : current,
           );
         }
         if (bootBusiness && nextScope.business !== bootBusiness && !bootIssue) {
@@ -1696,6 +1701,9 @@ export default function ChatPage() {
         setBlockedBootBusinessSlug((current) =>
           current === nextScope.business ? null : current,
         );
+        setBlockedBootMessage((current) =>
+          current && current.includes(`business:${nextScope.business}`) ? null : current,
+        );
       }
       const params = new URLSearchParams(searchParams);
       if (nextScope.business) params.set("business", nextScope.business);
@@ -1716,6 +1724,9 @@ export default function ChatPage() {
       const slug = normalizeBusinessLookup(business);
       if (!slug) return;
       setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
+      setBlockedBootMessage((current) =>
+        current && current.includes(`business:${slug}`) ? null : current,
+      );
       setPendingBusinessSlug(slug);
       setScopeState((prev) => {
         const existing = prev.businesses.find(
@@ -1780,6 +1791,9 @@ export default function ChatPage() {
           setScopeState(nextScope);
           setBlockedBootBusinessSlug((current) =>
             current === pendingBusinessSlug ? null : current,
+          );
+          setBlockedBootMessage((current) =>
+            current && current.includes(`business:${pendingBusinessSlug}`) ? null : current,
           );
           setPendingBusinessSlug(null);
           return;
@@ -2176,7 +2190,7 @@ export default function ChatPage() {
             />
           ) : (
             <GlobalLaunchpad
-              error={error}
+              error={error || blockedBootMessage}
               onCreate={runTakyonLine}
               onEnterPendingBusiness={enterPendingBusiness}
               operatorAccount={operatorAccount}
