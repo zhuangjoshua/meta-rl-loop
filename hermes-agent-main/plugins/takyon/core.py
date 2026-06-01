@@ -6541,19 +6541,56 @@ def _store() -> TakyonStore:
     return TakyonStore()
 
 
+def _session_business_slug() -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        raw = get_session_env("TAKYON_SESSION_BUSINESS_SLUG", "")
+    except Exception:
+        raw = os.getenv("TAKYON_SESSION_BUSINESS_SLUG", "")
+    raw = str(raw or "").strip()
+    return _slugify(raw) if raw else ""
+
+
+def _business_slug(args: dict, *, required: bool = False) -> str:
+    requested = _slugify(str(args.get("business") or args.get("business_slug") or ""))
+    session_slug = _session_business_slug()
+    if session_slug and requested and requested != session_slug:
+        raise TakyonError(f"business is bound to the current session: {session_slug}")
+    business = session_slug or requested
+    if required and not business:
+        raise TakyonError("business is required")
+    return business
+
+
 def _business_scope(args: dict) -> str:
-    return f"business:{_slugify(str(args.get('business') or args.get('business_slug') or ''))}"
+    return f"business:{_business_slug(args, required=True)}"
+
+
+def _commit_tool_data(args: dict, operation: dict[str, Any], *, scope: str | None = None) -> dict[str, Any]:
+    normalized_operation = dict(operation)
+    business = _business_slug(
+        {
+            "business": normalized_operation.get("business") or args.get("business"),
+            "business_slug": args.get("business_slug"),
+        },
+        required=False,
+    )
+    if business:
+        normalized_operation["business"] = business
+    commit_scope = scope or (f"business:{business}" if business else _business_scope(args))
+    return _store().commit(
+        scope=commit_scope,
+        operations=[normalized_operation],
+        idempotency_key=args.get("idempotency_key") or "",
+        reason=args.get("reason") or "",
+        actor=args.get("actor") or "agent",
+    )
 
 
 def _commit_tool(args: dict, operation: dict[str, Any], *, scope: str | None = None) -> str:
     try:
-        result = _store().commit(
-            scope=scope or _business_scope(args),
-            operations=[operation],
-            idempotency_key=args.get("idempotency_key") or "",
-            reason=args.get("reason") or "",
-            actor=args.get("actor") or "agent",
-        )
+        result = _commit_tool_data(args, operation, scope=scope)
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -6896,39 +6933,148 @@ def handle_business_create_workspace(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def _resolved_business_output_path_for_action(store: "TakyonStore", business: str, raw_path: str, *, action: str) -> tuple[str, Path]:
+    requested_path = str(raw_path or "")
+    if action == "memory.write" and requested_path and not requested_path.startswith("research/"):
+        requested_path = f"research/{requested_path}"
+    file_path = store._resolve_business_file(business, requested_path)
+    rel = str(file_path.relative_to(store._business_root(business)))
+    return rel, file_path
+
+
+def _verified_business_file_mutation_response(
+    *,
+    args: dict,
+    operation: dict[str, Any],
+    expected_content: str,
+) -> str:
+    try:
+        business = _business_slug(
+            {
+                "business": operation.get("business") or args.get("business"),
+                "business_slug": args.get("business_slug"),
+            },
+            required=True,
+        )
+        store = _store()
+        result = _commit_tool_data(args, operation)
+        rel = str(result.get("path") or "")
+        if not rel:
+            rel, _ = _resolved_business_output_path_for_action(
+                store,
+                business,
+                str(operation.get("path") or ""),
+                action=str(operation.get("action") or ""),
+            )
+        file_path = store._resolve_business_file(business, rel)
+        actual_content = file_path.read_text(encoding="utf-8", errors="replace")
+        verification = {
+            "path": rel,
+            "verified": actual_content == expected_content,
+            "expected_sha256": hashlib.sha256(expected_content.encode("utf-8")).hexdigest(),
+            "actual_sha256": hashlib.sha256(actual_content.encode("utf-8")).hexdigest(),
+        }
+        if verification["verified"]:
+            return tool_result({**result, "success": True, "verification": verification})
+        return tool_error(
+            f"postcondition verification failed for {rel}",
+            success=False,
+            business=business,
+            path=rel,
+            verification=verification,
+            result=result,
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_write_file(args: dict, **_: Any) -> str:
+    business = _business_slug(args, required=True)
+    store = _store()
+    mode = str(args.get("mode") or "replace").strip().lower()
+    content = str(args.get("content") or "")
+    _, file_path = _resolved_business_output_path_for_action(
+        store,
+        business,
+        str(args.get("path") or ""),
+        action="artifact.write",
+    )
+    previous_content = file_path.read_text(encoding="utf-8", errors="replace") if file_path.exists() else ""
+    expected_content = previous_content + content if mode == "append" and file_path.exists() else content
     operation = {
         "action": "artifact.write",
         "business": args.get("business"),
         "path": args.get("path"),
-        "content": args.get("content") or "",
-        "mode": args.get("mode") or "replace",
+        "content": content,
+        "mode": mode or "replace",
         "requires_api": args.get("requires_api") or [],
         "requires_env": args.get("requires_env") or [],
     }
-    return _commit_tool(args, operation)
+    return _verified_business_file_mutation_response(
+        args=args,
+        operation=operation,
+        expected_content=expected_content,
+    )
 
 
 def handle_business_patch_file(args: dict, **_: Any) -> str:
+    business = _business_slug(args, required=True)
+    store = _store()
+    _, file_path = _resolved_business_output_path_for_action(
+        store,
+        business,
+        str(args.get("path") or ""),
+        action="artifact.patch",
+    )
+    if not file_path.exists():
+        raise TakyonError(f"cannot patch missing file: {args.get('path')}")
+    old = str(args.get("old") or "")
+    if not old:
+        raise TakyonError("artifact.patch requires non-empty old text")
+    previous_content = file_path.read_text(encoding="utf-8", errors="replace")
+    if old not in previous_content:
+        raise TakyonError("artifact.patch old text not found")
+    new = str(args.get("new") or "")
+    expected_content = previous_content.replace(old, new, 1)
     operation = {
         "action": "artifact.patch",
         "business": args.get("business"),
         "path": args.get("path"),
-        "old": args.get("old"),
-        "new": args.get("new") or "",
+        "old": old,
+        "new": new,
     }
-    return _commit_tool(args, operation)
+    return _verified_business_file_mutation_response(
+        args=args,
+        operation=operation,
+        expected_content=expected_content,
+    )
 
 
 def handle_business_record_memory(args: dict, **_: Any) -> str:
+    business = _business_slug(args, required=True)
+    store = _store()
+    mode = str(args.get("mode") or "replace").strip().lower()
+    content = str(args.get("content") or "")
+    _, file_path = _resolved_business_output_path_for_action(
+        store,
+        business,
+        str(args.get("path") or ""),
+        action="memory.write",
+    )
+    previous_content = file_path.read_text(encoding="utf-8", errors="replace") if file_path.exists() else ""
+    expected_content = previous_content + content if mode == "append" and file_path.exists() else content
     operation = {
         "action": "memory.write",
         "business": args.get("business"),
         "path": args.get("path"),
-        "content": args.get("content") or "",
-        "mode": args.get("mode") or "replace",
+        "content": content,
+        "mode": mode or "replace",
     }
-    return _commit_tool(args, operation)
+    return _verified_business_file_mutation_response(
+        args=args,
+        operation=operation,
+        expected_content=expected_content,
+    )
 
 
 def handle_business_allocate_budget(args: dict, **_: Any) -> str:

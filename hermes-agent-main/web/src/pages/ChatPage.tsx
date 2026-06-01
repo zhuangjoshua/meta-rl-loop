@@ -338,9 +338,6 @@ interface TakyonShellResponse extends ScopeState {
   output?: string;
 }
 
-interface TakyonPromptContextResponse {
-  text?: string;
-}
 
 interface BusinessOutputsResponse extends ScopeState {
   outputs?: Deliverable[];
@@ -2016,25 +2013,6 @@ export default function ChatPage() {
     });
   }, []);
 
-  const contextForPrompt = useCallback(
-    async (text: string): Promise<string> => {
-      if (!sessionId) return text;
-      const res = await gw.request<TakyonPromptContextResponse>(
-        "takyon.prompt.context",
-        { session_id: sessionId, text },
-        10_000,
-      );
-      const promptText = res.text || text;
-      if (!createInTestMode) return promptText;
-      return [
-        "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode.",
-        "",
-        promptText,
-      ].join("\n");
-    },
-    [createInTestMode, gw, sessionId],
-  );
-
   const requestPromptSubmit = useCallback(
     async (text: string) => {
       if (!sessionId) throw new Error("Chat is still connecting.");
@@ -2043,7 +2021,7 @@ export default function ChatPage() {
         try {
           await gw.request(
             "prompt.submit",
-            { session_id: sessionId, text },
+            { session_id: sessionId, text, create_in_test_mode: createInTestMode },
             30_000,
           );
           return;
@@ -2056,7 +2034,7 @@ export default function ChatPage() {
         }
       }
     },
-    [gw, sessionId],
+    [createInTestMode, gw, sessionId],
   );
 
   const submitPrompt = useCallback(
@@ -2072,10 +2050,9 @@ export default function ChatPage() {
       setStatusItems([]);
       setRunning(true);
       setError(null);
-      const promptText = await contextForPrompt(text);
-      await requestPromptSubmit(promptText);
+      await requestPromptSubmit(text);
     },
-    [contextForPrompt, gw, requestPromptSubmit, running, sessionId],
+    [gw, requestPromptSubmit, running, sessionId],
   );
 
   const executeTakyonSlash = useCallback(

@@ -2092,7 +2092,10 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         role = m.get("role")
         if role not in {"user", "assistant", "tool", "system"}:
             continue
-        content_text = _content_display_text(m.get("content"))
+        if role == "user" and isinstance(m.get("display_text"), str) and m.get("display_text"):
+            content_text = str(m.get("display_text"))
+        else:
+            content_text = _content_display_text(m.get("content"))
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})
@@ -3095,6 +3098,7 @@ def _(rid, params: dict) -> dict:
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
+    create_in_test_mode = bool(params.get("create_in_test_mode"))
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -3120,7 +3124,15 @@ def _(rid, params: dict) -> dict:
             with session["history_lock"]:
                 session["running"] = False
             return
-        _run_prompt_submit(rid, sid, session, text)
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            display_text=text,
+            contextualize_takyon=True,
+            create_in_test_mode=create_in_test_mode,
+        )
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
     return _ok(rid, {"status": "streaming"})
@@ -3225,7 +3237,16 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    display_text: str | None = None,
+    contextualize_takyon: bool = False,
+    create_in_test_mode: bool = False,
+) -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -3262,6 +3283,12 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
+            if contextualize_takyon and isinstance(prompt, str):
+                prompt = _build_takyon_prompt_text(
+                    session,
+                    prompt,
+                    create_in_test_mode=create_in_test_mode,
+                )
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -3378,6 +3405,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             status_note = None
             if isinstance(result, dict):
                 if isinstance(result.get("messages"), list):
+                    if isinstance(display_text, str) and display_text:
+                        for message in reversed(result["messages"]):
+                            if isinstance(message, dict) and message.get("role") == "user":
+                                message["display_text"] = display_text
+                                break
                     with session["history_lock"]:
                         current_version = int(session.get("history_version", 0))
                         if current_version == history_version:
@@ -4730,6 +4762,44 @@ def _takyon_prompt_mentions_budget(text: str) -> bool:
     if re.search(r"\b(?:budget|cap|spend limit|spend cap|runway|limit)\b", compact):
         return True
     return bool(re.search(r"(?:\$|usd\s*)\d+(?:[,.]\d+)?|\d+(?:[,.]\d+)?\s*(?:usd|dollars?)\b", compact))
+
+
+def _build_takyon_prompt_text(
+    session: dict,
+    text: str,
+    *,
+    create_in_test_mode: bool = False,
+) -> str:
+    from plugins.takyon.cli import _operator_context_message
+
+    current_business = str(session.get("takyon_current_business") or "") or None
+    prompt_text = _operator_context_message(text, current_business)
+    if create_in_test_mode:
+        prompt_text = "\n\n".join(
+            [
+                "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode.",
+                prompt_text,
+            ]
+        )
+    if _takyon_prompt_may_create_business(text):
+        try:
+            data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
+            session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
+            session["takyon_pending_business_create"] = True
+            session["takyon_pending_business_create_at"] = time.time()
+        except Exception:
+            session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
+            session["takyon_pending_business_create"] = True
+            session["takyon_pending_business_create_at"] = time.time()
+        if not _takyon_prompt_mentions_budget(text):
+            prompt_text = (
+                "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
+                "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
+                "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
+                "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
+                + prompt_text
+            )
+    return prompt_text
 
 
 def _takyon_maybe_auto_enter_created_business(
@@ -6569,28 +6639,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4001, "session not found")
     text = str(params.get("text") or "")
     try:
-        from plugins.takyon.cli import _operator_context_message
-
-        current_business = str(session.get("takyon_current_business") or "") or None
-        prompt_text = _operator_context_message(text, current_business)
-        if _takyon_prompt_may_create_business(text):
-            try:
-                data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
-                session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
-                session["takyon_pending_business_create"] = True
-                session["takyon_pending_business_create_at"] = time.time()
-            except Exception:
-                session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
-                session["takyon_pending_business_create"] = True
-                session["takyon_pending_business_create_at"] = time.time()
-            if not _takyon_prompt_mentions_budget(text):
-                prompt_text = (
-                    "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
-                    "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
-                    "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
-                    "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
-                    + prompt_text
-                )
+        prompt_text = _build_takyon_prompt_text(
+            session,
+            text,
+            create_in_test_mode=bool(params.get("create_in_test_mode")),
+        )
         return _ok(
             rid,
             {"text": prompt_text},
