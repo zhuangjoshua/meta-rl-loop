@@ -384,6 +384,13 @@ interface Deliverable {
   at: number;
 }
 
+interface TakyonProgressState {
+  business: string;
+  lines: string[];
+  active: boolean;
+  status: ChatMessage["status"];
+}
+
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
@@ -413,6 +420,8 @@ const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+const TAKYON_PROGRESS_MESSAGE_PREFIX = "takyon-progress";
+const TAKYON_PROGRESS_MAX_LINES = 8;
 const ANSI_PATTERN = new RegExp(
   `${String.fromCharCode(27)}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`,
   "g",
@@ -429,6 +438,10 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2)}`;
+}
+
+function takyonProgressMessageId(business: string): string {
+  return `${TAKYON_PROGRESS_MESSAGE_PREFIX}-${business || "global"}`;
 }
 
 function formatBudgetCents(value?: number | null): string {
@@ -601,6 +614,56 @@ function mergePolledMessages(prev: ChatMessage[], polled: ChatMessage[]): ChatMe
     next.push(message);
   }
   return next;
+}
+
+function parseTakyonProgressBusiness(text: string): string {
+  const match = cleanText(text).match(/business:([a-z0-9-]+)/i);
+  return match ? normalizeBusinessLookup(match[1] || "") : "";
+}
+
+function updateTakyonProgress(
+  current: TakyonProgressState | null,
+  rawText: string,
+  fallbackBusiness: string,
+): TakyonProgressState | null {
+  const line = cleanText(rawText).trim();
+  if (!line) return current;
+  const business = parseTakyonProgressBusiness(line) || fallbackBusiness || current?.business || "";
+  const terminal = line.match(/^(?:Create|Wake) for business:[a-z0-9-]+\s+(done|error)\b/i);
+  const nextStatus: ChatMessage["status"] = terminal
+    ? (terminal[1] || "").toLowerCase() === "done"
+      ? "complete"
+      : "error"
+    : "streaming";
+  const reset = /^Started \//.test(line) || (!!business && business !== current?.business);
+  const previousLines = reset ? [] : current?.lines || [];
+  const deduped =
+    previousLines.length && previousLines[previousLines.length - 1] === line
+      ? previousLines
+      : [...previousLines, line];
+  return {
+    business,
+    lines: deduped.slice(-TAKYON_PROGRESS_MAX_LINES),
+    active: !terminal,
+    status: nextStatus,
+  };
+}
+
+function syncTakyonProgressMessage(
+  prev: ChatMessage[],
+  progress: TakyonProgressState | null,
+): ChatMessage[] {
+  const next = prev.filter((message) => !message.id.startsWith(TAKYON_PROGRESS_MESSAGE_PREFIX));
+  if (!progress || !progress.lines.length) return next;
+  return [
+    ...next,
+    {
+      id: takyonProgressMessageId(progress.business),
+      role: "system",
+      content: progress.lines.join("\n"),
+      status: progress.status,
+    },
+  ];
 }
 
 function extractPaths(text: string): string[] {
@@ -854,6 +917,7 @@ export default function ChatPage() {
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
     useState<TakyonOperatorAccountResponse | null>(null);
+  const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
@@ -870,6 +934,7 @@ export default function ChatPage() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const takyonRefreshTimerRef = useRef<number | null>(null);
 
   const refreshOperatorAccount = useCallback(async () => {
     try {
@@ -884,12 +949,62 @@ export default function ChatPage() {
   }, [sessionId]);
 
   useEffect(() => {
+    setMessages((prev) => syncTakyonProgressMessage(prev, takyonProgress));
+  }, [takyonProgress]);
+
+  useEffect(() => {
+    return () => {
+      if (takyonRefreshTimerRef.current !== null) {
+        window.clearTimeout(takyonRefreshTimerRef.current);
+        takyonRefreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     void refreshOperatorAccount();
   }, [refreshOperatorAccount]);
 
   useEffect(() => {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
   }, [createInTestMode]);
+
+  const refreshBusinessSurfaces = useCallback(async () => {
+    if (!canUseConnection(state) || !sessionIdRef.current) return;
+    try {
+      const scope = normalizeScopeState(
+        await gw.request<ScopeState>(
+          "takyon.scope.get",
+          { session_id: sessionIdRef.current },
+          10_000,
+        ),
+      );
+      setScopeState(scope);
+      if (scope.business) {
+        try {
+          const res = await gw.request<BusinessOutputsResponse>(
+            "takyon.outputs.list",
+            { session_id: sessionIdRef.current, limit: 50 },
+            10_000,
+          );
+          const outputs = Array.isArray(res.outputs) ? res.outputs : [];
+          setHistoricalOutputs({ business: scope.business, items: outputs });
+        } catch {
+          /* detached output refresh is best effort */
+        }
+      }
+    } catch {
+      /* detached surface refresh is best effort */
+    }
+  }, [gw, state]);
+
+  const scheduleTakyonRefresh = useCallback(() => {
+    if (takyonRefreshTimerRef.current !== null) return;
+    takyonRefreshTimerRef.current = window.setTimeout(() => {
+      takyonRefreshTimerRef.current = null;
+      void refreshBusinessSurfaces();
+    }, 250);
+  }, [refreshBusinessSurfaces]);
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -1033,8 +1148,15 @@ export default function ChatPage() {
     );
 
     cleanup.push(
-      gw.on<{ text?: string }>("status.update", (ev) => {
+      gw.on<{ kind?: string; text?: string }>("status.update", (ev) => {
         const text = asText(ev.payload?.text).trim();
+        const kind = asText(ev.payload?.kind).trim().toLowerCase();
+        if (kind === "takyon" && text) {
+          const businessHint =
+            scopeState.business || pendingBusinessSlug || businessFromLocationSearch();
+          setTakyonProgress((prev) => updateTakyonProgress(prev, text, businessHint));
+          scheduleTakyonRefresh();
+        }
         if (text) setStatusItems((prev) => [cleanText(text), ...prev].slice(0, 5));
       }),
     );
@@ -1271,7 +1393,7 @@ export default function ChatPage() {
       for (const fn of cleanup) fn();
       gw.close();
     };
-  }, [gw, refreshOperatorAccount, resumeParam]);
+  }, [gw, pendingBusinessSlug, refreshOperatorAccount, resumeParam, scheduleTakyonRefresh, scopeState.business]);
 
   useEffect(() => {
     const urlBusiness = businessFromLocationSearch();
@@ -1360,6 +1482,42 @@ export default function ChatPage() {
       window.clearInterval(timer);
     };
   }, [gw, running, scopeState.business, sessionId, state]);
+
+  useEffect(() => {
+    if (!takyonProgress?.active || !takyonProgress.business) return;
+    if (!canUseConnection(state) || !sessionId) return;
+    let cancelled = false;
+    const refresh = () => {
+      if (cancelled) return;
+      void refreshBusinessSurfaces();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [refreshBusinessSurfaces, sessionId, state, takyonProgress]);
+
+  useEffect(() => {
+    const runtimeTask = (scopeState.overview?.tasks || []).find(
+      (task) =>
+        task?.source === "runtime" &&
+        (task.status || "").toLowerCase() === "running" &&
+        /CEO (bootstrap|wake)/i.test(task.label || ""),
+    );
+    if (!runtimeTask || takyonProgress?.active) return;
+    const business = scopeState.business || pendingBusinessSlug || businessFromLocationSearch();
+    if (!business) return;
+    const detail = cleanText(`${runtimeTask.label || "CEO run"}: ${runtimeTask.detail || "Running"}`).trim();
+    if (!detail) return;
+    setTakyonProgress({
+      business,
+      lines: [detail],
+      active: true,
+      status: "streaming",
+    });
+  }, [pendingBusinessSlug, scopeState.business, scopeState.overview, takyonProgress?.active]);
 
   useEffect(() => {
     if (!canUseConnection(state) || !sessionId || !scopeState.business) return;
