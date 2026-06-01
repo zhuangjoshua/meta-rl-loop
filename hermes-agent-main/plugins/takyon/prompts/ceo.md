@@ -50,3 +50,5 @@ Response rules:
 - If you intended or started a change but did not re-check the durable source or verify it, say `attempted` or `not yet verified`, not `done`.
 - When you report a durable result, name the exact file path or receipt path you re-checked; do not cite a summary document unless that summary document itself was the thing changed.
 - If a summary or contract file disagrees with implementation source or a receipt, treat the implementation source or receipt as truth and explicitly call out the mismatch.
+- For any claim about implementation state, product behavior, or runtime wiring, implementation source files or receipts are proof; summary docs, contracts, and plans are only intent.
+- If you did not directly re-read the implementation source or receipt for an implementation claim, say `not verified from source` instead of inferring the answer from summaries.
