@@ -412,6 +412,13 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 
 const $ = (s,r=document)=>r.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const OWNER_WIN = (()=>{try{return window.parent&&window.parent!==window?window.parent:window;}catch(_e){return window;}})();
+const HAS_TAKYON_SESSION = Boolean((OWNER_WIN&&OWNER_WIN.__TAKYON_SESSION_TOKEN__)||window.__TAKYON_SESSION_TOKEN__);
+function staticNotice(msg){
+  const text=msg||'Static preview only. Open Litebulb through the Takyon dashboard to use real business data.';
+  const hint=$('.hint'); if(hint)hint.textContent=text;
+  const promo=$('.promo'); if(promo)promo.innerHTML=`litebulb static preview · <b>${esc(text)}</b>`;
+}
 
 /* ---------- clock + menubar ---------- */
 const clockEl=$('#clock'), statusEl=$('#status'), bulb=$('.bulb');
@@ -854,12 +861,15 @@ function say(){
 /* ---------- wiring ---------- */
 const input=$('#idea');
 function go(){const idea=(input.value.trim()||'a tool that books dog-grooming appointments');mount(idea);}
-$('#go').addEventListener('click',go);
-input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();go();}});
 document.querySelectorAll('.chip2').forEach(c=>c.addEventListener('click',()=>{input.value=c.dataset.idea||c.textContent;input.focus();}));
 const planpill=$('#planpill'); if(planpill)planpill.addEventListener('click',()=>planpill.classList.toggle('on'));
-$('#send').addEventListener('click',say);
-$('#say').addEventListener('keydown',e=>{if(e.key==='Enter')say();});
+if(!HAS_TAKYON_SESSION){
+  staticNotice();
+  $('#go').addEventListener('click',e=>{e.preventDefault();staticNotice();});
+  input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();staticNotice();}});
+  $('#send').addEventListener('click',e=>{e.preventDefault();staticNotice();});
+  $('#say').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();staticNotice();}});
+}
 
 /* ---------- window dock ---------- */
 const OPENERS={'w-board':openBoard,'w-product':openProduct,'w-status':openStatus,'w-files':openDeliverables,'w-ceo':openCeoLog};
