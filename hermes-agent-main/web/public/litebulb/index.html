@@ -444,7 +444,7 @@ function makeWin({id,title,x,y,w,h,html,crt=false}){
   win.style.cssText=`left:${x}px;top:${y}px;width:${w}px`;
   win.innerHTML=`<div class="win__bar"><span class="win__dots">
       <i class="win__dot" style="background:var(--red)"></i><i class="win__dot" style="background:var(--amber)"></i><i class="win__dot" style="background:var(--blue)"></i>
-    </span><span class="win__title">${title}</span><button class="win__x" title="close" aria-label="close window">×</button></div>
+    </span><span class="win__title">${title}</span><button class="win__x" title="close" aria-label="close window">x</button></div>
     <div class="win__body"${h?` style="height:${h}px"`:''}>${html}</div>`;
   desk.appendChild(win); focusWin(win);
   win.animate([{opacity:0,transform:'translateY(12px) scale(.98)'},{opacity:1,transform:'none'}],{duration:220,easing:'cubic-bezier(.2,.9,.25,1)'});
