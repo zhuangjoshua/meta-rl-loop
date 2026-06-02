@@ -266,6 +266,129 @@
     return esc(String(text || "")).replace(/\n/g, "<br>");
   }
 
+  function normalizeOpenableUrl(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/^https?:\/\//i.test(text) || /^data:/i.test(text)) return text;
+    if (/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/.*)?$/i.test(text)) {
+      return `https://${text}`;
+    }
+    return "";
+  }
+
+  function openUrlInNewTab(url) {
+    const target = normalizeOpenableUrl(url);
+    if (!target) throw new Error("No URL available.");
+    const opened = window.open(target, "_blank", "noopener,noreferrer");
+    if (opened) return;
+    const link = document.createElement("a");
+    link.href = target;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function compactPath(path) {
+    const raw = String(path || "").trim();
+    if (!raw) return "";
+    if (raw.length <= 42) return raw;
+    const parts = raw.split("/");
+    if (parts.length <= 2) return `${raw.slice(0, 39)}...`;
+    return `${parts[0]}/.../${parts[parts.length - 1]}`;
+  }
+
+  function previewWindow(title, html) {
+    const win = makeWin({
+      id: "w-preview",
+      title: title || "preview",
+      x: 148,
+      y: 72,
+      w: 720,
+      h: 480,
+      html,
+    });
+    const titleEl = win.querySelector(".win__title");
+    if (titleEl) titleEl.textContent = title || "preview";
+    body(win).innerHTML = html;
+    focusWin(win);
+    return win;
+  }
+
+  function previewPathForLive() {
+    const overview = LIVE.workspaceOverview || {};
+    const website = overview.artifacts && overview.artifacts.website || {};
+    const product = overview.product || {};
+    return String(website.path || website.source_path || product.source_path || "product/site").trim();
+  }
+
+  async function openSitePreview(path, label) {
+    const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
+    const targetPath = String(path || "").trim();
+    if (!business || !targetPath) return;
+    const win = previewWindow(label || compactPath(targetPath) || "site preview", `<div class="lab">loading preview</div><div class="meta">${esc(targetPath)}</div>`);
+    try {
+      const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/site-preview?path=${encodeURIComponent(targetPath)}`);
+      const url = normalizeOpenableUrl(res && res.url);
+      if (!url) throw new Error("Preview URL unavailable.");
+      body(win).innerHTML = `
+        <div class="lab">${esc(label || "site preview")}</div>
+        <div class="meta" style="margin-bottom:10px">${esc(res && res.path || targetPath)}</div>
+        <iframe
+          src="${esc(url)}"
+          title="${esc(label || "site preview")}"
+          style="width:100%;height:calc(100% - 44px);border:2px solid var(--ink);background:#fff"
+        ></iframe>
+      `;
+    } catch (err) {
+      body(win).innerHTML = `
+        <div class="lab">preview unavailable</div>
+        <div class="meta">${esc(err instanceof Error ? err.message : String(err))}</div>
+      `;
+    }
+  }
+
+  async function openDocument(path, label) {
+    const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
+    const targetPath = String(path || "").trim();
+    if (!business || !targetPath) return;
+    if (/\.html?$/i.test(targetPath)) {
+      await openSitePreview(targetPath, label);
+      return;
+    }
+    const win = previewWindow(label || compactPath(targetPath) || "document", `<div class="lab">loading document</div><div class="meta">${esc(targetPath)}</div>`);
+    try {
+      const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/file?path=${encodeURIComponent(targetPath)}`);
+      const content = String(res && res.content || "");
+      body(win).innerHTML = `
+        <div class="lab">${esc(label || compactPath(targetPath) || "document")}</div>
+        <div class="meta" style="margin-bottom:10px">${esc(res && res.path || targetPath)}${res && res.truncated ? " · truncated" : ""}</div>
+        <pre style="margin:0;border:2px solid var(--ink);background:#fff;padding:12px;white-space:pre-wrap;overflow:auto;height:calc(100% - 44px);font:12px/1.5 'Space Mono',monospace">${esc(content)}</pre>
+      `;
+    } catch (err) {
+      body(win).innerHTML = `
+        <div class="lab">document unavailable</div>
+        <div class="meta">${esc(err instanceof Error ? err.message : String(err))}</div>
+      `;
+    }
+  }
+
+  function latestActionablePost() {
+    const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts : [];
+    return posts.find((post) => normalizeOpenableUrl(post && post.url) || (post && post.artifact_path) || (post && post.conversation_file)) || null;
+  }
+
+  function latestInboundConversation() {
+    const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts : [];
+    return (
+      posts.find((post) => Number(post && post.unresolved_messages || 0) > 0 && post && post.conversation_file) ||
+      posts.find((post) => post && post.conversation_file) ||
+      null
+    );
+  }
+
   function renderPlanSummary(snapshot) {
     if (!snapshot || LIVE.planBusiness === snapshot.business_slug) return;
     const overview = snapshot.overview || {};
@@ -331,9 +454,13 @@
     }
   }
 
-  function buildOutreachRow(label, meta, state) {
-    return `<div class="chan">
-      <div class="chan-top"><span class="chan-nm">${esc(label)}</span><span class="chan-st ${state === "live" ? "live" : ""}">${esc(state)}</span></div>
+  function buildOutreachRow(label, meta, state, action) {
+    const clickable = !!(action && action.type);
+    const actionTag = clickable
+      ? `<span class="chan-st ${state === "live" ? "live" : ""}" style="cursor:pointer">${esc(action.label || "open")}</span>`
+      : `<span class="chan-st ${state === "live" ? "live" : ""}">${esc(state)}</span>`;
+    return `<div class="chan"${clickable ? ` data-action="${esc(action.type)}" tabindex="0" role="button" style="cursor:pointer"` : ""}>
+      <div class="chan-top"><span class="chan-nm">${esc(label)}</span>${actionTag}</div>
       <div class="meta" style="margin-top:6px">${esc(meta)}</div>
     </div>`;
   }
@@ -343,11 +470,24 @@
     if (!RT.live) return originalRenderProduct();
     const w = document.getElementById("w-product");
     if (!w || !RT.biz) return;
+    const previewPath = previewPathForLive();
     body(w).innerHTML = `<div class="mini"><div class="mini__bar"><i></i><i></i><i></i><span>${esc(RT.biz.siteHost || `${RT.biz.slug}.com`)} · ${esc(RT.biz.mode || "test")}</span></div>
       <div class="mini__page"><div class="mini__h">${esc(RT.biz.name || RT.biz.slug || "Litebulb")}</div>
       <p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}${RT.biz.publicUrl ? ` ${esc("· live url available")}` : "."}</p>
-      <span class="mini__cta">${RT.biz.publicUrl ? "open live site →" : "workspace preview →"}</span>
+      <button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${RT.biz.publicUrl ? "open live site →" : "open local preview →"}</button>
       <div class="mini__feats" id="feats">${(RT.shipped || []).map((f) => `<div>${esc(f)}</div>`).join("")}</div></div></div>`;
+    const cta = body(w).querySelector("#product-open-cta");
+    if (cta) {
+      cta.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (RT.biz.publicUrl) {
+          openUrlInNewTab(RT.biz.publicUrl);
+          return;
+        }
+        void openSitePreview(previewPath, `${RT.biz.name || RT.biz.slug || "Product"} preview`);
+      });
+    }
   };
 
   const originalRenderOutreach = renderOutreach;
@@ -360,14 +500,47 @@
     const credits = LIVE.creativeCredits && LIVE.creativeCredits.available
       ? `${Number(LIVE.creativeCredits.balance_credits || 0)} creative credits`
       : "creative credits unavailable";
+    const latestPost = latestActionablePost();
+    const latestConversation = latestInboundConversation();
     body(w).innerHTML = `
       <div class="lab">operator budget</div>
       <div class="big-wake" style="font-size:30px">$${RT.credits.toFixed(2)}</div>
       <div class="meta" style="margin:6px 0 11px">live Takyon data. This panel stays engine-shaped, but the channel controls are read-only until real per-channel budget rails exist.</div>
-      ${buildOutreachRow("Published posts", `${posts} recorded`, posts > 0 ? "live" : "idle")}
-      ${buildOutreachRow("Inbound", `${unresolved} unresolved`, unresolved > 0 ? "live" : "idle")}
-      ${buildOutreachRow("Creative credits", credits, LIVE.creativeCredits && LIVE.creativeCredits.available ? "live" : "idle")}
+      ${buildOutreachRow("Published posts", `${posts} recorded`, posts > 0 ? "live" : "idle", latestPost ? { type: "published-post", label: normalizeOpenableUrl(latestPost.url) ? "open" : "preview" } : null)}
+      ${buildOutreachRow("Inbound", `${unresolved} unresolved`, unresolved > 0 ? "live" : "idle", latestConversation ? { type: "inbound-thread", label: "open" } : null)}
+      ${buildOutreachRow("Creative credits", credits, LIVE.creativeCredits && LIVE.creativeCredits.available ? "live" : "idle", null)}
     `;
+    body(w).querySelectorAll("[data-action]").forEach((el) => {
+      const actionType = el.getAttribute("data-action") || "";
+      const run = () => {
+        if (actionType === "published-post" && latestPost) {
+          const postUrl = normalizeOpenableUrl(latestPost.url);
+          if (postUrl) {
+            openUrlInNewTab(postUrl);
+            return;
+          }
+          if (latestPost.artifact_path) {
+            void openDocument(latestPost.artifact_path, latestPost.title || "Published post");
+            return;
+          }
+          if (latestPost.conversation_file) {
+            void openDocument(latestPost.conversation_file, latestPost.title || "Conversation");
+          }
+          return;
+        }
+        if (actionType === "inbound-thread" && latestConversation && latestConversation.conversation_file) {
+          void openDocument(latestConversation.conversation_file, latestConversation.title || "Inbound conversation");
+          return;
+        }
+      };
+      el.addEventListener("click", run);
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          run();
+        }
+      });
+    });
   };
 
   const originalUpdateMenu = updateMenu;
