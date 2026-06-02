@@ -562,10 +562,12 @@ function cardHTML(t){
 /* ---------- product preview ---------- */
 function renderProduct(){
   const w=document.getElementById('w-product');if(!w)return;
-  body(w).innerHTML=`<div class="mini"><div class="mini__bar"><i></i><i></i><i></i><span>${RT.biz.slug}.com · test</span></div>
-    <div class="mini__page"><div class="mini__h">${esc(RT.biz.name)}</div>
+  body(w).innerHTML=`<div class="mini"><div class="mini__page">
+    <div class="lab">local preview</div>
+    <div class="mini__h">${esc(RT.biz.name)}</div>
+    <div class="meta" style="margin:6px 0 0">${esc(RT.biz.slug)}.com</div>
     <p class="mini__sub">${esc(RT.biz.idea)}.</p>
-    <span class="mini__cta">get early access →</span>
+    <button type="button" class="mini__cta" style="border:0;cursor:pointer">open local preview →</button>
     <div class="mini__feats" id="feats">${RT.shipped.map(f=>`<div>${esc(f)}</div>`).join('')}</div></div></div>`;
 }
 function shipFeature(f){

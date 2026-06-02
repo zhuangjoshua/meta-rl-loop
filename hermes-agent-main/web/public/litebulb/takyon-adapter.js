@@ -306,6 +306,60 @@
     return Math.max(0, Math.trunc(count));
   }
 
+  function prettyHost(url) {
+    return String(url || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  }
+
+  function channelLabel(source) {
+    const s = String(source || "").toLowerCase().replace(/^test-/, "");
+    if (!s) return "Post";
+    if (s === "x" || s.startsWith("x-") || s.includes("twitter")) return "X";
+    if (s.includes("reddit")) return "Reddit";
+    if (s.includes("hacker")) return "HN";
+    if (s.includes("linkedin")) return "LinkedIn";
+    if (s.includes("forum")) return "Forum";
+    if (s.includes("outreach")) return "Outreach";
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function publishedStateLabel(item) {
+    const status = String(item && item.status || "").trim().toLowerCase();
+    const mode = String(item && item.mode || "").trim().toLowerCase();
+    if (status === "published_local" || mode === "test" || String(item && item.artifact_path || "").trim()) {
+      return "locally published";
+    }
+    if (status === "published" || String(item && item.url || "").trim() || mode === "live") {
+      return "published";
+    }
+    return status ? status.replace(/_/g, " ") : "published";
+  }
+
+  function publishedPostEntries() {
+    const overview = LIVE.workspaceOverview || {};
+    const posts = Array.isArray(overview.posts) ? overview.posts : [];
+    const postEntries = posts.filter((post) => normalizeOpenableUrl(post && post.url) || (post && post.artifact_path));
+    if (postEntries.length) {
+      return postEntries.map((post) => ({
+        kind: "post",
+        title: String(post && post.title || channelLabel(post && post.source) || "Published post").trim(),
+        meta: `${channelLabel(post && post.source)} · ${publishedStateLabel(post)}`,
+        actionLabel: normalizeOpenableUrl(post && post.url) ? "open" : "preview",
+        payload: post,
+      }));
+    }
+    const outreach = overview.artifacts && overview.artifacts.outreach || {};
+    const items = Array.isArray(outreach.items) ? outreach.items : [];
+    return items
+      .filter((item) => String(item && item.path || "").trim())
+      .map((item) => ({
+        kind: "artifact",
+        title: compactPath(item && item.path || "") || "Published post",
+        meta: publishedStateLabel(item),
+        actionLabel: "preview",
+        payload: item,
+      }));
+  }
+
   function previewWindow(title, html) {
     const win = makeWin({
       id: "w-preview",
@@ -381,20 +435,6 @@
     }
   }
 
-  function latestActionablePost() {
-    const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts : [];
-    return posts.find((post) => normalizeOpenableUrl(post && post.url) || (post && post.artifact_path) || (post && post.conversation_file)) || null;
-  }
-
-  function latestInboundConversation() {
-    const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts : [];
-    return (
-      posts.find((post) => Number(post && post.unresolved_messages || 0) > 0 && post && post.conversation_file) ||
-      posts.find((post) => post && post.conversation_file) ||
-      null
-    );
-  }
-
   function renderPlanSummary(snapshot) {
     if (!snapshot || LIVE.planBusiness === snapshot.business_slug) return;
     const overview = snapshot.overview || {};
@@ -465,7 +505,7 @@
     const actionTag = clickable
       ? `<span class="chan-st ${state === "live" ? "live" : ""}" style="cursor:pointer">${esc(action.label || "open")}</span>`
       : `<span class="chan-st ${state === "live" ? "live" : ""}">${esc(state)}</span>`;
-    return `<div class="chan"${clickable ? ` data-action="${esc(action.type)}" tabindex="0" role="button" style="cursor:pointer"` : ""}>
+    return `<div class="chan"${clickable ? ` data-action="${esc(action.type)}" data-action-index="${Number(action.index || 0)}" tabindex="0" role="button" style="cursor:pointer"` : ""}>
       <div class="chan-top"><span class="chan-nm">${esc(label)}</span>${actionTag}</div>
       <div class="meta" style="margin-top:6px">${esc(meta)}</div>
     </div>`;
@@ -476,12 +516,25 @@
     if (!RT.live) return originalRenderProduct();
     const w = document.getElementById("w-product");
     if (!w || !RT.biz) return;
+    const overview = LIVE.workspaceOverview || {};
+    const product = overview.product || {};
+    const website = overview.artifacts && overview.artifacts.website || {};
     const previewPath = previewPathForLive();
-    body(w).innerHTML = `<div class="mini"><div class="mini__bar"><i></i><i></i><i></i><span>${esc(RT.biz.siteHost || `${RT.biz.slug}.com`)} · ${esc(RT.biz.mode || "test")}</span></div>
-      <div class="mini__page"><div class="mini__h">${esc(RT.biz.name || RT.biz.slug || "Litebulb")}</div>
-      <p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}${RT.biz.publicUrl ? ` ${esc("· live url available")}` : "."}</p>
-      <button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${RT.biz.publicUrl ? "open live site →" : "open local preview →"}</button>
-      <div class="mini__feats" id="feats">${(RT.shipped || []).map((f) => `<div>${esc(f)}</div>`).join("")}</div></div></div>`;
+    const live = String(product.publish_status || RT.biz.publishStatus || "").trim().toLowerCase() === "published" || !!RT.biz.publicUrl;
+    const hostLabel = live
+      ? prettyHost(RT.biz.publicUrl)
+      : String(website.path || product.source_path || "").trim()
+        ? compactPath(String(website.path || product.source_path || "").trim())
+        : "no site yet";
+    const publishTarget = prettyHost(website.publish_target || product.publish_target || "");
+    body(w).innerHTML = `<div class="mini"><div class="mini__page">
+      <div class="lab">${live ? "live product" : "local preview"}</div>
+      <div class="mini__h">${esc(RT.biz.name || RT.biz.slug || "Litebulb")}</div>
+      <div class="meta" style="margin:6px 0 0">${esc(hostLabel)}</div>
+      <p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p>
+      ${!live && publishTarget ? `<p class="meta" style="margin:0 0 12px">Publish target: ${esc(publishTarget)}${String(product.publish_status || "").trim().toLowerCase() === "published" ? "" : " · not live yet"}</p>` : ""}
+      <button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${live ? "open website →" : "open local preview →"}</button>
+      ${(RT.shipped || []).length ? `<div class="mini__feats" id="feats">${(RT.shipped || []).map((f) => `<div>${esc(f)}</div>`).join("")}</div>` : ""}</div></div>`;
     const cta = body(w).querySelector("#product-open-cta");
     if (cta) {
       cta.addEventListener("click", (event) => {
@@ -501,43 +554,44 @@
     if (!RT.live) return originalRenderOutreach();
     const w = document.getElementById("w-status");
     if (!w) return;
-    const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts.length : 0;
-    const unresolved = Number(LIVE.workspaceOverview && LIVE.workspaceOverview.metrics && LIVE.workspaceOverview.metrics.unresolved_inbound || 0);
+    const publishedPosts = publishedPostEntries();
     const creativeAvailable = !!(LIVE.creativeCredits && LIVE.creativeCredits.available);
     const creativeBalance = creativeAvailable ? wholeCredits(LIVE.creativeCredits.balance_credits) : null;
     const creativeReserved = creativeAvailable ? wholeCredits(LIVE.creativeCredits.reserved_credits) : null;
-    const latestPost = latestActionablePost();
-    const latestConversation = latestInboundConversation();
     body(w).innerHTML = `
       <div class="lab">paid outreach credits</div>
       <div class="big-wake" style="font-size:30px">${creativeBalance === null ? "—" : String(creativeBalance)}</div>
       <div class="meta" style="margin:6px 0 11px">${creativeBalance === null
         ? "Creative credits are unavailable for this business right now. Operator budget stays in the top rail."
         : `${creativeBalance} available${creativeReserved ? ` · ${creativeReserved} reserved` : ""}. Operator budget stays in the top rail.`}</div>
-      ${buildOutreachRow("Published posts", `${posts} recorded`, posts > 0 ? "live" : "idle", latestPost ? { type: "published-post", label: normalizeOpenableUrl(latestPost.url) ? "open" : "preview" } : null)}
-      ${buildOutreachRow("Inbound", `${unresolved} unresolved`, unresolved > 0 ? "live" : "idle", latestConversation ? { type: "inbound-thread", label: "open" } : null)}
-      ${buildOutreachRow("Reserved credits", creativeBalance === null ? "none reserved" : `${creativeReserved || 0} held for spendful actions`, creativeAvailable && (creativeReserved || 0) > 0 ? "live" : "idle", null)}
+      ${publishedPosts.length
+        ? publishedPosts.map((item, index) => buildOutreachRow(item.title, item.meta, "live", { type: "published-post", index, label: item.actionLabel })).join("")
+        : buildOutreachRow("Published posts", "No published posts yet", "idle", null)}
     `;
     body(w).querySelectorAll("[data-action]").forEach((el) => {
       const actionType = el.getAttribute("data-action") || "";
+      const actionIndex = Number(el.getAttribute("data-action-index") || 0);
       const run = () => {
-        if (actionType === "published-post" && latestPost) {
-          const postUrl = normalizeOpenableUrl(latestPost.url);
+        if (actionType === "published-post") {
+          const entry = publishedPosts[actionIndex];
+          const item = entry && entry.payload || null;
+          if (!item) return;
+          const postUrl = normalizeOpenableUrl(item.url);
           if (postUrl) {
             openUrlInNewTab(postUrl);
             return;
           }
-          if (latestPost.artifact_path) {
-            void openDocument(latestPost.artifact_path, latestPost.title || "Published post");
+          if (item.artifact_path) {
+            void openDocument(item.artifact_path, item.title || entry.title || "Published post");
             return;
           }
-          if (latestPost.conversation_file) {
-            void openDocument(latestPost.conversation_file, latestPost.title || "Conversation");
+          if (item.path) {
+            void openDocument(item.path, entry.title || "Published post");
+            return;
           }
-          return;
-        }
-        if (actionType === "inbound-thread" && latestConversation && latestConversation.conversation_file) {
-          void openDocument(latestConversation.conversation_file, latestConversation.title || "Inbound conversation");
+          if (item.conversation_file) {
+            void openDocument(item.conversation_file, item.title || entry.title || "Conversation");
+          }
           return;
         }
       };
