@@ -113,6 +113,7 @@ app = FastAPI(title="Takyon Agent", version=__version__)
 _SESSION_TOKEN_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN"
 _SESSION_TOKEN_FILE_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN_FILE"
 _SESSION_TOKEN_FILE_NAME = "dashboard_session_token"
+_TAKYON_DIRECT_FILE_READ_BYTES = 512 * 1024
 
 
 def _valid_session_token(value: str) -> bool:
@@ -1895,6 +1896,87 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "status": principal.status,
             "user_id": str(principal.user_id),
         }
+
+
+@app.get("/api/takyon/operator/businesses")
+async def get_takyon_operator_businesses(request: Request) -> dict[str, Any]:
+    """Read-only operator business list for the dashboard sidebar.
+
+    This stays deliberately separate from session/workspace scope hydration so
+    a failed business open cannot erase the global portfolio list.
+    """
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        return {
+            "available": False,
+            "businesses": [],
+            "reason": "operator_principal_unavailable",
+        }
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        data = store.read(scope="global", query="list_businesses", limit=200)
+        businesses = data.get("businesses") if isinstance(data, dict) else []
+        items = [item for item in businesses if isinstance(item, dict)] if isinstance(businesses, list) else []
+        return {
+            "available": True,
+            "businesses": items,
+            "owned_business_count": len(items),
+            "user_id": str(principal.user_id),
+        }
+    except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
+        _log.warning("dashboard operator businesses read failed: %s", exc)
+        return {
+            "available": False,
+            "businesses": [],
+            "owned_business_count": len(principal.business_slugs),
+            "reason": "read_failed",
+            "user_id": str(principal.user_id),
+        }
+
+
+@app.get("/api/takyon/businesses/{slug}/file")
+async def get_takyon_business_file(request: Request, slug: str, path: str = "") -> dict[str, Any]:
+    """Direct authenticated business file read for the dashboard viewer.
+
+    Uses the operator principal + canonical Takyon store directly instead of
+    routing through session-scoped chat RPC state.
+    """
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    rel_path = str(path or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        file_path = store._resolve_business_file(business, rel_path)
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f"file not found: {rel_path}")
+        size = file_path.stat().st_size
+        with file_path.open("rb") as fh:
+            raw = fh.read(min(size, _TAKYON_DIRECT_FILE_READ_BYTES))
+        rel = str(file_path.relative_to(store._business_root(business)))
+        return {
+            "business_slug": business,
+            "path": rel,
+            "size": size,
+            "content": raw.decode("utf-8", errors="replace"),
+            "truncated": size > _TAKYON_DIRECT_FILE_READ_BYTES,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - viewer should fail honestly
+        _log.warning("dashboard business file read failed for %s:%s: %s", business, rel_path, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/takyon/businesses/{slug}/creative-credits")

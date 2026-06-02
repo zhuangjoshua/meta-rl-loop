@@ -220,6 +220,96 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["owned_business_count"] == 2
 
 
+def test_operator_businesses_endpoint_returns_owned_businesses(tmp_path, monkeypatch, pg_store_dsn):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha", "beta"),
+    )
+
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
+    store.commit(
+        scope="business:alpha",
+        operations=[{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        idempotency_key="operator-businesses-alpha",
+        reason="test",
+        actor="test",
+    )
+    store.commit(
+        scope="business:beta",
+        operations=[{"action": "business.upsert", "business": "beta", "name": "Beta"}],
+        idempotency_key="operator-businesses-beta",
+        reason="test",
+        actor="test",
+    )
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/operator/businesses")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert [item["slug"] for item in body["businesses"]] == ["beta", "alpha"]
+    assert body["owned_business_count"] == 2
+
+
+def test_business_file_endpoint_reads_owned_file_directly(tmp_path, monkeypatch, pg_store_dsn):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
+    store.commit(
+        scope="business:alpha",
+        operations=[{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        idempotency_key="business-file-alpha",
+        reason="test",
+        actor="test",
+    )
+    business_file = store._business_root("alpha") / "distribution" / "local-published" / "x" / "note.md"
+    business_file.parent.mkdir(parents=True, exist_ok=True)
+    business_file.write_text("hello from file endpoint", encoding="utf-8")
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get(
+        "/api/takyon/businesses/alpha/file",
+        params={"path": "distribution/local-published/x/note.md"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["business_slug"] == "alpha"
+    assert body["path"] == "distribution/local-published/x/note.md"
+    assert body["content"] == "hello from file endpoint"
+    assert body["truncated"] is False
+
+
 def test_auth0_public_path_allows_machine_facing_pg_routes():
     import takyon_cli.web_server as web_server
 

@@ -26,8 +26,10 @@ import { useSearchParams } from "react-router-dom";
 import { Markdown } from "@/components/Markdown";
 import {
   api,
+  type TakyonBusinessFileReadResponse,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonOperatorAccountResponse,
+  type TakyonOperatorBusinessSummary,
 } from "@/lib/api";
 import {
   GatewayClient,
@@ -86,15 +88,7 @@ interface SessionHistoryResponse {
   running?: boolean;
 }
 
-interface BusinessSummary {
-  slug?: string;
-  name?: string;
-  goal?: string;
-  mode?: string;
-  status?: string;
-  state?: string;
-  reason?: string;
-}
+type BusinessSummary = TakyonOperatorBusinessSummary;
 
 interface BusinessOverviewProduct {
   status?: string;
@@ -389,12 +383,7 @@ interface BusinessMediaResponse extends ScopeState {
   url?: string;
 }
 
-interface BusinessFileReadResponse extends ScopeState {
-  path?: string;
-  size?: number;
-  content?: string;
-  truncated?: boolean;
-}
+type BusinessFileReadResponse = TakyonBusinessFileReadResponse;
 
 interface BusinessSitePreviewResponse extends ScopeState {
   path?: string;
@@ -1153,6 +1142,10 @@ export default function ChatPage() {
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
     useState<TakyonOperatorAccountResponse | null>(null);
+  const [operatorBusinesses, setOperatorBusinesses] = useState<BusinessSummary[]>([]);
+  const [operatorBusinessesAvailable, setOperatorBusinessesAvailable] = useState(false);
+  const [operatorBusinessesLoading, setOperatorBusinessesLoading] = useState(true);
+  const [operatorBusinessesReason, setOperatorBusinessesReason] = useState<string | null>(null);
   const [creativeCredits, setCreativeCredits] =
     useState<TakyonBusinessCreativeCreditsResponse | null>(null);
   const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
@@ -1197,6 +1190,11 @@ export default function ChatPage() {
     [scopeState.business],
   );
   const businessRequestPending = !!requestedBusinessSlug && requestedBusinessSlug !== activeBusinessSlug;
+  const visibleBusinesses = useMemo(() => {
+    if (operatorBusinesses.length > 0) return operatorBusinesses;
+    if (operatorBusinessesAvailable) return operatorBusinesses;
+    return scopeState.businesses;
+  }, [operatorBusinesses, operatorBusinessesAvailable, scopeState.businesses]);
   const displayScope = useMemo(() => {
     if (!activeBusinessSlug) return scopeState;
     const snapshot =
@@ -1284,6 +1282,32 @@ export default function ChatPage() {
     }
   }, []);
 
+  const refreshOperatorBusinesses = useCallback(async () => {
+    setOperatorBusinessesLoading(true);
+    try {
+      const res = await api.getTakyonOperatorBusinesses();
+      const items = Array.isArray(res.businesses)
+        ? res.businesses.filter((item): item is BusinessSummary => !!item && typeof item === "object")
+        : [];
+      setOperatorBusinessesAvailable(Boolean(res.available));
+      setOperatorBusinessesReason(res.available ? null : res.reason || "read_failed");
+      if (res.available) {
+        setOperatorBusinesses(items);
+        setScopeState((prev) =>
+          normalizeScopeState({
+            ...prev,
+            businesses: items,
+          }),
+        );
+      }
+    } catch {
+      setOperatorBusinessesAvailable(false);
+      setOperatorBusinessesReason("request_failed");
+    } finally {
+      setOperatorBusinessesLoading(false);
+    }
+  }, []);
+
   const refreshCreativeCredits = useCallback(async (business: string) => {
     if (!business) {
       setCreativeCredits(null);
@@ -1328,6 +1352,10 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshOperatorAccount();
   }, [refreshOperatorAccount]);
+
+  useEffect(() => {
+    void refreshOperatorBusinesses();
+  }, [refreshOperatorBusinesses]);
 
   useEffect(() => {
     void refreshCreativeCredits(activeBusinessSlug || "");
@@ -1406,6 +1434,15 @@ export default function ChatPage() {
           },
           10_000,
         );
+        const dashboardBusinesses = Array.isArray(state.businesses)
+          ? state.businesses.filter((item): item is BusinessSummary => !!item && typeof item === "object")
+          : [];
+        if (dashboardBusinesses.length > 0) {
+          setOperatorBusinesses(dashboardBusinesses);
+          setOperatorBusinessesAvailable(true);
+          setOperatorBusinessesReason(null);
+          setOperatorBusinessesLoading(false);
+        }
         const nextScope = normalizeDashboardState(state);
         const snapshot = normalizeWorkspaceSnapshot(state);
         setScopeState(nextScope);
@@ -2173,7 +2210,7 @@ export default function ChatPage() {
     async (business: string) => {
       if (!sessionId) return;
       if (business) {
-        const optimistic = optimisticBusinessSummary(scopeState.businesses, business);
+        const optimistic = optimisticBusinessSummary(visibleBusinesses, business);
         setPendingBusinessSlug(business);
         setScopeState((prev) =>
           normalizeScopeState({
@@ -2225,8 +2262,8 @@ export default function ChatPage() {
       appendSystem,
       loadDashboardState,
       recoverMissingSession,
-      scopeState.businesses,
       sessionId,
+      visibleBusinesses,
     ],
   );
 
@@ -2357,6 +2394,15 @@ export default function ChatPage() {
       );
       const createdBusiness = normalizeBusinessLookup(res.business_slug || slug);
       const snapshot = normalizeWorkspaceSnapshot(res);
+      const createdBusinesses = Array.isArray(res.businesses)
+        ? res.businesses.filter((item): item is BusinessSummary => !!item && typeof item === "object")
+        : [];
+      if (createdBusinesses.length > 0) {
+        setOperatorBusinesses(createdBusinesses);
+        setOperatorBusinessesAvailable(true);
+        setOperatorBusinessesReason(null);
+        setOperatorBusinessesLoading(false);
+      }
       if (snapshot) {
         setWorkspaceSnapshot(snapshot);
         setHistoricalOutputs({
@@ -2370,7 +2416,7 @@ export default function ChatPage() {
           business: createdBusiness,
           current: res.current || snapshot?.current || {},
           overview: res.overview || snapshot?.overview,
-          businesses: Array.isArray(res.businesses) ? res.businesses : scopeState.businesses,
+          businesses: Array.isArray(res.businesses) ? res.businesses : visibleBusinesses,
         }),
       );
       setPendingBusinessSlug(createdBusiness || null);
@@ -2400,16 +2446,18 @@ export default function ChatPage() {
         );
       }
       void refreshOperatorAccount();
+      void refreshOperatorBusinesses();
       void refreshBusinessSurfaces(createdBusiness);
     },
     [
       gw,
       refreshBusinessSurfaces,
+      refreshOperatorBusinesses,
       refreshOperatorAccount,
-      scopeState.businesses,
       searchParams,
       sessionId,
       setSearchParams,
+      visibleBusinesses,
     ],
   );
 
@@ -2455,17 +2503,13 @@ export default function ChatPage() {
 
   const readBusinessFile = useCallback(
     async (path: string, business?: string): Promise<BusinessFileReadResponse> => {
-      if (!sessionId) throw new Error("Chat is still connecting.");
       const targetBusiness = normalizeBusinessLookup(
         business || scopeBusinessRef.current || pendingBusinessSlugRef.current || "",
       );
-      return await gw.request<BusinessFileReadResponse>(
-        "takyon.file.read",
-        { session_id: sessionId, business_slug: targetBusiness, path },
-        20_000,
-      );
+      if (!targetBusiness) throw new Error("Business is still connecting.");
+      return await api.getTakyonBusinessFile(targetBusiness, path);
     },
-    [gw, sessionId],
+    [],
   );
 
   const resolveBusinessSitePreview = useCallback(
@@ -2497,7 +2541,13 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, makeMessage("user", text)]);
 
     try {
-      const requestedBusiness = naturalScopeChange(text, scopeState);
+      const requestedBusiness = naturalScopeChange(
+        text,
+        normalizeScopeState({
+          ...scopeState,
+          businesses: visibleBusinesses,
+        }),
+      );
       if (requestedBusiness !== undefined) {
         await setTakyonScope(requestedBusiness);
       } else if (text.startsWith("/")) {
@@ -2613,8 +2663,11 @@ export default function ChatPage() {
 
       <div className={cn("td-app min-h-0 flex-1", !inBusiness && "td-app--global")}>
         <BizSidebar
+          businesses={visibleBusinesses}
+          businessesAvailable={operatorBusinessesAvailable || visibleBusinesses.length > 0}
+          businessesReason={operatorBusinessesReason}
           canInteract={canInteract}
-          loadingBusinesses={businessRequestPending}
+          loadingBusinesses={operatorBusinessesLoading}
           onCreate={() => {
             void setTakyonScope("");
           }}
@@ -2826,6 +2879,9 @@ function BusinessScopeSyncState({
 }
 
 function BizSidebar({
+  businesses,
+  businessesAvailable,
+  businessesReason,
   canInteract,
   loadingBusinesses,
   onCreate,
@@ -2834,6 +2890,9 @@ function BizSidebar({
   scope,
   state,
 }: {
+  businesses: BusinessSummary[];
+  businessesAvailable: boolean;
+  businessesReason: string | null;
   canInteract: boolean;
   loadingBusinesses: boolean;
   onCreate: () => void;
@@ -2842,7 +2901,6 @@ function BizSidebar({
   scope: ScopeState;
   state: ConnectionState;
 }) {
-  const businesses = scope.businesses;
   const ready = canUseConnection(state) && canInteract;
   const spendableCents = operatorSpendableCents(operatorAccount);
   const reservedCents = operatorAccount?.available
@@ -2861,6 +2919,15 @@ function BizSidebar({
         : reservedCents > 0
           ? `${formatBudgetCents(reservedCents)} reserved`
           : "spendful turns enabled";
+  const emptyBusinessesMessage = loadingBusinesses
+    ? "Loading businesses…"
+    : !businessesAvailable
+      ? ownedBusinessCount > 0
+        ? "Business list failed to sync."
+        : businessesReason === "operator_principal_unavailable"
+          ? "Sign in to load businesses."
+          : "Business list unavailable."
+      : "No businesses yet.";
   return (
     <aside className="td-side">
       <div className="td-brand">
@@ -2878,7 +2945,7 @@ function BizSidebar({
         <div className="td-biz-list">
           {businesses.length === 0 ? (
             <p className="td-meta" style={{ padding: "4px 8px" }}>
-              {loadingBusinesses ? "Loading businesses…" : "No businesses yet."}
+              {emptyBusinessesMessage}
             </p>
           ) : (
             businesses.map((item) => {

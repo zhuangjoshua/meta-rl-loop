@@ -51,6 +51,29 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
   return res.json();
 }
 
+export async function fetchJSONWithTimeout<T>(
+  url: string,
+  timeoutMs: number,
+  init?: RequestInit,
+  errorLabel?: string,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchJSON<T>(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`request timed out: ${errorLabel || url}`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function getSessionToken(): Promise<string> {
   if (_sessionToken) return _sessionToken;
   const injected = window.__TAKYON_SESSION_TOKEN__;
@@ -84,9 +107,23 @@ export const api = {
   },
   getTakyonOperatorAccount: () =>
     fetchJSON<TakyonOperatorAccountResponse>("/api/takyon/operator/account"),
+  getTakyonOperatorBusinesses: () =>
+    fetchJSONWithTimeout<TakyonOperatorBusinessesResponse>(
+      "/api/takyon/operator/businesses",
+      15_000,
+      undefined,
+      "operator businesses",
+    ),
   getTakyonBusinessCreativeCredits: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits`,
+    ),
+  getTakyonBusinessFile: (slug: string, path: string) =>
+    fetchJSONWithTimeout<TakyonBusinessFileReadResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`,
+      15_000,
+      undefined,
+      "takyon.file.read",
     ),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
@@ -431,12 +468,38 @@ export interface TakyonOperatorAccountResponse {
   reason?: string;
 }
 
+export interface TakyonOperatorBusinessSummary {
+  slug?: string;
+  name?: string;
+  goal?: string;
+  mode?: string;
+  status?: string;
+  state?: string;
+  reason?: string;
+}
+
+export interface TakyonOperatorBusinessesResponse {
+  available: boolean;
+  businesses: TakyonOperatorBusinessSummary[];
+  owned_business_count?: number;
+  reason?: string;
+  user_id?: string;
+}
+
 export interface TakyonBusinessCreativeCreditsResponse {
   available: boolean;
   business_slug: string;
   balance_credits?: number;
   reserved_credits?: number;
   reason?: string;
+}
+
+export interface TakyonBusinessFileReadResponse {
+  business_slug: string;
+  path?: string;
+  size?: number;
+  content?: string;
+  truncated?: boolean;
 }
 
 export interface SessionInfo {
