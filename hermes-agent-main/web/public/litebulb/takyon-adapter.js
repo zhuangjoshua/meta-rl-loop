@@ -954,21 +954,25 @@
     const overview = LIVE.workspaceOverview || {};
     const product = overview.product || {};
     const website = overview.artifacts && overview.artifacts.website || {};
-    const previewPath = previewPathForLive();
     const live = String(product.publish_status || RT.biz.publishStatus || "").trim().toLowerCase() === "published" || !!RT.biz.publicUrl;
+    const hasLocalPreview = !!String(website.path || "").trim();
+    const previewPath = hasLocalPreview ? previewPathForLive() : "";
+    const productLabel = live ? "live product" : hasLocalPreview ? "local preview" : "product in progress";
     const hostLabel = live
       ? prettyHost(RT.biz.publicUrl)
-      : String(website.path || product.source_path || "").trim()
-        ? compactPath(String(website.path || product.source_path || "").trim())
+      : hasLocalPreview
+        ? compactPath(String(website.path || "").trim())
         : "no site yet";
     const publishTarget = prettyHost(website.publish_target || product.publish_target || "");
     body(w).innerHTML = `<div class="mini"><div class="mini__page">
-      <div class="lab">${live ? "live product" : "local preview"}</div>
+      <div class="lab">${productLabel}</div>
       <div class="mini__h">${esc(RT.biz.name || RT.biz.slug || "Litebulb")}</div>
       <div class="meta" style="margin:6px 0 0">${esc(hostLabel)}</div>
       <p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p>
       ${!live && publishTarget ? `<p class="meta" style="margin:0 0 12px">Publish target: ${esc(publishTarget)}${String(product.publish_status || "").trim().toLowerCase() === "published" ? "" : " · not live yet"}</p>` : ""}
-      <button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${live ? "open website →" : "open local preview →"}</button>
+      ${live || hasLocalPreview
+        ? `<button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${live ? "open website →" : "open local preview →"}</button>`
+        : `<div class="meta" style="margin:0 0 12px">Preview appears after the site exists.</div>`}
       ${(RT.shipped || []).length ? `<div class="mini__feats" id="feats">${(RT.shipped || []).map((f) => `<div>${esc(f)}</div>`).join("")}</div>` : ""}</div></div>`;
     const cta = body(w).querySelector("#product-open-cta");
     if (cta) {
