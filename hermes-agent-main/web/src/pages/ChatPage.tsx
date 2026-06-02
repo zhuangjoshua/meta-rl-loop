@@ -1193,6 +1193,7 @@ export default function ChatPage() {
       : null,
   );
   const [rightOpen, setRightOpen] = useState(false);
+  const [walletOpen, setWalletOpen] = useState(false);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1327,7 +1328,7 @@ export default function ChatPage() {
     const dollars = Number.parseFloat(operatorTopupAmount);
     const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
     if (amountCents <= 0) {
-      setOperatorBillingError("Enter a valid top-up amount.");
+      setOperatorBillingError("Enter a valid amount.");
       return;
     }
     setOperatorBillingBusy("topup");
@@ -1338,11 +1339,11 @@ export default function ChatPage() {
         currentDashboardReturnPath(),
       );
       if (!res.checkout_url) {
-        throw new Error("Top-up checkout URL unavailable.");
+        throw new Error("Funding checkout unavailable.");
       }
       window.location.assign(res.checkout_url);
     } catch (err) {
-      setOperatorBillingError(operatorActionErrorMessage(err, "Top-up failed."));
+      setOperatorBillingError(operatorActionErrorMessage(err, "Could not add funds."));
     } finally {
       setOperatorBillingBusy(null);
     }
@@ -2933,19 +2934,9 @@ export default function ChatPage() {
           businessesReason={operatorBusinessesReason}
           canInteract={canInteract}
           loadingBusinesses={operatorBusinessesLoading}
-          operatorBillingBusy={operatorBillingBusy}
-          operatorBillingError={operatorBillingError}
-          operatorTopupAmount={operatorTopupAmount}
           onCreate={() => {
             void setTakyonScope("");
           }}
-          onOperatorPayoutConnect={() => {
-            void startOperatorPayoutConnect();
-          }}
-          onOperatorTopup={() => {
-            void submitOperatorTopup();
-          }}
-          onOperatorTopupAmountChange={setOperatorTopupAmount}
           operatorAccount={operatorAccount}
           onSelect={setTakyonScope}
           scope={displayScope}
@@ -3002,6 +2993,14 @@ export default function ChatPage() {
               </button>
             )}
             <button
+              aria-label="Open wallet"
+              className="td-pill td-ghost"
+              onClick={() => setWalletOpen(true)}
+              type="button"
+            >
+              Wallet
+            </button>
+            <button
               aria-label="Reconnect"
               className="td-pill td-ghost"
               onClick={reconnect}
@@ -3011,26 +3010,10 @@ export default function ChatPage() {
             </button>
           </div>
 
-          <MobileOperatorBillingCard
-            operatorBillingBusy={operatorBillingBusy}
-            operatorBillingError={operatorBillingError}
-            operatorTopupAmount={operatorTopupAmount}
-            onOperatorPayoutConnect={() => {
-              void startOperatorPayoutConnect();
-            }}
-            onOperatorTopup={() => {
-              void submitOperatorTopup();
-            }}
-            onOperatorTopupAmountChange={setOperatorTopupAmount}
-            operatorAccount={operatorAccount}
-          />
-
           {inBusiness ? (
             <CompanyWorkspace
-              creativeCredits={creativeCredits}
               businessSlug={activeBusinessSlug}
               deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
-              onBuyCreativeCredits={buyCreativeCredits}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -3122,6 +3105,26 @@ export default function ChatPage() {
             wakeHealth={displayScope.overview?.wake_health}
           />
         )}
+
+        <WalletPanel
+          open={walletOpen}
+          onClose={() => setWalletOpen(false)}
+          businessSlug={activeBusinessSlug}
+          creativeCredits={creativeCredits}
+          operatorAccount={operatorAccount}
+          budget={displayScope.overview?.budget}
+          onBuyCreativeCredits={buyCreativeCredits}
+          operatorBillingBusy={operatorBillingBusy}
+          operatorBillingError={operatorBillingError}
+          operatorTopupAmount={operatorTopupAmount}
+          onOperatorTopup={() => {
+            void submitOperatorTopup();
+          }}
+          onOperatorPayoutConnect={() => {
+            void startOperatorPayoutConnect();
+          }}
+          onOperatorTopupAmountChange={setOperatorTopupAmount}
+        />
       </div>
 
       <PluginSlot name="chat:bottom" />
@@ -3193,7 +3196,7 @@ function OperatorBillingActions({
   return (
     <div className="td-operator-actions">
       <label className="td-mini-field">
-        <span className="td-eyebrow">Top up</span>
+        <span className="td-eyebrow">Add funds</span>
         <div className="td-mini-row">
           <input
             className="td-mini-input"
@@ -3210,7 +3213,7 @@ function OperatorBillingActions({
             onClick={onOperatorTopup}
             type="button"
           >
-            {operatorBillingBusy === "topup" ? "Opening…" : "Top up"}
+            {operatorBillingBusy === "topup" ? "Opening…" : "Add funds"}
           </button>
         </div>
       </label>
@@ -3229,58 +3232,190 @@ function OperatorBillingActions({
   );
 }
 
-function MobileOperatorBillingCard({
+function microUsdToDollars(value?: number): string {
+  const micro = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return BUDGET_FORMATTER.format(Math.max(0, micro) / 1_000_000);
+}
+
+function WalletPanel({
+  open,
+  onClose,
+  businessSlug,
+  creativeCredits,
+  operatorAccount,
+  budget,
+  onBuyCreativeCredits,
   operatorBillingBusy,
   operatorBillingError,
   operatorTopupAmount,
-  onOperatorPayoutConnect,
   onOperatorTopup,
+  onOperatorPayoutConnect,
   onOperatorTopupAmountChange,
-  operatorAccount,
 }: {
+  open: boolean;
+  onClose: () => void;
+  businessSlug: string;
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
+  operatorAccount: TakyonOperatorAccountResponse | null;
+  budget?: BusinessOverviewBudget;
+  onBuyCreativeCredits: (business: string) => Promise<void>;
   operatorBillingBusy: "topup" | "connect" | null;
   operatorBillingError: string | null;
   operatorTopupAmount: string;
-  onOperatorPayoutConnect: () => void;
   onOperatorTopup: () => void;
+  onOperatorPayoutConnect: () => void;
   onOperatorTopupAmountChange: (value: string) => void;
-  operatorAccount: TakyonOperatorAccountResponse | null;
 }) {
-  const spendableCents = operatorSpendableCents(operatorAccount);
-  const payoutStatus = operatorAccount?.available
-    ? String(operatorAccount.stripe_connect_status || "none")
-    : "none";
+  const [buyBusy, setBuyBusy] = useState(false);
+  const [buyError, setBuyError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setBuyBusy(false);
+      setBuyError(null);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const creditBalance =
+    creativeCredits?.available && typeof creativeCredits.balance_credits === "number"
+      ? Math.max(0, Math.trunc(creativeCredits.balance_credits))
+      : null;
+  const creditReserved =
+    creativeCredits?.available && typeof creativeCredits.reserved_credits === "number"
+      ? Math.max(0, Math.trunc(creativeCredits.reserved_credits))
+      : null;
+  const connectStatus = operatorAccount?.available
+    ? String(operatorAccount.stripe_connect_status || "none").toUpperCase()
+    : "—";
+
+  const handleBuy = () => {
+    if (!businessSlug) return;
+    setBuyBusy(true);
+    setBuyError(null);
+    void onBuyCreativeCredits(businessSlug)
+      .catch((err) => {
+        setBuyError(operatorActionErrorMessage(err, "Credit checkout failed."));
+      })
+      .finally(() => {
+        setBuyBusy(false);
+      });
+  };
+
   return (
-    <section className="td-card td-operator-mobile" aria-label="Operator billing">
-      <div className="td-operator-mobile-head">
-        <div>
-          <p className="td-eyebrow">Operator budget</p>
-          <div className="td-defer">
-            <span className="td-dash">
-              {spendableCents === null ? "—" : formatBudgetCents(spendableCents)}
-            </span>
-          </div>
-        </div>
-        <div className="td-operator-mobile-stats">
-          <span>
-            Payouts{" "}
-            {operatorAccount?.available
-              ? formatBudgetCents(operatorAccount.owed_balance_cents)
-              : "—"}
-          </span>
-          <span>Connect {operatorAccount?.available ? payoutStatus : "—"}</span>
-        </div>
-      </div>
-      <OperatorBillingActions
-        operatorBillingBusy={operatorBillingBusy}
-        operatorBillingError={operatorBillingError}
-        operatorTopupAmount={operatorTopupAmount}
-        onOperatorPayoutConnect={onOperatorPayoutConnect}
-        onOperatorTopup={onOperatorTopup}
-        onOperatorTopupAmountChange={onOperatorTopupAmountChange}
-        operatorAccount={operatorAccount}
+    <>
+      <button
+        aria-label="Close wallet"
+        className="fixed inset-0 z-[65] bg-[#1a1916]/35 backdrop-blur-sm"
+        onClick={onClose}
+        type="button"
       />
-    </section>
+      <aside
+        aria-label="Wallet"
+        className="td-wallet fixed inset-y-0 right-0 z-[70] flex w-[min(94vw,400px)] flex-col"
+      >
+        <header className="td-wallet-head">
+          <span className="td-t">Wallet</span>
+          <button
+            aria-label="Close wallet"
+            className="td-wallet-x"
+            onClick={onClose}
+            type="button"
+          >
+            ×
+          </button>
+        </header>
+        <div className="td-wallet-body">
+          <section className="td-wallet-sec">
+            <p className="td-eyebrow">Creative credits</p>
+            <div className="td-wallet-rows">
+              <div className="td-wallet-row">
+                <span>Balance</span>
+                <span className="td-wallet-v">{creditBalance === null ? "—" : creditBalance}</span>
+              </div>
+              <div className="td-wallet-row">
+                <span>Reserved</span>
+                <span className="td-wallet-v">{creditReserved === null ? "—" : creditReserved}</span>
+              </div>
+            </div>
+            {businessSlug ? (
+              <>
+                <button
+                  className="td-mini-button"
+                  disabled={buyBusy}
+                  onClick={handleBuy}
+                  type="button"
+                >
+                  {buyBusy ? "Opening…" : "Buy credits"}
+                </button>
+                {buyError ? <p className="td-mini-error">{buyError}</p> : null}
+              </>
+            ) : (
+              <p className="td-wallet-note">Select a business to manage creative credits.</p>
+            )}
+          </section>
+
+          <section className="td-wallet-sec">
+            <p className="td-eyebrow">Payouts</p>
+            <div className="td-wallet-rows">
+              <div className="td-wallet-row">
+                <span>Owed</span>
+                <span className="td-wallet-v">
+                  {operatorAccount?.available
+                    ? formatBudgetCents(operatorAccount.owed_balance_cents)
+                    : "—"}
+                </span>
+              </div>
+              <div className="td-wallet-row">
+                <span>Connect status</span>
+                <span className="td-wallet-v">{connectStatus}</span>
+              </div>
+            </div>
+            <OperatorBillingActions
+              operatorBillingBusy={operatorBillingBusy}
+              operatorBillingError={operatorBillingError}
+              operatorTopupAmount={operatorTopupAmount}
+              onOperatorPayoutConnect={onOperatorPayoutConnect}
+              onOperatorTopup={onOperatorTopup}
+              onOperatorTopupAmountChange={onOperatorTopupAmountChange}
+              operatorAccount={operatorAccount}
+            />
+          </section>
+
+          <section className="td-wallet-sec">
+            <p className="td-eyebrow">App subsidy</p>
+            {businessSlug ? (
+              <div className="td-wallet-rows">
+                <div className="td-wallet-row">
+                  <span>Status</span>
+                  <span className="td-wallet-v td-wallet-v--text">
+                    {budget?.app_status || "—"}
+                  </span>
+                </div>
+                <div className="td-wallet-row">
+                  <span>Cap</span>
+                  <span className="td-wallet-v">{microUsdToDollars(budget?.app_limit_microusd)}</span>
+                </div>
+                <div className="td-wallet-row">
+                  <span>Spent</span>
+                  <span className="td-wallet-v">{microUsdToDollars(budget?.app_spent_microusd)}</span>
+                </div>
+                <div className="td-wallet-row">
+                  <span>Remaining</span>
+                  <span className="td-wallet-v">
+                    {microUsdToDollars(budget?.app_remaining_microusd)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="td-wallet-note">Select a business to view its subsidy.</p>
+            )}
+            <p className="td-wallet-note">Customer usage funding.</p>
+          </section>
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -3290,13 +3425,7 @@ function BizSidebar({
   businessesReason,
   canInteract,
   loadingBusinesses,
-  operatorBillingBusy,
-  operatorBillingError,
-  operatorTopupAmount,
   onCreate,
-  onOperatorPayoutConnect,
-  onOperatorTopup,
-  onOperatorTopupAmountChange,
   operatorAccount,
   onSelect,
   scope,
@@ -3307,36 +3436,17 @@ function BizSidebar({
   businessesReason: string | null;
   canInteract: boolean;
   loadingBusinesses: boolean;
-  operatorBillingBusy: "topup" | "connect" | null;
-  operatorBillingError: string | null;
-  operatorTopupAmount: string;
   onCreate: () => void;
-  onOperatorPayoutConnect: () => void;
-  onOperatorTopup: () => void;
-  onOperatorTopupAmountChange: (value: string) => void;
   operatorAccount: TakyonOperatorAccountResponse | null;
   onSelect: (business: string) => Promise<void>;
   scope: ScopeState;
   state: ConnectionState;
 }) {
   const ready = canUseConnection(state) && canInteract;
-  const spendableCents = operatorSpendableCents(operatorAccount);
-  const reservedCents = operatorAccount?.available
-    ? Math.max(0, Number(operatorAccount.reserved_cents ?? 0))
-    : 0;
   const ownedBusinessCount =
     typeof operatorAccount?.owned_business_count === "number"
       ? operatorAccount.owned_business_count
       : businesses.length;
-  const budgetStatus = !operatorAccount
-    ? "loading budget state"
-    : !operatorAccount.available
-      ? "per-user budget unavailable"
-      : spendableCents === 0
-        ? "spendful turns blocked at 0"
-        : reservedCents > 0
-          ? `${formatBudgetCents(reservedCents)} reserved`
-          : "spendful turns enabled";
   const emptyBusinessesMessage = loadingBusinesses
     ? "Loading businesses…"
     : !businessesAvailable
@@ -3346,9 +3456,6 @@ function BizSidebar({
           ? "Sign in to load businesses."
           : "Business list unavailable."
       : "No businesses yet.";
-  const payoutStatus = operatorAccount?.available
-    ? String(operatorAccount.stripe_connect_status || "none")
-    : "none";
   return (
     <aside className="td-side">
       <div className="td-brand">
@@ -3405,67 +3512,6 @@ function BizSidebar({
       </div>
 
       <div className="td-side-foot">
-        <div className="td-card td-portfolio">
-          <p className="td-eyebrow">Operator budget</p>
-          <div className="td-defer">
-            <span className="td-dash">
-              {spendableCents === null ? "—" : formatBudgetCents(spendableCents)}
-            </span>
-          </div>
-          <div className="mt-3 grid gap-1 text-[11px] text-[var(--td-muted)]">
-            <div className="flex items-center justify-between gap-3">
-              <span>Included remaining</span>
-              <span>
-                {operatorAccount?.available
-                  ? formatBudgetCents(operatorAccount.allowance_remaining_cents)
-                  : "—"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Top-up balance</span>
-              <span>
-                {operatorAccount?.available
-                  ? formatBudgetCents(operatorAccount.topup_balance_cents)
-                  : "—"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Reserved</span>
-              <span>
-                {operatorAccount?.available
-                  ? formatBudgetCents(operatorAccount.reserved_cents)
-                  : "—"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Customer payouts</span>
-              <span>
-                {operatorAccount?.available
-                  ? formatBudgetCents(operatorAccount.owed_balance_cents)
-                  : "—"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Connect status</span>
-              <span className="uppercase tracking-[0.12em]">
-                {operatorAccount?.available ? payoutStatus : "—"}
-              </span>
-            </div>
-          </div>
-          <OperatorBillingActions
-            operatorBillingBusy={operatorBillingBusy}
-            operatorBillingError={operatorBillingError}
-            operatorTopupAmount={operatorTopupAmount}
-            onOperatorPayoutConnect={onOperatorPayoutConnect}
-            onOperatorTopup={onOperatorTopup}
-            onOperatorTopupAmountChange={onOperatorTopupAmountChange}
-            operatorAccount={operatorAccount}
-          />
-          <span className="td-defer-note">
-            <span className="td-dotline" />
-            {budgetStatus}
-          </span>
-        </div>
         <button
           className="td-acct"
           onClick={() => void onSelect("")}
@@ -4106,9 +4152,7 @@ function deliverableActionFor(item: Deliverable): DeliverableAction {
 
 function CompanyWorkspace({
   businessSlug,
-  creativeCredits,
   deliverables,
-  onBuyCreativeCredits,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
@@ -4117,9 +4161,7 @@ function CompanyWorkspace({
   takyonProgress,
 }: {
   businessSlug: string;
-  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   deliverables: Deliverable[];
-  onBuyCreativeCredits: (business: string) => Promise<void>;
   onReadFile: (path: string, business?: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string, business?: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string, business?: string) => Promise<BusinessSitePreviewResponse>;
@@ -4149,16 +4191,25 @@ function CompanyWorkspace({
   const outreachStatus = (outreach.status || "").trim();
   const distActive =
     posts.length > 0 || publishedCount > 0 || (!!outreachStatus && outreachStatus !== "missing");
-  const creativeBalance =
-    creativeCredits?.available && typeof creativeCredits.balance_credits === "number"
-      ? creativeCredits.balance_credits
-      : null;
-  const creativeReserved =
-    creativeCredits?.available && typeof creativeCredits.reserved_credits === "number"
-      ? creativeCredits.reserved_credits
-      : null;
-  const [buyCreditsBusy, setBuyCreditsBusy] = useState(false);
-  const [buyCreditsError, setBuyCreditsError] = useState<string | null>(null);
+
+  const metrics = overview.metrics || {};
+  const mrrCents =
+    typeof metrics.mrr_cents === "number" && Number.isFinite(metrics.mrr_cents)
+      ? metrics.mrr_cents
+      : 0;
+  const signups =
+    typeof metrics.users === "number" && Number.isFinite(metrics.users)
+      ? Math.max(0, Math.trunc(metrics.users))
+      : 0;
+  // Adaptive north-star: lead with revenue if it exists, else sign-ups, else an
+  // honest "getting started" state. No fabricated numbers and no fake chart —
+  // there is no time-series to plot. The funnel below stays as the supporting view.
+  const northStar =
+    mrrCents > 0
+      ? { label: "MRR", value: `$${Math.round(mrrCents / 100)}/mo` }
+      : signups > 0
+        ? { label: "Sign-ups", value: String(signups) }
+        : { label: "Progress", value: "Getting started" };
 
   // Progressive disclosure: a section only appears once it actually exists.
   // Product shows when live or a built site/preview exists; Distribution when
@@ -4201,8 +4252,6 @@ function CompanyWorkspace({
 
   useEffect(() => {
     setViewer(null);
-    setBuyCreditsBusy(false);
-    setBuyCreditsError(null);
   }, [scope.business]);
 
   const progressLine =
@@ -4290,20 +4339,6 @@ function CompanyWorkspace({
     openSitePreview(previewPath, `${name} preview`);
   }, [name, openSitePreview, previewPath]);
 
-  const handleBuyCredits = useCallback(() => {
-    setBuyCreditsBusy(true);
-    setBuyCreditsError(null);
-    void onBuyCreativeCredits(businessSlug)
-      .catch((err) => {
-        setBuyCreditsError(
-          operatorActionErrorMessage(err, "Creative credit checkout failed."),
-        );
-      })
-      .finally(() => {
-        setBuyCreditsBusy(false);
-      });
-  }, [businessSlug, onBuyCreativeCredits]);
-
   return (
     <>
       <div className="td-scroll">
@@ -4323,43 +4358,12 @@ function CompanyWorkspace({
           )}
         </header>
 
-        {/* Metric ledger — one ruled stat strip. Values are honest deferred
-            dashes (no number) until the billing control plane is live. */}
-        <div className="td-ledger">
-          {[
-            { label: "MRR", value: "—" },
-            { label: "Paying", value: "—" },
-            { label: "Signups", value: "—" },
-            { label: "Net revenue", value: "—" },
-            {
-              label: "Creative credits",
-              value:
-                creativeBalance === null ? "—" : String(Math.max(0, Math.trunc(creativeBalance))),
-            },
-            {
-              label: "Reserved",
-              value:
-                creativeReserved === null ? "—" : String(Math.max(0, Math.trunc(creativeReserved))),
-            },
-          ].map((item) => (
-            <div className="td-led" key={item.label}>
-              <div className="td-led-k">{item.label}</div>
-              <div className="td-led-v">{item.value}</div>
-            </div>
-          ))}
-        </div>
-        <div className="td-ledger-actions">
-          <button
-            className="td-btn td-btn-primary"
-            disabled={buyCreditsBusy}
-            onClick={handleBuyCredits}
-            type="button"
-          >
-            {buyCreditsBusy ? "Opening…" : "Buy credits"}
-          </button>
-          {buyCreditsError ? (
-            <p className="td-mini-error">{buyCreditsError}</p>
-          ) : null}
+        {/* North-star headline — one adaptive metric that leads with whatever
+            is most real (revenue → sign-ups → getting started). Honest, never
+            fabricated; the funnel below remains the supporting view. */}
+        <div className="td-north">
+          <div className="td-north-k">{northStar.label}</div>
+          <div className="td-north-v">{northStar.value}</div>
         </div>
 
         {hasProduct && (

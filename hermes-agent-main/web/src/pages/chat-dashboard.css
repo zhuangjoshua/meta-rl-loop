@@ -159,8 +159,7 @@
 .tk-dash .td-acct .td-who { font-family: var(--td-font-display); font-size: 13px; font-weight: 700; letter-spacing: -.01em; }
 .tk-dash .td-acct .td-role { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .04em; color: var(--td-meta); }
 
-/* portfolio card (operator budget) */
-.tk-dash .td-portfolio { margin-top: 8px; padding: 14px; }
+/* operator billing actions — reused by the Wallet payouts section */
 .tk-dash .td-operator-actions {
   display: flex;
   flex-direction: column;
@@ -256,43 +255,6 @@
 .tk-dash .td-pill.td-soft { background: var(--td-accent-soft); color: var(--td-accent-ink); }
 .tk-dash .td-pill.td-ghost { background: transparent; color: var(--td-meta); border: 1px solid var(--td-border); }
 
-.tk-dash .td-operator-mobile { display: none; }
-.tk-dash .td-operator-mobile-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
-}
-.tk-dash .td-operator-mobile-stats {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: right;
-  font-family: var(--td-font-mono);
-  font-size: 10px;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-  color: var(--td-meta);
-}
-@media (max-width: 1023px) {
-  .tk-dash .td-operator-mobile {
-    display: block;
-    margin: 12px 20px 0;
-    padding: 14px;
-  }
-}
-@media (max-width: 639px) {
-  .tk-dash .td-operator-mobile {
-    margin: 10px 14px 0;
-  }
-  .tk-dash .td-operator-mobile-head {
-    flex-direction: column;
-  }
-  .tk-dash .td-operator-mobile-stats {
-    text-align: left;
-  }
-}
-
 .tk-dash .td-scroll { overflow-y: auto; padding: 30px 36px 40px; min-height: 0; }
 
 /* shared card surface — sidebar budget, global create form, viewer modal */
@@ -324,26 +286,6 @@
   font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .06em;
   text-transform: uppercase; color: var(--td-muted);
   display: inline-flex; align-items: center; gap: 8px; margin: 16px 0 0;
-}
-
-/* ─── Metric ledger — single ruled stat strip, not a tile grid ─────────── */
-.tk-dash .td-ledger {
-  display: flex; flex-wrap: wrap; gap: 0;
-  border-top: 2.5px solid var(--td-fg); border-bottom: 1px solid var(--td-border);
-  margin: 0 0 4px;
-}
-.tk-dash .td-led {
-  flex: 1 1 0; min-width: 140px;
-  padding: 14px 18px; display: flex; flex-direction: column; gap: 8px;
-  border-left: 1px solid var(--td-border);
-}
-.tk-dash .td-led:first-child { border-left: 0; padding-left: 2px; }
-.tk-dash .td-led-k { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: var(--td-meta); }
-.tk-dash .td-led-v { font-family: var(--td-font-display); font-weight: 800; font-size: 32px; line-height: 1; letter-spacing: -.03em; color: var(--td-faint); }
-@media (max-width: 720px) { .tk-dash .td-led { flex-basis: 50%; } }
-.tk-dash .td-ledger-actions {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  margin: 12px 0 0;
 }
 
 /* ─── Numbered section heads — editorial device w/ heavy ink rule ──────── */
@@ -606,3 +548,68 @@
 /* generic link-ish accent text button */
 .tk-dash .td-linkish { color: var(--td-accent-ink); font-weight: 600; }
 .tk-dash .td-linkish:hover { text-decoration: underline; }
+
+/* ─── North-star headline — single adaptive lead metric (replaces ledger) ─ */
+.tk-dash .td-north {
+  border-top: 2.5px solid var(--td-fg); border-bottom: 1px solid var(--td-border);
+  padding: 16px 2px 18px; margin: 0 0 4px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.tk-dash .td-north-k {
+  font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .15em;
+  text-transform: uppercase; color: var(--td-meta);
+}
+.tk-dash .td-north-v {
+  font-family: var(--td-font-display); font-weight: 800;
+  font-size: clamp(34px, 5vw, 52px); line-height: 1;
+  letter-spacing: -.035em; color: var(--td-fg);
+}
+
+/* ─── Wallet — paper/card right overlay (mirrors the CEO rail) ──────────── */
+.tk-dash .td-wallet {
+  background: var(--td-surface);
+  border-left: 2.5px solid var(--td-fg);
+  box-shadow: -18px 0 40px -24px rgba(26,25,22,.45);
+  min-height: 0; overflow: hidden;
+}
+.tk-dash .td-wallet-head {
+  display: flex; align-items: center; gap: 11px; flex-shrink: 0;
+  padding: 16px 18px; border-bottom: 2.5px solid var(--td-fg);
+}
+.tk-dash .td-wallet-head .td-t {
+  font-family: var(--td-font-display); font-weight: 800; font-size: 16px;
+  letter-spacing: -.005em; text-transform: uppercase;
+}
+.tk-dash .td-wallet-x {
+  margin-left: auto; width: 28px; height: 28px; border-radius: var(--td-radius);
+  display: grid; place-items: center; font-size: 20px; line-height: 1;
+  color: var(--td-muted); border: 1px solid transparent;
+}
+.tk-dash .td-wallet-x:hover { color: var(--td-fg); border-color: var(--td-border); background: var(--td-fg-soft); }
+
+.tk-dash .td-wallet-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 18px; display: flex; flex-direction: column; gap: 22px;
+}
+.tk-dash .td-wallet-sec {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-bottom: 20px; border-bottom: 1px solid var(--td-border);
+}
+.tk-dash .td-wallet-sec:last-child { border-bottom: 0; padding-bottom: 0; }
+.tk-dash .td-wallet-rows { display: flex; flex-direction: column; gap: 7px; }
+.tk-dash .td-wallet-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+  font-family: var(--td-font-mono); font-size: 11px; letter-spacing: .03em;
+  color: var(--td-muted);
+}
+.tk-dash .td-wallet-v {
+  font-family: var(--td-font-mono); font-variant-numeric: tabular-nums;
+  font-weight: 700; font-size: 13px; color: var(--td-fg); text-align: right;
+}
+.tk-dash .td-wallet-v--text { text-transform: uppercase; letter-spacing: .06em; }
+.tk-dash .td-wallet-note {
+  margin: 2px 0 0; font-family: var(--td-font-mono); font-size: 10px;
+  letter-spacing: .05em; text-transform: uppercase; color: var(--td-meta);
+}
+.tk-dash .td-wallet-sec .td-mini-button { align-self: flex-start; }
+/* the payouts section reuses OperatorBillingActions (.td-operator-actions) */

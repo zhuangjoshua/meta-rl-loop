@@ -72,7 +72,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - Use `business_claude_agent_task` for non-trivial `product/site/` builds or multi-file source edits. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 - When first publish speed matters, prefer the smallest honest, dependency-light source that can verify and publish quickly. Do not default to a heavy framework if a static or minimal app shell is enough for the first truthful surface.
 - Use `business_verify_product_surface` only when there is real source to verify or publish. Treat its blocker output as truth.
-- During bootstrap, once `product/site/` exists with real source, prefer the worker build plus one honest verification/publish pass before later auth/customer/outreach follow-on work.
+- During bootstrap, once `product/site/` exists with real source, complete an honest verification/publish pass before later auth/customer/outreach follow-on work.
 
 ## Procedure
 
@@ -86,7 +86,7 @@ Use this skill to create or materially improve the business-owned product surfac
 8. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, what works now, what is blocked, and what still depends on app-runtime or provider work. The selected runtime_features are the backend rails the worker will receive as product-site UI contract.
 9. Decide whether the source work is trivial or substantial. Use direct `business_write_file` or `business_patch_file` only for small local fixes. For non-trivial `product/site/` builds, default to `business_claude_agent_task` with `workspace="product/site"` so the worker implements the source while this skill keeps ownership of truth, routing, and verification. When the operator's immediate ask is the first site/app publish, keep the worker task tightly bounded to landing the first honest surface rather than open-ended research, polish, or campaign expansion.
 10. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
-11. If the operator asked for verification or publication and the source is real, make sure there is one honest verification/publish pass. `business_claude_agent_task` already performs that pass by default for `product/*` workspaces; only call `business_verify_product_surface` separately when worker verification was disabled, when you made additional source changes after the worker run, or when you need a second explicit publish check. During bootstrap, complete this verification before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md`; publication may still proceed, so treat blockers as advisory follow-up work unless the publish result itself is blocked.
+11. If the operator asked for verification or publication and the source is real, call `business_verify_product_surface` before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md`; publication may still proceed, so treat blockers as advisory follow-up work unless the publish result itself is blocked.
 12. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting runtime mirror files become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
 
 ### Shared style skills
@@ -121,7 +121,7 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 - Claiming runtime-backed product behavior that only exists in prose
 - Splitting the actual product surface across random directories
 - Treating `business_claude_agent_task` as a second owner instead of the implementation lane underneath this skill
-- Running a second `business_verify_product_surface` immediately after a product-site worker run that already returned verification
+- Claiming publication state without an explicit `business_verify_product_surface` result or visible receipt
 
 ## Verification Checklist
 

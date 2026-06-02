@@ -51,7 +51,6 @@ import { Typography } from "@/components/NouiTypography";
 import { cn } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { SidebarFooter } from "@/components/SidebarFooter";
-import { SidebarOperatorBillingStrip } from "@/components/SidebarOperatorBillingStrip";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -776,7 +775,6 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
       </span>
 
       <SidebarStatusStrip />
-      <SidebarOperatorBillingStrip />
 
       <ul className="flex flex-col">
         {items.map(({ action, icon: Icon, label, runningLabel, spin }) => {

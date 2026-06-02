@@ -60,14 +60,14 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 - The Takyon toolset must be available.
 - Start with `business_read_business` so the worker gets the right current business context.
 - The delegated workspace must stay inside one of the canonical roots.
-- For `product/*` workspaces, `business_claude_agent_task` already performs the normal verification/publish pass by default. Plan to use `business_verify_product_surface` after the worker run only when that default is disabled or when you changed product source again afterwards.
+- For `product/*` workspaces, plan to use `business_verify_product_surface` after the worker run when the changed source should be validated or published.
 
 ## How to Run
 
 - Call `business_read_business` first and decide whether the task is narrow enough to delegate.
 - Call `business_claude_agent_task` with one bounded workspace, a clear instruction, and an explicit desired output path.
 - When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design", "<style-skill>"]` so the worker receives both the shared frontend method and one shared design system.
-- For `product/*` workspaces, reuse the verification result returned by `business_claude_agent_task` by default. Follow with `business_verify_product_surface` only when worker verification was disabled or when more source changes happened after the worker run.
+- For `product/*` workspaces, follow the worker run with `business_verify_product_surface` when the changed source should be validated or published.
 - If the result implies a send, deploy, runtime mutation, or other external effect, switch back to the appropriate Takyon skill or `business_*` tool path after the worker completes.
 
 ## Procedure
@@ -76,7 +76,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 2. Choose one narrow workspace inside `product/`, `distribution/`, `research/`, or `metrics/`. Name the exact target files or directory in the instruction.
 3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 4. Review the changed files. Keep only durable changes that stay inside the requested business scope and canonical roots.
-5. If the worker changed `product/site/` or another product source path that should be validated, reuse the verification returned by `business_claude_agent_task` when present. Call `business_verify_product_surface` only when you disabled worker verification or changed product source again after the worker finished.
+5. If the worker changed `product/site/` or another product source path that should be validated or published, call `business_verify_product_surface`.
 6. If the worker output implies a real publish, send, checkout, auth, or billing effect, route that next step back through the appropriate Takyon skill and `business_*` tool instead of pretending the worker already did it.
 7. For customer-facing product copy, default to capability language. Only mention model families when the operator explicitly wants that positioning, and never leak stale names like `GPT-4o-mini` into a Claude-backed product surface.
 

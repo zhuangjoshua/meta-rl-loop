@@ -141,16 +141,17 @@ def test_bundled_takyon_skills_exist():
         assert text.startswith("---\nname:")
 
 
-def test_bootstrap_prompt_requires_distribution_campaign_batch():
+def test_bootstrap_prompt_deprioritizes_full_distribution_batch_for_first_publish():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
     assert "distribution/campaign/" in prompt
-    assert "3 evidence-backed lanes" in prompt
-    assert "6 total" in prompt
     assert "business_publish_outreach" in prompt
-    assert "not a forever recurring funnel" in prompt
+    assert "Do not treat a full multi-lane opening campaign batch as part of the first-site critical path." in prompt
+    assert "one verified surface plus the next recorded move is enough to complete the initial turn" in prompt
+    assert "3 evidence-backed lanes" not in prompt
+    assert "6 total" not in prompt
 
 
 def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
@@ -164,16 +165,38 @@ def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
     assert "Do not expand product/runtime.md" in prompt
 
 
+def test_bootstrap_prompt_treats_fresh_create_as_greenfield_and_research_bounded():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    assert "assume metrics and most business workspaces may be empty" in prompt
+    assert "Do a minimal existence check for current product/source/publish state" in prompt
+    assert "Do bounded market research first" in prompt
+
+
 def test_bootstrap_prompt_orders_surface_before_distribution_before_runtime():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    surface_index = prompt.index("Then normally use takyon-build-product")
-    distribution_index = prompt.index("then create or continue distribution/campaign/")
+    surface_index = prompt.index("Then use takyon-build-product")
+    distribution_index = prompt.index("After that surface is live, record the next opening distribution move under distribution/campaign/.")
     runtime_index = prompt.index("Do not expand product/runtime.md")
 
     assert surface_index < distribution_index < runtime_index
+
+
+def test_bootstrap_prompt_orders_research_before_surface_before_verify():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    research_index = prompt.index("Do bounded market research first")
+    surface_index = prompt.index("Then use takyon-build-product")
+    verify_index = prompt.index("Once product/site/ exists with real source, complete the same-turn build plus business_verify_product_surface")
+
+    assert research_index < surface_index < verify_index
 
 
 def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch):
@@ -642,16 +665,19 @@ def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_ch
 
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
-    assert "- Status: active" in surface_md
+    assert "- Status: unverified" in surface_md
     assert "- Publish status: published" in surface_md
-    assert "changed after the last business_verify_product_surface receipt" not in surface_md
-    assert app["surface_contract"]["status"] == "active"
+    assert "changed after the last business_verify_product_surface receipt" in surface_md
+    assert app["surface_contract"]["status"] == "unverified"
     assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
-    assert (tmp_path / "published-sites" / "latexflow" / "index.html").read_text(encoding="utf-8") == "<h1>Latexflow v2</h1>\n"
+    freshness = app["surface_contract"]["metadata"]["takyon_projection_freshness"]["product_surface"]
+    assert freshness["status"] == "stale"
+    assert freshness["authoritative"] is False
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "stale"
+    assert (tmp_path / "published-sites" / "latexflow" / "index.html").read_text(encoding="utf-8") == "<h1>Latexflow</h1>\n"
 
 
-def test_artifact_write_auto_verifies_new_product_site(tmp_path, monkeypatch):
+def test_artifact_write_leaves_new_product_site_unverified_until_explicit_verify(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -676,17 +702,17 @@ def test_artifact_write_auto_verifies_new_product_site(tmp_path, monkeypatch):
     )
 
     app = store.read(scope="business:sitecheck", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["status"] == "active"
-    assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "https://sitecheck.fourmanifold.com/"
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
-    assert (tmp_path / "published-sites" / "sitecheck" / "index.html").exists()
+    assert app["surface_contract"]["status"] == "unverified"
+    assert app["surface_contract"]["publish_status"] == "not_published"
+    assert app["surface_contract"]["public_url"] == ""
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "unverified"
+    assert "product source has not been published" in app["product_surface"]["local_continuable_work"]
+    assert not (tmp_path / "published-sites" / "sitecheck" / "index.html").exists()
     receipt_dir = tmp_path / "businesses" / "sitecheck" / "metrics" / "receipts" / "product-surface"
-    assert receipt_dir.exists()
-    assert any(receipt_dir.glob("*.json"))
+    assert not receipt_dir.exists()
 
 
-def test_surface_upsert_auto_verifies_existing_product_site_file(tmp_path, monkeypatch):
+def test_surface_upsert_leaves_existing_product_site_unverified_until_explicit_verify(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -711,14 +737,14 @@ def test_surface_upsert_auto_verifies_existing_product_site_file(tmp_path, monke
 
     app = store.read(scope="business:siteafterwrite", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["source_path"] == "product/site"
-    assert app["surface_contract"]["status"] == "active"
-    assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "https://siteafterwrite.fourmanifold.com/"
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
-    assert (tmp_path / "published-sites" / "siteafterwrite" / "index.html").exists()
+    assert app["surface_contract"]["status"] == "unverified"
+    assert app["surface_contract"]["publish_status"] == "not_published"
+    assert app["surface_contract"]["public_url"] == ""
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "unverified"
+    assert "product source has not been published" in app["product_surface"]["local_continuable_work"]
+    assert not (tmp_path / "published-sites" / "siteafterwrite" / "index.html").exists()
     receipt_dir = tmp_path / "businesses" / "siteafterwrite" / "metrics" / "receipts" / "product-surface"
-    assert receipt_dir.exists()
-    assert any(receipt_dir.glob("*.json"))
+    assert not receipt_dir.exists()
 
 
 def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_path, monkeypatch):

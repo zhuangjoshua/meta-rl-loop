@@ -4731,7 +4731,9 @@ class TakyonStore:
             return
         if rel == source_path or rel.startswith(f"{source_path}/"):
             self._rewrite_app_files(conn, slug)
-            self._auto_verify_product_surface_for_source_change(conn, slug, changed_rel=rel)
+            # Product source mutations should leave the surface unverified/stale until one explicit
+            # completion check runs. Avoid firing the terminal verifier on every partial write while
+            # a product/site tree is still assembling.
 
     def _app_summary(self, conn: sqlite3.Connection, slug: str, limit: int) -> dict[str, Any]:
         budget = self._ensure_app_budget(conn, slug)
@@ -5956,13 +5958,8 @@ class TakyonStore:
             existing = self._stored_app_surface_contract(conn, slug)
             design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
-            auto_verify_existing_source = False
             if op.get("source_path"):
                 source_path = _canonical_product_surface_source_path(str(op.get("source_path")))
-                auto_verify_existing_source = (
-                    not bool(op.get("_skip_auto_verify"))
-                    and _workspace_needs_runtime_ui_contract(source_path)
-                )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
             runtime_features_raw = op.get("runtime_features")
             runtime_features = (
@@ -6039,12 +6036,6 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
-            if auto_verify_existing_source:
-                self._auto_verify_product_surface_for_source_change(
-                    conn,
-                    slug,
-                    changed_rel=source_path,
-                )
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
