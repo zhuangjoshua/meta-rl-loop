@@ -1205,6 +1205,50 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
 
 
+def test_claude_agent_task_uses_lighter_defaults_for_product_site_work(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-faster-defaults",
+                "install": False,
+            }
+        )
+    )
+
+    payload = captured["payload"]
+    assert result["success"] is True
+    assert payload["maxTurns"] == 8
+    assert payload["timeoutMs"] == 180000
+    assert payload["effort"] == "medium"
+
+
 def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)

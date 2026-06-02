@@ -10842,6 +10842,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
             )
 
+        customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         budget_usd = _clamp_float(args.get("budget_usd"), default=2.0, minimum=0.05, maximum=25.0)
         budget = store.commit(
             scope=f"business:{business}",
@@ -10862,8 +10863,25 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
 
-        max_turns = _clamp_int(args.get("max_turns"), default=12, minimum=1, maximum=40)
-        timeout_ms = _clamp_int(args.get("timeout_ms"), default=300_000, minimum=30_000, maximum=1_800_000)
+        max_turns = _clamp_int(
+            args.get("max_turns"),
+            default=8 if customer_facing_product_workspace else 12,
+            minimum=1,
+            maximum=40,
+        )
+        timeout_ms = _clamp_int(
+            args.get("timeout_ms"),
+            default=180_000 if customer_facing_product_workspace else 300_000,
+            minimum=30_000,
+            maximum=1_800_000,
+        )
+        effort = str(
+            args.get("effort")
+            or ("medium" if customer_facing_product_workspace else os.getenv("TAKYON_CLAUDE_AGENT_EFFORT"))
+            or "high"
+        ).strip().lower()
+        if effort not in {"low", "medium", "high"}:
+            effort = "medium" if customer_facing_product_workspace else "high"
         model = str(
             args.get("model")
             or os.getenv("TAKYON_CLAUDE_AGENT_MODEL")
@@ -10891,6 +10909,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "root": str(workspace_path),
             "instruction": worker_instruction,
             "model": model,
+            "effort": effort,
             "maxTurns": max_turns,
             "timeoutMs": timeout_ms,
             "maxBudgetUsd": budget_usd,
@@ -10956,7 +10975,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 requested_publish_policy=requested_publish_policy,
                 publish_policy=publish_policy,
                 install=_boolish(args.get("install"), default=True),
-                timeout_seconds=_clamp_int(args.get("verification_timeout_seconds"), default=300, minimum=15, maximum=900),
+                timeout_seconds=_clamp_int(
+                    args.get("verification_timeout_seconds"),
+                    default=180 if customer_facing_product_workspace else 300,
+                    minimum=15,
+                    maximum=900,
+                ),
                 receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
                 verification_source="business_claude_agent_task",
             )
@@ -11598,11 +11622,12 @@ TAKYON_TOOL_DEFINITIONS = [
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work"},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override"},
-                "max_turns": {"type": "integer", "description": "SDK turn cap, default 12"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000"},
+                "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
+                "max_turns": {"type": "integer", "description": "SDK turn cap, default 8 for product/site work and 12 otherwise"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 180000 for product/site work and 300000 otherwise"},
                 "verify_surface": {"type": "boolean", "description": "Check product/website source after edits and write a receipt; product/* workspaces default to this source check"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
-                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 300"},
+                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 180 for product/site work and 300 otherwise"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

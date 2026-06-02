@@ -116,6 +116,7 @@ async function main() {
   const maxTurns = Number.parseInt(String(input.maxTurns || ""), 10) || 12;
   const maxBudgetUsd = Number.parseFloat(String(input.maxBudgetUsd || "")) || 2;
   const model = String(input.model || process.env.TAKYON_CLAUDE_AGENT_MODEL || "claude-sonnet-4-6").trim();
+  const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
 
   let timeout = null;
   let text = "";
@@ -134,7 +135,7 @@ async function main() {
             },
             model,
             thinking: { type: "adaptive", display: "omitted" },
-            effort: String(process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high"),
+            effort: ["low", "medium", "high"].includes(effort) ? effort : "high",
             tools: ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob"],
             disallowedTools: ["Bash"],
             permissionMode: "acceptEdits",
