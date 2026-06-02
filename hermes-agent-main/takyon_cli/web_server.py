@@ -1999,26 +1999,168 @@ async def get_takyon_business_workspace(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
+        import re
+        from pathlib import Path
+
         from plugins.takyon.core import TakyonStore
-        from tui_gateway.server import (
-            _takyon_business_overview_payload,
-            _takyon_business_payload,
-            _takyon_get_background_run,
-            _takyon_historical_outputs_payload,
-        )
+        from tui_gateway.server import _takyon_get_background_run, _takyon_historical_outputs_payload
 
         store = TakyonStore(operator_user_id=str(principal.user_id))
         output_limit = max(1, min(int(limit or 50), 100))
+        outputs = _takyon_historical_outputs_payload(
+            store,
+            business,
+            limit=output_limit,
+        )
+        background_run = _takyon_get_background_run(business)
+        with store._connect() as conn:
+            current = store._row_to_dict(store._ensure_business(conn, business))
+            latest_worker_job = None
+            for table_name in ("jobs", store._work_requests_table()):
+                try:
+                    row = conn.execute(
+                        f"SELECT * FROM {table_name} WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 1",
+                        (business,),
+                    ).fetchone()
+                except Exception:
+                    row = None
+                if row is not None:
+                    latest_worker_job = store._row_to_dict(row)
+                    break
+
+        def _brief(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, (str, int, float, bool)):
+                return str(value)
+            return ""
+
+        def _title_from_path(path: str) -> str:
+            stem = Path(path).stem
+            label = stem.replace("-", " ").replace("_", " ").strip()
+            label = re.sub(r"\s+", " ", label)
+            return label.title() if label else Path(path).name
+
+        website_output = next(
+            (
+                item
+                for item in outputs
+                if isinstance(item, dict) and str(item.get("path") or "").strip() == "product/site/index.html"
+            ),
+            None,
+        )
+        outreach_outputs = [
+            item
+            for item in outputs
+            if isinstance(item, dict)
+            and str(item.get("path") or "").startswith(("distribution/local-published/", "outreach/local-published/"))
+        ]
+
+        task_status = _brief((background_run or {}).get("status") or (latest_worker_job or {}).get("status") or "")
+        task_kind = _brief((background_run or {}).get("kind") or (latest_worker_job or {}).get("kind") or "")
+        task_detail = _brief((background_run or {}).get("detail") or "")
+        task_label = (
+            "CEO bootstrap"
+            if task_kind == "ceo_bootstrap"
+            else "CEO wake"
+            if task_kind == "ceo_wake"
+            else "CEO run"
+        )
+        tasks = (
+            [
+                {
+                    "id": _brief((background_run or {}).get("job_id") or (latest_worker_job or {}).get("id") or task_kind),
+                    "source": "job",
+                    "label": task_label,
+                    "status": task_status or "running",
+                    "detail": task_detail or ("CEO work is in progress." if task_status == "running" else f"{task_label} is {task_status or 'recorded'}."),
+                    "tone": "active" if task_status in {"queued", "running"} else "done",
+                    "updated_at": "",
+                }
+            ]
+            if task_kind or task_status
+            else []
+        )
+
+        ceo_loop = {
+            "status": "working" if tasks and task_status in {"queued", "running"} else "working" if website_output else "ready",
+            "headline": (
+                task_detail
+                or ("Product preview is available." if website_output else "The workspace is ready for the next move.")
+            ),
+            "detail": (
+                "Open the preview, ask the CEO to continue, or inspect a deliverable."
+                if website_output
+                else "Open a deliverable or ask the CEO to keep working."
+            ),
+            "next_action": (
+                "Let the current CEO run finish."
+                if tasks and task_status in {"queued", "running"}
+                else "Open the preview or continue research."
+                if website_output
+                else "Open a deliverable or wake the CEO."
+            ),
+        }
+
+        posts = []
+        for item in outreach_outputs[:5]:
+            path = str(item.get("path") or "").strip()
+            parts = Path(path).parts
+            source = parts[2] if len(parts) >= 3 else "distribution"
+            posts.append(
+                {
+                    "id": path,
+                    "title": _title_from_path(path),
+                    "source": source,
+                    "status": "active",
+                    "mode": "test" if "/local-published/" in path else "live",
+                    "artifact_path": path,
+                    "updated_at": item.get("at"),
+                }
+            )
+
         return {
             "business_slug": business,
-            "current": _takyon_business_payload(store, business) or {},
-            "overview": _takyon_business_overview_payload(store, business) or {},
-            "outputs": _takyon_historical_outputs_payload(
-                store,
-                business,
-                limit=output_limit,
-            ),
-            "background_run": _takyon_get_background_run(business),
+            "current": current or {},
+            "overview": {
+                "goal": _brief((current or {}).get("goal")),
+                "mode": _brief((current or {}).get("mode") or (current or {}).get("status") or (current or {}).get("state")),
+                "product": {
+                    "status": "local_source" if website_output else "missing",
+                    "source_path": "product/site" if website_output else "",
+                    "design_brief_path": "product/design-brief.md",
+                },
+                "tasks": tasks,
+                "ceo_loop": ceo_loop,
+                "posts": posts,
+                "artifacts": {
+                    "website": {
+                        "status": "local_source" if website_output else "missing",
+                        "path": str((website_output or {}).get("path") or ""),
+                        "source_path": "product/site" if website_output else "",
+                    },
+                    "outreach": {
+                        "status": "published_local" if outreach_outputs else "missing",
+                        "path": str((outreach_outputs[0] or {}).get("path") or "") if outreach_outputs else "",
+                        "published_count": len(outreach_outputs),
+                        "items": [
+                            {
+                                "path": str(item.get("path") or ""),
+                                "updated_at": item.get("at"),
+                                "status": "published_local",
+                            }
+                            for item in outreach_outputs[:12]
+                        ],
+                    },
+                    "creative_assets": {
+                        "status": "missing",
+                        "path": "",
+                        "count": 0,
+                    },
+                },
+            },
+            "outputs": outputs,
+            "background_run": background_run,
         }
     except HTTPException:
         raise
