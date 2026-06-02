@@ -570,6 +570,13 @@ def _workspace_needs_runtime_ui_contract(workspace_raw: str) -> bool:
     return normalized == "product/site" or normalized.startswith("product/site/")
 
 
+def _canonical_product_surface_source_path(source_path: str) -> str:
+    normalized = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
+    if _workspace_needs_runtime_ui_contract(normalized):
+        return "product/site"
+    return normalized
+
+
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     runtime_features = _surface_runtime_features(surface)
     if not runtime_features:
@@ -5946,8 +5953,13 @@ class TakyonStore:
             existing = self._stored_app_surface_contract(conn, slug)
             design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
+            auto_verify_existing_source = False
             if op.get("source_path"):
-                source_path = _safe_relpath(str(op.get("source_path")), field="source_path").as_posix()
+                source_path = _canonical_product_surface_source_path(str(op.get("source_path")))
+                auto_verify_existing_source = (
+                    not bool(op.get("_skip_auto_verify"))
+                    and _workspace_needs_runtime_ui_contract(source_path)
+                )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
             runtime_features_raw = op.get("runtime_features")
             runtime_features = (
@@ -6024,6 +6036,12 @@ class TakyonStore:
                 ),
             )
             self._rewrite_app_files(conn, slug)
+            if auto_verify_existing_source:
+                self._auto_verify_product_surface_for_source_change(
+                    conn,
+                    slug,
+                    changed_rel=source_path,
+                )
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
@@ -7723,6 +7741,7 @@ def _product_surface_verification_operations(
             {
                 "action": "app.surface.upsert",
                 "business": business,
+                "_skip_auto_verify": True,
                 "status": next_status,
                 "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
                 "source_path": verification.get("source_path"),

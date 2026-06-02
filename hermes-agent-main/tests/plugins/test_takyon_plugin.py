@@ -682,6 +682,41 @@ def test_artifact_write_auto_verifies_new_product_site(tmp_path, monkeypatch):
     assert any(receipt_dir.glob("*.json"))
 
 
+def test_surface_upsert_auto_verifies_existing_product_site_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:siteafterwrite",
+        [{"action": "business.upsert", "business": "siteafterwrite", "name": "SiteAfterWrite", "budget": {"amount": 25}}],
+        "init-site-after-write",
+    )
+    _commit(
+        store,
+        "business:siteafterwrite",
+        [{"action": "artifact.write", "business": "siteafterwrite", "path": "product/site/index.html", "content": "<h1>SiteAfterWrite</h1>\n"}],
+        "write-site-before-surface",
+    )
+    _commit(
+        store,
+        "business:siteafterwrite",
+        [{"action": "app.surface.upsert", "business": "siteafterwrite", "status": "active", "source_path": "product/site/index.html", "routes": ["/"]}],
+        "surface-after-existing-site",
+    )
+
+    app = store.read(scope="business:siteafterwrite", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["source_path"] == "product/site"
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == "https://siteafterwrite.fourmanifold.com/"
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+    assert (tmp_path / "published-sites" / "siteafterwrite" / "index.html").exists()
+    receipt_dir = tmp_path / "businesses" / "siteafterwrite" / "metrics" / "receipts" / "product-surface"
+    assert receipt_dir.exists()
+    assert any(receipt_dir.glob("*.json"))
+
+
 def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
