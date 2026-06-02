@@ -636,9 +636,50 @@ def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_ch
         "mutate-product-source",
     )
 
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
-    assert "- Status: unverified" in surface_md
-    assert "changed after the last business_verify_product_surface receipt" in surface_md
+    assert "- Status: active" in surface_md
+    assert "- Publish status: published" in surface_md
+    assert "changed after the last business_verify_product_surface receipt" not in surface_md
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+    assert (tmp_path / "published-sites" / "latexflow" / "index.html").read_text(encoding="utf-8") == "<h1>Latexflow v2</h1>\n"
+
+
+def test_artifact_write_auto_verifies_new_product_site(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:sitecheck",
+        [{"action": "business.upsert", "business": "sitecheck", "name": "SiteCheck", "budget": {"amount": 25}}],
+        "init-auto-verify-site",
+    )
+    _commit(
+        store,
+        "business:sitecheck",
+        [{"action": "app.surface.upsert", "business": "sitecheck", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-auto-verify-site",
+    )
+
+    _commit(
+        store,
+        "business:sitecheck",
+        [{"action": "artifact.write", "business": "sitecheck", "path": "product/site/index.html", "content": "<h1>SiteCheck</h1>\n"}],
+        "write-site-index",
+    )
+
+    app = store.read(scope="business:sitecheck", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "active"
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == "https://sitecheck.fourmanifold.com/"
+    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+    assert (tmp_path / "published-sites" / "sitecheck" / "index.html").exists()
+    receipt_dir = tmp_path / "businesses" / "sitecheck" / "metrics" / "receipts" / "product-surface"
+    assert receipt_dir.exists()
+    assert any(receipt_dir.glob("*.json"))
 
 
 def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_path, monkeypatch):

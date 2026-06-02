@@ -4601,15 +4601,6 @@ class TakyonStore:
                         index.append(f"  - UI contract: {str(item).strip()}")
         _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
 
-    def _refresh_surface_projection_files_for_path(self, conn: sqlite3.Connection, slug: str, rel_path: str) -> None:
-        surface = self._stored_app_surface_contract(conn, slug)
-        source_path = str(surface.get("source_path") or "").strip()
-        rel = str(rel_path or "").strip().strip("/")
-        if not source_path or not rel:
-            return
-        if rel == source_path or rel.startswith(f"{source_path}/"):
-            self._rewrite_app_files(conn, slug)
-
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
         if not plans:
             plan_lines.append("No app plans configured.")
@@ -4659,6 +4650,78 @@ class TakyonStore:
             f"- Actual cost microusd: {int(usage['actual'] or 0)}",
         ]
         _atomic_write_text(root / "usage.md", "\n".join(usage_lines) + "\n")
+
+    def _auto_verify_product_surface_for_source_change(
+        self,
+        conn: sqlite3.Connection,
+        slug: str,
+        *,
+        changed_rel: str,
+    ) -> None:
+        surface = self._stored_app_surface_contract(conn, slug)
+        source_path = str(surface.get("source_path") or "").strip()
+        rel = str(changed_rel or "").strip().strip("/")
+        if not source_path or not rel:
+            return
+        if not _workspace_needs_runtime_ui_contract(source_path):
+            return
+        if rel != source_path and not rel.startswith(f"{source_path}/"):
+            return
+        source_root = self._resolve_business_file(slug, source_path, sync=False)
+        if not source_root.exists() or not source_root.is_dir():
+            return
+
+        requested_publish_policy = str(
+            surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY
+        ).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+        publish_policy = (
+            "publish_after_verify"
+            if _is_shared_renderer_publish_policy(requested_publish_policy)
+            else requested_publish_policy
+        )
+        publish_target = _product_publish_target(slug, surface.get("publish_target"))
+        receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
+        verification = _finalize_product_surface_verification(
+            store=self,
+            business=slug,
+            surface=surface,
+            source_path=source_path,
+            publish_target=publish_target,
+            requested_publish_policy=requested_publish_policy,
+            publish_policy=publish_policy,
+            install=False,
+            timeout_seconds=180,
+            receipt_path=receipt_path,
+            verification_source="source_path_refresh",
+        )
+        parsed_scope = {"raw": f"business:{slug}", "business": slug}
+        for operation in _product_surface_verification_operations(
+            business=slug,
+            verification=verification,
+            surface=surface,
+            publish_target=publish_target,
+            publish_policy=publish_policy,
+            requested_publish_policy=requested_publish_policy,
+            activate_on_success=True,
+        ):
+            normalized = self._normalize_operation(conn, parsed_scope, operation)
+            self._apply_operation(
+                conn,
+                parsed_scope,
+                normalized,
+                reason="product source changed; auto-verify surface",
+                actor="system",
+            )
+
+    def _refresh_surface_projection_files_for_path(self, conn: sqlite3.Connection, slug: str, rel_path: str) -> None:
+        surface = self._stored_app_surface_contract(conn, slug)
+        source_path = str(surface.get("source_path") or "").strip()
+        rel = str(rel_path or "").strip().strip("/")
+        if not source_path or not rel:
+            return
+        if rel == source_path or rel.startswith(f"{source_path}/"):
+            self._rewrite_app_files(conn, slug)
+            self._auto_verify_product_surface_for_source_change(conn, slug, changed_rel=rel)
 
     def _app_summary(self, conn: sqlite3.Connection, slug: str, limit: int) -> dict[str, Any]:
         budget = self._ensure_app_budget(conn, slug)
