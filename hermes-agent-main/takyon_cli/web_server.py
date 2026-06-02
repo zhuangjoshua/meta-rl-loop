@@ -184,7 +184,7 @@ def _takyon_direct_output_detail(path: str) -> tuple[str, str]:
 
 def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40) -> list[dict[str, Any]]:
     try:
-        root = store._business_root(slug)
+        root = store._business_root(slug, sync=False)
     except Exception:
         return []
     if not root.exists() or not root.is_dir():
@@ -2067,13 +2067,13 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
         from plugins.takyon.core import TakyonStore
 
         store = TakyonStore(operator_user_id=str(principal.user_id))
-        file_path = store._resolve_business_file(business, rel_path)
+        file_path = store._resolve_business_file(business, rel_path, sync=False)
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail=f"file not found: {rel_path}")
         size = file_path.stat().st_size
         with file_path.open("rb") as fh:
             raw = fh.read(min(size, _TAKYON_DIRECT_FILE_READ_BYTES))
-        rel = str(file_path.relative_to(store._business_root(business)))
+        rel = str(file_path.relative_to(store._business_root(business, sync=False)))
         return {
             "business_slug": business,
             "path": rel,

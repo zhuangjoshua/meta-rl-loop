@@ -3907,14 +3907,15 @@ class TakyonStore:
         for key in sorted(backend.list_digests(prefix)):
             backend.delete(key)
 
-    def _business_root(self, slug: str) -> Path:
+    def _business_root(self, slug: str, *, sync: bool = True) -> Path:
         base = self._workspace_root_override or self.root
         root = base / "businesses" / _slugify(slug)
-        self._sync_business_workspace_cache(slug, root)
+        if sync:
+            self._sync_business_workspace_cache(slug, root)
         return root
 
-    def _resolve_business_file(self, slug: str, rel: str, *, require_output_root: bool = False, field: str = "business path") -> Path:
-        root = self._business_root(slug)
+    def _resolve_business_file(self, slug: str, rel: str, *, require_output_root: bool = False, field: str = "business path", sync: bool = True) -> Path:
+        root = self._business_root(slug, sync=sync)
         relative = (
             _canonical_business_output_relpath(rel, field=field)
             if require_output_root
