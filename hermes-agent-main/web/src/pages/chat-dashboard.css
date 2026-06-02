@@ -256,6 +256,43 @@
 .tk-dash .td-pill.td-soft { background: var(--td-accent-soft); color: var(--td-accent-ink); }
 .tk-dash .td-pill.td-ghost { background: transparent; color: var(--td-meta); border: 1px solid var(--td-border); }
 
+.tk-dash .td-operator-mobile { display: none; }
+.tk-dash .td-operator-mobile-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.tk-dash .td-operator-mobile-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: right;
+  font-family: var(--td-font-mono);
+  font-size: 10px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--td-meta);
+}
+@media (max-width: 1023px) {
+  .tk-dash .td-operator-mobile {
+    display: block;
+    margin: 12px 20px 0;
+    padding: 14px;
+  }
+}
+@media (max-width: 639px) {
+  .tk-dash .td-operator-mobile {
+    margin: 10px 14px 0;
+  }
+  .tk-dash .td-operator-mobile-head {
+    flex-direction: column;
+  }
+  .tk-dash .td-operator-mobile-stats {
+    text-align: left;
+  }
+}
+
 .tk-dash .td-scroll { overflow-y: auto; padding: 30px 36px 40px; min-height: 0; }
 
 /* shared card surface — sidebar budget, global create form, viewer modal */

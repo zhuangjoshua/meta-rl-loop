@@ -2994,6 +2994,20 @@ export default function ChatPage() {
             </button>
           </div>
 
+          <MobileOperatorBillingCard
+            operatorBillingBusy={operatorBillingBusy}
+            operatorBillingError={operatorBillingError}
+            operatorTopupAmount={operatorTopupAmount}
+            onOperatorPayoutConnect={() => {
+              void startOperatorPayoutConnect();
+            }}
+            onOperatorTopup={() => {
+              void submitOperatorTopup();
+            }}
+            onOperatorTopupAmountChange={setOperatorTopupAmount}
+            operatorAccount={operatorAccount}
+          />
+
           {inBusiness ? (
             <CompanyWorkspace
               creativeCredits={creativeCredits}
@@ -3136,6 +3150,122 @@ function BusinessScopeSyncState({
   );
 }
 
+function OperatorBillingActions({
+  operatorBillingBusy,
+  operatorBillingError,
+  operatorTopupAmount,
+  onOperatorPayoutConnect,
+  onOperatorTopup,
+  onOperatorTopupAmountChange,
+  operatorAccount,
+}: {
+  operatorBillingBusy: "topup" | "connect" | null;
+  operatorBillingError: string | null;
+  operatorTopupAmount: string;
+  onOperatorPayoutConnect: () => void;
+  onOperatorTopup: () => void;
+  onOperatorTopupAmountChange: (value: string) => void;
+  operatorAccount: TakyonOperatorAccountResponse | null;
+}) {
+  const payoutStatus = operatorAccount?.available
+    ? String(operatorAccount.stripe_connect_status || "none")
+    : "none";
+  const payoutButtonLabel =
+    payoutStatus === "active" ? "Open payouts" : "Connect payouts";
+  return (
+    <div className="td-operator-actions">
+      <label className="td-mini-field">
+        <span className="td-eyebrow">Top up</span>
+        <div className="td-mini-row">
+          <input
+            className="td-mini-input"
+            disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+            inputMode="decimal"
+            onChange={(event) => onOperatorTopupAmountChange(event.target.value)}
+            placeholder="25"
+            type="text"
+            value={operatorTopupAmount}
+          />
+          <button
+            className="td-mini-button"
+            disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+            onClick={onOperatorTopup}
+            type="button"
+          >
+            {operatorBillingBusy === "topup" ? "Opening…" : "Top up"}
+          </button>
+        </div>
+      </label>
+      <button
+        className="td-mini-button td-mini-button--secondary"
+        disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+        onClick={onOperatorPayoutConnect}
+        type="button"
+      >
+        {operatorBillingBusy === "connect" ? "Opening…" : payoutButtonLabel}
+      </button>
+      {operatorBillingError ? (
+        <p className="td-mini-error">{operatorBillingError}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function MobileOperatorBillingCard({
+  operatorBillingBusy,
+  operatorBillingError,
+  operatorTopupAmount,
+  onOperatorPayoutConnect,
+  onOperatorTopup,
+  onOperatorTopupAmountChange,
+  operatorAccount,
+}: {
+  operatorBillingBusy: "topup" | "connect" | null;
+  operatorBillingError: string | null;
+  operatorTopupAmount: string;
+  onOperatorPayoutConnect: () => void;
+  onOperatorTopup: () => void;
+  onOperatorTopupAmountChange: (value: string) => void;
+  operatorAccount: TakyonOperatorAccountResponse | null;
+}) {
+  const spendableCents = operatorSpendableCents(operatorAccount);
+  const payoutStatus = operatorAccount?.available
+    ? String(operatorAccount.stripe_connect_status || "none")
+    : "none";
+  return (
+    <section className="td-card td-operator-mobile" aria-label="Operator billing">
+      <div className="td-operator-mobile-head">
+        <div>
+          <p className="td-eyebrow">Operator budget</p>
+          <div className="td-defer">
+            <span className="td-dash">
+              {spendableCents === null ? "—" : formatBudgetCents(spendableCents)}
+            </span>
+          </div>
+        </div>
+        <div className="td-operator-mobile-stats">
+          <span>
+            Payouts{" "}
+            {operatorAccount?.available
+              ? formatBudgetCents(operatorAccount.owed_balance_cents)
+              : "—"}
+          </span>
+          <span>Connect {operatorAccount?.available ? payoutStatus : "—"}</span>
+        </div>
+      </div>
+      <OperatorBillingActions
+        operatorBillingBusy={operatorBillingBusy}
+        operatorBillingError={operatorBillingError}
+        operatorTopupAmount={operatorTopupAmount}
+        onOperatorPayoutConnect={onOperatorPayoutConnect}
+        onOperatorTopup={onOperatorTopup}
+        onOperatorTopupAmountChange={onOperatorTopupAmountChange}
+        operatorAccount={operatorAccount}
+      />
+    </section>
+  );
+}
+
 function BizSidebar({
   businesses,
   businessesAvailable,
@@ -3201,8 +3331,6 @@ function BizSidebar({
   const payoutStatus = operatorAccount?.available
     ? String(operatorAccount.stripe_connect_status || "none")
     : "none";
-  const payoutButtonLabel =
-    payoutStatus === "active" ? "Open payouts" : "Connect payouts";
   return (
     <aside className="td-side">
       <div className="td-brand">
@@ -3306,41 +3434,15 @@ function BizSidebar({
               </span>
             </div>
           </div>
-          <div className="td-operator-actions">
-            <label className="td-mini-field">
-              <span className="td-eyebrow">Top up</span>
-              <div className="td-mini-row">
-                <input
-                  className="td-mini-input"
-                  disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-                  inputMode="decimal"
-                  onChange={(event) => onOperatorTopupAmountChange(event.target.value)}
-                  placeholder="25"
-                  type="text"
-                  value={operatorTopupAmount}
-                />
-                <button
-                  className="td-mini-button"
-                  disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-                  onClick={onOperatorTopup}
-                  type="button"
-                >
-                  {operatorBillingBusy === "topup" ? "Opening…" : "Top up"}
-                </button>
-              </div>
-            </label>
-            <button
-              className="td-mini-button td-mini-button--secondary"
-              disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-              onClick={onOperatorPayoutConnect}
-              type="button"
-            >
-              {operatorBillingBusy === "connect" ? "Opening…" : payoutButtonLabel}
-            </button>
-            {operatorBillingError ? (
-              <p className="td-mini-error">{operatorBillingError}</p>
-            ) : null}
-          </div>
+          <OperatorBillingActions
+            operatorBillingBusy={operatorBillingBusy}
+            operatorBillingError={operatorBillingError}
+            operatorTopupAmount={operatorTopupAmount}
+            onOperatorPayoutConnect={onOperatorPayoutConnect}
+            onOperatorTopup={onOperatorTopup}
+            onOperatorTopupAmountChange={onOperatorTopupAmountChange}
+            operatorAccount={operatorAccount}
+          />
           <span className="td-defer-note">
             <span className="td-dotline" />
             {budgetStatus}
