@@ -2176,6 +2176,7 @@ async def get_takyon_business_workspace(
         )
         with store._connect() as conn:
             current = store._row_to_dict(store._ensure_business(conn, business))
+            surface = store._app_surface_contract(conn, business)
             latest_worker_job = None
             for table_name in ("jobs", store._work_requests_table()):
                 try:
@@ -2219,6 +2220,24 @@ async def get_takyon_business_workspace(
             if isinstance(item, dict)
             and str(item.get("path") or "").startswith(("distribution/local-published/", "outreach/local-published/"))
         ]
+        surface_status = _brief(surface.get("status") or "")
+        surface_source_path = _brief(surface.get("source_path") or "")
+        surface_publish_target = _brief(surface.get("publish_target") or "")
+        surface_publish_policy = _brief(surface.get("publish_policy") or "")
+        surface_publish_status = _brief(surface.get("publish_status") or "")
+        surface_public_url = _brief(surface.get("public_url") or "")
+        surface_publish_receipt_path = _brief(surface.get("publish_receipt_path") or "")
+        surface_publish_blocker = _brief(surface.get("publish_blocker") or "")
+        website_live = surface_publish_status == "published" and bool(surface_public_url)
+        website_status = (
+            "published"
+            if website_live
+            else "publish_blocked"
+            if surface_publish_status == "blocked"
+            else "local_source"
+            if website_output
+            else "missing"
+        )
 
         task_status = _brief((background_run or {}).get("status") or (latest_worker_job or {}).get("status") or "")
         task_kind = _brief((background_run or {}).get("kind") or (latest_worker_job or {}).get("kind") or "")
@@ -2264,16 +2283,20 @@ async def get_takyon_business_workspace(
             "status": "working" if tasks and task_status in {"queued", "running"} else "working" if website_output else "ready",
             "headline": (
                 task_detail
-                or ("Product preview is available." if website_output else "The workspace is ready for the next move.")
+                or ("Product is live." if website_live else "Product preview is available." if website_output else "The workspace is ready for the next move.")
             ),
             "detail": (
-                "Open the preview, ask the CEO to continue, or inspect a deliverable."
+                "Open the website, ask the CEO to continue, or inspect a deliverable."
+                if website_live
+                else "Open the preview, ask the CEO to continue, or inspect a deliverable."
                 if website_output
                 else "Open a deliverable or ask the CEO to keep working."
             ),
             "next_action": (
                 "Let the current CEO run finish."
                 if tasks and task_status in {"queued", "running"}
+                else "Open the website or continue distribution."
+                if website_live
                 else "Open the preview or continue research."
                 if website_output
                 else "Open a deliverable or wake the CEO."
@@ -2304,18 +2327,30 @@ async def get_takyon_business_workspace(
                 "goal": _brief((current or {}).get("goal")),
                 "mode": _brief((current or {}).get("mode") or (current or {}).get("status") or (current or {}).get("state")),
                 "product": {
-                    "status": "local_source" if website_output else "missing",
-                    "source_path": "product/site" if website_output else "",
+                    "status": surface_status or website_status,
+                    "source_path": surface_source_path or ("product/site" if website_output else ""),
                     "design_brief_path": "product/design-brief.md",
+                    "publish_target": surface_publish_target,
+                    "publish_policy": surface_publish_policy,
+                    "publish_status": surface_publish_status,
+                    "public_url": surface_public_url,
+                    "publish_receipt_path": surface_publish_receipt_path,
+                    "publish_blocker": surface_publish_blocker,
                 },
                 "tasks": tasks,
                 "ceo_loop": ceo_loop,
                 "posts": posts,
                 "artifacts": {
                     "website": {
-                        "status": "local_source" if website_output else "missing",
+                        "status": website_status,
                         "path": str((website_output or {}).get("path") or ""),
-                        "source_path": "product/site" if website_output else "",
+                        "source_path": surface_source_path or ("product/site" if website_output else ""),
+                        "public_url": surface_public_url,
+                        "publish_target": surface_publish_target,
+                        "publish_policy": surface_publish_policy,
+                        "publish_status": surface_publish_status,
+                        "publish_blocker": surface_publish_blocker,
+                        "publish_receipt_path": surface_publish_receipt_path,
                     },
                     "outreach": {
                         "status": "published_local" if outreach_outputs else "missing",
