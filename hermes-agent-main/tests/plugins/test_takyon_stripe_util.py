@@ -117,3 +117,39 @@ def test_request_http_error_becomes_stripe_error(monkeypatch):
         stripe_request("checkout/sessions", {"mode": "payment"})
     # The upstream error body is preserved in the message, never swallowed.
     assert "card_declined" in str(excinfo.value)
+
+
+def test_request_get_uses_querystring_and_no_body(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id":"acct_test_1","payouts_enabled":true}'
+
+    def _fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["body"] = request.data
+        return _Resp()
+
+    monkeypatch.setattr(stripe_util.urllib.request, "urlopen", _fake_urlopen)
+    out = stripe_request(
+        "accounts/acct_test_1",
+        {"expand[]": "capabilities"},
+        method="GET",
+    )
+
+    assert out["id"] == "acct_test_1"
+    assert captured["method"] == "GET"
+    assert captured["body"] is None
+    assert (
+        captured["url"]
+        == "https://api.stripe.com/v1/accounts/acct_test_1?expand%5B%5D=capabilities"
+    )

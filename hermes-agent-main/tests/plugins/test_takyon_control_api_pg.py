@@ -21,7 +21,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from plugins.takyon import billing, business_credits, stripe_util  # noqa: E402
+from plugins.takyon import billing, business_credits, custody, stripe_util  # noqa: E402
 from plugins.takyon.control_api import build_control_router, get_control_conn  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     provision_user_on_first_login,
@@ -153,6 +153,87 @@ def test_me_returns_resolved_identity(client, pg_conn):
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"user_id": uid, "status": "active"}
+
+
+def test_me_payouts_returns_custody_and_connect_state(client, pg_conn, monkeypatch):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    custody.accrue(pg_conn, uid, slug, 5000, "custody-1", fee_bps=0)
+    pg_conn.execute(
+        "update users set stripe_connect_account_id = %s, stripe_connect_status = %s where id = %s",
+        ("acct_live_123", "pending", uid),
+    )
+
+    def _fake_request(path, params, *, method="POST"):
+        assert path == "accounts/acct_live_123"
+        assert method == "GET"
+        return {
+            "id": "acct_live_123",
+            "default_currency": "usd",
+            "details_submitted": True,
+            "payouts_enabled": True,
+            "requirements": {"disabled_reason": None, "past_due": []},
+        }
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.get("/v1/me/payouts", headers=_auth(raw))
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "user_id": uid,
+        "stripe_connect_account_id": "acct_live_123",
+        "stripe_connect_status": "active",
+        "payouts_enabled": True,
+        "details_submitted": True,
+        "payout_currency": "usd",
+        "owed_balance_cents": 5000,
+        "paid_out_cents": 0,
+    }
+
+
+def test_payout_connect_creates_account_and_onboarding_link(client, pg_conn, monkeypatch):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub(), "owner@example.com")
+    captured: list[tuple[str, dict, str]] = []
+
+    def _fake_request(path, params, *, method="POST"):
+        captured.append((path, dict(params), method))
+        if path == "accounts":
+            return {
+                "id": "acct_connect_1",
+                "default_currency": "usd",
+                "details_submitted": False,
+                "payouts_enabled": False,
+                "requirements": {"disabled_reason": None, "past_due": []},
+            }
+        if path == "account_links":
+            return {"url": "https://connect.stripe.com/onboarding/acct_connect_1"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        "/v1/me/payouts/connect",
+        headers=_auth(raw),
+        json={
+            "return_url": "https://app.example.com/return",
+            "refresh_url": "https://app.example.com/refresh",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "connect_url": "https://connect.stripe.com/onboarding/acct_connect_1",
+        "link_type": "account_onboarding",
+        "stripe_connect_account_id": "acct_connect_1",
+        "stripe_connect_status": "pending",
+    }
+    assert captured[0][0] == "accounts"
+    assert captured[0][1]["type"] == "express"
+    assert captured[0][1]["email"] == "owner@example.com"
+    assert captured[0][1]["capabilities[transfers][requested]"] == "true"
+    assert captured[1][0] == "account_links"
+    row = pg_conn.execute(
+        "select stripe_connect_account_id, stripe_connect_status from users where id = %s",
+        (uid,),
+    ).fetchone()
+    assert tuple(row) == ("acct_connect_1", "pending")
 
 
 def test_businesses_lists_only_owned(client, pg_conn):

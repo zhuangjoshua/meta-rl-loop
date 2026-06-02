@@ -494,6 +494,27 @@ function operatorSpendableCents(
   return Number.isFinite(cents) ? Math.max(0, cents) : 0;
 }
 
+function currentDashboardReturnPath(): string {
+  if (typeof window === "undefined") return "/";
+  const path = window.location.pathname || "/";
+  const search = window.location.search || "";
+  return `${path}${search}`;
+}
+
+function operatorActionErrorMessage(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const raw = error.message.replace(/^\d+:\s*/, "");
+  try {
+    const payload = JSON.parse(raw) as { detail?: unknown };
+    if (typeof payload.detail === "string" && payload.detail.trim()) {
+      return payload.detail;
+    }
+  } catch {
+    // Keep the original text when the backend didn't return JSON.
+  }
+  return raw || fallback;
+}
+
 function businessCountLabel(count: number): string {
   return `${count} business${count === 1 ? "" : "es"}`;
 }
@@ -1144,6 +1165,9 @@ export default function ChatPage() {
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
     useState<TakyonOperatorAccountResponse | null>(null);
+  const [operatorTopupAmount, setOperatorTopupAmount] = useState("25");
+  const [operatorBillingBusy, setOperatorBillingBusy] = useState<"topup" | "connect" | null>(null);
+  const [operatorBillingError, setOperatorBillingError] = useState<string | null>(null);
   const [operatorBusinesses, setOperatorBusinesses] = useState<BusinessSummary[]>([]);
   const [operatorBusinessesAvailable, setOperatorBusinessesAvailable] = useState(false);
   const [operatorBusinessesLoading, setOperatorBusinessesLoading] = useState(true);
@@ -1298,6 +1322,51 @@ export default function ChatPage() {
       setOperatorAccount((prev) => prev || { available: false, reason: "request_failed" });
     }
   }, []);
+
+  const submitOperatorTopup = useCallback(async () => {
+    const dollars = Number.parseFloat(operatorTopupAmount);
+    const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
+    if (amountCents <= 0) {
+      setOperatorBillingError("Enter a valid top-up amount.");
+      return;
+    }
+    setOperatorBillingBusy("topup");
+    setOperatorBillingError(null);
+    try {
+      const res = await api.createTakyonOperatorTopupCheckout(
+        amountCents,
+        currentDashboardReturnPath(),
+      );
+      if (!res.checkout_url) {
+        throw new Error("Top-up checkout URL unavailable.");
+      }
+      window.location.assign(res.checkout_url);
+    } catch (err) {
+      setOperatorBillingError(operatorActionErrorMessage(err, "Top-up failed."));
+    } finally {
+      setOperatorBillingBusy(null);
+    }
+  }, [operatorTopupAmount]);
+
+  const startOperatorPayoutConnect = useCallback(async () => {
+    setOperatorBillingBusy("connect");
+    setOperatorBillingError(null);
+    try {
+      const res = await api.createTakyonOperatorPayoutConnect(currentDashboardReturnPath());
+      if (!res.connect_url) {
+        throw new Error("Payout connect URL unavailable.");
+      }
+      window.location.assign(res.connect_url);
+    } catch (err) {
+      setOperatorBillingError(
+        operatorActionErrorMessage(err, "Payout connect failed."),
+      );
+      setOperatorBillingBusy(null);
+      await refreshOperatorAccount();
+      return;
+    }
+    setOperatorBillingBusy(null);
+  }, [refreshOperatorAccount]);
 
   const refreshOperatorBusinesses = useCallback(async () => {
     setOperatorBusinessesLoading(true);
@@ -2847,9 +2916,19 @@ export default function ChatPage() {
           businessesReason={operatorBusinessesReason}
           canInteract={canInteract}
           loadingBusinesses={operatorBusinessesLoading}
+          operatorBillingBusy={operatorBillingBusy}
+          operatorBillingError={operatorBillingError}
+          operatorTopupAmount={operatorTopupAmount}
           onCreate={() => {
             void setTakyonScope("");
           }}
+          onOperatorPayoutConnect={() => {
+            void startOperatorPayoutConnect();
+          }}
+          onOperatorTopup={() => {
+            void submitOperatorTopup();
+          }}
+          onOperatorTopupAmountChange={setOperatorTopupAmount}
           operatorAccount={operatorAccount}
           onSelect={setTakyonScope}
           scope={displayScope}
@@ -3063,7 +3142,13 @@ function BizSidebar({
   businessesReason,
   canInteract,
   loadingBusinesses,
+  operatorBillingBusy,
+  operatorBillingError,
+  operatorTopupAmount,
   onCreate,
+  onOperatorPayoutConnect,
+  onOperatorTopup,
+  onOperatorTopupAmountChange,
   operatorAccount,
   onSelect,
   scope,
@@ -3074,7 +3159,13 @@ function BizSidebar({
   businessesReason: string | null;
   canInteract: boolean;
   loadingBusinesses: boolean;
+  operatorBillingBusy: "topup" | "connect" | null;
+  operatorBillingError: string | null;
+  operatorTopupAmount: string;
   onCreate: () => void;
+  onOperatorPayoutConnect: () => void;
+  onOperatorTopup: () => void;
+  onOperatorTopupAmountChange: (value: string) => void;
   operatorAccount: TakyonOperatorAccountResponse | null;
   onSelect: (business: string) => Promise<void>;
   scope: ScopeState;
@@ -3107,6 +3198,11 @@ function BizSidebar({
           ? "Sign in to load businesses."
           : "Business list unavailable."
       : "No businesses yet.";
+  const payoutStatus = operatorAccount?.available
+    ? String(operatorAccount.stripe_connect_status || "none")
+    : "none";
+  const payoutButtonLabel =
+    payoutStatus === "active" ? "Open payouts" : "Connect payouts";
   return (
     <aside className="td-side">
       <div className="td-brand">
@@ -3195,6 +3291,55 @@ function BizSidebar({
                   : "—"}
               </span>
             </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Customer payouts</span>
+              <span>
+                {operatorAccount?.available
+                  ? formatBudgetCents(operatorAccount.owed_balance_cents)
+                  : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span>Connect status</span>
+              <span className="uppercase tracking-[0.12em]">
+                {operatorAccount?.available ? payoutStatus : "—"}
+              </span>
+            </div>
+          </div>
+          <div className="td-operator-actions">
+            <label className="td-mini-field">
+              <span className="td-eyebrow">Top up</span>
+              <div className="td-mini-row">
+                <input
+                  className="td-mini-input"
+                  disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+                  inputMode="decimal"
+                  onChange={(event) => onOperatorTopupAmountChange(event.target.value)}
+                  placeholder="25"
+                  type="text"
+                  value={operatorTopupAmount}
+                />
+                <button
+                  className="td-mini-button"
+                  disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+                  onClick={onOperatorTopup}
+                  type="button"
+                >
+                  {operatorBillingBusy === "topup" ? "Opening…" : "Top up"}
+                </button>
+              </div>
+            </label>
+            <button
+              className="td-mini-button td-mini-button--secondary"
+              disabled={!operatorAccount?.available || operatorBillingBusy !== null}
+              onClick={onOperatorPayoutConnect}
+              type="button"
+            >
+              {operatorBillingBusy === "connect" ? "Opening…" : payoutButtonLabel}
+            </button>
+            {operatorBillingError ? (
+              <p className="td-mini-error">{operatorBillingError}</p>
+            ) : null}
           </div>
           <span className="td-defer-note">
             <span className="td-dotline" />

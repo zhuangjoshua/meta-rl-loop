@@ -107,6 +107,26 @@ export const api = {
   },
   getTakyonOperatorAccount: () =>
     fetchJSON<TakyonOperatorAccountResponse>("/api/takyon/operator/account"),
+  createTakyonOperatorTopupCheckout: (amountCents: number, returnPath: string) =>
+    fetchJSON<{ checkout_url?: string; session_id?: string; amount_cents?: number }>(
+      "/api/takyon/operator/topup/checkout",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount_cents: amountCents, return_path: returnPath }),
+      },
+    ),
+  createTakyonOperatorPayoutConnect: (returnPath: string) =>
+    fetchJSON<{
+      connect_url?: string;
+      link_type?: string;
+      stripe_connect_account_id?: string;
+      stripe_connect_status?: string;
+    }>("/api/takyon/operator/payouts/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ return_path: returnPath }),
+    }),
   getTakyonOperatorBusinesses: () =>
     fetchJSONWithTimeout<TakyonOperatorBusinessesResponse>(
       "/api/takyon/operator/businesses",
@@ -479,6 +499,12 @@ export interface TakyonOperatorAccountResponse {
   topup_balance_cents?: number;
   reserved_cents?: number;
   spendable_cents?: number;
+  owed_balance_cents?: number;
+  paid_out_cents?: number;
+  payout_currency?: string;
+  stripe_connect_status?: string;
+  payouts_enabled?: boolean;
+  details_submitted?: boolean;
   reason?: string;
 }
 

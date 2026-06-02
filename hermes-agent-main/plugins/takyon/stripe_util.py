@@ -31,25 +31,37 @@ class StripeError(Exception):
     error instead of a silently-faked success."""
 
 
-def stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    """POST form-encoded `params` to `https://api.stripe.com/v1/{path}` with the shared
-    platform secret key, dropping any None-valued params. Returns the parsed JSON object.
+def stripe_request(
+    path: str,
+    params: dict[str, Any],
+    *,
+    method: str = "POST",
+) -> dict[str, Any]:
+    """Send a Stripe API request to `https://api.stripe.com/v1/{path}` with the shared
+    platform secret key, dropping any None-valued params. POST bodies are form-encoded;
+    GET params are query-encoded. Returns the parsed JSON object.
     Raises StripeError if STRIPE_SECRET_KEY is absent (the call is never faked) or Stripe
     returns a non-2xx response."""
     key = os.environ.get("STRIPE_SECRET_KEY")
     if not key:
         raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
-    data = urllib.parse.urlencode(
+    verb = str(method or "POST").strip().upper() or "POST"
+    encoded = urllib.parse.urlencode(
         {k: v for k, v in params.items() if v is not None}
-    ).encode("utf-8")
+    )
+    base_url = f"https://api.stripe.com/v1/{path.lstrip('/')}"
+    data = None if verb == "GET" else encoded.encode("utf-8")
+    request_url = base_url
+    if verb == "GET" and encoded:
+        request_url = f"{base_url}?{encoded}"
     request = urllib.request.Request(
-        f"https://api.stripe.com/v1/{path.lstrip('/')}",
+        request_url,
         data=data,
         headers={
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/x-www-form-urlencoded",
         },
-        method="POST",
+        method=verb,
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:

@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import billing, business_credits, rate_limit, stripe_util
+from . import billing, business_credits, custody, rate_limit, stripe_util
 from .control_plane import ResolvedPrincipal, resolve_api_key
 
 _BEARER_PREFIX = "Bearer "
@@ -47,6 +48,218 @@ class CreativeCreditCheckoutRequest(BaseModel):
     pack_id: str = Field(..., min_length=1)
     success_url: str = Field(..., min_length=1)
     cancel_url: str = Field(..., min_length=1)
+
+
+class PayoutConnectRequest(BaseModel):
+    """Body for POST /v1/me/payouts/connect."""
+
+    return_url: str = Field(..., min_length=1)
+    refresh_url: str = Field(..., min_length=1)
+
+
+@dataclass(frozen=True)
+class OperatorPayoutState:
+    user_id: str
+    stripe_connect_account_id: str | None
+    stripe_connect_status: str
+    payouts_enabled: bool
+    details_submitted: bool
+    payout_currency: str
+    owed_balance_cents: int
+    paid_out_cents: int
+
+
+def _stripe_connect_country() -> str:
+    raw = str(os.environ.get("TAKYON_STRIPE_CONNECT_COUNTRY") or "US").strip().upper()
+    if len(raw) == 2 and raw.isalpha():
+        return raw
+    return "US"
+
+
+def _classify_connect_status(account: dict[str, Any]) -> tuple[str, bool, bool]:
+    payouts_enabled = bool(account.get("payouts_enabled"))
+    details_submitted = bool(account.get("details_submitted"))
+    requirements = (
+        account.get("requirements") if isinstance(account.get("requirements"), dict) else {}
+    )
+    disabled_reason = str(requirements.get("disabled_reason") or "").strip()
+    past_due = requirements.get("past_due")
+    if payouts_enabled:
+        return "active", payouts_enabled, details_submitted
+    if disabled_reason or (isinstance(past_due, list) and past_due):
+        return "restricted", payouts_enabled, details_submitted
+    return "pending", payouts_enabled, details_submitted
+
+
+def _read_operator_payout_row(conn, user_id: str, *, for_update: bool = False):
+    sql = (
+        "select stripe_connect_account_id, stripe_connect_status, payout_currency, email "
+        "from users where id = %s"
+    )
+    if for_update:
+        sql += " for update"
+    row = conn.execute(sql, (user_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"user_not_found:{user_id}")
+    return row
+
+
+def create_topup_checkout_session(
+    user_id: str,
+    *,
+    amount_cents: int,
+    success_url: str,
+    cancel_url: str,
+) -> dict[str, Any]:
+    params = {
+        "mode": "payment",
+        "client_reference_id": user_id,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": "usd",
+        "line_items[0][price_data][unit_amount]": amount_cents,
+        "line_items[0][price_data][product_data][name]": "Takyon balance top-up",
+        "metadata[purpose]": "takyon_topup",
+        "metadata[user_id]": user_id,
+        "payment_intent_data[metadata][purpose]": "takyon_topup",
+        "payment_intent_data[metadata][user_id]": user_id,
+    }
+    return stripe_util.stripe_request("checkout/sessions", params)
+
+
+def get_operator_payout_state(
+    conn,
+    user_id: str,
+    *,
+    refresh_live: bool = True,
+) -> OperatorPayoutState:
+    row = _read_operator_payout_row(conn, user_id, for_update=False)
+    account_id = None if row[0] is None else str(row[0])
+    cached_status = str(row[1] or "none")
+    payout_currency = str(row[2] or "usd")
+    payouts_enabled = cached_status == "active"
+    details_submitted = cached_status in {"pending", "active", "restricted"}
+
+    if refresh_live and account_id:
+        try:
+            account = stripe_util.stripe_request(f"accounts/{account_id}", {}, method="GET")
+        except stripe_util.StripeError:
+            account = None
+        if account is not None:
+            status, payouts_enabled, details_submitted = _classify_connect_status(account)
+            payout_currency = str(
+                account.get("default_currency") or payout_currency or "usd"
+            ).lower()
+            if status != cached_status or payout_currency != str(row[2] or "usd"):
+                with conn.transaction():
+                    _read_operator_payout_row(conn, user_id, for_update=True)
+                    conn.execute(
+                        "update users set stripe_connect_status = %s, payout_currency = %s "
+                        "where id = %s",
+                        (status, payout_currency, user_id),
+                    )
+            cached_status = status
+
+    custody.open_custody_account(conn, user_id)
+    balances = custody.get_custody_balances(conn, user_id)
+    return OperatorPayoutState(
+        user_id=user_id,
+        stripe_connect_account_id=account_id,
+        stripe_connect_status=cached_status,
+        payouts_enabled=payouts_enabled,
+        details_submitted=details_submitted,
+        payout_currency=str(balances.currency or payout_currency or "usd").lower(),
+        owed_balance_cents=int(balances.owed_balance_cents),
+        paid_out_cents=int(balances.paid_out_cents),
+    )
+
+
+def create_operator_payout_connect_link(
+    conn,
+    user_id: str,
+    *,
+    return_url: str,
+    refresh_url: str,
+) -> dict[str, Any]:
+    if not str(return_url or "").strip():
+        raise ValueError("return_url is required")
+    if not str(refresh_url or "").strip():
+        raise ValueError("refresh_url is required")
+    with conn.transaction():
+        row = _read_operator_payout_row(conn, user_id, for_update=True)
+        account_id = None if row[0] is None else str(row[0])
+        cached_status = str(row[1] or "none")
+        payout_currency = str(row[2] or "usd").lower()
+        email = str(row[3] or "").strip() or None
+
+        account_payload: dict[str, Any] | None = None
+        if account_id:
+            account_payload = stripe_util.stripe_request(
+                f"accounts/{account_id}", {}, method="GET"
+            )
+            cached_status, _payouts_enabled, _details_submitted = _classify_connect_status(
+                account_payload
+            )
+            payout_currency = str(
+                account_payload.get("default_currency") or payout_currency or "usd"
+            ).lower()
+            conn.execute(
+                "update users set stripe_connect_status = %s, payout_currency = %s where id = %s",
+                (cached_status, payout_currency, user_id),
+            )
+
+        if not account_id:
+            params = {
+                "type": "express",
+                "country": _stripe_connect_country(),
+                "default_currency": payout_currency or "usd",
+                "capabilities[transfers][requested]": "true",
+                "metadata[takyon_user_id]": user_id,
+                "metadata[purpose]": "operator_payouts",
+            }
+            if email:
+                params["email"] = email
+            account_payload = stripe_util.stripe_request("accounts", params)
+            account_id = str(account_payload.get("id") or "").strip()
+            if not account_id:
+                raise stripe_util.StripeError("Stripe account creation returned no account id")
+            cached_status, _payouts_enabled, _details_submitted = _classify_connect_status(
+                account_payload
+            )
+            payout_currency = str(
+                account_payload.get("default_currency") or payout_currency or "usd"
+            ).lower()
+            conn.execute(
+                "update users set stripe_connect_account_id = %s, stripe_connect_status = %s, "
+                "payout_currency = %s where id = %s",
+                (account_id, cached_status, payout_currency, user_id),
+            )
+
+    if cached_status == "active":
+        link = stripe_util.stripe_request(f"accounts/{account_id}/login_links", {})
+        return {
+            "url": link.get("url"),
+            "link_type": "login_link",
+            "stripe_connect_account_id": account_id,
+            "stripe_connect_status": cached_status,
+        }
+
+    link = stripe_util.stripe_request(
+        "account_links",
+        {
+            "account": account_id,
+            "refresh_url": refresh_url,
+            "return_url": return_url,
+            "type": "account_onboarding",
+        },
+    )
+    return {
+        "url": link.get("url"),
+        "link_type": "account_onboarding",
+        "stripe_connect_account_id": account_id,
+        "stripe_connect_status": cached_status,
+    }
 
 
 def get_control_conn():
@@ -194,6 +407,52 @@ def build_control_router() -> APIRouter:
         # NOT fabricate them in the meantime.
         return {"user_id": principal.user_id, "status": principal.status}
 
+    @router.get("/me/payouts")
+    def get_my_payouts(
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        state = get_operator_payout_state(conn, principal.user_id, refresh_live=True)
+        return {
+            "user_id": state.user_id,
+            "stripe_connect_account_id": state.stripe_connect_account_id,
+            "stripe_connect_status": state.stripe_connect_status,
+            "payouts_enabled": state.payouts_enabled,
+            "details_submitted": state.details_submitted,
+            "payout_currency": state.payout_currency,
+            "owed_balance_cents": state.owed_balance_cents,
+            "paid_out_cents": state.paid_out_cents,
+        }
+
+    @router.post("/me/payouts/connect")
+    def connect_my_payouts(
+        body: PayoutConnectRequest,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        try:
+            link = create_operator_payout_connect_link(
+                conn,
+                principal.user_id,
+                return_url=body.return_url,
+                refresh_url=body.refresh_url,
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail="user_not_found")
+        except stripe_util.StripeError as exc:
+            msg = str(exc)
+            if "STRIPE_SECRET_KEY" in msg:
+                raise HTTPException(
+                    status_code=503, detail="payout_connect_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
+        return {
+            "connect_url": link.get("url"),
+            "link_type": link.get("link_type"),
+            "stripe_connect_account_id": link.get("stripe_connect_account_id"),
+            "stripe_connect_status": link.get("stripe_connect_status"),
+        }
+
     @router.get("/businesses")
     def list_businesses(
         principal: ResolvedPrincipal = Depends(_rate_limited_principal),
@@ -325,22 +584,13 @@ def build_control_router() -> APIRouter:
         client_reference_id + metadata.purpose=takyon_topup let the billing webhook credit
         the right user exactly once when payment completes. Requires STRIPE_SECRET_KEY; if
         it is absent the call is blocked (503) with a reason — never a faked URL."""
-        params = {
-            "mode": "payment",
-            "client_reference_id": principal.user_id,
-            "success_url": body.success_url,
-            "cancel_url": body.cancel_url,
-            "line_items[0][quantity]": 1,
-            "line_items[0][price_data][currency]": "usd",
-            "line_items[0][price_data][unit_amount]": body.amount_cents,
-            "line_items[0][price_data][product_data][name]": "Takyon balance top-up",
-            "metadata[purpose]": "takyon_topup",
-            "metadata[user_id]": principal.user_id,
-            "payment_intent_data[metadata][purpose]": "takyon_topup",
-            "payment_intent_data[metadata][user_id]": principal.user_id,
-        }
         try:
-            session = stripe_util.stripe_request("checkout/sessions", params)
+            session = create_topup_checkout_session(
+                principal.user_id,
+                amount_cents=body.amount_cents,
+                success_url=body.success_url,
+                cancel_url=body.cancel_url,
+            )
         except stripe_util.StripeError as exc:
             msg = str(exc)
             if "STRIPE_SECRET_KEY" in msg:

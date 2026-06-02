@@ -1059,6 +1059,77 @@ def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
         return None
 
 
+def _tui_turn_session_id(reservation_key: str) -> str:
+    key = str(reservation_key or "").strip()
+    if not key.startswith("tui-turn:"):
+        return ""
+    parts = key.split(":", 2)
+    if len(parts) != 3:
+        return ""
+    return parts[1].strip()
+
+
+def _running_tui_turn_session_ids() -> set[str]:
+    try:
+        from tui_gateway import server as tui_server
+
+        sessions = getattr(tui_server, "_sessions", {})
+    except Exception:
+        return set()
+
+    running: set[str] = set()
+    if not isinstance(sessions, dict):
+        return running
+    for sid, session in list(sessions.items()):
+        if isinstance(session, dict) and session.get("running"):
+            running.add(str(sid))
+    return running
+
+
+def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
+    """Refund orphaned dashboard-turn holds for this operator.
+
+    A healthy TUI turn settles/refunds its `tui-turn:<sid>:...` reservation in the
+    turn thread's `finally`. If the dashboard process dies mid-turn, that finalizer
+    never runs and the operator budget can show a permanent hold. The live gateway
+    session table is the canonical liveness signal for these reservations: if a
+    `tui-turn:*` hold has no matching running session, it is stale and safe to
+    release before we render the account snapshot.
+    """
+    operator_user_id = str(user_id or "").strip()
+    if not operator_user_id:
+        return 0
+
+    from plugins.takyon import billing
+
+    running_session_ids = _running_tui_turn_session_ids()
+    rows = conn.execute(
+        "select distinct r.reservation_key "
+        "from billing_entries r "
+        "where r.user_id = %s "
+        "  and r.kind = 'reserve' "
+        "  and r.reservation_key like 'tui-turn:%' "
+        "  and not exists ("
+        "    select 1 from billing_entries f "
+        "    where f.reservation_key = r.reservation_key "
+        "      and f.kind in ('settle', 'refund')"
+        "  )",
+        (operator_user_id,),
+    ).fetchall()
+    released = 0
+    for row in rows:
+        key = str(row[0] or "").strip()
+        session_id = _tui_turn_session_id(key)
+        if not session_id or session_id in running_session_ids:
+            continue
+        try:
+            billing.refund(conn, key)
+            released += 1
+        except billing.UnknownReservation:
+            continue
+    return released
+
+
 def _seed_platform_owner_if_postgres() -> None:
     """Serving-flip startup seed for the dashboard server (Phase 8, mediationplan.md owner-wiring
     finding). The shell-side twin of this runs in ``cli.py``; both call the SAME idempotent
@@ -1237,6 +1308,23 @@ def _takyon_app_origin(request: Request, body: dict[str, Any] | None = None) -> 
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host")
     return f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+
+
+def _dashboard_origin(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    return f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+
+
+def _dashboard_absolute_url(request: Request, path: str) -> str:
+    safe_path = _same_origin_path(path or "/")
+    prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+    if prefix:
+        if safe_path == "/":
+            safe_path = prefix
+        elif safe_path != prefix and not safe_path.startswith(f"{prefix}/"):
+            safe_path = f"{prefix}{safe_path}"
+    return f"{_dashboard_origin(request).rstrip('/')}{safe_path}"
 
 
 def _takyon_app_set_session_cookie(response: Response, request: Request, token: str) -> None:
@@ -1948,6 +2036,7 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
 
     try:
         from plugins.takyon import billing
+        from plugins.takyon.control_api import get_operator_payout_state
         from plugins.takyon.core import _db_backend
 
         if _db_backend() != "postgres":
@@ -1976,8 +2065,18 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
 
         conn = psycopg.connect(url, autocommit=True)
         try:
+            released = _release_stale_tui_turn_reservations(conn, str(principal.user_id))
+            if released:
+                _log.info(
+                    "released %s stale dashboard-turn reservation(s) for operator %s",
+                    released,
+                    principal.user_id,
+                )
             balances = billing.get_billing_balances(conn, str(principal.user_id))
             reconciled = billing.reconcile_billing(conn, str(principal.user_id))
+            payout_state = get_operator_payout_state(
+                conn, str(principal.user_id), refresh_live=True
+            )
         finally:
             conn.close()
 
@@ -1994,6 +2093,12 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "spendable_cents": allowance_remaining + topup_balance,
             "status": principal.status,
             "topup_balance_cents": topup_balance,
+            "owed_balance_cents": int(payout_state.owed_balance_cents),
+            "paid_out_cents": int(payout_state.paid_out_cents),
+            "payout_currency": payout_state.payout_currency,
+            "stripe_connect_status": payout_state.stripe_connect_status,
+            "payouts_enabled": bool(payout_state.payouts_enabled),
+            "details_submitted": bool(payout_state.details_submitted),
             "user_id": str(principal.user_id),
         }
     except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
@@ -2005,6 +2110,138 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "status": principal.status,
             "user_id": str(principal.user_id),
         }
+
+
+@app.post("/api/takyon/operator/topup/checkout")
+async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, Any]:
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        amount_cents = int(body.get("amount_cents") or 0)
+    except (TypeError, ValueError):
+        amount_cents = 0
+    if amount_cents <= 0:
+        raise HTTPException(status_code=400, detail="amount_cents must be > 0")
+    return_path = _same_origin_path(str(body.get("return_path") or "/"))
+    try:
+        from plugins.takyon.control_api import create_topup_checkout_session
+
+        session = create_topup_checkout_session(
+            str(principal.user_id),
+            amount_cents=amount_cents,
+            success_url=_dashboard_absolute_url(request, return_path),
+            cancel_url=_dashboard_absolute_url(request, return_path),
+        )
+    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(status_code=503, detail="topup_unconfigured") from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+    return {
+        "checkout_url": session.get("url"),
+        "session_id": session.get("id"),
+        "amount_cents": amount_cents,
+    }
+
+
+@app.post("/api/takyon/operator/payouts/connect")
+async def create_takyon_operator_payout_connect(request: Request) -> dict[str, Any]:
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return_path = _same_origin_path(str(body.get("return_path") or "/"))
+    refresh_qs = urllib.parse.urlencode({"return_to": return_path})
+    refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
+    try:
+        import psycopg
+
+        from plugins.takyon.control_api import create_operator_payout_connect_link
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            link = create_operator_payout_connect_link(
+                conn,
+                str(principal.user_id),
+                return_url=_dashboard_absolute_url(request, return_path),
+                refresh_url=_dashboard_absolute_url(request, refresh_path),
+            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(
+                status_code=503, detail="payout_connect_unconfigured"
+            ) from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+    return {
+        "connect_url": link.get("url"),
+        "link_type": link.get("link_type"),
+        "stripe_connect_account_id": link.get("stripe_connect_account_id"),
+        "stripe_connect_status": link.get("stripe_connect_status"),
+    }
+
+
+@app.get("/api/takyon/operator/payouts/connect/refresh")
+async def refresh_takyon_operator_payout_connect(
+    request: Request,
+    return_to: str = "/",
+) -> Response:
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    safe_return = _same_origin_path(return_to or "/")
+    refresh_qs = urllib.parse.urlencode({"return_to": safe_return})
+    refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
+    try:
+        import psycopg
+
+        from plugins.takyon.control_api import create_operator_payout_connect_link
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            link = create_operator_payout_connect_link(
+                conn,
+                str(principal.user_id),
+                return_url=_dashboard_absolute_url(request, safe_return),
+                refresh_url=_dashboard_absolute_url(request, refresh_path),
+            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(
+                status_code=503, detail="payout_connect_unconfigured"
+            ) from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+    target = str(link.get("url") or "").strip()
+    if not target:
+        raise HTTPException(status_code=502, detail="missing_connect_url")
+    return RedirectResponse(target, status_code=302)
 
 
 @app.get("/api/takyon/operator/businesses")

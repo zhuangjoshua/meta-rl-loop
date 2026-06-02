@@ -161,6 +161,71 @@
 
 /* portfolio card (operator budget) */
 .tk-dash .td-portfolio { margin-top: 8px; padding: 14px; }
+.tk-dash .td-operator-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.tk-dash .td-mini-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tk-dash .td-mini-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.tk-dash .td-mini-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--td-border);
+  background: #fff;
+  color: var(--td-fg);
+  border-radius: var(--td-radius);
+  padding: 8px 10px;
+  font-family: var(--td-font-mono);
+  font-size: 12px;
+}
+.tk-dash .td-mini-input:disabled {
+  background: var(--td-border-2);
+  color: var(--td-meta);
+}
+.tk-dash .td-mini-button {
+  border: 1.5px solid var(--td-fg);
+  background: var(--td-fg);
+  color: #fff;
+  border-radius: var(--td-radius);
+  padding: 8px 10px;
+  font-family: var(--td-font-mono);
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.tk-dash .td-mini-button:hover { background: var(--td-accent); border-color: var(--td-accent); }
+.tk-dash .td-mini-button:disabled {
+  background: var(--td-faint);
+  border-color: var(--td-faint);
+  color: #fff;
+}
+.tk-dash .td-mini-button--secondary {
+  background: transparent;
+  color: var(--td-fg);
+}
+.tk-dash .td-mini-button--secondary:hover {
+  background: var(--td-fg-soft);
+  border-color: var(--td-fg);
+  color: var(--td-fg);
+}
+.tk-dash .td-mini-error {
+  margin: 0;
+  color: #9b2f2f;
+  font-family: var(--td-font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
 
 /* ─── Main column ──────────────────────────────────────────────────────── */
 .tk-dash .td-main {
