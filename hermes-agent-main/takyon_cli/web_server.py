@@ -5784,6 +5784,7 @@ def mount_spa(application: FastAPI):
         return
 
     _index_path = WEB_DIST / "index.html"
+    _litebulb_index_path = WEB_DIST / "litebulb" / "index.html"
 
     def _serve_index(prefix: str = ""):
         """Return index.html with the session token + base-path injected.
@@ -5807,6 +5808,40 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
+        html = html.replace("</head>", f"{token_script}</head>", 1)
+        return HTMLResponse(
+            html,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    def _serve_litebulb_index(prefix: str = ""):
+        """Serve the Litebulb operator workspace as the top-level document.
+
+        Litebulb is a self-contained ``index.html`` (vanilla JS + the
+        ``takyon-adapter.js`` data layer).  It used to be mounted in an iframe
+        by the SPA; serving it directly at the operator landing drops the frame
+        boundary and the React bundle entirely.  We inject the same session
+        token / base-path the SPA uses so the adapter authenticates and the
+        page's ``HAS_TAKYON_SESSION`` gate boots the live runtime instead of the
+        mock.  Falls back to the SPA index when the asset is missing (older
+        build), so the dashboard never hard-fails.
+        """
+        if not _litebulb_index_path.is_file():
+            return _serve_index(prefix)
+        html = _litebulb_index_path.read_text()
+        chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+        token_script = (
+            f'<script>window.__TAKYON_SESSION_TOKEN__="{_SESSION_TOKEN}";'
+            f"window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+            f'window.__TAKYON_BASE_PATH__="{prefix}";</script>'
+        )
+        # Served at ``/`` the page's relative ``./takyon-adapter.js`` would
+        # resolve to ``/takyon-adapter.js``; point it at the real static path
+        # (honouring any reverse-proxy prefix).
+        html = html.replace(
+            'src="./takyon-adapter.js"',
+            f'src="{prefix}/litebulb/takyon-adapter.js"',
+        )
         html = html.replace("</head>", f"{token_script}</head>", 1)
         return HTMLResponse(
             html,
@@ -5855,6 +5890,11 @@ def mount_spa(application: FastAPI):
             and file_path.is_file()
         ):
             return FileResponse(file_path)
+        # Operator landing: in embedded/--tui mode the business workspace IS
+        # the Litebulb UI, served directly (no iframe, no React bundle).  Every
+        # other route still renders the SPA shell for client-side routing.
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path in ("", "chat"):
+            return _serve_litebulb_index(prefix)
         return _serve_index(prefix)
 
 
