@@ -300,6 +300,12 @@
     return `${parts[0]}/.../${parts[parts.length - 1]}`;
   }
 
+  function wholeCredits(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count)) return 0;
+    return Math.max(0, Math.trunc(count));
+  }
+
   function previewWindow(title, html) {
     const win = makeWin({
       id: "w-preview",
@@ -497,18 +503,20 @@
     if (!w) return;
     const posts = Array.isArray(LIVE.workspaceOverview && LIVE.workspaceOverview.posts) ? LIVE.workspaceOverview.posts.length : 0;
     const unresolved = Number(LIVE.workspaceOverview && LIVE.workspaceOverview.metrics && LIVE.workspaceOverview.metrics.unresolved_inbound || 0);
-    const credits = LIVE.creativeCredits && LIVE.creativeCredits.available
-      ? `${Number(LIVE.creativeCredits.balance_credits || 0)} creative credits`
-      : "creative credits unavailable";
+    const creativeAvailable = !!(LIVE.creativeCredits && LIVE.creativeCredits.available);
+    const creativeBalance = creativeAvailable ? wholeCredits(LIVE.creativeCredits.balance_credits) : null;
+    const creativeReserved = creativeAvailable ? wholeCredits(LIVE.creativeCredits.reserved_credits) : null;
     const latestPost = latestActionablePost();
     const latestConversation = latestInboundConversation();
     body(w).innerHTML = `
-      <div class="lab">operator budget</div>
-      <div class="big-wake" style="font-size:30px">$${RT.credits.toFixed(2)}</div>
-      <div class="meta" style="margin:6px 0 11px">live Takyon data. This panel stays engine-shaped, but the channel controls are read-only until real per-channel budget rails exist.</div>
+      <div class="lab">paid outreach credits</div>
+      <div class="big-wake" style="font-size:30px">${creativeBalance === null ? "—" : String(creativeBalance)}</div>
+      <div class="meta" style="margin:6px 0 11px">${creativeBalance === null
+        ? "Creative credits are unavailable for this business right now. Operator budget stays in the top rail."
+        : `${creativeBalance} available${creativeReserved ? ` · ${creativeReserved} reserved` : ""}. Operator budget stays in the top rail.`}</div>
       ${buildOutreachRow("Published posts", `${posts} recorded`, posts > 0 ? "live" : "idle", latestPost ? { type: "published-post", label: normalizeOpenableUrl(latestPost.url) ? "open" : "preview" } : null)}
       ${buildOutreachRow("Inbound", `${unresolved} unresolved`, unresolved > 0 ? "live" : "idle", latestConversation ? { type: "inbound-thread", label: "open" } : null)}
-      ${buildOutreachRow("Creative credits", credits, LIVE.creativeCredits && LIVE.creativeCredits.available ? "live" : "idle", null)}
+      ${buildOutreachRow("Reserved credits", creativeBalance === null ? "none reserved" : `${creativeReserved || 0} held for spendful actions`, creativeAvailable && (creativeReserved || 0) > 0 ? "live" : "idle", null)}
     `;
     body(w).querySelectorAll("[data-action]").forEach((el) => {
       const actionType = el.getAttribute("data-action") || "";
@@ -549,7 +557,7 @@
     $("#mb-wake").style.display = "";
     $("#mb-credits").style.display = "";
     $("#mb-wake").textContent = RT.nextWakeAt ? `wake ${RT.paused ? "paused" : fmt(RT.nextWakeAt - Date.now())}` : `wake ${RT.paused ? "paused" : "n/a"}`;
-    $("#mb-credits").textContent = `$${RT.credits.toFixed(2)}`;
+    $("#mb-credits").textContent = `operator $${RT.credits.toFixed(2)}`;
   };
 
   const originalRenderBoard = renderBoard;

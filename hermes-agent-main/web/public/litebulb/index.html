@@ -578,7 +578,7 @@ function fmt(ms){ms=Math.max(0,ms);const s=Math.floor(ms/1000);return String(Mat
 function updateMenu(){
   $('#mb-wake').style.display=''; $('#mb-credits').style.display='';
   $('#mb-wake').textContent='wake '+(RT.paused?'paused':fmt(RT.nextWakeAt-Date.now()));
-  $('#mb-credits').textContent='$'+RT.credits.toFixed(2);
+  $('#mb-credits').textContent='operator $'+RT.credits.toFixed(2);
 }
 function renderOutreach(){
   const w=document.getElementById('w-status'); if(!w)return;
@@ -595,9 +595,9 @@ function renderOutreach(){
         <button class="cbtn go ${c.live?'on':''}" data-ch="${key}" data-go="1" ${(!c.live&&rem<=0)?'disabled':''}>${c.live?'pause':'go live'}</button>
       </div></div>`;};
   body(w).innerHTML=`
-    <div class="lab">treasury — unallocated</div>
+    <div class="lab">paid outreach budget</div>
     <div class="big-wake" style="font-size:30px">$${RT.credits.toFixed(2)}</div>
-    <div class="meta" style="margin:6px 0 11px">put budget behind a channel, then take it live — litebulb runs it on the wake loop.</div>
+    <div class="meta" style="margin:6px 0 11px">mock channel funding lives here; the operator budget rides in the top rail.</div>
     ${['x','ads','cold'].map(row).join('')}`;
   body(w).querySelectorAll('.cbtn').forEach(b=>b.addEventListener('click',()=>{
     if(b.dataset.go)toggleChannel(b.dataset.ch); else allocChannel(b.dataset.ch,parseInt(b.dataset.d,10));
