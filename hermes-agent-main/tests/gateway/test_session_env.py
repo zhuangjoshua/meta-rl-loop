@@ -202,7 +202,7 @@ def test_workspace_root_flows_into_takyon_store(monkeypatch, tmp_path):
         store = TakyonStore(root=home)
         assert store.root == home.resolve()
         assert store._business_root("acme") == (scratch / "businesses" / "acme").resolve()
-        assert store.db_path == home.resolve() / "state.sqlite3"
+        assert not hasattr(store, "db_path")
         assert get_session_env("TAKYON_SESSION_WORKSPACE_ROOT") == str(scratch)
     finally:
         clear_session_vars(tokens)

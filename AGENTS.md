@@ -115,7 +115,7 @@ When behavior is wrong, find the upstream cause before adding a downstream rule,
 
 Do not add deterministic business-action routers, fixed if/then workflow funnels, or forced artifact shortcuts to make the CEO pick a business move. Encourage the CEO through the Hermes skills index, skill guidance, tool schemas, capability/read tools, exact gate errors, and regression tests that catch bad substitutions. Deterministic code is appropriate only for durable safety and integrity rails such as scope isolation, path containment, idempotency, credential checks, budget caps, audit receipts, kill/pause controls, and UI rendering mechanics.
 
-Use canonical sources of truth wherever they exist. Runtime config belongs in `$TAKYON_HOME/config.yaml`; the CEO runtime prompt belongs in `plugins/takyon/prompts/ceo.md`; Takyon skill metadata belongs in Hermes `SKILL.md` frontmatter under `skills/takyon/`; shell/harness command metadata belongs in `plugins/takyon/harness/settings.json` and `plugins/takyon/harness/commands/*.md`; business facts belong in `state.sqlite3` and the per-business filesystem. Do not duplicate those facts in prompts or UI code when they can be read from the canonical source.
+Use canonical sources of truth wherever they exist. Runtime config belongs in `$TAKYON_HOME/config.yaml`; the CEO runtime prompt belongs in `plugins/takyon/prompts/ceo.md`; Takyon skill metadata belongs in Hermes `SKILL.md` frontmatter under `skills/takyon/`; shell/harness command metadata belongs in `plugins/takyon/harness/settings.json` and `plugins/takyon/harness/commands/*.md`; business facts belong in the Postgres control plane plus the per-business filesystem rooted at `$TAKYON_HOME/businesses/`. Do not duplicate those facts in prompts or UI code when they can be read from the canonical source.
 
 Before adding a new store, command, prompt rule, metric file, or workflow, check whether the active Takyon/Hermes trunk already has a canonical source that does the job. If it does, tell the operator and use or point to that source instead of creating a duplicate.
 
@@ -168,7 +168,7 @@ Archived `polsia3` reference files may mention fixed workflow IDs or old workflo
 
 ## Test Mode
 
-Test-mode semantics belong in the Takyon tools, skills, and harness metadata, not in `AGENTS.md`. The canonical state is `businesses.mode` in `.takyon/state.sqlite3`, changed through `business_set_mode` or the shell command `/test on|off|status`. Do not add parallel per-channel test flags or duplicate test-mode behavior in prompts.
+Test-mode semantics belong in the Takyon tools, skills, and harness metadata, not in `AGENTS.md`. The canonical state is `businesses.mode` in the Postgres control plane, changed through `business_set_mode` or the shell command `/test on|off|status`. Do not add parallel per-channel test flags or duplicate test-mode behavior in prompts.
 
 ## Hermes-Style Takyon Work
 
@@ -196,7 +196,7 @@ When the CEO is working, the shell must leave a visible operator lane. Do not us
 
 For operator experience, test through the real shell path. Direct commands such as `./takyon create ...` are useful unit/smoke checks, but they do not exercise the interactive shell parser, slash command handling, scoped CEO routing, shell history, visible progress, input-lane behavior, or operator follow-up flow.
 
-For isolated E2E tests, use a temporary workspace-local `TAKYON_HOME`, copy only the config needed to run the model, and launch `./takyon shell`. Run `/create` and follow-up inspection commands from inside the shell. Do not test by writing directly into `.takyon/state.sqlite3` or by bypassing the shell when the bug is about shell UX, progress, slash commands, scope, or operator conversation.
+For isolated E2E tests, use a temporary workspace-local `TAKYON_HOME`, copy only the config needed to run the model, and launch `./takyon shell`. Run `/create` and follow-up inspection commands from inside the shell. Do not test by writing directly into Postgres control-plane tables or by bypassing the shell when the bug is about shell UX, progress, slash commands, scope, or operator conversation.
 
 Use `/status`, `/pulse`, `/files`, `/read`, `/cron list`, and `/cron tick` inside the shell to verify state, receipts, product surface, pulse, filesystem visibility, and scheduled wake behavior. Keep test businesses in test mode unless the operator explicitly wants live side effects.
 

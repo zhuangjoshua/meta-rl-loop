@@ -31,11 +31,10 @@ Plain text in the shell goes to the scoped CEO by default. `/ceo` is only a focu
 
 ## Storage
 
-Takyon state lives under `TAKYON_HOME`. In the parent workspace launcher this is `/Users/Zygote/Downloads/takyon/.takyon`.
+Takyon control/business authority lives in Supabase Postgres. Takyon-managed business files still live under `TAKYON_HOME`. In the parent workspace launcher this is `/Users/Zygote/Downloads/takyon/.takyon`.
 
 ```text
 $TAKYON_HOME/
-  state.sqlite3
   businesses/
     <business>/
       product/
@@ -178,7 +177,7 @@ The runtime should not hardcode final product design, layout, or copy.
 
 ## Test Mode
 
-`businesses.mode` in `state.sqlite3` is the source of truth.
+`businesses.mode` in the Postgres control plane is the source of truth.
 
 In test mode:
 

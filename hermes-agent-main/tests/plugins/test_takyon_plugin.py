@@ -1318,6 +1318,8 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/auth/request, GET /api/takyon/apps/latexflow/auth/verify, GET /api/takyon/apps/latexflow/session" in instruction
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/checkout" in instruction
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/generate" in instruction
+    assert "Treat POST <runtime_api_base>/generate as the public product contract for AI generation" in instruction
+    assert "product code should not call providers or internal authority endpoints directly" in instruction
 
 
 def test_runtime_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):

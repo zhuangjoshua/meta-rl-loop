@@ -203,9 +203,9 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "tools": [],
         "endpoints": [("POST", "generate")],
         "worker_contract": [
-            "AI generation goes through the shared Takyon AI gateway: POST /internal/ai-gateway/messages on the runtime host, body {messages|prompt, model?, system?, max_tokens?, temperature?}.",
-            "Authenticate with the business's own tkg_ gateway key via `Authorization: Bearer tkg_...`. The generated app holds ONLY that gateway key, never the platform provider key (e.g. ANTHROPIC_API_KEY) — the gateway calls the shared provider key server-side and never returns it.",
-            "The gateway meters each call against the business product budget: treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as generation-not-configured (keep the action visible but clearly blocked; never fake a completion).",
+            "Treat POST <runtime_api_base>/generate as the public product contract for AI generation; product code should not call providers or internal authority endpoints directly.",
+            "That public runtime route brokers server-side through the shared Takyon AI authority, which owns provider credentials, funding checks, and spend settlement.",
+            "Treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as generation-not-configured (keep the action visible but clearly blocked; never fake a completion).",
             "Use the returned {text, content, model, usage} as the only source of truth for output and spend; do not invent token counts or cost.",
         ],
     },
@@ -3362,7 +3362,6 @@ class TakyonStore:
     ):
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
         self.root = base.resolve()
-        self.db_path = self.root / "state.sqlite3"
         # Explicit Postgres DSN for tests/callers that want a throwaway DB instead of the runtime env.
         self._database_url = database_url
         session_user_id = ""
@@ -5145,7 +5144,7 @@ class TakyonStore:
                     "scale": "0 none, 1 operator hypothesis, 2 market evidence, 3 user reply, 4 usage, 5 paid revenue",
                 },
                 "storage": {
-                    "raw_sources": ["state.sqlite3", "events", "app_* tables", "conversation_* tables", "ledger_entries", "jobs"],
+                    "raw_sources": ["postgres control plane", "events", "app_* tables", "conversation_* tables", "ledger_entries", "jobs"],
                     "snapshot_event_type": "business.pulse.snapshot",
                     "human_summary_path": "metrics/summary.md",
                     "business_model_path": "research/strategy.md",
