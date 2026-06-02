@@ -140,6 +140,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
+from takyon_cli.config import get_env_value
 from takyon_constants import get_takyon_home
 from utils import atomic_json_write
 
@@ -1509,13 +1510,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         return FeishuAdapterSettings(
             app_id=str(extra.get("app_id") or os.getenv("FEISHU_APP_ID", "")).strip(),
-            app_secret=str(extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET", "")).strip(),
+            app_secret=str(extra.get("app_secret") or get_env_value("FEISHU_APP_SECRET") or "").strip(),
             domain_name=str(extra.get("domain") or os.getenv("FEISHU_DOMAIN", "feishu")).strip().lower(),
             connection_mode=str(
                 extra.get("connection_mode") or os.getenv("FEISHU_CONNECTION_MODE", "websocket")
             ).strip().lower(),
-            encrypt_key=os.getenv("FEISHU_ENCRYPT_KEY", "").strip(),
-            verification_token=os.getenv("FEISHU_VERIFICATION_TOKEN", "").strip(),
+            encrypt_key=(get_env_value("FEISHU_ENCRYPT_KEY") or "").strip(),
+            verification_token=(get_env_value("FEISHU_VERIFICATION_TOKEN") or "").strip(),
             group_policy=os.getenv("FEISHU_GROUP_POLICY", "allowlist").strip().lower(),
             allowed_group_users=frozenset(
                 item.strip()

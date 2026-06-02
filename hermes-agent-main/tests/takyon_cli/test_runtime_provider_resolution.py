@@ -402,6 +402,26 @@ def test_resolve_runtime_provider_openrouter_explicit(monkeypatch):
     assert resolved["source"] == "explicit"
 
 
+def test_resolve_runtime_provider_openrouter_uses_saved_env_key(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(
+        rp,
+        "get_env_value",
+        lambda key: {"OPENROUTER_API_KEY": "saved-openrouter-key"}.get(key),
+    )
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="openrouter")
+
+    assert resolved["provider"] == "openrouter"
+    assert resolved["api_key"] == "saved-openrouter-key"
+    assert resolved["base_url"] == rp.OPENROUTER_BASE_URL
+
+
 def test_resolve_runtime_provider_auto_uses_openrouter_pool(monkeypatch):
     class _Entry:
         access_token = "pool-key"
@@ -2025,8 +2045,12 @@ class TestAzureAnthropicEnvVarHint:
 
     def test_azure_anthropic_key_still_works_as_fallback(self, monkeypatch):
         """Historical fixed-name env vars still resolve when no hint is set."""
-        monkeypatch.setenv("AZURE_ANTHROPIC_KEY", "historical-key")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(
+            rp,
+            "get_env_value",
+            lambda key: {"AZURE_ANTHROPIC_KEY": "historical-key"}.get(key),
+        )
         monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
         monkeypatch.setattr(rp, "_get_model_config", lambda: self._cfg())
         monkeypatch.setattr(rp, "load_pool", lambda provider: None)

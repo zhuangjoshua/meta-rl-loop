@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
+from takyon_cli.config import get_env_value
 
 from agent.video_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -103,7 +104,7 @@ def _resolve_model(explicit: Optional[str]) -> str:
 
 def _resolve_client() -> Tuple[str, str]:
     _load_local_env()
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = str(get_env_value("OPENAI_API_KEY") or "").strip()
     base_url = (
         os.getenv("OPENAI_VIDEO_BASE_URL")
         or os.getenv("OPENAI_BASE_URL")

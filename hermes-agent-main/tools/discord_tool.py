@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
+from takyon_cli.config import get_env_value
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ _FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED = 1 << 19
 
 def _get_bot_token() -> Optional[str]:
     """Resolve the Discord bot token from environment."""
-    return os.getenv("DISCORD_BOT_TOKEN", "").strip() or None
+    return (get_env_value("DISCORD_BOT_TOKEN") or "").strip() or None
 
 
 def _discord_request(

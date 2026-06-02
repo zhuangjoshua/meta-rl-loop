@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
+from takyon_cli.config import get_env_value
 from takyon_cli.providers import (
     custom_provider_slug,
     determine_api_mode,
@@ -1125,11 +1126,11 @@ def list_authenticated_providers(
         botocore may otherwise probe EC2 IMDS (169.254.169.254) on local
         machines before returning no credentials.
         """
-        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip():
+        if (get_env_value("AWS_BEARER_TOKEN_BEDROCK") or "").strip():
             return True
         if (
-            os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
-            and os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+            (get_env_value("AWS_ACCESS_KEY_ID") or "").strip()
+            and (get_env_value("AWS_SECRET_ACCESS_KEY") or "").strip()
         ):
             return True
         return any(
@@ -1178,7 +1179,7 @@ def list_authenticated_providers(
     # On auth rejection or unreachable server, fall back to the caller-supplied
     # current model so the picker still shows something when offline / mis-keyed.
     if "lmstudio" not in curated and (
-        os.environ.get("LM_API_KEY") or os.environ.get("LM_BASE_URL") or current_provider.strip().lower() == "lmstudio"
+        (get_env_value("LM_API_KEY") or "") or os.environ.get("LM_BASE_URL") or current_provider.strip().lower() == "lmstudio"
     ):
         from takyon_cli.models import fetch_lmstudio_models
         from takyon_cli.auth import AuthError
@@ -1190,7 +1191,7 @@ def list_authenticated_providers(
         )
         try:
             live = fetch_lmstudio_models(
-                api_key=os.environ.get("LM_API_KEY", ""),
+                api_key=get_env_value("LM_API_KEY") or "",
                 base_url=lm_base,
                 timeout=1.5, # Smaller timeout for picker
             )

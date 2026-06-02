@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 os.environ["TAKYON_QUIET"] = "1"  # Our own modules
 
 import yaml
+from takyon_cli.config import get_env_value
 
 # prompt_toolkit for fixed input area TUI
 from prompt_toolkit.history import FileHistory
@@ -2762,9 +2763,9 @@ class TakyonCLI:
         # custom endpoint → prefer OPENAI_API_KEY (issue #560).
         # Note: _ensure_runtime_credentials() re-resolves this before first use.
         if self.base_url and base_url_host_matches(self.base_url, "openrouter.ai"):
-            self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+            self.api_key = api_key or get_env_value("OPENROUTER_API_KEY") or get_env_value("OPENAI_API_KEY")
         else:
-            self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+            self.api_key = api_key or get_env_value("OPENAI_API_KEY") or get_env_value("OPENROUTER_API_KEY")
         # Max turns priority: CLI arg > config file > env var > default
         if max_turns is not None:  # CLI arg was explicitly set
             self.max_turns = max_turns

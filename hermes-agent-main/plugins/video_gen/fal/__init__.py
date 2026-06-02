@@ -41,6 +41,7 @@ from agent.video_gen_provider import (
     error_response,
     success_response,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class FALVideoGenProvider(VideoGenProvider):
         return "FAL"
 
     def is_available(self) -> bool:
-        if not os.environ.get("FAL_KEY", "").strip():
+        if not (get_env_value("FAL_KEY") or "").strip():
             return False
         try:
             import fal_client  # noqa: F401
@@ -390,7 +391,7 @@ class FALVideoGenProvider(VideoGenProvider):
         seed: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        if not os.environ.get("FAL_KEY", "").strip():
+        if not (get_env_value("FAL_KEY") or "").strip():
             return error_response(
                 error=(
                     "FAL_KEY not set. Run `takyon tools` → Video Generation "

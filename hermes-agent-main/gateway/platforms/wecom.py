@@ -68,6 +68,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     cache_image_from_bytes,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +153,8 @@ class WeComAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.WECOM)
 
         extra = config.extra or {}
-        self._bot_id = str(extra.get("bot_id") or os.getenv("WECOM_BOT_ID", "")).strip()
-        self._secret = str(extra.get("secret") or os.getenv("WECOM_SECRET", "")).strip()
+        self._bot_id = str(extra.get("bot_id") or get_env_value("WECOM_BOT_ID") or "").strip()
+        self._secret = str(extra.get("secret") or get_env_value("WECOM_SECRET") or "").strip()
         self._ws_url = str(
             extra.get("websocket_url")
             or extra.get("websocketUrl")

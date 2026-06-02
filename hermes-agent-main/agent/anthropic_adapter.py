@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
+from takyon_cli.config import get_env_value
 from takyon_constants import get_takyon_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, normalize_proxy_env_vars
@@ -1104,7 +1105,7 @@ def resolve_anthropic_token() -> Optional[str]:
     creds = read_claude_code_credentials()
 
     # 1. Takyon-managed OAuth/setup token env var
-    token = os.getenv("ANTHROPIC_TOKEN", "").strip()
+    token = str(get_env_value("ANTHROPIC_TOKEN") or "").strip()
     if token:
         preferred = _prefer_refreshable_claude_code_token(token, creds)
         if preferred:
@@ -1112,7 +1113,7 @@ def resolve_anthropic_token() -> Optional[str]:
         return token
 
     # 2. CLAUDE_CODE_OAUTH_TOKEN (used by Claude Code for setup-tokens)
-    cc_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    cc_token = str(get_env_value("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
     if cc_token:
         preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
         if preferred:
@@ -1126,7 +1127,7 @@ def resolve_anthropic_token() -> Optional[str]:
 
     # 4. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Takyon configs.
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = str(get_env_value("ANTHROPIC_API_KEY") or "").strip()
     if api_key:
         return api_key
 

@@ -4772,16 +4772,20 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
-def save_env_value(key: str, value: str):
-    """Save or update a value in ~/.takyon/.env."""
-    if is_managed():
-        managed_error(f"set {key}")
-        return
-    if not _ENV_VAR_NAME_RE.match(key):
-        raise ValueError(f"Invalid environment variable name: {key!r}")
-    value = value.replace("\n", "").replace("\r", "")
-    # API keys / tokens must be ASCII — strip non-ASCII with a warning.
-    value = _check_non_ascii_credential(key, value)
+def _validate_env_key(key: str) -> str:
+    name = str(key or "").strip()
+    if not _ENV_VAR_NAME_RE.match(name):
+        raise ValueError(f"Invalid environment variable name: {name!r}")
+    return name
+
+
+def _normalize_env_value_for_storage(key: str, value: str) -> str:
+    cleaned = str(value).replace("\n", "").replace("\r", "")
+    return _check_non_ascii_credential(key, cleaned)
+
+
+def _save_env_value_direct(key: str, value: str) -> None:
+    """Low-level env writer used by config and Safebox authority paths."""
     ensure_takyon_home()
     env_path = get_env_path()
 
@@ -4797,7 +4801,6 @@ def save_env_value(key: str, value: str):
         # Sanitize on every read: split concatenated keys, drop stale placeholders
         lines = _sanitize_env_lines(lines)
 
-    # Find and update or append
     found = False
     for i, line in enumerate(lines):
         if line.strip().startswith(f"{key}="):
@@ -4806,13 +4809,11 @@ def save_env_value(key: str, value: str):
             break
 
     if not found:
-        # Ensure there's a newline at the end of the file before appending
         if lines and not lines[-1].endswith("\n"):
             lines[-1] += "\n"
         lines.append(f"{key}={value}\n")
-    
-    fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
-    # Preserve original permissions so Docker volume mounts aren't clobbered.
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix=".tmp", prefix=".env_")
     original_mode = None
     if env_path.exists():
         try:
@@ -4820,12 +4821,11 @@ def save_env_value(key: str, value: str):
         except OSError:
             pass
     try:
-        with os.fdopen(fd, 'w', **write_kw) as f:
+        with os.fdopen(fd, "w", **write_kw) as f:
             f.writelines(lines)
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, env_path)
-        # Restore original permissions before _secure_file may tighten them.
         if original_mode is not None:
             try:
                 os.chmod(env_path, original_mode)
@@ -4843,16 +4843,8 @@ def save_env_value(key: str, value: str):
     invalidate_env_cache()
 
 
-def remove_env_value(key: str) -> bool:
-    """Remove a key from ~/.takyon/.env and os.environ.
-
-    Returns True if the key was found and removed, False otherwise.
-    """
-    if is_managed():
-        managed_error(f"remove {key}")
-        return False
-    if not _ENV_VAR_NAME_RE.match(key):
-        raise ValueError(f"Invalid environment variable name: {key!r}")
+def _remove_env_value_direct(key: str) -> bool:
+    """Low-level env remover used by config and Safebox authority paths."""
     env_path = get_env_path()
     if not env_path.exists():
         os.environ.pop(key, None)
@@ -4869,15 +4861,14 @@ def remove_env_value(key: str) -> bool:
     found = len(new_lines) < len(lines)
 
     if found:
-        fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
-        # Preserve original permissions so Docker volume mounts aren't clobbered.
+        fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix=".tmp", prefix=".env_")
         original_mode = None
         try:
             original_mode = stat.S_IMODE(env_path.stat().st_mode)
         except OSError:
             pass
         try:
-            with os.fdopen(fd, 'w', **write_kw) as f:
+            with os.fdopen(fd, "w", **write_kw) as f:
                 f.writelines(new_lines)
                 f.flush()
                 os.fsync(f.fileno())
@@ -4898,6 +4889,36 @@ def remove_env_value(key: str) -> bool:
     os.environ.pop(key, None)
     invalidate_env_cache()
     return found
+
+
+def save_env_value(key: str, value: str):
+    """Save or update a value in ~/.takyon/.env."""
+    name = _validate_env_key(key)
+    if is_managed():
+        managed_error(f"set {name}")
+        return
+    from plugins.takyon import safebox as takyon_safebox
+
+    if takyon_safebox.is_sensitive_env_key(name):
+        takyon_safebox.save_env_backed_value(name, value)
+        return
+    _save_env_value_direct(name, _normalize_env_value_for_storage(name, value))
+
+
+def remove_env_value(key: str) -> bool:
+    """Remove a key from ~/.takyon/.env and os.environ.
+
+    Returns True if the key was found and removed, False otherwise.
+    """
+    name = _validate_env_key(key)
+    if is_managed():
+        managed_error(f"remove {name}")
+        return False
+    from plugins.takyon import safebox as takyon_safebox
+
+    if takyon_safebox.is_sensitive_env_key(name):
+        return takyon_safebox.remove_env_backed_value(name)
+    return _remove_env_value_direct(name)
 
 
 def save_anthropic_oauth_token(value: str, save_fn=None):
@@ -4955,13 +4976,19 @@ def reload_env() -> int:
 
 def get_env_value(key: str) -> Optional[str]:
     """Get a value from ~/.takyon/.env or environment."""
-    # Check environment first
-    if key in os.environ:
-        return os.environ[key]
-    
-    # Then check .env file
+    name = str(key or "").strip()
+    if not name:
+        return None
+    from plugins.takyon import safebox as takyon_safebox
+
+    if takyon_safebox.is_sensitive_env_key(name):
+        value = takyon_safebox.read_env_backed_value(name)
+        return value or None
+    if name in os.environ:
+        return os.environ[name]
+
     env_vars = load_env()
-    return env_vars.get(key)
+    return env_vars.get(name)
 
 
 # =============================================================================

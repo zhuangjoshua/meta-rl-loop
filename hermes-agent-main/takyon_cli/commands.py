@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from takyon_cli.config import get_env_value
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -1092,7 +1093,7 @@ def _lmstudio_completion_models() -> list[str]:
     """Locally-loaded LM Studio models for /model autocomplete (cached, gated)."""
     global _LMSTUDIO_COMPLETION_CACHE
     # Gate: don't probe 127.0.0.1 on every keystroke for users who don't use LM Studio.
-    if not (os.environ.get("LM_API_KEY") or os.environ.get("LM_BASE_URL")):
+    if not ((get_env_value("LM_API_KEY") or "") or os.environ.get("LM_BASE_URL")):
         try:
             from takyon_cli.auth import _load_auth_store
             store = _load_auth_store() or {}
@@ -1107,7 +1108,7 @@ def _lmstudio_completion_models() -> list[str]:
     try:
         from takyon_cli.models import fetch_lmstudio_models
         models = fetch_lmstudio_models(
-            api_key=os.environ.get("LM_API_KEY", ""),
+            api_key=get_env_value("LM_API_KEY") or "",
             base_url=os.environ.get("LM_BASE_URL") or "http://127.0.0.1:1234/v1",
             timeout=0.8,
         )

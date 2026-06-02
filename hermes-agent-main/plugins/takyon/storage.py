@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol, runtime_checkable
 
+from . import safebox
+
 # Safety rails (durable hardcodes, like core's MAX_WRITE_CHARS / path containment).
 MAX_OBJECT_BYTES = 256 * 1024 * 1024  # 256 MiB — bound a single object so a sync can't OOM the host.
 _MAX_KEY_DEPTH = 48
@@ -261,8 +263,8 @@ class SupabaseS3StorageBackend:
     def __init__(self) -> None:
         endpoint = os.getenv("SUPABASE_S3_ENDPOINT")
         region = os.getenv("SUPABASE_S3_REGION")
-        access_key = os.getenv("SUPABASE_S3_ACCESS_KEY_ID")
-        secret_key = os.getenv("SUPABASE_S3_SECRET_ACCESS_KEY")
+        access_key = safebox.read_env_backed_value("SUPABASE_S3_ACCESS_KEY_ID")
+        secret_key = safebox.read_env_backed_value("SUPABASE_S3_SECRET_ACCESS_KEY")
         bucket = os.getenv("TAKYON_STORAGE_BUCKET")
         missing = [
             name

@@ -35,6 +35,7 @@ from gateway.platforms.base import (
     SendResult,
 )
 from gateway.platforms.helpers import redact_phone, strip_markdown
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def check_sms_requirements() -> bool:
         import aiohttp  # noqa: F401
     except ImportError:
         return False
-    return bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"))
+    return bool(get_env_value("TWILIO_ACCOUNT_SID") and get_env_value("TWILIO_AUTH_TOKEN"))
 
 
 class SmsAdapter(BasePlatformAdapter):
@@ -65,8 +66,8 @@ class SmsAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SMS)
-        self._account_sid: str = os.environ["TWILIO_ACCOUNT_SID"]
-        self._auth_token: str = os.environ["TWILIO_AUTH_TOKEN"]
+        self._account_sid: str = get_env_value("TWILIO_ACCOUNT_SID") or ""
+        self._auth_token: str = get_env_value("TWILIO_AUTH_TOKEN") or ""
         self._from_number: str = os.getenv("TWILIO_PHONE_NUMBER", "")
         self._webhook_port: int = int(
             os.getenv("SMS_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT))

@@ -16,6 +16,7 @@ from email.utils import formatdate
 from typing import Dict, Optional
 
 from agent.redact import redact_sensitive_text
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ def _handle_send(args):
         # Weixin can be configured purely via .env; synthesize a pconfig so
         # send_message and cron delivery work without a gateway.yaml entry.
         if platform_name == "weixin":
-            wx_token = os.getenv("WEIXIN_TOKEN", "").strip()
+            wx_token = (get_env_value("WEIXIN_TOKEN") or "").strip()
             wx_account = os.getenv("WEIXIN_ACCOUNT_ID", "").strip()
             if wx_token and wx_account:
                 from gateway.config import PlatformConfig
@@ -1485,9 +1486,9 @@ async def _send_email(extra, chat_id, message):
     from email.mime.text import MIMEText
     from email.utils import formatdate
 
-    address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
-    smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
+    address = extra.get("address") or get_env_value("EMAIL_ADDRESS") or ""
+    password = get_env_value("EMAIL_PASSWORD") or ""
+    smtp_host = extra.get("smtp_host") or get_env_value("EMAIL_SMTP_HOST") or ""
     try:
         smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
     except (ValueError, TypeError):
@@ -1526,8 +1527,8 @@ async def _send_sms(auth_token, chat_id, message):
 
     import base64
 
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    from_number = os.getenv("TWILIO_PHONE_NUMBER", "")
+    account_sid = get_env_value("TWILIO_ACCOUNT_SID") or ""
+    from_number = get_env_value("TWILIO_PHONE_NUMBER") or ""
     if not account_sid or not auth_token or not from_number:
         return {"error": "SMS not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required)"}
 
@@ -1577,7 +1578,7 @@ async def _send_mattermost(token, extra, chat_id, message):
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
         base_url = (extra.get("url") or os.getenv("MATTERMOST_URL", "")).rstrip("/")
-        token = token or os.getenv("MATTERMOST_TOKEN", "")
+        token = token or get_env_value("MATTERMOST_TOKEN") or ""
         if not base_url or not token:
             return {"error": "Mattermost not configured (MATTERMOST_URL, MATTERMOST_TOKEN required)"}
         url = f"{base_url}/api/v4/posts"
@@ -1605,7 +1606,7 @@ async def _send_matrix(token, extra, chat_id, message):
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
         homeserver = (extra.get("homeserver") or os.getenv("MATRIX_HOMESERVER", "")).rstrip("/")
-        token = token or os.getenv("MATRIX_ACCESS_TOKEN", "")
+        token = token or get_env_value("MATRIX_ACCESS_TOKEN") or ""
         if not homeserver or not token:
             return {"error": "Matrix not configured (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN required)"}
         txn_id = f"takyon_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
@@ -1705,7 +1706,7 @@ async def _send_homeassistant(token, extra, chat_id, message):
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
     try:
         hass_url = (extra.get("url") or os.getenv("HASS_URL", "")).rstrip("/")
-        token = token or os.getenv("HASS_TOKEN", "")
+        token = token or get_env_value("HASS_TOKEN") or ""
         if not hass_url or not token:
             return {"error": "Home Assistant not configured (HASS_URL, HASS_TOKEN required)"}
         url = f"{hass_url}/api/services/notify/notify"
@@ -1924,7 +1925,8 @@ async def _send_qqbot(pconfig, chat_id, message):
     extra = pconfig.extra or {}
     appid = extra.get("app_id") or os.getenv("QQ_APP_ID", "")
     secret = (pconfig.token or extra.get("client_secret")
-              or os.getenv("QQ_CLIENT_SECRET", ""))
+              or get_env_value("QQ_CLIENT_SECRET")
+              or "")
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 

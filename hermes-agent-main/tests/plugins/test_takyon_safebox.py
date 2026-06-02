@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from plugins.takyon import safebox
@@ -42,6 +44,35 @@ def test_first_env_backed_value_returns_first_populated_alias(monkeypatch):
     )
 
 
-def test_read_env_backed_value_rejects_unallowlisted_keys():
-    with pytest.raises(KeyError, match="safebox does not expose env key"):
-        safebox.read_env_backed_value("OPENAI_API_KEY")
+def test_read_env_backed_value_allows_sensitive_api_keys(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        safebox,
+        "load_env",
+        lambda: {"OPENAI_API_KEY": "sk-openai-disk"},
+    )
+
+    assert safebox.read_env_backed_value("OPENAI_API_KEY") == "sk-openai-disk"
+
+
+def test_read_env_backed_value_rejects_non_sensitive_keys():
+    with pytest.raises(KeyError, match="non-sensitive env key"):
+        safebox.read_env_backed_value("OPENAI_BASE_URL")
+
+
+def test_save_and_remove_env_backed_value_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    safebox.save_env_backed_value("OPENAI_API_KEY", "sk-round-trip")
+
+    env_path = tmp_path / ".env"
+    assert env_path.exists()
+    assert "OPENAI_API_KEY=sk-round-trip" in env_path.read_text(encoding="utf-8")
+    assert os.environ["OPENAI_API_KEY"] == "sk-round-trip"
+
+    removed = safebox.remove_env_backed_value("OPENAI_API_KEY")
+
+    assert removed is True
+    assert "OPENAI_API_KEY" not in env_path.read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY" not in os.environ

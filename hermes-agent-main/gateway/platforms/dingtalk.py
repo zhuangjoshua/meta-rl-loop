@@ -95,6 +95,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def check_dingtalk_requirements() -> bool:
         httpx = _httpx
         DINGTALK_STREAM_AVAILABLE = True
         HTTPX_AVAILABLE = True
-    if not os.getenv("DINGTALK_CLIENT_ID") or not os.getenv("DINGTALK_CLIENT_SECRET"):
+    if not get_env_value("DINGTALK_CLIENT_ID") or not get_env_value("DINGTALK_CLIENT_SECRET"):
         return False
     return True
 
@@ -182,12 +183,8 @@ class DingTalkAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DINGTALK)
 
         extra = config.extra or {}
-        self._client_id: str = extra.get("client_id") or os.getenv(
-            "DINGTALK_CLIENT_ID", ""
-        )
-        self._client_secret: str = extra.get("client_secret") or os.getenv(
-            "DINGTALK_CLIENT_SECRET", ""
-        )
+        self._client_id: str = extra.get("client_id") or get_env_value("DINGTALK_CLIENT_ID") or ""
+        self._client_secret: str = extra.get("client_secret") or get_env_value("DINGTALK_CLIENT_SECRET") or ""
 
         # Group-chat gating (mirrors Slack/Telegram/Discord/WhatsApp conventions).
         # Mention state is the structured ``is_in_at_list`` attribute from the

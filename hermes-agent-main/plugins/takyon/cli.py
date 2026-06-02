@@ -2079,18 +2079,12 @@ def _setup_paths(store: TakyonStore) -> str:
 
 def _secret_command(store: TakyonStore, argv: list[str]) -> str:
     path = _secrets_path(store)
+    from takyon_cli.config import save_env_value
+    from . import safebox
+
     if len(argv) < 2 or argv[1] in {"list", "ls"}:
         load_takyon_env()
-        names: list[str] = []
-        for candidate in [path, store.root / ".env"]:
-            if not candidate.exists():
-                continue
-            for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or "=" not in stripped:
-                    continue
-                names.append(stripped.split("=", 1)[0].removeprefix("export ").strip())
-        names = sorted(set(name for name in names if name))
+        names = safebox.list_env_backed_keys(sensitive_only=False)
         return "Secret keys:\n" + ("\n".join(f"  {name}=<redacted>" for name in names) if names else "  none found")
     if argv[1] != "set" or len(argv) < 4:
         raise SystemExit("usage: takyon secret list | takyon secret set KEY VALUE")
@@ -2098,21 +2092,10 @@ def _secret_command(store: TakyonStore, argv: list[str]) -> str:
     if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
         raise SystemExit("secret key must be an env-style name")
     value = " ".join(argv[3:])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.exists() else []
-    prefix = f"{key}="
-    updated = False
-    next_lines = []
-    for line in lines:
-        if line.strip().startswith(prefix) or line.strip().startswith(f"export {prefix}"):
-            next_lines.append(f"{key}={value}")
-            updated = True
-        else:
-            next_lines.append(line)
-    if not updated:
-        next_lines.append(f"{key}={value}")
-    path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
-    path.chmod(0o600)
+    if safebox.is_sensitive_env_key(key):
+        safebox.save_env_backed_value(key, value)
+    else:
+        save_env_value(key, value)
     return f"Stored {key}=<redacted> in {path}"
 
 

@@ -120,7 +120,7 @@ def _xai_credentials_present() -> bool:
             return True
     except Exception:
         pass
-    return bool(str(os.environ.get("XAI_API_KEY") or "").strip())
+    return bool(str(get_env_value("XAI_API_KEY") or "").strip())
 
 # Platform-scoped toolsets: only appear in the `takyon tools` checklist for
 # these platforms, and only resolve/save for these platforms.  A toolset
@@ -1117,7 +1117,7 @@ def _get_platform_tools(
             default_off = set(_DEFAULT_OFF_TOOLSETS)
             if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
                 default_off.remove(platform)
-            if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+            if "homeassistant" in default_off and get_env_value("HASS_TOKEN"):
                 default_off.remove("homeassistant")
             expanded -= default_off
 
@@ -1169,7 +1169,7 @@ def _get_platform_tools(
         # (e.g. cron) that run through _get_platform_tools without an
         # explicit saved toolset list. Without this, Norbert's HA cron jobs
         # regressed after #14798 made cron honor per-platform tool config.
-        if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+        if "homeassistant" in default_off and get_env_value("HASS_TOKEN"):
             default_off.remove("homeassistant")
         # Symmetric carve-out for x_search auto-enable (see the inject
         # block above). Without this, the default_off subtraction would

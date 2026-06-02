@@ -37,6 +37,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 import requests
+from takyon_cli.config import get_env_value
 
 from agent.browser_provider import BrowserProvider
 
@@ -66,8 +67,8 @@ class BrowserbaseBrowserProvider(BrowserProvider):
     # ------------------------------------------------------------------
 
     def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
-        api_key = os.environ.get("BROWSERBASE_API_KEY")
-        project_id = os.environ.get("BROWSERBASE_PROJECT_ID")
+        api_key = get_env_value("BROWSERBASE_API_KEY")
+        project_id = get_env_value("BROWSERBASE_PROJECT_ID")
         if api_key and project_id:
             return {
                 "api_key": api_key,

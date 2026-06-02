@@ -33,6 +33,7 @@ from agent.video_gen_provider import (
     error_response,
     success_response,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def _resolve_xai_credentials() -> Tuple[str, str]:
         logger.debug("xAI credential resolver failed: %s", exc)
         creds = {}
 
-    api_key = str(creds.get("api_key") or os.getenv("XAI_API_KEY", "")).strip()
+    api_key = str(creds.get("api_key") or get_env_value("XAI_API_KEY") or "").strip()
     base_url = str(
         creds.get("base_url")
         or os.getenv("XAI_BASE_URL")

@@ -96,6 +96,7 @@ from gateway.platforms.base import (
 )
 from gateway.config import Platform
 from gateway.session import SessionSource
+from takyon_cli.config import get_env_value
 
 
 # ---------------------------------------------------------------------------
@@ -635,11 +636,11 @@ class LineAdapter(BasePlatformAdapter):
 
         # Credentials
         self.channel_access_token = (
-            os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+            get_env_value("LINE_CHANNEL_ACCESS_TOKEN")
             or extra.get("channel_access_token", "")
         )
         self.channel_secret = (
-            os.getenv("LINE_CHANNEL_SECRET")
+            get_env_value("LINE_CHANNEL_SECRET")
             or extra.get("channel_secret", "")
         )
 
@@ -1465,9 +1466,9 @@ def _is_relative_to(child: Path, parent: Path) -> bool:
 
 def check_requirements() -> bool:
     """Plugin gate: require credentials AND aiohttp at runtime."""
-    if not os.getenv("LINE_CHANNEL_ACCESS_TOKEN"):
+    if not get_env_value("LINE_CHANNEL_ACCESS_TOKEN"):
         return False
-    if not os.getenv("LINE_CHANNEL_SECRET"):
+    if not get_env_value("LINE_CHANNEL_SECRET"):
         return False
     try:
         import aiohttp  # noqa: F401
@@ -1479,10 +1480,10 @@ def check_requirements() -> bool:
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
     has_token = bool(
-        os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or extra.get("channel_access_token")
+        get_env_value("LINE_CHANNEL_ACCESS_TOKEN") or extra.get("channel_access_token")
     )
     has_secret = bool(
-        os.getenv("LINE_CHANNEL_SECRET") or extra.get("channel_secret")
+        get_env_value("LINE_CHANNEL_SECRET") or extra.get("channel_secret")
     )
     return has_token and has_secret
 
@@ -1499,7 +1500,7 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     in ``.env`` without a ``platforms.line`` block in ``config.yaml``.
     Mirrors the IRC plugin's pattern.
     """
-    if not (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") and os.getenv("LINE_CHANNEL_SECRET")):
+    if not (get_env_value("LINE_CHANNEL_ACCESS_TOKEN") and get_env_value("LINE_CHANNEL_SECRET")):
         return None
     seeded: Dict[str, Any] = {}
     if os.getenv("LINE_PORT"):
@@ -1539,7 +1540,7 @@ async def _standalone_send(
     """
     extra = getattr(pconfig, "extra", {}) or {}
     token = (
-        os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+        get_env_value("LINE_CHANNEL_ACCESS_TOKEN")
         or extra.get("channel_access_token", "")
     )
     if not token or not chat_id:

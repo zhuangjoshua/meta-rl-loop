@@ -71,6 +71,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.platforms.helpers import strip_markdown
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -202,9 +203,9 @@ class QQAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.QQBOT)
 
         extra = config.extra or {}
-        self._app_id = str(extra.get("app_id") or os.getenv("QQ_APP_ID", "")).strip()
+        self._app_id = str(extra.get("app_id") or get_env_value("QQ_APP_ID") or "").strip()
         self._client_secret = str(
-            extra.get("client_secret") or os.getenv("QQ_CLIENT_SECRET", "")
+            extra.get("client_secret") or get_env_value("QQ_CLIENT_SECRET") or ""
         ).strip()
         self._markdown_support = bool(extra.get("markdown_support", True))
 
@@ -2062,7 +2063,7 @@ class QQAdapter(BasePlatformAdapter):
                     }
 
         # 2. QQ-specific env vars (set by `takyon setup gateway` / `takyon gateway`)
-        qq_stt_key = os.getenv("QQ_STT_API_KEY", "")
+        qq_stt_key = get_env_value("QQ_STT_API_KEY") or ""
         if qq_stt_key:
             base_url = os.getenv(
                 "QQ_STT_BASE_URL",

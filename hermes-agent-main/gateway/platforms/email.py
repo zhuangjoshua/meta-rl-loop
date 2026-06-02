@@ -42,6 +42,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.config import Platform, PlatformConfig
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 # Automated sender patterns — emails from these are silently ignored
@@ -101,10 +102,10 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
     
 def check_email_requirements() -> bool:
     """Check if email platform dependencies are available."""
-    addr = os.getenv("EMAIL_ADDRESS")
-    pwd = os.getenv("EMAIL_PASSWORD")
-    imap = os.getenv("EMAIL_IMAP_HOST")
-    smtp = os.getenv("EMAIL_SMTP_HOST")
+    addr = get_env_value("EMAIL_ADDRESS")
+    pwd = get_env_value("EMAIL_PASSWORD")
+    imap = get_env_value("EMAIL_IMAP_HOST")
+    smtp = get_env_value("EMAIL_SMTP_HOST")
     if not all([addr, pwd, imap, smtp]):
         return False
     return True
@@ -248,11 +249,11 @@ class EmailAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
 
-        self._address = os.getenv("EMAIL_ADDRESS", "")
-        self._password = os.getenv("EMAIL_PASSWORD", "")
-        self._imap_host = os.getenv("EMAIL_IMAP_HOST", "")
+        self._address = get_env_value("EMAIL_ADDRESS") or ""
+        self._password = get_env_value("EMAIL_PASSWORD") or ""
+        self._imap_host = get_env_value("EMAIL_IMAP_HOST") or ""
         self._imap_port = int(os.getenv("EMAIL_IMAP_PORT", "993"))
-        self._smtp_host = os.getenv("EMAIL_SMTP_HOST", "")
+        self._smtp_host = get_env_value("EMAIL_SMTP_HOST") or ""
         self._smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
         self._poll_interval = int(os.getenv("EMAIL_POLL_INTERVAL", "15"))
 

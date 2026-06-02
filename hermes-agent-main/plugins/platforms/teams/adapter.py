@@ -97,6 +97,7 @@ from gateway.platforms.base import (
     SendResult,
     cache_image_from_url,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +198,8 @@ class TeamsSummaryWriter:
 
         env_defaults = {
             "delivery_mode": os.getenv("TEAMS_DELIVERY_MODE", ""),
-            "incoming_webhook_url": os.getenv("TEAMS_INCOMING_WEBHOOK_URL", ""),
-            "access_token": os.getenv("TEAMS_GRAPH_ACCESS_TOKEN", ""),
+            "incoming_webhook_url": get_env_value("TEAMS_INCOMING_WEBHOOK_URL") or "",
+            "access_token": get_env_value("TEAMS_GRAPH_ACCESS_TOKEN") or "",
             "team_id": os.getenv("TEAMS_TEAM_ID", ""),
             "channel_id": os.getenv("TEAMS_CHANNEL_ID", ""),
             "chat_id": os.getenv("TEAMS_CHAT_ID", ""),
@@ -398,9 +399,9 @@ def check_requirements() -> bool:
 def validate_config(config) -> bool:
     """Return True when the config has the minimum required credentials."""
     extra = getattr(config, "extra", {}) or {}
-    client_id = os.getenv("TEAMS_CLIENT_ID") or extra.get("client_id", "")
-    client_secret = os.getenv("TEAMS_CLIENT_SECRET") or extra.get("client_secret", "")
-    tenant_id = os.getenv("TEAMS_TENANT_ID") or extra.get("tenant_id", "")
+    client_id = get_env_value("TEAMS_CLIENT_ID") or extra.get("client_id", "")
+    client_secret = get_env_value("TEAMS_CLIENT_SECRET") or extra.get("client_secret", "")
+    tenant_id = get_env_value("TEAMS_TENANT_ID") or extra.get("tenant_id", "")
     return bool(client_id and client_secret and tenant_id)
 
 
@@ -420,9 +421,9 @@ def _env_enablement() -> dict | None:
     The special ``home_channel`` key in the returned dict becomes a proper
     ``HomeChannel`` dataclass on the ``PlatformConfig`` via the core hook.
     """
-    client_id = os.getenv("TEAMS_CLIENT_ID", "").strip()
-    client_secret = os.getenv("TEAMS_CLIENT_SECRET", "").strip()
-    tenant_id = os.getenv("TEAMS_TENANT_ID", "").strip()
+    client_id = (get_env_value("TEAMS_CLIENT_ID") or "").strip()
+    client_secret = (get_env_value("TEAMS_CLIENT_SECRET") or "").strip()
+    tenant_id = (get_env_value("TEAMS_TENANT_ID") or "").strip()
     if not (client_id and client_secret and tenant_id):
         return None
     seed: dict = {
@@ -525,9 +526,9 @@ async def _standalone_send(
     attachments via the SDK.
     """
     extra = getattr(pconfig, "extra", {}) or {}
-    client_id = os.getenv("TEAMS_CLIENT_ID") or extra.get("client_id", "")
-    client_secret = os.getenv("TEAMS_CLIENT_SECRET") or extra.get("client_secret", "")
-    tenant_id = os.getenv("TEAMS_TENANT_ID") or extra.get("tenant_id", "")
+    client_id = get_env_value("TEAMS_CLIENT_ID") or extra.get("client_id", "")
+    client_secret = get_env_value("TEAMS_CLIENT_SECRET") or extra.get("client_secret", "")
+    tenant_id = get_env_value("TEAMS_TENANT_ID") or extra.get("tenant_id", "")
     if not (client_id and client_secret and tenant_id):
         return {"error": "Teams standalone send: TEAMS_CLIENT_ID, TEAMS_CLIENT_SECRET, and TEAMS_TENANT_ID are all required"}
 
@@ -627,9 +628,9 @@ class TeamsAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("teams"))
         extra = config.extra or {}
-        self._client_id = extra.get("client_id") or os.getenv("TEAMS_CLIENT_ID", "")
-        self._client_secret = extra.get("client_secret") or os.getenv("TEAMS_CLIENT_SECRET", "")
-        self._tenant_id = extra.get("tenant_id") or os.getenv("TEAMS_TENANT_ID", "")
+        self._client_id = extra.get("client_id") or get_env_value("TEAMS_CLIENT_ID") or ""
+        self._client_secret = extra.get("client_secret") or get_env_value("TEAMS_CLIENT_SECRET") or ""
+        self._tenant_id = extra.get("tenant_id") or get_env_value("TEAMS_TENANT_ID") or ""
         self._port = _coerce_port(
             extra.get("port") or os.getenv("TEAMS_PORT", str(_DEFAULT_PORT))
         )

@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+from takyon_cli.config import get_env_value
 from takyon_constants import get_takyon_home
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 
@@ -74,7 +75,7 @@ def _access_token_is_expiring(expires_at: object, skew_seconds: int) -> bool:
 
 def read_nous_access_token() -> Optional[str]:
     """Read a Nous Subscriber OAuth access token from auth store or env override."""
-    explicit = os.getenv("TOOL_GATEWAY_USER_TOKEN")
+    explicit = get_env_value("TOOL_GATEWAY_USER_TOKEN")
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
 

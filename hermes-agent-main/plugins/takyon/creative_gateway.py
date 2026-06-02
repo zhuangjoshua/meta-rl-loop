@@ -23,6 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
 from .control_api import get_control_conn
+from . import safebox
 
 _SESSION_HEADER_NAME = "X-Takyon-Session-Token"
 _UNAUTH_HEADERS = {"WWW-Authenticate": _SESSION_HEADER_NAME}
@@ -35,7 +36,7 @@ def _core():
 
 
 def _expected_session_token() -> str:
-    token = str(os.getenv("TAKYON_DASHBOARD_SESSION_TOKEN") or "").strip()
+    token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
     if token:
         return token
     home = Path(os.getenv("TAKYON_HOME") or (Path.home() / ".takyon"))

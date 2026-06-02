@@ -398,7 +398,7 @@ def show_status(args):
         print(f"  Persistence:  {'snapshot filesystem' if persist_enabled else 'ephemeral filesystem'}")
         print("  Processes:    live processes do not survive cleanup, snapshots, or sandbox recreation")
 
-    sudo_password = os.getenv("SUDO_PASSWORD", "")
+    sudo_password = get_env_value("SUDO_PASSWORD") or ""
     print(f"  Sudo:         {check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
 
     # =========================================================================
@@ -535,7 +535,7 @@ def show_status(args):
         print(color("◆ Deep Checks", Colors.CYAN, Colors.BOLD))
         
         # Check OpenRouter connectivity
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        openrouter_key = get_env_value("OPENROUTER_API_KEY") or ""
         if openrouter_key:
             try:
                 import httpx

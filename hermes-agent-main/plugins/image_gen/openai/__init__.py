@@ -35,6 +35,7 @@ from agent.image_gen_provider import (
     save_b64_image,
     success_response,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
         return "OpenAI"
 
     def is_available(self) -> bool:
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not get_env_value("OPENAI_API_KEY"):
             return False
         try:
             import openai  # noqa: F401
@@ -187,7 +188,7 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        if not os.environ.get("OPENAI_API_KEY"):
+        if not get_env_value("OPENAI_API_KEY"):
             return error_response(
                 error=(
                     "OPENAI_API_KEY not set. Run `takyon tools` → Image "

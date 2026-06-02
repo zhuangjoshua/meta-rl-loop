@@ -104,6 +104,7 @@ from gateway.platforms.base import (
     proxy_kwargs_for_aiohttp,
 )
 from gateway.platforms.helpers import ThreadParticipationTracker
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -229,8 +230,8 @@ def check_matrix_requirements() -> bool:
     Lazy-installs mautrix via ``tools.lazy_deps.ensure("platform.matrix")``
     on first call if not present. Rebinds all module-level type globals on success.
     """
-    token = os.getenv("MATRIX_ACCESS_TOKEN", "")
-    password = os.getenv("MATRIX_PASSWORD", "")
+    token = get_env_value("MATRIX_ACCESS_TOKEN") or ""
+    password = get_env_value("MATRIX_PASSWORD") or ""
     homeserver = os.getenv("MATRIX_HOMESERVER", "")
 
     if not token and not password:
@@ -328,13 +329,11 @@ class MatrixAdapter(BasePlatformAdapter):
         self._homeserver: str = (
             config.extra.get("homeserver", "") or os.getenv("MATRIX_HOMESERVER", "")
         ).rstrip("/")
-        self._access_token: str = config.token or os.getenv("MATRIX_ACCESS_TOKEN", "")
+        self._access_token: str = config.token or get_env_value("MATRIX_ACCESS_TOKEN") or ""
         self._user_id: str = config.extra.get("user_id", "") or os.getenv(
             "MATRIX_USER_ID", ""
         )
-        self._password: str = config.extra.get("password", "") or os.getenv(
-            "MATRIX_PASSWORD", ""
-        )
+        self._password: str = config.extra.get("password", "") or get_env_value("MATRIX_PASSWORD") or ""
         self._encryption: bool = config.extra.get(
             "encryption",
             os.getenv("MATRIX_ENCRYPTION", "").lower() in {"true", "1", "yes"},
@@ -799,7 +798,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 # (fresh crypto.db, share_keys re-upload) — otherwise the
                 # device's self-signing signature is stale and peers refuse
                 # to share Megolm sessions with the rotated device.
-                recovery_key = os.getenv("MATRIX_RECOVERY_KEY", "").strip()
+                recovery_key = (get_env_value("MATRIX_RECOVERY_KEY") or "").strip()
                 if recovery_key:
                     try:
                         await olm.verify_with_recovery_key(recovery_key)

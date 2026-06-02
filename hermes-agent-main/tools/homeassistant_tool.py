@@ -17,6 +17,8 @@ import os
 import re
 from typing import Any, Dict, Optional
 
+from takyon_cli.config import get_env_value
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -32,7 +34,7 @@ def _get_config():
     """Return (hass_url, hass_token) from env vars at call time."""
     return (
         (_HASS_URL or os.getenv("HASS_URL", "http://homeassistant.local:8123")).rstrip("/"),
-        _HASS_TOKEN or os.getenv("HASS_TOKEN", ""),
+        _HASS_TOKEN or get_env_value("HASS_TOKEN") or "",
     )
 
 # Regex for valid HA entity_id format (e.g. "light.living_room", "sensor.temperature_1")
@@ -343,7 +345,7 @@ def _handle_list_services(args: dict, **kw) -> str:
 
 def _check_ha_available() -> bool:
     """Tool is only available when HASS_TOKEN is set."""
-    return bool(os.getenv("HASS_TOKEN"))
+    return bool(get_env_value("HASS_TOKEN"))
 
 
 # ---------------------------------------------------------------------------

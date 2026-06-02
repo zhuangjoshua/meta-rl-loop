@@ -11,7 +11,7 @@ import shutil
 import importlib.util
 from pathlib import Path
 
-from takyon_cli.config import get_project_root, get_takyon_home, get_env_path
+from takyon_cli.config import get_env_path, get_env_value, get_project_root, get_takyon_home
 from takyon_cli.env_loader import load_takyon_dotenv
 from takyon_constants import display_takyon_home
 
@@ -1107,7 +1107,7 @@ def run_doctor(args):
         if ssh_host:
             ssh_user = os.getenv("TERMINAL_SSH_USER")
             ssh_port = os.getenv("TERMINAL_SSH_PORT")
-            ssh_key = os.getenv("TERMINAL_SSH_KEY")
+            ssh_key = get_env_value("TERMINAL_SSH_KEY")
             target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
             cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
             if ssh_port:
@@ -1139,7 +1139,7 @@ def run_doctor(args):
     
     # Daytona (if using daytona backend)
     if terminal_env == "daytona":
-        daytona_key = os.getenv("DAYTONA_API_KEY")
+        daytona_key = get_env_value("DAYTONA_API_KEY")
         if daytona_key:
             check_ok("Daytona API key", "(configured)")
         else:
@@ -1372,7 +1372,7 @@ def run_doctor(args):
     _probes: list = []  # list of (label, callable) submitted in display order
 
     def _probe_openrouter() -> _ConnectivityResult:
-        key = os.getenv("OPENROUTER_API_KEY")
+        key = get_env_value("OPENROUTER_API_KEY")
         if not key:
             return _ConnectivityResult(
                 "OpenRouter API",

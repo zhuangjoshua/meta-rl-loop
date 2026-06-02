@@ -29,6 +29,7 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ _RECONNECT_JITTER = 0.2
 
 def check_mattermost_requirements() -> bool:
     """Return True if the Mattermost adapter can be used."""
-    token = os.getenv("MATTERMOST_TOKEN", "")
+    token = get_env_value("MATTERMOST_TOKEN") or ""
     url = os.getenv("MATTERMOST_URL", "")
     if not token:
         logger.debug("Mattermost: MATTERMOST_TOKEN not set")
@@ -78,7 +79,7 @@ class MattermostAdapter(BasePlatformAdapter):
             config.extra.get("url", "")
             or os.getenv("MATTERMOST_URL", "")
         ).rstrip("/")
-        self._token: str = config.token or os.getenv("MATTERMOST_TOKEN", "")
+        self._token: str = config.token or get_env_value("MATTERMOST_TOKEN") or ""
 
         self._bot_user_id: str = ""
         self._bot_username: str = ""
@@ -869,5 +870,4 @@ class MattermostAdapter(BasePlatformAdapter):
         )
 
         await self.handle_message(msg_event)
-
 

@@ -38,6 +38,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from takyon_cli.config import get_env_value
+
 # Match ``https://meet.google.com/abc-defg-hij`` or ``.../lookup/...`` — the
 # short three-segment code or a lookup URL. Anything else is rejected.
 MEET_URL_RE = re.compile(
@@ -456,7 +458,7 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
     realtime_model = os.environ.get("TAKYON_MEET_REALTIME_MODEL", "gpt-realtime")
     realtime_voice = os.environ.get("TAKYON_MEET_REALTIME_VOICE", "alloy")
     realtime_instructions = os.environ.get("TAKYON_MEET_REALTIME_INSTRUCTIONS", "")
-    realtime_api_key = os.environ.get("TAKYON_MEET_REALTIME_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    realtime_api_key = get_env_value("TAKYON_MEET_REALTIME_KEY") or get_env_value("OPENAI_API_KEY") or ""
 
     if not url or not _is_safe_meet_url(url):
         sys.stderr.write(

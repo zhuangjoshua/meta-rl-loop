@@ -226,6 +226,16 @@ class TestSaveEnvValueSecure:
             env_mode = (tmp_path / ".env").stat().st_mode & 0o777
             assert env_mode == 0o600
 
+    def test_sensitive_save_delegates_to_safebox(self, monkeypatch):
+        from plugins.takyon import safebox
+
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(safebox, "save_env_backed_value", lambda key, value: calls.append((key, value)))
+
+        save_env_value("OPENAI_API_KEY", "sk-delegated")
+
+        assert calls == [("OPENAI_API_KEY", "sk-delegated")]
+
 
 class TestRemoveEnvValue:
     def test_removes_key_from_env_file(self, tmp_path):
@@ -261,6 +271,15 @@ class TestRemoveEnvValue:
             assert result is False
             # os.environ should still be cleared
             assert "GHOST_KEY" not in os.environ
+
+    def test_sensitive_remove_delegates_to_safebox(self, monkeypatch):
+        from plugins.takyon import safebox
+
+        calls: list[str] = []
+        monkeypatch.setattr(safebox, "remove_env_backed_value", lambda key: calls.append(key) or True)
+
+        assert remove_env_value("OPENAI_API_KEY") is True
+        assert calls == ["OPENAI_API_KEY"]
 
     def test_clears_os_environ_even_when_not_in_file(self, tmp_path):
         env_path = tmp_path / ".env"

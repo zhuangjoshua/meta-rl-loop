@@ -27,7 +27,7 @@ def has_xai_credentials() -> bool:
     other availability scans. Truthful refresh + expiry handling happens
     in ``search()`` (or whichever caller actually makes the request).
     """
-    if os.environ.get("XAI_API_KEY", "").strip():
+    if str(get_env_value("XAI_API_KEY", "") or "").strip():
         return True
     try:
         from takyon_constants import get_takyon_home

@@ -59,6 +59,7 @@ from .config import (
     GatewayConfig,
     SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
     HomeChannel,
+    get_env_value,
 )
 from .whatsapp_identity import (
     canonical_whatsapp_identifier,
@@ -216,7 +217,7 @@ def _discord_tools_loaded() -> bool:
     Returns False (safe default — keeps the stale-API disclaimer) on any
     error so a bad config can't silently promise tools the agent lacks.
     """
-    if not (os.environ.get("DISCORD_BOT_TOKEN") or "").strip():
+    if not (get_env_value("DISCORD_BOT_TOKEN") or "").strip():
         return False
     try:
         from takyon_cli.config import load_config

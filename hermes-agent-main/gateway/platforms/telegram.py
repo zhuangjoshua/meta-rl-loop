@@ -16,6 +16,8 @@ import html as _html
 import re
 from typing import Dict, List, Optional, Any
 
+from takyon_cli.config import get_env_value
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -1485,7 +1487,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # start rather than silently run in fail-open mode.
                 # See GHSA-3vpc-7q5r-276h.
                 webhook_port = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
-                webhook_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+                webhook_secret = (get_env_value("TELEGRAM_WEBHOOK_SECRET") or "").strip()
                 if not webhook_secret:
                     raise RuntimeError(
                         "TELEGRAM_WEBHOOK_SECRET is required when "

@@ -47,7 +47,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 import yaml
 
-from takyon_cli.config import get_takyon_home, get_config_path, read_raw_config
+from takyon_cli.config import get_config_path, get_env_value, get_takyon_home, read_raw_config
 from takyon_constants import OPENROUTER_BASE_URL
 from utils import atomic_replace, atomic_yaml_write, is_truthy_value
 
@@ -1482,7 +1482,7 @@ def resolve_provider(
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
 
-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
+    if has_usable_secret(get_env_value("OPENAI_API_KEY")) or has_usable_secret(get_env_value("OPENROUTER_API_KEY")):
         return "openrouter"
 
     # Auto-detect API-key providers by checking their env vars
@@ -5744,9 +5744,9 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
 
     # api_key mode (default)
     try:
-        api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or os.getenv("AZURE_FOUNDRY_API_KEY", "")
+        api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or ""
     except Exception:
-        api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "")
+        api_key = ""
     info["logged_in"] = has_usable_secret(api_key)
     return info
 
@@ -7464,7 +7464,7 @@ def logout_command(args) -> None:
         if should_reset_config:
             _reset_config_provider()
         print(f"Logged out of {provider_name}.")
-        if should_reset_config and os.getenv("OPENROUTER_API_KEY"):
+        if should_reset_config and get_env_value("OPENROUTER_API_KEY"):
             print("Takyon will use OpenRouter for inference.")
         elif should_reset_config:
             print("Run `takyon model` or configure an API key to use Takyon.")

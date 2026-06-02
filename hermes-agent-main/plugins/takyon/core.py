@@ -5214,7 +5214,7 @@ class TakyonStore:
 
     def _delete_vercel_project_domain(self, domain: str) -> dict[str, Any]:
         load_takyon_env()
-        token = os.getenv("VERCEL_TOKEN")
+        token = safebox.read_env_backed_value("VERCEL_TOKEN")
         project = os.getenv("VERCEL_PROJECT_ID")
         team = os.getenv("VERCEL_TEAM_ID")
         if not token:
@@ -7144,7 +7144,7 @@ def _subscription_entitlement_status(status: str) -> str:
 
 def _postmark_magic_link(email: str, product_name: str, link: str) -> str | None:
     load_takyon_env()
-    token = os.getenv("POSTMARK_SERVER_TOKEN")
+    token = safebox.read_env_backed_value("POSTMARK_SERVER_TOKEN")
     from_email = os.getenv("POSTMARK_FROM_EMAIL")
     if not token or not from_email:
         raise TakyonError("magic-link email requires POSTMARK_SERVER_TOKEN and POSTMARK_FROM_EMAIL")
@@ -8468,7 +8468,7 @@ def _dashboard_runtime_base_url() -> str:
 
 def _dashboard_session_token_value() -> str:
     load_takyon_env()
-    token = str(os.getenv("TAKYON_DASHBOARD_SESSION_TOKEN") or "").strip()
+    token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
     if token:
         return token
     token_path = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser() / "dashboard_session_token"
@@ -9387,9 +9387,9 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
     """Resolve Meta Marketing API config from env. Never returns the token to callers that print."""
     load_takyon_env()
     token = (
-        os.getenv("META_SYSTEM_USER_ACCESS_TOKEN")
-        or os.getenv("META_ACCESS_TOKEN")
-        or os.getenv("FACEBOOK_ACCESS_TOKEN")
+        safebox.read_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN")
+        or safebox.read_env_backed_value("META_ACCESS_TOKEN")
+        or safebox.read_env_backed_value("FACEBOOK_ACCESS_TOKEN")
         or ""
     ).strip()
     if require_token and not token:

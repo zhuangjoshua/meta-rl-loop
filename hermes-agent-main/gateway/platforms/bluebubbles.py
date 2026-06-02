@@ -31,6 +31,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
 )
 from gateway.platforms.helpers import strip_markdown
+from takyon_cli.config import get_env_value
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self.server_url = _normalize_server_url(
             extra.get("server_url") or os.getenv("BLUEBUBBLES_SERVER_URL", "")
         )
-        self.password = extra.get("password") or os.getenv("BLUEBUBBLES_PASSWORD", "")
+        self.password = extra.get("password") or get_env_value("BLUEBUBBLES_PASSWORD") or ""
         self.webhook_host = (
             extra.get("webhook_host")
             or os.getenv("BLUEBUBBLES_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST)
@@ -934,4 +935,3 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             asyncio.create_task(self.mark_read(session_chat_id))
 
         return web.Response(text="ok")
-

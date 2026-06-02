@@ -6,7 +6,7 @@ agent/auxiliary_client.py so auth, headers, and API format are handled
 consistently.
 """
 
-import os
+from takyon_cli.config import get_env_value
 
 _client = None
 
@@ -30,4 +30,4 @@ def get_async_client():
 
 def check_api_key() -> bool:
     """Check whether the OpenRouter API key is present."""
-    return bool(os.getenv("OPENROUTER_API_KEY"))
+    return bool(get_env_value("OPENROUTER_API_KEY"))

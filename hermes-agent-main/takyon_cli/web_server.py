@@ -3128,7 +3128,10 @@ async def get_env_vars():
     env_on_disk = load_env()
     result = {}
     for var_name, info in OPTIONAL_ENV_VARS.items():
-        value = env_on_disk.get(var_name)
+        if takyon_safebox.is_sensitive_env_key(var_name):
+            value = takyon_safebox.read_env_backed_value(var_name)
+        else:
+            value = env_on_disk.get(var_name)
         result[var_name] = {
             "is_set": bool(value),
             "redacted_value": redact_key(value) if value else None,
@@ -3187,8 +3190,11 @@ async def reveal_env_var(body: EnvVarReveal, request: Request):
     _reveal_timestamps.append(now)
 
     # --- Reveal ---
-    env_on_disk = load_env()
-    value = env_on_disk.get(body.key)
+    if takyon_safebox.is_sensitive_env_key(body.key):
+        value = takyon_safebox.read_env_backed_value(body.key)
+    else:
+        env_on_disk = load_env()
+        value = env_on_disk.get(body.key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
 
@@ -3285,7 +3291,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
             "has_refresh_token": bool(cc_creds.get("refreshToken")),
         }
 
-    env_token = os.getenv("ANTHROPIC_TOKEN") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+    env_token = takyon_safebox.first_env_backed_value("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if env_token:
         return {
             "logged_in": True,

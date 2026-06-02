@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from takyon_cli import __version__ as _TAKYON_VERSION
+from takyon_cli.config import get_env_value
 
 # Identify ourselves so endpoints fronted by Cloudflare's Browser Integrity
 # Check (error 1010) don't reject the default ``Python-urllib/*`` signature.
@@ -1492,7 +1493,7 @@ def fetch_ai_gateway_pricing(
 
 def _resolve_openrouter_api_key() -> str:
     """Best-effort OpenRouter API key for pricing fetch."""
-    return os.getenv("OPENROUTER_API_KEY", "").strip()
+    return str(get_env_value("OPENROUTER_API_KEY") or "").strip()
 
 
 _DEFAULT_NOUS_INFERENCE_BASE = "https://inference-api.nousresearch.com"
@@ -1564,7 +1565,7 @@ def _fetch_novita_pricing(
     matching the pattern used by ``fetch_ai_gateway_pricing`` — without this,
     every menu render or pricing lookup re-hits the network.
     """
-    api_key = os.getenv("NOVITA_API_KEY", "").strip()
+    api_key = str(get_env_value("NOVITA_API_KEY") or "").strip()
     if not api_key:
         return {}
 
@@ -1645,7 +1646,7 @@ def list_available_providers() -> list[dict[str, str]]:
                 custom_base_url = _get_custom_base_url() or ""
                 has_creds = bool(custom_base_url.strip())
             elif pid == "openrouter":
-                has_creds = has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
+                has_creds = has_usable_secret(str(get_env_value("OPENROUTER_API_KEY") or ""))
             else:
                 status = get_auth_status(pid)
                 has_creds = bool(status.get("logged_in") or status.get("configured"))
@@ -2230,7 +2231,7 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         if live:
             return live
     if normalized == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        api_key = str(get_env_value("OPENAI_API_KEY") or "").strip()
         if api_key:
             base_raw = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
             base = base_raw or "https://api.openai.com/v1"
@@ -2258,9 +2259,9 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         if base_url:
             # Try common API key env vars for custom endpoints
             api_key = (
-                os.getenv("CUSTOM_API_KEY", "")
-                or os.getenv("OPENAI_API_KEY", "")
-                or os.getenv("OPENROUTER_API_KEY", "")
+                str(get_env_value("CUSTOM_API_KEY") or "")
+                or str(get_env_value("OPENAI_API_KEY") or "")
+                or str(get_env_value("OPENROUTER_API_KEY") or "")
             )
             live = fetch_api_models(api_key, base_url)
             if live:
@@ -3138,7 +3139,7 @@ def probe_api_models(
 
 def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
     """Fetch available language models with tool-use from AI Gateway."""
-    api_key = os.getenv("AI_GATEWAY_API_KEY", "").strip()
+    api_key = str(get_env_value("AI_GATEWAY_API_KEY") or "").strip()
     if not api_key:
         return None
     base_url = os.getenv("AI_GATEWAY_BASE_URL", "").strip()
@@ -3270,7 +3271,7 @@ def fetch_ollama_cloud_models(
 
     # 2. Live API probe
     if not api_key:
-        api_key = os.getenv("OLLAMA_API_KEY", "")
+        api_key = str(get_env_value("OLLAMA_API_KEY") or "")
     if not base_url:
         base_url = os.getenv("OLLAMA_BASE_URL", "") or "https://ollama.com/v1"
 

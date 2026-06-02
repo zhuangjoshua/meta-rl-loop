@@ -29,7 +29,7 @@ from takyon_cli.auth import (
     resolve_external_process_provider_credentials,
     has_usable_secret,
 )
-from takyon_cli.config import get_compatible_custom_providers, load_config
+from takyon_cli.config import get_compatible_custom_providers, get_env_value, load_config
 from takyon_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname
 
@@ -584,8 +584,8 @@ def _resolve_named_custom_runtime(
             return pool_result
         api_key_candidates = [
             (explicit_api_key or "").strip(),
-            os.getenv("OPENAI_API_KEY", "").strip(),
-            os.getenv("OPENROUTER_API_KEY", "").strip(),
+            str(get_env_value("OPENAI_API_KEY") or "").strip(),
+            str(get_env_value("OPENROUTER_API_KEY") or "").strip(),
         ]
         api_key = next(
             (c for c in api_key_candidates if has_usable_secret(c)),
@@ -624,9 +624,9 @@ def _resolve_named_custom_runtime(
     api_key_candidates = [
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
-        os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
-        os.getenv("OPENAI_API_KEY", "").strip(),
-        os.getenv("OPENROUTER_API_KEY", "").strip(),
+        str(get_env_value(str(custom_provider.get("key_env", "") or "").strip()) or "").strip(),
+        str(get_env_value("OPENAI_API_KEY") or "").strip(),
+        str(get_env_value("OPENROUTER_API_KEY") or "").strip(),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
@@ -710,8 +710,8 @@ def _resolve_openrouter_runtime(
     if _is_openrouter_url:
         api_key_candidates = [
             explicit_api_key,
-            os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENAI_API_KEY"),
+            get_env_value("OPENROUTER_API_KEY"),
+            get_env_value("OPENAI_API_KEY"),
         ]
     else:
         # Custom endpoint: use api_key from config when using config base_url (#1760).
@@ -725,9 +725,9 @@ def _resolve_openrouter_runtime(
         api_key_candidates = [
             explicit_api_key,
             (cfg_api_key if use_config_base_url else ""),
-            (os.getenv("OLLAMA_API_KEY") if _is_ollama_url else ""),
-            os.getenv("OPENAI_API_KEY"),
-            os.getenv("OPENROUTER_API_KEY"),
+            (get_env_value("OLLAMA_API_KEY") if _is_ollama_url else ""),
+            get_env_value("OPENAI_API_KEY"),
+            get_env_value("OPENROUTER_API_KEY"),
         ]
     api_key = next(
         (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
@@ -914,7 +914,7 @@ def _resolve_azure_foundry_runtime(
         except Exception:
             api_key = ""
     if not api_key:
-        api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "").strip()
+        api_key = str(get_env_value("AZURE_FOUNDRY_API_KEY") or "").strip()
     if not api_key:
         raise AuthError(
             "Azure Foundry requires an API key. Set AZURE_FOUNDRY_API_KEY in "
@@ -1109,8 +1109,8 @@ def resolve_runtime_provider(
     if requested_provider == "anthropic" and "azure.com" in _eff_base:
         _azure_key = (
             (explicit_api_key or "").strip()
-            or os.getenv("AZURE_ANTHROPIC_KEY", "").strip()
-            or os.getenv("ANTHROPIC_API_KEY", "").strip()
+            or str(get_env_value("AZURE_ANTHROPIC_KEY") or "").strip()
+            or str(get_env_value("ANTHROPIC_API_KEY") or "").strip()
         )
         return {
             "provider": "anthropic",
@@ -1377,7 +1377,7 @@ def resolve_runtime_provider(
             for hint_key in ("key_env", "api_key_env"):
                 env_var = str(model_cfg.get(hint_key) or "").strip()
                 if env_var:
-                    token = os.getenv(env_var, "").strip()
+                    token = str(get_env_value(env_var) or "").strip()
                     if token:
                         break
             # Next: an inline api_key on the model config (useful in multi-profile
@@ -1387,8 +1387,8 @@ def resolve_runtime_provider(
             # Finally fall back to the historical fixed names.
             if not token:
                 token = (
-                    os.getenv("AZURE_ANTHROPIC_KEY", "").strip()
-                    or os.getenv("ANTHROPIC_API_KEY", "").strip()
+                    str(get_env_value("AZURE_ANTHROPIC_KEY") or "").strip()
+                    or str(get_env_value("ANTHROPIC_API_KEY") or "").strip()
                 )
             if not token:
                 raise AuthError(

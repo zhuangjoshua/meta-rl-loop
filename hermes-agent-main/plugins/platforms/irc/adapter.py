@@ -51,6 +51,7 @@ from gateway.platforms.base import (
 )
 from gateway.session import SessionSource
 from gateway.config import PlatformConfig, Platform
+from takyon_cli.config import get_env_value
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +117,8 @@ class IRCAdapter(BasePlatformAdapter):
             if os.getenv("IRC_USE_TLS")
             else extra.get("use_tls", True)
         )
-        self.server_password = os.getenv("IRC_SERVER_PASSWORD") or extra.get("server_password", "")
-        self.nickserv_password = os.getenv("IRC_NICKSERV_PASSWORD") or extra.get("nickserv_password", "")
+        self.server_password = get_env_value("IRC_SERVER_PASSWORD") or extra.get("server_password", "")
+        self.nickserv_password = get_env_value("IRC_NICKSERV_PASSWORD") or extra.get("nickserv_password", "")
 
         # Auth
         self.allowed_users: list = extra.get("allowed_users", [])
@@ -683,10 +684,10 @@ def _env_enablement() -> dict | None:
         seed["use_tls"] = use_tls in {"1", "true", "yes"}
     # Passwords live in PlatformConfig.extra as well for back-compat with
     # existing config.yaml users; env-reads at construct time still win.
-    if os.getenv("IRC_SERVER_PASSWORD"):
-        seed["server_password"] = os.getenv("IRC_SERVER_PASSWORD")
-    if os.getenv("IRC_NICKSERV_PASSWORD"):
-        seed["nickserv_password"] = os.getenv("IRC_NICKSERV_PASSWORD")
+    if get_env_value("IRC_SERVER_PASSWORD"):
+        seed["server_password"] = get_env_value("IRC_SERVER_PASSWORD")
+    if get_env_value("IRC_NICKSERV_PASSWORD"):
+        seed["nickserv_password"] = get_env_value("IRC_NICKSERV_PASSWORD")
     # Optional home-channel (usually the same as IRC_CHANNEL, but can be a
     # dedicated reports channel).  Defaults to IRC_CHANNEL so cron jobs
     # with ``deliver=irc`` have a sensible target without extra config.
@@ -760,8 +761,8 @@ async def _standalone_send(
     else:
         use_tls = bool(extra.get("use_tls", True))
 
-    server_password = os.getenv("IRC_SERVER_PASSWORD") or extra.get("server_password", "")
-    nickserv_password = os.getenv("IRC_NICKSERV_PASSWORD") or extra.get("nickserv_password", "")
+    server_password = get_env_value("IRC_SERVER_PASSWORD") or extra.get("server_password", "")
+    nickserv_password = get_env_value("IRC_NICKSERV_PASSWORD") or extra.get("nickserv_password", "")
 
     # Reject control characters in chat_id to block IRC command injection.
     raw_target = chat_id or channel
