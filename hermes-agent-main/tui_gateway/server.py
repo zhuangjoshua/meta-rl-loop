@@ -1572,6 +1572,80 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     return f"{text}{suffix}" if text else None
 
 
+def _takyon_trace_label(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Activity"
+    text = re.sub(r"[._-]+", " ", text)
+    return " ".join(part.capitalize() for part in text.split())
+
+
+def _takyon_trace_tool_shape(
+    name: str,
+    args: dict | None = None,
+    context: str = "",
+) -> tuple[str, str, str, str]:
+    tool_name = str(name or "").strip()
+    tool_args = args if isinstance(args, dict) else {}
+    preview = str(context or "").strip()
+    if tool_name == "skill_view":
+        skill_name = str(tool_args.get("name") or preview).strip()
+        label = skill_name or "Skill"
+        detail = preview or (f"Loaded skill {skill_name}." if skill_name else "Loaded a skill.")
+        return "skill", label, detail, skill_name
+    if tool_name == "todo":
+        todos = tool_args.get("todos")
+        count = len(todos) if isinstance(todos, list) else 0
+        detail = f"Updated {count} task{'s' if count != 1 else ''}." if count else "Updated task list."
+        return "tool", "Todo", detail, ""
+    if tool_name == "business_claude_agent_task":
+        workspace = str(tool_args.get("workspace") or tool_args.get("source_path") or preview).strip()
+        return "tool", "Delegated worker", workspace or "Delegated workspace task.", ""
+    return "tool", _takyon_trace_label(tool_name), preview, ""
+
+
+def _takyon_record_session_runtime_event(
+    session: dict | None,
+    *,
+    kind: str,
+    status: str,
+    detail: str = "",
+    line: str = "",
+    command: str = "operator turn",
+    trace: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(session, dict):
+        return
+    slug = str(session.get("takyon_current_business") or "").strip()
+    if not slug:
+        return
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "status": status,
+        "detail": detail,
+        "line": line,
+        "command": command,
+    }
+    if isinstance(trace, dict) and trace:
+        payload["trace"] = {
+            str(key): value
+            for key, value in trace.items()
+            if value not in (None, "", [], {})
+        }
+    try:
+        store = _takyon_store(session)
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}/runtime",
+                business_slug=slug,
+                event_type=f"dashboard.run.{status}",
+                payload=payload,
+            )
+    except Exception as exc:
+        logger.debug("failed to record gateway runtime event for %s: %s", slug, exc)
+
+
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
     if session is not None:
@@ -1584,6 +1658,25 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         except Exception:
             pass
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
+        context = _tool_ctx(name, args)
+        entry_kind, label, detail, skill_name = _takyon_trace_tool_shape(name, args, context)
+        _takyon_record_session_runtime_event(
+            session,
+            kind="ceo_turn",
+            status="trace",
+            detail=detail or label,
+            trace={
+                "kind": entry_kind,
+                "entry_key": f"tool:{tool_call_id}",
+                "label": label,
+                "detail": detail or label,
+                "status": "running",
+                "tool_name": str(name or "").strip(),
+                "skill_name": skill_name,
+                "preview": context,
+                "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+            },
+        )
     if _tool_progress_enabled(sid):
         # tool.complete is the source of truth for todos (full list from the
         # tool result). args.todos here may be a partial merge update.
@@ -1629,6 +1722,27 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
             payload["inline_diff"] = "\n".join(rendered)
     except Exception:
         pass
+    if session is not None:
+        context = _tool_ctx(name, args)
+        entry_kind, label, detail, skill_name = _takyon_trace_tool_shape(name, args, context)
+        _takyon_record_session_runtime_event(
+            session,
+            kind="ceo_turn",
+            status="trace",
+            detail=str(payload.get("summary") or detail or label).strip(),
+            trace={
+                "kind": entry_kind,
+                "entry_key": f"tool:{tool_call_id}",
+                "label": label,
+                "detail": str(payload.get("summary") or detail or label).strip(),
+                "status": "completed",
+                "tool_name": str(name or "").strip(),
+                "skill_name": skill_name,
+                "preview": context,
+                "summary": str(payload.get("summary") or "").strip(),
+                "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+            },
+        )
     if _tool_progress_enabled(sid) or payload.get("inline_diff"):
         _emit("tool.complete", sid, payload)
 
@@ -3426,6 +3540,23 @@ def _run_prompt_submit(
                 _takyon_operator_user_id(session)
             )
             current_business = str(session.get("takyon_current_business") or "").strip()
+            turn_key = ""
+            if current_business:
+                turn_key = f"turn:session:{sid}:{uuid.uuid4().hex[:10]}"
+                session["takyon_active_turn_key"] = turn_key
+                _takyon_record_session_runtime_event(
+                    session,
+                    kind="ceo_turn",
+                    status="started",
+                    detail="CEO turn is running.",
+                    trace={
+                        "kind": "turn",
+                        "entry_key": turn_key,
+                        "label": "CEO turn",
+                        "detail": "CEO turn is running.",
+                        "status": "running",
+                    },
+                )
             if resolved_operator_user_id:
                 reservation_key, reserved_cents = _operator_budget_reserve(
                     operator_user_id=resolved_operator_user_id,
@@ -3541,6 +3672,24 @@ def _run_prompt_submit(
             if rendered:
                 payload["rendered"] = rendered
             _emit("message.complete", sid, payload)
+            if current_business:
+                trace_status_value = "completed" if status == "complete" else "failed"
+                trace_detail = (raw or "").strip()[:280]
+                if not trace_detail:
+                    trace_detail = "CEO turn completed." if trace_status_value == "completed" else "CEO turn ended with an error."
+                _takyon_record_session_runtime_event(
+                    session,
+                    kind="ceo_turn",
+                    status=trace_status_value,
+                    detail=trace_detail,
+                    trace={
+                        "kind": "turn",
+                        "entry_key": turn_key or f"turn:session:{sid}",
+                        "label": "CEO turn",
+                        "detail": trace_detail,
+                        "status": trace_status_value,
+                    },
+                )
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -3667,6 +3816,19 @@ def _run_prompt_submit(
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
+            _takyon_record_session_runtime_event(
+                session,
+                kind="ceo_turn",
+                status="failed",
+                detail=str(e),
+                trace={
+                    "kind": "turn",
+                    "entry_key": str(session.get("takyon_active_turn_key") or f"turn:session:{sid}"),
+                    "label": "CEO turn",
+                    "detail": str(e),
+                    "status": "failed",
+                },
+            )
             _emit("error", sid, {"message": str(e)})
         finally:
             turn_actual_cents = max(
@@ -3708,6 +3870,7 @@ def _run_prompt_submit(
             except Exception:
                 pass
             _clear_session_context(session_tokens)
+            session.pop("takyon_active_turn_key", None)
             with session["history_lock"]:
                 session["running"] = False
 
@@ -5035,12 +5198,131 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             return "active"
         return "neutral"
 
+    def trace_status(value: Any) -> str:
+        text = brief_text(value).strip().lower()
+        if text in {"started", "output", "heartbeat"}:
+            return "running"
+        return text or "recorded"
+
+    def upsert_trace_entry(
+        entries_by_key: dict[str, dict[str, Any]],
+        order: list[str],
+        entry: dict[str, Any],
+    ) -> None:
+        key = brief_text(entry.get("entry_key") or entry.get("id"))
+        if not key:
+            return
+        current = entries_by_key.get(key)
+        if current is None:
+            entries_by_key[key] = entry
+            order.append(key)
+            return
+        merged = dict(current)
+        for field in (
+            "id",
+            "source",
+            "kind",
+            "label",
+            "detail",
+            "status",
+            "tone",
+            "updated_at",
+            "tool_name",
+            "skill_name",
+            "summary",
+        ):
+            value = brief_text(entry.get(field)) if field not in {"id"} else entry.get(field)
+            if value not in (None, "", [], {}):
+                merged[field] = value
+        entries_by_key[key] = merged
+
+    def legacy_trace_entry(
+        *,
+        event_id: str,
+        event_kind: str,
+        event_status: str,
+        detail: str,
+        updated_at: str,
+    ) -> dict[str, Any] | None:
+        text = detail.strip()
+        status = trace_status(event_status)
+        tone = status_tone(status)
+        if event_kind in {"ceo_bootstrap", "ceo_wake", "ceo_turn"} and event_status in {"started", "completed", "failed"}:
+            return {
+                "id": event_id,
+                "entry_key": f"turn:{event_kind}",
+                "source": "runtime",
+                "kind": "turn",
+                "label": job_label(event_kind if event_kind != "ceo_turn" else "ceo_turn").replace("Ceo", "CEO"),
+                "detail": text or ("CEO turn completed." if status == "completed" else "CEO turn is running."),
+                "status": status,
+                "tone": tone,
+                "updated_at": updated_at,
+                "tool_name": "",
+                "skill_name": "",
+                "summary": "",
+            }
+        tool_started = re.match(r"^tool started -> ([^·]+?)(?: · (.+))?$", text, re.I)
+        if tool_started:
+            tool_name = brief_text(tool_started.group(1)).strip()
+            preview = brief_text(tool_started.group(2)).strip()
+            return {
+                "id": event_id,
+                "entry_key": f"legacy-tool:{tool_name}:{preview}",
+                "source": "runtime",
+                "kind": "tool",
+                "label": human_kind(tool_name),
+                "detail": preview or text,
+                "status": "running",
+                "tone": "active",
+                "updated_at": updated_at,
+                "tool_name": tool_name,
+                "skill_name": "",
+                "summary": "",
+            }
+        tool_completed = re.match(r"^tool completed -> ([^·]+?)(?: · (.+))?$", text, re.I)
+        if tool_completed:
+            tool_name = brief_text(tool_completed.group(1)).strip()
+            summary = brief_text(tool_completed.group(2)).strip()
+            return {
+                "id": event_id,
+                "entry_key": f"legacy-tool:{tool_name}",
+                "source": "runtime",
+                "kind": "tool",
+                "label": human_kind(tool_name),
+                "detail": summary or text,
+                "status": "completed",
+                "tone": "done",
+                "updated_at": updated_at,
+                "tool_name": tool_name,
+                "skill_name": "",
+                "summary": summary,
+            }
+        if text.startswith("agent -> "):
+            return {
+                "id": event_id,
+                "entry_key": f"note:{event_id}",
+                "source": "runtime",
+                "kind": "note",
+                "label": "Agent",
+                "detail": text.replace("agent -> ", "", 1).strip(),
+                "status": status,
+                "tone": tone,
+                "updated_at": updated_at,
+                "tool_name": "",
+                "skill_name": "",
+                "summary": "",
+            }
+        return None
+
     def job_label(kind: Any) -> str:
         value = brief_text(kind)
         if value == "ceo_bootstrap":
             return "CEO bootstrap"
         if value == "ceo_wake":
             return "CEO wake"
+        if value == "ceo_turn":
+            return "CEO turn"
         if value == "product.deploy":
             return "Publish product site"
         if value == "product.build":
@@ -5238,6 +5520,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     agent_runs: list[dict[str, Any]] = []
     workers: list[dict[str, Any]] = []
     runtime_events: list[dict[str, Any]] = []
+    trace_entries: list[dict[str, Any]] = []
     conn = None
     try:
         conn = store._connect()
@@ -5294,9 +5577,11 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 )
         event_rows = conn.execute(
             "SELECT * FROM events WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%' ORDER BY created_at DESC LIMIT ?",
-            (slug, 12),
+            (slug, 48),
         ).fetchall()
         seen_runtime_details: set[str] = set()
+        trace_by_key: dict[str, dict[str, Any]] = {}
+        trace_order: list[str] = []
         for row in event_rows:
             event = as_dict(store._row_to_dict(row))
             payload = as_dict(event.get("payload"))
@@ -5305,6 +5590,36 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             if status == "heartbeat":
                 continue
             detail = brief_text(payload.get("line") or payload.get("detail"))
+            event_id = brief_text(event.get("id"))
+            updated_at = brief_text(event.get("created_at"))
+            trace_payload = as_dict(payload.get("trace"))
+            if trace_payload:
+                trace_kind = brief_text(trace_payload.get("kind") or "note")
+                trace_entry = {
+                    "id": event_id,
+                    "entry_key": brief_text(trace_payload.get("entry_key") or event_id),
+                    "source": "runtime",
+                    "kind": trace_kind,
+                    "label": brief_text(trace_payload.get("label")) or job_label(event_kind or trace_kind),
+                    "detail": brief_text(trace_payload.get("detail") or detail or trace_payload.get("summary")),
+                    "status": trace_status(trace_payload.get("status") or status),
+                    "tone": status_tone(trace_status(trace_payload.get("status") or status)),
+                    "updated_at": updated_at,
+                    "tool_name": brief_text(trace_payload.get("tool_name")),
+                    "skill_name": brief_text(trace_payload.get("skill_name")),
+                    "summary": brief_text(trace_payload.get("summary")),
+                }
+                upsert_trace_entry(trace_by_key, trace_order, trace_entry)
+            else:
+                fallback_entry = legacy_trace_entry(
+                    event_id=event_id,
+                    event_kind=event_kind,
+                    event_status=status,
+                    detail=detail,
+                    updated_at=updated_at,
+                )
+                if fallback_entry is not None:
+                    upsert_trace_entry(trace_by_key, trace_order, fallback_entry)
             if detail in seen_runtime_details:
                 continue
             seen_runtime_details.add(detail)
@@ -5313,6 +5628,10 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 label = "CEO bootstrap"
             elif event_kind == "ceo_wake":
                 label = "CEO wake"
+            elif event_kind == "ceo_turn":
+                label = "CEO turn"
+            if trace_payload:
+                label = brief_text(trace_payload.get("label")) or label
             lower_detail = detail.lower()
             if label == "CEO live trace" and lower_detail.startswith("agent ->"):
                 label = "Agent"
@@ -5326,17 +5645,19 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 label = "Product verification"
             runtime_events.append(
                 {
-                    "id": brief_text(event.get("id")),
-                    "status": "running" if status in {"started", "output", "heartbeat"} else status,
-                    "updated_at": brief_text(event.get("created_at")),
+                    "id": event_id,
+                    "status": trace_status(trace_payload.get("status") if trace_payload else status),
+                    "updated_at": updated_at,
                     "label": label,
-                    "detail": detail or brief_text(payload.get("command")) or "Runtime event recorded.",
-                    "tone": status_tone("running" if status in {"started", "output", "heartbeat"} else status),
+                    "detail": brief_text(trace_payload.get("detail") if trace_payload else detail) or brief_text(payload.get("command")) or "Runtime event recorded.",
+                    "tone": status_tone(trace_payload.get("status") if trace_payload else trace_status(status)),
                 }
             )
+        trace_entries = [trace_by_key[key] for key in reversed(trace_order)]
     except Exception:
         agent_runs = []
         runtime_events = []
+        trace_entries = []
     finally:
         if conn is not None:
             conn.close()
@@ -5674,6 +5995,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         "agent_runs": agent_runs,
         "workers": workers[:8],
         "registry": _takyon_registry_display_payload(),
+        "trace": trace_entries[:32],
         "tasks": task_cards[:16],
         "status_cards": status_cards,
         "ceo_loop": ceo_loop,

@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import threading
-from typing import Mapping
+from typing import Any, Mapping
 
 from . import jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
@@ -67,6 +68,7 @@ def _record_runtime_event(
     detail: str = "",
     line: str = "",
     command: str = "",
+    trace: Mapping[str, Any] | None = None,
 ) -> None:
     from .core import TakyonStore
 
@@ -77,6 +79,12 @@ def _record_runtime_event(
         "line": line,
         "command": command,
     }
+    if isinstance(trace, Mapping) and trace:
+        payload["trace"] = {
+            str(key): value
+            for key, value in trace.items()
+            if value not in (None, "", [], {})
+        }
     try:
         store = TakyonStore()
         with store._connect() as conn:
@@ -91,6 +99,32 @@ def _record_runtime_event(
         _log.debug("failed to record worker runtime event for %s: %s", slug, exc)
 
 
+def _humanize_trace_label(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Activity"
+    text = re.sub(r"[._-]+", " ", text)
+    return " ".join(part.capitalize() for part in text.split())
+
+
+def _tool_trace_shape(name: str, args: Mapping[str, Any] | None = None) -> tuple[str, str, str]:
+    tool_name = str(name or "").strip()
+    arguments = args if isinstance(args, Mapping) else {}
+    if tool_name == "skill_view":
+        skill_name = str(arguments.get("name") or "").strip()
+        label = skill_name or "Skill"
+        detail = f"Loaded skill {skill_name}." if skill_name else "Loaded a skill."
+        return "skill", label, detail
+    if tool_name == "todo":
+        todos = arguments.get("todos")
+        count = len(todos) if isinstance(todos, list) else 0
+        return "tool", "Todo", (f"Updated {count} task{'s' if count != 1 else ''}." if count else "Updated task list.")
+    if tool_name == "business_claude_agent_task":
+        workspace = str(arguments.get("workspace") or arguments.get("source_path") or "").strip()
+        return "tool", "Delegated worker", workspace or "Delegated workspace task."
+    return "tool", _humanize_trace_label(tool_name), ""
+
+
 class _RuntimeProgress:
     def __init__(self, *, slug: str, kind: str, command: str):
         self.slug = slug
@@ -98,6 +132,38 @@ class _RuntimeProgress:
         self.command = command
         self._last_activity = ""
         self._last_tool_generating = ""
+
+    def _record_trace(
+        self,
+        *,
+        entry_kind: str,
+        entry_key: str,
+        label: str,
+        detail: str,
+        status: str,
+        tool_name: str = "",
+        skill_name: str = "",
+        preview: str = "",
+        summary: str = "",
+    ) -> None:
+        _record_runtime_event(
+            self.slug,
+            kind=self.kind,
+            status="trace",
+            detail=detail or label,
+            command=self.command,
+            trace={
+                "kind": entry_kind,
+                "entry_key": entry_key,
+                "label": label,
+                "detail": detail,
+                "status": status,
+                "tool_name": tool_name,
+                "skill_name": skill_name,
+                "preview": preview,
+                "summary": summary,
+            },
+        )
 
     def emit(self, line: str) -> None:
         text = str(line or "").strip()
@@ -117,6 +183,31 @@ class _RuntimeProgress:
             return
         self._last_tool_generating = name
         self.emit(f"preparing tool -> {name}")
+
+    def tool_started(
+        self,
+        tool_call_id: str,
+        name: str,
+        args: dict[str, object],
+    ) -> None:
+        from agent.display import build_tool_preview
+
+        tool_name = str(name or "").strip()
+        if not tool_name:
+            return
+        preview = build_tool_preview(tool_name, args if isinstance(args, dict) else {}, max_len=120) or ""
+        entry_kind, label, default_detail = _tool_trace_shape(tool_name, args)
+        skill_name = str((args or {}).get("name") or "").strip() if tool_name == "skill_view" else ""
+        self._record_trace(
+            entry_kind=entry_kind,
+            entry_key=f"tool:{tool_call_id or tool_name}",
+            label=label,
+            detail=preview or default_detail or f"{label} started.",
+            status="running",
+            tool_name=tool_name,
+            skill_name=skill_name,
+            preview=preview,
+        )
 
     def activity(self, desc: str) -> None:
         text = str(desc or "").strip()
@@ -146,15 +237,29 @@ class _RuntimeProgress:
 
     def tool_completed(
         self,
-        _tool_id: str,
+        tool_id: str,
         name: str,
         args: dict[str, object],
         result: object,
     ) -> None:
         from .cli import _tool_progress_lines
 
-        for line in _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)[:2]:
+        lines = _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)
+        for line in lines[:2]:
             self.emit(line)
+        entry_kind, label, default_detail = _tool_trace_shape(name, args)
+        skill_name = str((args or {}).get("name") or "").strip() if name == "skill_view" else ""
+        detail = next((str(line).strip() for line in lines if str(line).strip()), "")
+        self._record_trace(
+            entry_kind=entry_kind,
+            entry_key=f"tool:{tool_id or name}",
+            label=label,
+            detail=detail or default_detail or f"{label} completed.",
+            status="completed",
+            tool_name=str(name or "").strip(),
+            skill_name=skill_name,
+            summary=detail or default_detail or f"{label} completed.",
+        )
 
 
 def _run_ceo_turn(
@@ -225,6 +330,7 @@ def _run_ceo_turn(
             "platform": "takyon",
             "quiet_mode": True,
             "tool_progress_callback": progress.tool_progress if progress is not None else None,
+            "tool_start_callback": progress.tool_started if progress is not None else None,
             "tool_gen_callback": progress.tool_generating if progress is not None else None,
             "tool_complete_callback": progress.tool_completed if progress is not None else None,
         },
@@ -332,6 +438,13 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             status="started",
             detail="CEO wake is running.",
             command=f"/wake {slug}",
+            trace={
+                "kind": "turn",
+                "entry_key": "turn:ceo_wake",
+                "label": "CEO wake",
+                "detail": "CEO wake is running.",
+                "status": "running",
+            },
         )
         with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
             tokens = set_session_vars(
@@ -355,6 +468,13 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             status="failed",
             detail=str(exc),
             command=f"/wake {slug}",
+            trace={
+                "kind": "turn",
+                "entry_key": "turn:ceo_wake",
+                "label": "CEO wake",
+                "detail": str(exc),
+                "status": "failed",
+            },
         )
         raise
     finally:
@@ -367,6 +487,13 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
         status="completed",
         detail="CEO wake completed.",
         command=f"/wake {slug}",
+        trace={
+            "kind": "turn",
+            "entry_key": "turn:ceo_wake",
+            "label": "CEO wake",
+            "detail": final_response[:280].strip() or "CEO wake completed.",
+            "status": "completed",
+        },
     )
     return JobRunResult(
         result={
@@ -416,6 +543,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             status="started",
             detail="CEO bootstrap is running.",
             command=command,
+            trace={
+                "kind": "turn",
+                "entry_key": "turn:ceo_bootstrap",
+                "label": "CEO bootstrap",
+                "detail": "CEO bootstrap is running.",
+                "status": "running",
+            },
         )
         with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
             tokens = set_session_vars(
@@ -439,6 +573,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             status="failed",
             detail=str(exc),
             command=command,
+            trace={
+                "kind": "turn",
+                "entry_key": "turn:ceo_bootstrap",
+                "label": "CEO bootstrap",
+                "detail": str(exc),
+                "status": "failed",
+            },
         )
         raise
     finally:
@@ -470,6 +611,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         status="completed",
         detail="CEO bootstrap completed.",
         command=command,
+        trace={
+            "kind": "turn",
+            "entry_key": "turn:ceo_bootstrap",
+            "label": "CEO bootstrap",
+            "detail": final_response[:280].strip() or "CEO bootstrap completed.",
+            "status": "completed",
+        },
     )
     return JobRunResult(
         result={

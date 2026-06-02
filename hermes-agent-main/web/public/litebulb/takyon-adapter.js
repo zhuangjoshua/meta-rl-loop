@@ -47,10 +47,18 @@
     refreshBusy: false,
     workspaceSnapshot: null,
     workspaceOutputs: [],
+    liveTrace: new Map(),
+    activeTurnTraceId: "",
+    traceLogSeen: new Set(),
     lastOverviewTaskSignature: "",
     lastBackgroundDetail: "",
     lastCeoHeadline: "",
     pollMs: 0,
+    historyPollTimer: null,
+    historyPollMs: 0,
+    historySeen: new Set(),
+    historyRunning: false,
+    refreshTimer: null,
   };
 
   function endpoint(path) {
@@ -82,6 +90,10 @@
     const headers = new Headers(extra || {});
     if (ENV.token && !headers.has(SESSION_HEADER)) headers.set(SESSION_HEADER, ENV.token);
     return headers;
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   async function fetchJSON(path, init) {
@@ -156,6 +168,45 @@
 
   function businessSummary(slug) {
     return LIVE.businessIndex.get(String(slug || "").trim().toLowerCase()) || null;
+  }
+
+  function isTransientConnectionMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) return false;
+    return /live stream (?:reconnecting|disconnected|unauthorized|forbidden)|websocket connection failed/i.test(text);
+  }
+
+  function isBusinessScopeDeniedMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) return false;
+    return /could not open business:|no businesses are visible for this account|that business is not available to this account|access denied for business:/i.test(text);
+  }
+
+  function isBusyError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return /session busy|busy|4009/i.test(message);
+  }
+
+  function isMissingSessionError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return /session not found|4001/i.test(message);
+  }
+
+  function historyMessageKey(role, text) {
+    const cleanRole = String(role || "").trim();
+    const cleanText = String(text || "").trim();
+    return cleanRole && cleanText ? `${cleanRole}\n${cleanText}` : "";
+  }
+
+  function rememberHistoryMessage(role, text) {
+    const key = historyMessageKey(role, text);
+    if (!key) return;
+    LIVE.historySeen.add(key);
+  }
+
+  function hasSeenHistoryMessage(role, text) {
+    const key = historyMessageKey(role, text);
+    return !!key && LIVE.historySeen.has(key);
   }
 
   function hasObjectKeys(value) {
@@ -312,6 +363,67 @@
     };
   }
 
+  function traceUpdatedAtMs(value) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const parsed = Date.parse(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function traceStatus(entry) {
+    const raw = String(entry && entry.status || "").trim().toLowerCase();
+    if (!raw) return "todo";
+    if (raw === "started" || raw === "output" || raw === "heartbeat") return "running";
+    if (/fail|error|blocked/.test(raw)) return "blocked";
+    if (/complete|done|success/.test(raw)) return "done";
+    if (/running|active/.test(raw)) return "running";
+    if (/queued|scheduled|waiting|pending/.test(raw)) return "scheduled";
+    return raw;
+  }
+
+  function mergedTraceEntries(snapshot) {
+    const overview = snapshot && snapshot.overview || {};
+    const base = Array.isArray(overview.trace) ? overview.trace.filter(Boolean) : [];
+    const byKey = new Map();
+    base.forEach((entry, index) => {
+      const key = String(entry && (entry.entry_key || entry.id || `trace:${index}`) || `trace:${index}`);
+      byKey.set(key, entry);
+    });
+    LIVE.liveTrace.forEach((entry, key) => {
+      if (!entry) return;
+      const existing = byKey.get(key);
+      byKey.set(key, existing ? Object.assign({}, existing, entry) : entry);
+    });
+    return Array.from(byKey.values()).sort((a, b) => traceUpdatedAtMs(a && a.updated_at) - traceUpdatedAtMs(b && b.updated_at));
+  }
+
+  function mapTraceEntry(entry, index) {
+    const kind = String(entry && entry.kind || "note").trim().toLowerCase();
+    const label = String(entry && (entry.label || entry.skill_name || entry.tool_name || entry.id || `trace ${index + 1}`) || `trace ${index + 1}`).trim();
+    const detail = String(entry && entry.detail || entry && entry.summary || "").trim();
+    const status = traceStatus(entry);
+    const lane = laneFromOverviewText(`${label} ${detail} ${kind}`);
+    return {
+      id: String(entry && (entry.entry_key || entry.id || `trace:${index}`) || `trace:${index}`).trim(),
+      key: kind || status || "trace",
+      title: label,
+      body: detail,
+      lane,
+      assignee: kind === "skill" ? "skill" : kind === "turn" ? "ceo" : String(entry && entry.source || lane || "ops").replace(/\s+/g, "-").slice(0, 12),
+      status,
+      priority: status === "running" || status === "blocked" ? "p1" : status === "scheduled" ? "p2" : "p3",
+      created: traceUpdatedAtMs(entry && entry.updated_at) || (Date.now() - index * 1000),
+      progress: { done: status === "done" ? 1 : 0, total: 1 },
+      comments: [],
+      events: detail ? [{ kind: kind || "trace", note: detail }] : [],
+      runs: [],
+      result: status === "done" ? detail : null,
+      block_reason: status === "blocked" ? detail : "",
+      _live: true,
+      _detailLoaded: true,
+      _fromTrace: true,
+    };
+  }
+
   function laneFromTask(task) {
     const raw = [
       task.tenant,
@@ -379,6 +491,14 @@
         next.push(mapBoardTask(task || {}));
       });
     });
+    if (!next.length) {
+      const trace = mergedTraceEntries(snapshot);
+      if (trace.length) {
+        trace.forEach((entry, index) => {
+          next.push(mapTraceEntry(entry || {}, index));
+        });
+      }
+    }
     if (!next.length) {
       const overviewTasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
         ? snapshot.overview.tasks
@@ -486,6 +606,11 @@
   function hasLiveProgress(snapshot) {
     const backgroundStatus = String(snapshot && snapshot.background_run && snapshot.background_run.status || "").trim().toLowerCase();
     if (backgroundStatus === "queued" || backgroundStatus === "running") return true;
+    const trace = mergedTraceEntries(snapshot);
+    if (trace.some((entry) => {
+      const status = traceStatus(entry);
+      return status === "running" || status === "scheduled";
+    })) return true;
     const tasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
       ? snapshot.overview.tasks
       : [];
@@ -514,6 +639,31 @@
   function syncLivePollTimer(snapshot) {
     const desiredMs = hasLiveProgress(snapshot) ? 1500 : 15000;
     if (LIVE.pollMs !== desiredMs) restartLivePollTimer(desiredMs);
+  }
+
+  function restartHistoryPollTimer(ms) {
+    const nextMs = Number(ms);
+    if (!Number.isFinite(nextMs) || nextMs < 500) return;
+    if (LIVE.historyPollTimer) window.clearInterval(LIVE.historyPollTimer);
+    LIVE.historyPollMs = nextMs;
+    LIVE.historyPollTimer = window.setInterval(() => {
+      void pollSessionHistory();
+    }, nextMs);
+  }
+
+  function syncHistoryPollTimer() {
+    const desiredMs = LIVE.historyRunning || !LIVE.ws ? 2500 : 4000;
+    if (LIVE.historyPollMs !== desiredMs) restartHistoryPollTimer(desiredMs);
+  }
+
+  function scheduleLiveRefresh(delayMs) {
+    const waitMs = Number(delayMs);
+    if (!Number.isFinite(waitMs) || waitMs < 0 || !LIVE.activeBusiness) return;
+    if (LIVE.refreshTimer) window.clearTimeout(LIVE.refreshTimer);
+    LIVE.refreshTimer = window.setTimeout(() => {
+      LIVE.refreshTimer = null;
+      void refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+    }, waitMs);
   }
 
   function channelLabel(source) {
@@ -700,6 +850,26 @@
     }
   }
 
+  function traceLogSignature(entry) {
+    return [
+      entry && (entry.entry_key || entry.id || ""),
+      entry && entry.kind || "",
+      entry && entry.status || "",
+      entry && entry.label || "",
+      entry && entry.detail || "",
+    ].join("|");
+  }
+
+  function traceLogHtml(entry) {
+    const kind = String(entry && entry.kind || "note").trim().toLowerCase();
+    const status = traceStatus(entry);
+    const badge = kind === "skill" ? "skill" : kind === "tool" ? "tool" : kind === "turn" ? "turn" : "note";
+    const badgeClass = status === "done" ? "l-green" : status === "blocked" ? "l-red" : "l-blue";
+    const label = String(entry && entry.label || badge).trim();
+    const detail = String(entry && entry.detail || "").trim();
+    return `<span class="${badgeClass}">[${esc(badge)}]</span> ${esc(label)}${detail ? ` — ${esc(detail)}` : ""}`;
+  }
+
   function syncOverviewActivity(snapshot) {
     if (!snapshot) return;
     const backgroundRun = snapshot.background_run || {};
@@ -720,6 +890,17 @@
     if (ceoHeadline && ceoHeadline !== LIVE.lastCeoHeadline) {
       addCeo(formatRichText(ceoHeadline));
       LIVE.lastCeoHeadline = ceoHeadline;
+    }
+
+    const trace = mergedTraceEntries(snapshot);
+    if (trace.length) {
+      trace.forEach((entry) => {
+        const signature = traceLogSignature(entry);
+        if (!signature || LIVE.traceLogSeen.has(signature)) return;
+        LIVE.traceLogSeen.add(signature);
+        ceolog(traceLogHtml(entry), true);
+      });
+      return;
     }
 
     const signature = overviewTasks
@@ -775,6 +956,7 @@
     renderPlanSummary(snapshot);
     syncOverviewActivity(snapshot);
     syncLivePollTimer(snapshot);
+    syncHistoryPollTimer();
     const modeEl = $("#mb-mode");
     if (modeEl) {
       modeEl.textContent = RT.biz.mode || "test";
@@ -1300,19 +1482,29 @@
     LIVE.workspaceOverview = null;
     LIVE.workspaceSnapshot = null;
     LIVE.workspaceOutputs = [];
+    LIVE.liveTrace = new Map();
+    LIVE.activeTurnTraceId = "";
+    LIVE.traceLogSeen = new Set();
     LIVE.lastOverviewTaskSignature = "";
     LIVE.lastBackgroundDetail = "";
     LIVE.lastCeoHeadline = "";
     LIVE.pollMs = 0;
+    LIVE.historyRunning = false;
+    LIVE.historySeen = new Set();
+    LIVE.historyPollMs = 0;
   }
 
   function stopLiveTimers() {
     if (LIVE.menuTimer) window.clearInterval(LIVE.menuTimer);
     if (LIVE.pollTimer) window.clearInterval(LIVE.pollTimer);
+    if (LIVE.historyPollTimer) window.clearInterval(LIVE.historyPollTimer);
     if (LIVE.reconnectTimer) window.clearTimeout(LIVE.reconnectTimer);
+    if (LIVE.refreshTimer) window.clearTimeout(LIVE.refreshTimer);
     LIVE.menuTimer = null;
     LIVE.pollTimer = null;
+    LIVE.historyPollTimer = null;
     LIVE.reconnectTimer = null;
+    LIVE.refreshTimer = null;
   }
 
   function closeLiveSocket() {
@@ -1341,6 +1533,45 @@
     if (/search|fetch/.test(raw)) return "fetch";
     if (/terminal|exec|run|deploy/.test(raw)) return "execute";
     return "other";
+  }
+
+  function refreshTraceBoard() {
+    if (!RT.live) return;
+    applyBoard(null, LIVE.workspaceSnapshot || { business_slug: LIVE.activeBusiness, overview: {}, outputs: [] });
+  }
+
+  function upsertLiveTrace(entry) {
+    if (!entry) return;
+    const key = String(entry.entry_key || entry.id || "").trim();
+    if (!key) return;
+    const current = LIVE.liveTrace.get(key) || {};
+    LIVE.liveTrace.set(key, Object.assign({}, current, entry, { entry_key: key }));
+    refreshTraceBoard();
+  }
+
+  function liveToolTrace(payload, status) {
+    const name = String(payload && payload.name || "").trim();
+    const context = String(payload && payload.context || "").trim();
+    if (!name) return null;
+    if (name === "skill_view") {
+      return {
+        kind: "skill",
+        label: context || "Skill",
+        detail: context || "Loaded a skill.",
+        status,
+        skill_name: context,
+        tool_name: name,
+        updated_at: new Date().toISOString(),
+      };
+    }
+    return {
+      kind: "tool",
+      label: j$(name),
+      detail: context || j$(name),
+      status,
+      tool_name: name,
+      updated_at: new Date().toISOString(),
+    };
   }
 
   function applyToolPreview(name, preview) {
@@ -1382,10 +1613,66 @@
 
   function finishAssistantText(text) {
     if (text) LIVE.assistantText = String(text);
-    if (LIVE.assistantText) ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
+    if (LIVE.assistantText) {
+      ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
+      rememberHistoryMessage("assistant", LIVE.assistantText);
+    }
     LIVE.assistantText = "";
     LIVE.assistantBubble = null;
     scrollChat();
+  }
+
+  function mergeHistoryMessages(items) {
+    const messages = Array.isArray(items) ? items : [];
+    messages.forEach((item) => {
+      const role = String(item && item.role || "").trim().toLowerCase();
+      const text = String(item && item.text || "").trim();
+      if (!text || hasSeenHistoryMessage(role, text)) return;
+      if (role === "user") {
+        rememberHistoryMessage("user", text);
+        addYou(text);
+        return;
+      }
+      if (role === "assistant") {
+        finishAssistantText(text);
+        return;
+      }
+      if (role === "system") {
+        if (isTransientConnectionMessage(text)) return;
+        if (isBusinessScopeDeniedMessage(text)) {
+          addCeo(formatRichText(text));
+          rememberHistoryMessage("system", text);
+          return;
+        }
+        if (/^(?:\d{3}:|request timed out:|session busy|session not found)/i.test(text)) return;
+        addCeo(formatRichText(text));
+        rememberHistoryMessage("system", text);
+      }
+    });
+  }
+
+  async function pollSessionHistory() {
+    if (!LIVE.sessionId) return;
+    try {
+      const res = await rpc("session.history", { session_id: LIVE.sessionId }, 10000);
+      LIVE.historyRunning = Boolean(res && res.running);
+      mergeHistoryMessages(res && res.messages);
+      syncHistoryPollTimer();
+      if (!LIVE.historyRunning) return;
+      scheduleLiveRefresh(250);
+    } catch (err) {
+      if (isMissingSessionError(err)) {
+        LIVE.sessionId = "";
+        LIVE.sessionBusiness = "";
+        if (LIVE.activeBusiness) {
+          void ensureSession(LIVE.activeBusiness).then(() => {
+            syncHistoryPollTimer();
+          }).catch(() => {
+            /* best effort session recovery */
+          });
+        }
+      }
+    }
   }
 
   async function ensureSession(business) {
@@ -1407,7 +1694,18 @@
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
+      LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
+      upsertLiveTrace({
+        entry_key: LIVE.activeTurnTraceId,
+        kind: "turn",
+        label: "CEO turn",
+        detail: "CEO turn is running.",
+        status: "running",
+        updated_at: new Date().toISOString(),
+      });
       setStatus("running", "run");
+      LIVE.historyRunning = true;
+      syncHistoryPollTimer();
       LIVE.assistantText = "";
       LIVE.assistantBubble = null;
       return;
@@ -1417,8 +1715,23 @@
       return;
     }
     if (ev.type === "message.complete") {
+      if (LIVE.activeTurnTraceId) {
+        const turnStatus = String(payload.status || "").trim().toLowerCase() === "complete" ? "completed" : "failed";
+        upsertLiveTrace({
+          entry_key: LIVE.activeTurnTraceId,
+          kind: "turn",
+          label: "CEO turn",
+          detail: String(payload.text || "").trim().slice(0, 280) || "CEO turn completed.",
+          status: turnStatus,
+          updated_at: new Date().toISOString(),
+        });
+        LIVE.activeTurnTraceId = "";
+      }
       finishAssistantText(payload.text || "");
+      if (payload.warning) ceolog(esc(String(payload.warning)), true);
       setStatus("running", "run");
+      LIVE.historyRunning = false;
+      syncHistoryPollTimer();
       void refreshBusinessData(LIVE.activeBusiness);
       return;
     }
@@ -1429,10 +1742,17 @@
     }
     if (ev.type === "status.update") {
       const text = String(payload.text || "").trim();
+      const kind = String(payload.kind || "").trim().toLowerCase();
       if (text) ceolog(esc(text), true);
+      if (kind === "takyon") {
+        LIVE.historyRunning = true;
+        syncHistoryPollTimer();
+        scheduleLiveRefresh(250);
+      }
       return;
     }
     if (ev.type === "tool.start") {
+      const trace = liveToolTrace(payload, "running");
       const el = addTool({
         kind: toolKind(payload.name),
         nm: payload.name || "tool",
@@ -1440,7 +1760,13 @@
       });
       el.dataset.toolName = String(payload.name || "tool");
       if (payload.tool_id) LIVE.toolEls.set(String(payload.tool_id), el);
-      ceolog(`<span class="l-blue">[tool]</span> ${esc(payload.name || "tool")}`, true);
+      if (payload.tool_id) {
+        upsertLiveTrace(Object.assign({ entry_key: `tool:${String(payload.tool_id)}` }, trace || {}));
+      }
+      ceolog(
+        `<span class="l-blue">[${esc(trace && trace.kind === "skill" ? "skill" : "tool")}]</span> ${esc(trace && trace.label || payload.name || "tool")}`,
+        true
+      );
       return;
     }
     if (ev.type === "tool.progress") {
@@ -1454,12 +1780,34 @@
         const chip = holder.querySelector(".tool");
         if (chip) chip.classList.add("done");
       }
+      if (key) {
+        const trace = liveToolTrace(payload, "completed") || {};
+        if (String(payload.summary || "").trim()) trace.detail = String(payload.summary || "").trim();
+        trace.updated_at = new Date().toISOString();
+        upsertLiveTrace(Object.assign({ entry_key: `tool:${key}`, status: "completed" }, trace));
+      }
       if (payload.summary) ceolog(`<span class="l-green">[tool]</span> ${esc(payload.summary)}`, true);
+      scheduleLiveRefresh(150);
       void refreshBusinessData(LIVE.activeBusiness);
       return;
     }
     if (ev.type === "error") {
       const text = String(payload.message || "The live CEO stream reported an error.").trim();
+      if (isTransientConnectionMessage(text)) {
+        setStatus("syncing…", "build");
+        return;
+      }
+      if (LIVE.activeTurnTraceId) {
+        upsertLiveTrace({
+          entry_key: LIVE.activeTurnTraceId,
+          kind: "turn",
+          label: "CEO turn",
+          detail: text,
+          status: "failed",
+          updated_at: new Date().toISOString(),
+        });
+        LIVE.activeTurnTraceId = "";
+      }
       addCeo(formatRichText(text));
       setStatus("paused", "paused");
     }
@@ -1481,7 +1829,9 @@
     ws.addEventListener("close", () => {
       if (LIVE.ws !== ws) return;
       LIVE.ws = null;
+      syncHistoryPollTimer();
       if (!LIVE.sessionId || !LIVE.activeBusiness) return;
+      setStatus("syncing…", "build");
       LIVE.reconnectTimer = window.setTimeout(() => {
         void ensureSession(LIVE.activeBusiness).catch(() => {
           /* best effort reconnect */
@@ -1659,6 +2009,7 @@
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);
     restartLivePollTimer(15000);
+    restartHistoryPollTimer(4000);
   }
 
   async function createLiveBusinessWithOptions(options) {
@@ -1724,17 +2075,43 @@
     const text = field.value.trim();
     if (!text || !LIVE.activeBusiness) return;
     field.value = "";
+    rememberHistoryMessage("user", text);
     addYou(text);
     try {
-      const sessionId = await ensureSession(LIVE.activeBusiness);
+      let sessionId = await ensureSession(LIVE.activeBusiness);
+      if (LIVE.historyRunning && sessionId) {
+        await rpc("session.interrupt", { session_id: sessionId }, 10000);
+        await wait(400);
+      }
       setStatus("running", "run");
-      await rpc("prompt.submit", {
-        session_id: sessionId,
-        text,
-        create_in_test_mode: String(RT.biz && RT.biz.mode || "test") !== "live",
-      }, 30000);
+      LIVE.historyRunning = true;
+      syncHistoryPollTimer();
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          await rpc("prompt.submit", {
+            session_id: sessionId,
+            text,
+            create_in_test_mode: String(RT.biz && RT.biz.mode || "test") !== "live",
+          }, 30000);
+          return;
+        } catch (err) {
+          if (isMissingSessionError(err)) {
+            LIVE.sessionId = "";
+            LIVE.sessionBusiness = "";
+            sessionId = await ensureSession(LIVE.activeBusiness);
+            continue;
+          }
+          if (attempt < 7 && isBusyError(err)) {
+            await wait(350 + attempt * 200);
+            continue;
+          }
+          throw err;
+        }
+      }
     } catch (err) {
       addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
+      LIVE.historyRunning = false;
+      syncHistoryPollTimer();
       setStatus("paused", "paused");
     }
   }
