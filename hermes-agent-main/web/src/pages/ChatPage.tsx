@@ -1174,6 +1174,7 @@ export default function ChatPage() {
   const connectionStateRef = useRef<ConnectionState>("idle");
   const sessionIdRef = useRef<string | null>(null);
   const scopeBusinessRef = useRef<string>("");
+  const workspaceSnapshotRef = useRef<TakyonDashboardWorkspaceResponse | null>(null);
   const pendingBusinessSlugRef = useRef<string | null>(null);
   const scopeHydrationInFlightRef = useRef(false);
   const takyonRefreshTimerRef = useRef<number | null>(null);
@@ -1186,9 +1187,23 @@ export default function ChatPage() {
       ),
     [pendingBusinessSlug, scopeState.business, searchParams],
   );
+  const snapshotBusinessSlug = useMemo(
+    () => normalizeBusinessLookup(workspaceSnapshot?.business_slug || ""),
+    [workspaceSnapshot],
+  );
   const activeBusinessSlug = useMemo(
-    () => normalizeBusinessLookup(scopeState.business || ""),
-    [scopeState.business],
+    () => {
+      const scopeBusiness = normalizeBusinessLookup(scopeState.business || "");
+      if (scopeBusiness) return scopeBusiness;
+      if (
+        snapshotBusinessSlug &&
+        (!requestedBusinessSlug || snapshotBusinessSlug === requestedBusinessSlug)
+      ) {
+        return snapshotBusinessSlug;
+      }
+      return "";
+    },
+    [requestedBusinessSlug, scopeState.business, snapshotBusinessSlug],
   );
   const businessRequestPending = !!requestedBusinessSlug && requestedBusinessSlug !== activeBusinessSlug;
   const visibleBusinesses = useMemo(() => {
@@ -1395,6 +1410,10 @@ export default function ChatPage() {
   }, [activeBusinessSlug]);
 
   useEffect(() => {
+    workspaceSnapshotRef.current = workspaceSnapshot;
+  }, [workspaceSnapshot]);
+
+  useEffect(() => {
     pendingBusinessSlugRef.current = pendingBusinessSlug;
   }, [pendingBusinessSlug]);
 
@@ -1575,6 +1594,25 @@ export default function ChatPage() {
         }
         const nextScope = normalizeDashboardState(state);
         const snapshot = normalizeWorkspaceSnapshot(state);
+        const existingSnapshot = workspaceSnapshotRef.current;
+        const existingSnapshotBusiness = normalizeBusinessLookup(
+          existingSnapshot?.business_slug || "",
+        );
+        if (business && !nextScope.business && existingSnapshot && existingSnapshotBusiness === business) {
+          if (options?.syncUrl) {
+            const params = new URLSearchParams(searchParams);
+            params.set("business", business);
+            setSearchParams(params, { replace: true });
+          }
+          return normalizeScopeState({
+            ...nextScope,
+            scope: `business:${business}`,
+            business,
+            businesses: dashboardBusinesses.length > 0 ? dashboardBusinesses : visibleBusinesses,
+            current: existingSnapshot.current || {},
+            overview: existingSnapshot.overview,
+          });
+        }
         setScopeState(nextScope);
         setWorkspaceSnapshot(snapshot);
         if (nextScope.business && snapshot) {

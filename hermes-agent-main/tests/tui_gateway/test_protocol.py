@@ -212,7 +212,9 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
 
     assert response["result"]["business"] == "latexflow-05262217"
     assert ran.wait(1)
-    assert "latexflow-05262217" in str(captured.get("line") or "")
+    captured_line = str(captured.get("line") or "")
+    assert "--name latexflow" in captured_line
+    assert "latexflow-05262217" in captured_line
 
 
 def test_takyon_create_no_auto_stays_synchronous(server, monkeypatch):
@@ -323,6 +325,83 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
     assert result["current"]["slug"] == "latexflow"
     assert result["outputs"][0]["id"] == "surface"
     assert server._sessions[sid]["takyon_current_business"] == "latexflow"
+
+
+def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": "", "takyon_operator_user_id": "user-1"}
+    captured: dict[str, object] = {}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+    def fake_slugify(value):
+        return str(value or "").strip().lower().replace(" ", "-")
+
+    def fake_run_takyon_command(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return {
+            "success": True,
+            "business": "cat-app-0602012413",
+            "mode": "test",
+            "bootstrap_job": {
+                "job_id": "job-999",
+                "kind": "ceo_bootstrap",
+                "status": "queued",
+            },
+        }
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._slugify = fake_slugify
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(
+        server,
+        "_takyon_unique_business_slug",
+        lambda *_args, **_kwargs: "cat-app-0602012413",
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "cat-app-0602012413",
+            "current": {"slug": "cat-app-0602012413", "name": "Cat App", "mode": "test"},
+            "overview": {},
+            "outputs": [],
+            "background_run": {"kind": "create", "status": "queued"},
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_businesses_for_session",
+        lambda *_args, **_kwargs: [{"slug": "cat-app-0602012413", "name": "Cat App"}],
+    )
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-unique-1",
+        {
+            "session_id": sid,
+            "business": "cat-app",
+            "business_name": "Cat App",
+            "goal": "cat app",
+            "mode": "test",
+        },
+    )
+
+    assert captured["argv"] == [
+        "create",
+        "--test",
+        "--name",
+        "Cat App",
+        "cat-app-0602012413",
+        "cat app",
+    ]
+    result = response["result"]
+    assert result["business_slug"] == "cat-app-0602012413"
+    assert result["business_name"] == "Cat App"
 
 
 def test_takyon_dashboard_workspace_uses_explicit_business_slug(server, monkeypatch):

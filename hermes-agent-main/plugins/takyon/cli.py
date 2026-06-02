@@ -625,6 +625,7 @@ def _parse_business_start_args(
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
+    explicit_name: str | None = None
     auto_start = auto_default
     no_auto = False
     clean: list[str] = []
@@ -646,6 +647,11 @@ def _parse_business_start_args(
             if index >= len(tokens):
                 raise SystemExit(usage)
             schedule = tokens[index]
+        elif token == "--name":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            explicit_name = str(tokens[index] or "").strip() or None
         elif token in {"-h", "--help", "help"}:
             raise SystemExit(usage)
         elif token.startswith("--"):
@@ -655,8 +661,9 @@ def _parse_business_start_args(
         index += 1
     if not clean:
         raise SystemExit(usage)
-    raw_name = clean[0]
-    slug = _slugify(raw_name)
+    slug_token = clean[0]
+    raw_name = explicit_name or slug_token
+    slug = _slugify(slug_token)
     goal = " ".join(clean[1:]).strip()
     return slug, raw_name, goal, mode, schedule, auto_start, no_auto
 

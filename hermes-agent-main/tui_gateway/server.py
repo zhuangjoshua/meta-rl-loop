@@ -5893,7 +5893,7 @@ def _takyon_session(params: dict) -> dict | None:
     return _sessions.get(str(params.get("session_id") or ""))
 
 
-_TAKYON_CREATE_VALUE_FLAGS = {"--schedule"}
+_TAKYON_CREATE_VALUE_FLAGS = {"--schedule", "--name"}
 
 
 def _takyon_create_business_arg_index(tokens: list[str]) -> int | None:
@@ -6738,7 +6738,10 @@ def _(rid, params: dict) -> dict:
         operator_user_id = _takyon_operator_user_id(session) or None
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
-        command_argv = ["create", f"--{requested_mode}", slug]
+        command_argv = ["create", f"--{requested_mode}"]
+        if requested_name:
+            command_argv.extend(["--name", requested_name])
+        command_argv.append(slug)
         if requested_goal:
             command_argv.append(requested_goal)
         result = run_takyon_command(
@@ -7065,9 +7068,9 @@ def _(rid, params: dict) -> dict:
                 create_requested = True
                 from plugins.takyon.cli import _parse_business_start_args
 
-                slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
+                slug, raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
                     ["create", *tokens[1:]],
-                    usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+                    usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] [--name "Display name"] <business> [goal]',
                     auto_default=True,
                 )
                 create_bootstrap_requested = bool(auto_start and not no_auto)
@@ -7079,6 +7082,8 @@ def _(rid, params: dict) -> dict:
                     business_index = _takyon_create_business_arg_index(tokens)
                     if business_index is not None:
                         tokens[business_index] = expected_create_business
+                        if raw_name and raw_name != expected_create_business and "--name" not in tokens:
+                            tokens[business_index:business_index] = ["--name", raw_name]
                         normalized_line = "/" + shlex.join(tokens)
         except Exception:
             expected_create_business = ""
