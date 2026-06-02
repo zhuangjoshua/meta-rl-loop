@@ -439,6 +439,59 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _datetime_to_iso(value: datetime | None) -> str:
+    return value.astimezone(timezone.utc).isoformat() if isinstance(value, datetime) else ""
+
+
+def _latest_tree_file_updated_at(root: Path, *, skip_hidden: bool = False, skip_predicate: Any = None) -> datetime | None:
+    latest: datetime | None = None
+    if not root.exists() or not root.is_dir():
+        return None
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if skip_hidden and any(part.startswith(".") for part in path.parts):
+            continue
+        if callable(skip_predicate) and skip_predicate(path):
+            continue
+        try:
+            updated = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        except OSError:
+            continue
+        if latest is None or updated > latest:
+            latest = updated
+    return latest
+
+
+def _projection_freshness(
+    *,
+    projection: str,
+    evidence: str,
+    projection_updated_at: Any,
+    evidence_updated_at: Any,
+    stale_reason: str,
+) -> dict[str, Any] | None:
+    projection_dt = _parse_iso_datetime(projection_updated_at)
+    evidence_dt = (
+        evidence_updated_at
+        if isinstance(evidence_updated_at, datetime)
+        else _parse_iso_datetime(evidence_updated_at)
+    )
+    if evidence_dt is None:
+        return None
+    if projection_dt is not None and projection_dt >= evidence_dt:
+        return None
+    return {
+        "projection": projection,
+        "evidence": evidence,
+        "authoritative": False,
+        "status": "stale",
+        "reason": stale_reason,
+        "projection_updated_at": _datetime_to_iso(projection_dt),
+        "evidence_updated_at": _datetime_to_iso(evidence_dt),
+    }
+
+
 def _normalize_guidance_skills(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -4159,7 +4212,7 @@ class TakyonStore:
         conn.execute("UPDATE app_users SET tier = ?, updated_at = ? WHERE business_slug = ? AND id = ?", (tier, _now(), slug, user_id))
         return str(tier)
 
-    def _app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
+    def _stored_app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM app_surface_contracts WHERE business_slug = ?", (slug,)).fetchone()
         contract = self._row_to_dict(row)
         if contract:
@@ -4191,6 +4244,57 @@ class TakyonStore:
             "created_at": None,
             "updated_at": None,
         }
+
+    def _reconcile_app_surface_contract(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
+        surface = dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
+        source_path = str(surface.get("source_path") or "").strip()
+        claimed_truth = (
+            str(surface.get("status") or "").strip().lower() in {"active", "publish_blocked"}
+            or str(surface.get("publish_status") or "").strip().lower() in {"published", "blocked"}
+            or bool(str(surface.get("publish_receipt_path") or "").strip())
+        )
+        if not source_path or not claimed_truth:
+            return surface
+        root = self._business_root(slug) / source_path
+        has_source_files = bool(root.exists() and root.is_dir() and _product_source_files(root, limit=1))
+        if not has_source_files:
+            return surface
+        latest = self._latest_surface_verification(conn, slug, source_path)
+        freshness = _projection_freshness(
+            projection="app.surface",
+            evidence=f"{source_path}/**",
+            projection_updated_at=(latest or {}).get("event_created_at"),
+            evidence_updated_at=_latest_tree_file_updated_at(root, skip_hidden=True, skip_predicate=_product_source_is_skipped),
+            stale_reason=(
+                "product source exists but has not been reconciled by business_verify_product_surface"
+                if not latest
+                else "product source changed after the last business_verify_product_surface receipt"
+            ),
+        )
+        if not freshness:
+            return surface
+        metadata = dict(surface.get("metadata") or {}) if isinstance(surface.get("metadata"), dict) else {}
+        freshness_map = dict(metadata.get("takyon_projection_freshness") or {}) if isinstance(metadata.get("takyon_projection_freshness"), dict) else {}
+        freshness_map["product_surface"] = freshness
+        prior_validation = metadata.get("takyon_surface_validation") if isinstance(metadata.get("takyon_surface_validation"), dict) else None
+        validation: dict[str, Any] = {
+            "status": "stale",
+            "reason": freshness["reason"],
+            "source_path": source_path,
+            "evidence_updated_at": freshness["evidence_updated_at"],
+            "projection_updated_at": freshness["projection_updated_at"],
+        }
+        if prior_validation:
+            validation["last_authoritative_validation"] = prior_validation
+        metadata["takyon_projection_freshness"] = freshness_map
+        metadata["takyon_surface_validation"] = validation
+        surface["metadata"] = metadata
+        if str(surface.get("status") or "").strip().lower() in {"active", "publish_blocked"}:
+            surface["status"] = "unverified"
+        return surface
+
+    def _app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
+        return self._reconcile_app_surface_contract(conn, slug)
 
     def _latest_surface_verification(self, conn: sqlite3.Connection, slug: str, source_path: str | None) -> dict[str, Any] | None:
         if not source_path:
@@ -4243,6 +4347,11 @@ class TakyonStore:
             local_work.append("product source has pretend-state findings")
         elif risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
+        surface_metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+        freshness = surface_metadata.get("takyon_projection_freshness") if isinstance(surface_metadata.get("takyon_projection_freshness"), dict) else {}
+        product_surface_freshness = freshness.get("product_surface") if isinstance(freshness.get("product_surface"), dict) else {}
+        if product_surface_freshness.get("status") == "stale":
+            local_work.append(product_surface_freshness.get("reason") or "product surface projection is stale; rerun business_verify_product_surface")
         return {
             "surface_status": str(surface.get("status") or "missing"),
             "publish_status": str(surface.get("publish_status") or ""),
@@ -4251,6 +4360,7 @@ class TakyonStore:
             "has_source_files": has_source_files,
             "latest_verification": latest or {},
             "inventory": inventory or {},
+            "projection_freshness": product_surface_freshness or {},
             "local_continuable_work": local_work[:8],
         }
 
@@ -4490,6 +4600,15 @@ class TakyonStore:
                     for item in spec.get("worker_contract") or []:
                         index.append(f"  - UI contract: {str(item).strip()}")
         _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
+
+    def _refresh_surface_projection_files_for_path(self, conn: sqlite3.Connection, slug: str, rel_path: str) -> None:
+        surface = self._stored_app_surface_contract(conn, slug)
+        source_path = str(surface.get("source_path") or "").strip()
+        rel = str(rel_path or "").strip().strip("/")
+        if not source_path or not rel:
+            return
+        if rel == source_path or rel.startswith(f"{source_path}/"):
+            self._rewrite_app_files(conn, slug)
 
         plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
         if not plans:
@@ -5761,7 +5880,7 @@ class TakyonStore:
             status = str(op.get("status") or "draft").strip().lower()
             if not status:
                 raise TakyonError("surface status is required")
-            existing = self._app_surface_contract(conn, slug)
+            existing = self._stored_app_surface_contract(conn, slug)
             design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
             if op.get("source_path"):
@@ -5860,7 +5979,7 @@ class TakyonStore:
             if op.get("publish_source_path"):
                 publish_source_path = _safe_relpath(str(op.get("publish_source_path")), field="publish_source_path").as_posix()
             blocker = str(op.get("blocker") or "")
-            existing = self._app_surface_contract(conn, slug)
+            existing = self._stored_app_surface_contract(conn, slug)
             metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
             metadata = {
                 **metadata,
@@ -6269,6 +6388,7 @@ class TakyonStore:
                 (workspace_id, slug, path_text, kind, status, _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, now),
             )
             (self._business_root(slug) / rel).mkdir(parents=True, exist_ok=True)
+            self._refresh_surface_projection_files_for_path(conn, slug, path_text)
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/workspace:{path_text}", business_slug=slug, event_type=action, payload={"reason": reason, "actor": actor, "metadata": metadata})
             return {"action": action, "business": slug, "workspace": path_text}
@@ -6293,6 +6413,7 @@ class TakyonStore:
             rel = str(file_path.relative_to(self._business_root(slug)))
             _validate_brain_index_completion_gate(rel, content)
             _atomic_write_text(file_path, content)
+            self._refresh_surface_projection_files_for_path(conn, slug, rel)
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":
@@ -6330,6 +6451,7 @@ class TakyonStore:
             rel = str(file_path.relative_to(self._business_root(slug)))
             _validate_brain_index_completion_gate(rel, updated_content)
             _atomic_write_text(file_path, updated_content)
+            self._refresh_surface_projection_files_for_path(conn, slug, rel)
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":

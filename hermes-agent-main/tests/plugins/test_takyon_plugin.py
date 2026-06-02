@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -551,6 +552,93 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     pulse = store.calculate_pulse("latexflow")
     assert pulse["current_state"]["product_surface"]["inventory_status"] == "collected"
     assert pulse["summary"]["local_continuable_product_work"] == 0
+
+
+def test_product_surface_projection_turns_stale_when_source_changes_after_publish(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-stale-surface",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-stale-surface",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    index = site / "index.html"
+    index.write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    handle_business_verify_product_surface(
+        {
+            "business": "latexflow",
+            "source_path": "product/site",
+            "install": False,
+            "idempotency_key": "verify-stale-surface",
+        }
+    )
+
+    # Simulate a later source edit that bypassed the canonical verify/publish turn.
+    index.write_text("<h1>Latexflow v2</h1>\n", encoding="utf-8")
+    future_ts = datetime.now().timestamp() + 5
+    os.utime(index, (future_ts, future_ts))
+
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["status"] == "unverified"
+    assert app["surface_contract"]["publish_status"] == "published"
+    freshness = app["surface_contract"]["metadata"]["takyon_projection_freshness"]["product_surface"]
+    assert freshness["status"] == "stale"
+    assert freshness["authoritative"] is False
+    assert "changed after the last business_verify_product_surface receipt" in freshness["reason"]
+    assert any(
+        "changed after the last business_verify_product_surface receipt" in item
+        for item in app["product_surface"]["local_continuable_work"]
+    )
+
+
+def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_changes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-refresh-surface-md",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-refresh-surface-md",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    handle_business_verify_product_surface(
+        {
+            "business": "latexflow",
+            "source_path": "product/site",
+            "install": False,
+            "idempotency_key": "verify-refresh-surface-md",
+        }
+    )
+
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "business": "latexflow", "path": "product/site/index.html", "content": "<h1>Latexflow v2</h1>\n"}],
+        "mutate-product-source",
+    )
+
+    surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
+    assert "- Status: unverified" in surface_md
+    assert "changed after the last business_verify_product_surface receipt" in surface_md
 
 
 def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_path, monkeypatch):
