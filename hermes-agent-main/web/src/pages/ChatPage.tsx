@@ -1969,7 +1969,8 @@ export default function ChatPage() {
     if (!urlBusiness || !canUseConnection(state)) return;
     if (scopeHydrationInFlightRef.current) return;
     if (blockedBootBusinessSlug === urlBusiness) return;
-    if (scopeState.business === urlBusiness || pendingBusinessSlug === urlBusiness) return;
+    if (scopeState.business === urlBusiness) return;
+    if (pendingBusinessSlug === urlBusiness && !sessionId) return;
     console.info("[takyon-scope] url fallback pending", {
       sessionId,
       state,
