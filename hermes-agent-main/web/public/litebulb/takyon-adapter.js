@@ -50,6 +50,7 @@
     lastOverviewTaskSignature: "",
     lastBackgroundDetail: "",
     lastCeoHeadline: "",
+    pollMs: 0,
   };
 
   function endpoint(path) {
@@ -155,6 +156,39 @@
 
   function businessSummary(slug) {
     return LIVE.businessIndex.get(String(slug || "").trim().toLowerCase()) || null;
+  }
+
+  function hasObjectKeys(value) {
+    return !!(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length);
+  }
+
+  function normalizeLiveSnapshot(value) {
+    const business = String(value && (value.business_slug || value.business) || "").trim().toLowerCase();
+    if (!business) return null;
+    return {
+      business_slug: business,
+      current: hasObjectKeys(value && value.current) ? value.current : {},
+      overview: hasObjectKeys(value && value.overview) ? value.overview : undefined,
+      outputs: Array.isArray(value && value.outputs) ? value.outputs : [],
+      background_run:
+        value && value.background_run && typeof value.background_run === "object"
+          ? value.background_run
+          : null,
+    };
+  }
+
+  function mergeLiveSnapshots(primary, fallback) {
+    const preferred = normalizeLiveSnapshot(primary);
+    const alternate = normalizeLiveSnapshot(fallback);
+    if (!preferred) return alternate;
+    if (!alternate) return preferred;
+    return {
+      business_slug: preferred.business_slug || alternate.business_slug,
+      current: hasObjectKeys(preferred.current) ? preferred.current : alternate.current,
+      overview: hasObjectKeys(preferred.overview) ? preferred.overview : alternate.overview,
+      outputs: Array.isArray(preferred.outputs) && preferred.outputs.length ? preferred.outputs : alternate.outputs,
+      background_run: preferred.background_run || alternate.background_run,
+    };
   }
 
   function rememberBusinesses(items) {
@@ -449,6 +483,39 @@
     return String(url || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
   }
 
+  function hasLiveProgress(snapshot) {
+    const backgroundStatus = String(snapshot && snapshot.background_run && snapshot.background_run.status || "").trim().toLowerCase();
+    if (backgroundStatus === "queued" || backgroundStatus === "running") return true;
+    const tasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
+      ? snapshot.overview.tasks
+      : [];
+    return tasks.some((task) => {
+      const source = String(task && task.source || "").trim().toLowerCase();
+      const label = String(task && task.label || "").trim();
+      const status = String(task && task.status || "").trim().toLowerCase();
+      return (
+        (source === "runtime" || source === "job" || /CEO (bootstrap|wake)/i.test(label)) &&
+        (status === "queued" || status === "running")
+      );
+    });
+  }
+
+  function restartLivePollTimer(ms) {
+    const nextMs = Number(ms);
+    if (!Number.isFinite(nextMs) || nextMs < 250) return;
+    if (LIVE.pollTimer) window.clearInterval(LIVE.pollTimer);
+    LIVE.pollMs = nextMs;
+    LIVE.pollTimer = window.setInterval(() => {
+      if (!LIVE.activeBusiness) return;
+      void refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+    }, nextMs);
+  }
+
+  function syncLivePollTimer(snapshot) {
+    const desiredMs = hasLiveProgress(snapshot) ? 1500 : 15000;
+    if (LIVE.pollMs !== desiredMs) restartLivePollTimer(desiredMs);
+  }
+
   function channelLabel(source) {
     const s = String(source || "").toLowerCase().replace(/^test-/, "");
     if (!s) return "Post";
@@ -707,6 +774,7 @@
     renderDeliverablesWindow();
     renderPlanSummary(snapshot);
     syncOverviewActivity(snapshot);
+    syncLivePollTimer(snapshot);
     const modeEl = $("#mb-mode");
     if (modeEl) {
       modeEl.textContent = RT.biz.mode || "test";
@@ -1235,6 +1303,7 @@
     LIVE.lastOverviewTaskSignature = "";
     LIVE.lastBackgroundDetail = "";
     LIVE.lastCeoHeadline = "";
+    LIVE.pollMs = 0;
   }
 
   function stopLiveTimers() {
@@ -1456,21 +1525,30 @@
     if (!business || LIVE.refreshBusy) return;
     LIVE.refreshBusy = true;
     try {
+      const activeSessionId =
+        LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
       const settled = await Promise.allSettled([
         fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50`),
         fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`),
         fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`),
         options && options.skipAccount ? Promise.resolve(LIVE.operatorAccount) : fetchJSON("/api/takyon/operator/account"),
+        activeSessionId ? rpc("takyon.dashboard.state", {
+          session_id: activeSessionId,
+          business_slug: business,
+          limit: 50,
+        }, 10000) : Promise.resolve(null),
       ]);
       const workspace = settled[0].status === "fulfilled" ? settled[0].value : null;
       const board = settled[1].status === "fulfilled" ? settled[1].value : null;
       LIVE.creativeCredits = settled[2].status === "fulfilled" ? settled[2].value : LIVE.creativeCredits;
       LIVE.operatorAccount = settled[3].status === "fulfilled" ? settled[3].value : LIVE.operatorAccount;
-      if (workspace) {
-        LIVE.workspaceOverview = workspace.overview || {};
-        applyWorkspace(workspace, businessSummary(business));
+      const dashboardState = settled[4].status === "fulfilled" ? settled[4].value : null;
+      const snapshot = mergeLiveSnapshots(workspace, dashboardState);
+      if (snapshot) {
+        LIVE.workspaceOverview = snapshot.overview || {};
+        applyWorkspace(snapshot, businessSummary(business));
       }
-      if (workspace || board) applyBoard(board, workspace || LIVE.workspaceSnapshot || null);
+      if (snapshot || board) applyBoard(board, snapshot || LIVE.workspaceSnapshot || null);
       if (document.getElementById("w-operator")) renderOperatorWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
@@ -1483,7 +1561,7 @@
     }
   }
 
-  async function mountLiveBusiness(slug, providedSummary) {
+  async function mountLiveBusiness(slug, providedSummary, initialSnapshot) {
     const business = String(slug || "").trim().toLowerCase();
     if (!business) return;
     LIVE.activeBusiness = business;
@@ -1498,6 +1576,21 @@
     };
     RT.live = true;
     mountLiveShell(biz);
+    const seededSnapshot = mergeLiveSnapshots(initialSnapshot, {
+      business_slug: business,
+      current: {
+        name: biz.name,
+        goal: biz.idea,
+        mode: biz.mode,
+      },
+    });
+    if (seededSnapshot) {
+      applyWorkspace(seededSnapshot, summary);
+      applyBoard(null, seededSnapshot);
+      if (document.getElementById("w-wake")) renderWakeWindow("");
+      if (document.getElementById("w-files")) renderDeliverablesWindow();
+      setStatus("running", "run");
+    }
     await ensureSession(business);
     await refreshBusinessData(business);
   }
@@ -1565,9 +1658,7 @@
     addThink("connecting to Takyon.");
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);
-    LIVE.pollTimer = window.setInterval(() => {
-      void refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
-    }, 15000);
+    restartLivePollTimer(15000);
   }
 
   async function createLiveBusinessWithOptions(options) {
@@ -1602,7 +1693,14 @@
         goal,
         mode,
       };
-      await mountLiveBusiness(created, summary);
+      const initialSnapshot = normalizeLiveSnapshot({
+        business_slug: created,
+        current: result && result.current || {},
+        overview: result && result.overview || {},
+        outputs: result && result.outputs || [],
+        background_run: result && result.background_run || null,
+      });
+      await mountLiveBusiness(created, summary, initialSnapshot);
       if (result && result.output) addCeo(formatRichText(result.output));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
