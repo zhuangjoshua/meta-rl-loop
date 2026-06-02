@@ -5158,7 +5158,14 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
         )
         if not postish:
             continue
-        artifact_path = "" if url else raw_url
+        artifact_path = ""
+        if not url and raw_url:
+            try:
+                artifact_candidate = store._resolve_business_file(slug, raw_url, sync=False)
+                if artifact_candidate.exists() and artifact_candidate.is_file():
+                    artifact_path = raw_url
+            except Exception:
+                artifact_path = ""
         try:
             conversation_file = brief_text(store._conversation_thread_relpath(thread_dict))
         except Exception:

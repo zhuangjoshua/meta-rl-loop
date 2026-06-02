@@ -5060,6 +5060,9 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
 def test_business_overview_treats_test_publish_path_as_artifact(tmp_path):
     business_root = tmp_path / "demo"
     business_root.mkdir()
+    artifact = business_root / "distribution" / "local-published" / "test-post.md"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("test post\n", encoding="utf-8")
 
     class _FakeStore:
         def read(self, *, scope, query, **_kwargs):
@@ -5100,6 +5103,9 @@ def test_business_overview_treats_test_publish_path_as_artifact(tmp_path):
         def _business_root(self, slug):
             return business_root
 
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            return business_root / rel
+
         def _connect(self):
             raise RuntimeError("db not needed for this payload test")
 
@@ -5109,6 +5115,72 @@ def test_business_overview_treats_test_publish_path_as_artifact(tmp_path):
     assert payload["posts"][0]["mode"] == "test"
     assert payload["posts"][0]["url"] == ""
     assert payload["posts"][0]["artifact_path"] == "distribution/local-published/test-post.md"
+    assert (
+        payload["posts"][0]["conversation_file"]
+        == "metrics/conversations/threads/thread-test-1.md"
+    )
+
+
+def test_business_overview_posts_omit_missing_artifact_preview(tmp_path):
+    business_root = tmp_path / "businesses" / "demo"
+    business_root.mkdir(parents=True)
+
+    class _FakeStore:
+        def read(self, scope, query, **kwargs):
+            if query == "summary":
+                return {
+                    "business": {"slug": "demo", "goal": "Test", "mode": "test"},
+                    "product_surface": {},
+                    "app": {},
+                    "budget": {},
+                    "creative_credits": {},
+                    "app_budget": {},
+                    "app_revenue": {},
+                    "app_usage": {},
+                    "pulse_summary": {},
+                    "jobs": [],
+                    "events": [],
+                    "conversations": {
+                        "threads": [
+                            {
+                                "id": "thread-test-1",
+                                "source": "test-reddit",
+                                "title": "Test local post",
+                                "url": "distribution/local-published/missing.md",
+                                "status": "active",
+                                "created_at": "2026-06-01T00:00:00Z",
+                                "updated_at": "2026-06-01T00:05:00Z",
+                            }
+                        ],
+                        "unresolved": [],
+                    },
+                }
+            if query == "list_files":
+                return {"files": []}
+            return {}
+
+        def calculate_pulse(self, slug, limit=5):
+            return {}
+
+        def _conversation_thread_relpath(self, thread_dict):
+            return "metrics/conversations/threads/thread-test-1.md"
+
+        def _business_cron_jobs(self, slug):
+            return []
+
+        def _business_root(self, slug):
+            return business_root
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            return business_root / rel
+
+        def _connect(self):
+            raise RuntimeError("db not needed for this payload test")
+
+    payload = server._takyon_business_overview_payload(_FakeStore(), "demo")
+
+    assert len(payload["posts"]) == 1
+    assert payload["posts"][0]["artifact_path"] == ""
     assert (
         payload["posts"][0]["conversation_file"]
         == "metrics/conversations/threads/thread-test-1.md"

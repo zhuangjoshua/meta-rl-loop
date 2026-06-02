@@ -3858,6 +3858,7 @@ function CompanyWorkspace({
   const name = scope.current?.name || scope.business;
   const publicUrl =
     productPublicUrl || customerWebsiteUrl({ business: scope.business, product, website });
+  const publishTarget = normalizeOpenableUrl(website.publish_target || product.publish_target);
   const live = productIsLive(product) || !!publicUrl;
   const previewPath =
     website.path || website.source_path || product.source_path || "product/site";
@@ -4060,11 +4061,13 @@ function CompanyWorkspace({
             <div className="td-sec">
               <span className="td-sec-no">{sectionNo("product")}</span>
               <h3 className="td-sec-label">Product</h3>
-              <span className="td-sec-meta">{live ? prettyHost(publicUrl) : "preview"}</span>
+              <span className="td-sec-meta">
+                {live ? prettyHost(publicUrl) : publishTarget ? `target ${prettyHost(publishTarget)}` : "local preview"}
+              </span>
             </div>
             <div className="td-plate">
               <div className="td-plate-top">
-                <span className="td-plate-eyebrow">{live ? "Live product" : "Preview"}</span>
+                <span className="td-plate-eyebrow">{live ? "Live product" : "Local preview"}</span>
                 <span className="td-plate-host">
                   {live
                     ? prettyHost(publicUrl)
@@ -4075,6 +4078,12 @@ function CompanyWorkspace({
               </div>
               <h2 className="td-plate-name">{name}</h2>
               {overview.goal && <p className="td-plate-goal">{overview.goal}</p>}
+              {!live && publishTarget && (
+                <p className="td-meta" style={{ margin: "10px 0 0" }}>
+                  Publish target: {prettyHost(publishTarget)}{" "}
+                  {product.publish_status === "published" ? "" : "· not live yet"}
+                </p>
+              )}
               <div className="td-funnel">
                 {["Signups", "Active", "Paying"].map((label, index) => (
                   <Fragment key={label}>
@@ -4097,7 +4106,7 @@ function CompanyWorkspace({
                   </button>
                 ) : (
                   <button className="td-btn td-btn-primary" onClick={openPreview} type="button">
-                    Open preview <ExternalLink className="td-ar h-3.5 w-3.5" />
+                    Open local preview <ExternalLink className="td-ar h-3.5 w-3.5" />
                   </button>
                 )}
               </div>
