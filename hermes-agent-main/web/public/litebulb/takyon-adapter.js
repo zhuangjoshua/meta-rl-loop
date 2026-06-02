@@ -47,6 +47,9 @@
     refreshBusy: false,
     workspaceSnapshot: null,
     workspaceOutputs: [],
+    lastOverviewTaskSignature: "",
+    lastBackgroundDetail: "",
+    lastCeoHeadline: "",
   };
 
   function endpoint(path) {
@@ -228,6 +231,53 @@
     return "p3";
   }
 
+  function laneFromOverviewText(text) {
+    const raw = String(text || "").toLowerCase();
+    if (/research|market|validate|evidence/.test(raw)) return "research";
+    if (/product|preview|site|auth|checkout|runtime|deploy/.test(raw)) return "product";
+    if (/outreach|distribution|lead|customer|sales|growth|publish/.test(raw)) return "growth";
+    if (/creative|seo|content|ad/.test(raw)) return "creative";
+    return "ops";
+  }
+
+  function statusFromOverviewTask(task) {
+    const rawStatus = String(task && task.status || "").toLowerCase();
+    const tone = String(task && task.tone || "").toLowerCase();
+    if (/blocked|error|fail|attention|missing/.test(rawStatus) || tone === "blocked") return "blocked";
+    if (/done|complete|success|succeeded|passed/.test(rawStatus) || tone === "done") return "done";
+    if (/running|active|working|watch/.test(rawStatus) || tone === "active") return "running";
+    if (/queued|scheduled|waiting|pending/.test(rawStatus) || tone === "waiting") return "scheduled";
+    if (/review/.test(rawStatus)) return "review";
+    return "todo";
+  }
+
+  function mapOverviewTask(task, index) {
+    const label = String(task && (task.label || task.id || `task ${index + 1}`) || `task ${index + 1}`).trim();
+    const detail = String(task && task.detail || "").trim();
+    const lane = laneFromOverviewText(`${label} ${detail}`);
+    const status = statusFromOverviewTask(task);
+    return {
+      id: String(task && task.id || `overview:${index}:${label}`).trim(),
+      key: String(task && task.source || status || "task").trim(),
+      title: label,
+      body: detail,
+      lane,
+      assignee: String(task && task.source || lane || "ops").replace(/\s+/g, "-").slice(0, 12),
+      status,
+      priority: status === "running" || status === "blocked" ? "p1" : status === "scheduled" ? "p2" : "p3",
+      created: Date.now() - index * 1000,
+      progress: { done: status === "done" ? 1 : 0, total: 1 },
+      comments: [],
+      events: detail ? [{ kind: "detail", note: detail }] : [],
+      runs: [],
+      result: status === "done" ? detail : null,
+      block_reason: status === "blocked" ? detail : "",
+      _live: true,
+      _detailLoaded: true,
+      _fromOverview: true,
+    };
+  }
+
   function laneFromTask(task) {
     const raw = [
       task.tenant,
@@ -285,7 +335,7 @@
     };
   }
 
-  function applyBoard(board) {
+  function applyBoard(board, snapshot) {
     const next = [];
     const cols = Array.isArray(board && board.columns) ? board.columns : [];
     cols.forEach((col) => {
@@ -295,6 +345,14 @@
         next.push(mapBoardTask(task || {}));
       });
     });
+    if (!next.length) {
+      const overviewTasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
+        ? snapshot.overview.tasks
+        : [];
+      overviewTasks.forEach((task, index) => {
+        next.push(mapOverviewTask(task || {}, index));
+      });
+    }
     RT.tasks = next;
     renderBoard();
   }
@@ -575,6 +633,45 @@
     }
   }
 
+  function syncOverviewActivity(snapshot) {
+    if (!snapshot) return;
+    const backgroundRun = snapshot.background_run || {};
+    const ceo = snapshot.overview && snapshot.overview.ceo_loop || {};
+    const overviewTasks = Array.isArray(snapshot.overview && snapshot.overview.tasks)
+      ? snapshot.overview.tasks
+      : [];
+
+    const backgroundDetail = String(backgroundRun.detail || "").trim();
+    if (backgroundDetail && backgroundDetail !== LIVE.lastBackgroundDetail) {
+      ceolog(`<span class="sys">[background]</span> ${esc(backgroundDetail)}`, true);
+      LIVE.lastBackgroundDetail = backgroundDetail;
+    }
+
+    const ceoHeadline = [String(ceo.headline || "").trim(), String(ceo.next_action || "").trim()]
+      .filter(Boolean)
+      .join(" · ");
+    if (ceoHeadline && ceoHeadline !== LIVE.lastCeoHeadline) {
+      addCeo(formatRichText(ceoHeadline));
+      LIVE.lastCeoHeadline = ceoHeadline;
+    }
+
+    const signature = overviewTasks
+      .map((task) => [task && task.id, task && task.status, task && task.detail].join("|"))
+      .join("::");
+    if (!signature || signature === LIVE.lastOverviewTaskSignature) return;
+    LIVE.lastOverviewTaskSignature = signature;
+    const active = overviewTasks.filter((task) => {
+      const status = String(task && task.status || "").toLowerCase();
+      const tone = String(task && task.tone || "").toLowerCase();
+      return tone === "active" || /running|active|working|watch/.test(status);
+    });
+    active.slice(0, 4).forEach((task) => {
+      const label = String(task && task.label || "task").trim();
+      const detail = String(task && task.detail || "").trim();
+      ceolog(`<span class="l-blue">[focus]</span> ${esc(label)}${detail ? ` — ${esc(detail)}` : ""}`, true);
+    });
+  }
+
   function applyWorkspace(snapshot, summary) {
     const overview = (snapshot && snapshot.overview) || {};
     const current = (snapshot && snapshot.current) || {};
@@ -609,6 +706,7 @@
     renderOutreach();
     renderDeliverablesWindow();
     renderPlanSummary(snapshot);
+    syncOverviewActivity(snapshot);
     const modeEl = $("#mb-mode");
     if (modeEl) {
       modeEl.textContent = RT.biz.mode || "test";
@@ -1134,6 +1232,9 @@
     LIVE.workspaceOverview = null;
     LIVE.workspaceSnapshot = null;
     LIVE.workspaceOutputs = [];
+    LIVE.lastOverviewTaskSignature = "";
+    LIVE.lastBackgroundDetail = "";
+    LIVE.lastCeoHeadline = "";
   }
 
   function stopLiveTimers() {
@@ -1369,7 +1470,7 @@
         LIVE.workspaceOverview = workspace.overview || {};
         applyWorkspace(workspace, businessSummary(business));
       }
-      if (board) applyBoard(board);
+      if (workspace || board) applyBoard(board, workspace || LIVE.workspaceSnapshot || null);
       if (document.getElementById("w-operator")) renderOperatorWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
