@@ -138,6 +138,31 @@ export const api = {
     fetchJSON<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits`,
     ),
+  getTakyonBusinessCreativeCreditPacks: (slug: string) =>
+    fetchJSON<TakyonBusinessCreativeCreditPacksResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/packs`,
+    ),
+  createTakyonBusinessCreativeCreditCheckout: (
+    slug: string,
+    packId: string,
+    returnPath: string,
+  ) =>
+    fetchJSON<{
+      checkout_url?: string;
+      session_id?: string;
+      business_slug?: string;
+      pack_id?: string;
+      credits?: number;
+      amount_cents?: number;
+    }>(`/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/checkout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pack_id: packId,
+        success_path: returnPath,
+        cancel_path: returnPath,
+      }),
+    }),
   getTakyonBusinessFile: (slug: string, path: string) =>
     fetchJSONWithTimeout<TakyonBusinessFileReadResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`,
@@ -532,6 +557,20 @@ export interface TakyonBusinessCreativeCreditsResponse {
   balance_credits?: number;
   reserved_credits?: number;
   reason?: string;
+}
+
+export interface TakyonBusinessCreativeCreditPack {
+  id: string;
+  name?: string;
+  description?: string;
+  credits?: number;
+  amount_cents?: number;
+  currency?: string;
+}
+
+export interface TakyonBusinessCreativeCreditPacksResponse {
+  business_slug: string;
+  packs: TakyonBusinessCreativeCreditPack[];
 }
 
 export interface TakyonBusinessFileReadResponse {

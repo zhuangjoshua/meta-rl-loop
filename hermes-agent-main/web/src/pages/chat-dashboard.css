@@ -341,6 +341,10 @@
 .tk-dash .td-led-k { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: var(--td-meta); }
 .tk-dash .td-led-v { font-family: var(--td-font-display); font-weight: 800; font-size: 32px; line-height: 1; letter-spacing: -.03em; color: var(--td-faint); }
 @media (max-width: 720px) { .tk-dash .td-led { flex-basis: 50%; } }
+.tk-dash .td-ledger-actions {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin: 12px 0 0;
+}
 
 /* ─── Numbered section heads — editorial device w/ heavy ink rule ──────── */
 .tk-dash .td-block { margin-bottom: 4px; }

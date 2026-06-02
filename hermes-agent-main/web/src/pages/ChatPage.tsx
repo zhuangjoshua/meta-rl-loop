@@ -1410,6 +1410,23 @@ export default function ChatPage() {
     }
   }, []);
 
+  const buyCreativeCredits = useCallback(async (business: string) => {
+    const packs = await api.getTakyonBusinessCreativeCreditPacks(business);
+    const pack = Array.isArray(packs.packs) ? packs.packs[0] : null;
+    if (!pack?.id) {
+      throw new Error("No creative credit packs are configured.");
+    }
+    const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
+      business,
+      pack.id,
+      currentDashboardReturnPath(),
+    );
+    if (!checkout.checkout_url) {
+      throw new Error("Creative credit checkout URL unavailable.");
+    }
+    window.location.assign(checkout.checkout_url);
+  }, []);
+
   const applyWorkspaceSnapshot = useCallback(
     (
       business: string,
@@ -3013,6 +3030,7 @@ export default function ChatPage() {
               creativeCredits={creativeCredits}
               businessSlug={activeBusinessSlug}
               deliverables={mergeOutputs(deliverables, scopedHistoricalOutputs)}
+              onBuyCreativeCredits={buyCreativeCredits}
               onReadFile={readBusinessFile}
               onResolveMedia={resolveBusinessMedia}
               onResolveSitePreview={resolveBusinessSitePreview}
@@ -4090,6 +4108,7 @@ function CompanyWorkspace({
   businessSlug,
   creativeCredits,
   deliverables,
+  onBuyCreativeCredits,
   onReadFile,
   onResolveMedia,
   onResolveSitePreview,
@@ -4100,6 +4119,7 @@ function CompanyWorkspace({
   businessSlug: string;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   deliverables: Deliverable[];
+  onBuyCreativeCredits: (business: string) => Promise<void>;
   onReadFile: (path: string, business?: string) => Promise<BusinessFileReadResponse>;
   onResolveMedia: (path: string, business?: string) => Promise<BusinessMediaResponse>;
   onResolveSitePreview: (path?: string, business?: string) => Promise<BusinessSitePreviewResponse>;
@@ -4137,6 +4157,8 @@ function CompanyWorkspace({
     creativeCredits?.available && typeof creativeCredits.reserved_credits === "number"
       ? creativeCredits.reserved_credits
       : null;
+  const [buyCreditsBusy, setBuyCreditsBusy] = useState(false);
+  const [buyCreditsError, setBuyCreditsError] = useState<string | null>(null);
 
   // Progressive disclosure: a section only appears once it actually exists.
   // Product shows when live or a built site/preview exists; Distribution when
@@ -4179,6 +4201,8 @@ function CompanyWorkspace({
 
   useEffect(() => {
     setViewer(null);
+    setBuyCreditsBusy(false);
+    setBuyCreditsError(null);
   }, [scope.business]);
 
   const progressLine =
@@ -4266,6 +4290,20 @@ function CompanyWorkspace({
     openSitePreview(previewPath, `${name} preview`);
   }, [name, openSitePreview, previewPath]);
 
+  const handleBuyCredits = useCallback(() => {
+    setBuyCreditsBusy(true);
+    setBuyCreditsError(null);
+    void onBuyCreativeCredits(businessSlug)
+      .catch((err) => {
+        setBuyCreditsError(
+          operatorActionErrorMessage(err, "Creative credit checkout failed."),
+        );
+      })
+      .finally(() => {
+        setBuyCreditsBusy(false);
+      });
+  }, [businessSlug, onBuyCreativeCredits]);
+
   return (
     <>
       <div className="td-scroll">
@@ -4309,6 +4347,19 @@ function CompanyWorkspace({
               <div className="td-led-v">{item.value}</div>
             </div>
           ))}
+        </div>
+        <div className="td-ledger-actions">
+          <button
+            className="td-btn td-btn-primary"
+            disabled={buyCreditsBusy}
+            onClick={handleBuyCredits}
+            type="button"
+          >
+            {buyCreditsBusy ? "Opening…" : "Buy credits"}
+          </button>
+          {buyCreditsError ? (
+            <p className="td-mini-error">{buyCreditsError}</p>
+          ) : null}
         </div>
 
         {hasProduct && (

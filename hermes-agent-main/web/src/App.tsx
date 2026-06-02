@@ -51,6 +51,7 @@ import { Typography } from "@/components/NouiTypography";
 import { cn } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
 import { SidebarFooter } from "@/components/SidebarFooter";
+import { SidebarOperatorBillingStrip } from "@/components/SidebarOperatorBillingStrip";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -67,7 +68,6 @@ import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
-import LitebulbEmbedPage from "@/pages/LitebulbEmbedPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -662,7 +662,7 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <LitebulbEmbedPage />
+                      <ChatPage />
                     </div>
                   ))}
               </div>
@@ -776,6 +776,7 @@ function SidebarSystemActions({ onNavigate }: { onNavigate: () => void }) {
       </span>
 
       <SidebarStatusStrip />
+      <SidebarOperatorBillingStrip />
 
       <ul className="flex flex-col">
         {items.map(({ action, icon: Icon, label, runningLabel, spin }) => {
