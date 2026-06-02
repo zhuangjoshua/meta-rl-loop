@@ -36,6 +36,7 @@ CRON_JOBS_PY = PROJECT_ROOT / "cron" / "jobs.py"
 CRON_SCHEDULER_PY = PROJECT_ROOT / "cron" / "scheduler.py"
 ROOT_LAUNCHER = WORKSPACE_ROOT / "takyon"
 HERMES_LAUNCHER = PROJECT_ROOT / "takyon"
+BUILD_SKILLS_INDEX_PATH = PROJECT_ROOT / "scripts" / "build_skills_index.py"
 
 EXACT_EDITABLE = {
     CEO_PROMPT_PATH.resolve(),

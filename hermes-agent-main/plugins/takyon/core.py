@@ -51,6 +51,8 @@ from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_takyon_home
 from tools.registry import tool_error, tool_result
 
+from . import safebox
+
 
 TAKYON_TOOLSET = "takyon"
 TAKYON_AUTHORITY_TOOLSET = "takyon-authority"
@@ -69,7 +71,6 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_upsert_business",
         "business_delete_business",
         "business_set_mode",
-        "business_allocate_budget",
         "business_configure_app_budget",
         "business_grant_app_subsidy",
         "business_verify_product_surface",
@@ -3117,18 +3118,6 @@ def _normalize_budget_spec(value: Any) -> Any:
     return normalized
 
 
-def _budget_amount(value: Any) -> float | None:
-    normalized = _normalize_budget_spec(value)
-    if isinstance(normalized, dict):
-        for key in ("amount", "cap", "limit", "monthly_cap", "cap_usd", "amount_usd", "budget_usd"):
-            if key in normalized:
-                try:
-                    return float(normalized[key])
-                except (TypeError, ValueError):
-                    return None
-    return None
-
-
 def _scope_parts(scope: str) -> dict[str, str | None]:
     raw = str(scope or "").strip()
     if not raw:
@@ -3196,7 +3185,6 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "control.set",
         "cron.ensure_ceo_wakeup",
         "event.record",
-        "ledger.allocate",
         "maintenance.gc",
         "memory.write",
     }
@@ -3996,6 +3984,11 @@ class TakyonStore:
         for key in list(result):
             if key.endswith("_json"):
                 result[key[:-5]] = _json_loads(result.pop(key), {})
+                continue
+            try:
+                result[key] = _json_default(result[key])
+            except TypeError:
+                pass
         return result
 
     def _business(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
@@ -5039,7 +5032,6 @@ class TakyonStore:
                 f"SELECT SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued FROM {self._work_requests_table()} WHERE business_slug = ?",
                 (slug,),
             )
-            business_budget_amount = _budget_amount(business.get("budget"))
             computed_windows = {name: {**bounds, "metrics": window_metrics(bounds["start"], bounds["end"])} for name, bounds in windows.items()}
             lifetime = computed_windows["lifetime"]["metrics"]
             summary = {
@@ -5112,7 +5104,6 @@ class TakyonStore:
                         "spent_microusd": int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
                         "remaining_microusd": int(app_budget["hard_limit_microusd"] or 0) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
                     },
-                    "business_budget": {"amount": business_budget_amount, "status": "missing" if business_budget_amount is None else "present"},
                     "active_paid_customers": int(active_entitlements["paid_customers"] or 0),
                     "mrr_cents": summary["mrr_cents"],
                     "arr_cents": summary["arr_cents"],
@@ -5752,7 +5743,6 @@ class TakyonStore:
             "cron.ensure_ceo_wakeup",
             "event.record",
             "job.enqueue",
-            "ledger.allocate",
             "maintenance.gc",
             "memory.write",
             "outreach.local_publish",
@@ -5850,7 +5840,18 @@ class TakyonStore:
                         )
                 conn.execute(
                     "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
-                    (slug, name, goal, mode or "live", work_focus or "all", _json_dumps(budget or {}), _json_dumps(metadata), owner_user_id, now, now),
+                    (
+                        slug,
+                        name,
+                        goal,
+                        mode or "live",
+                        work_focus or "all",
+                        _json_dumps(budget) if budget is not None else None,
+                        _json_dumps(metadata),
+                        owner_user_id,
+                        now,
+                        now,
+                    ),
                 )
             root = self._business_root(slug)
             root.mkdir(parents=True, exist_ok=True)
@@ -6549,30 +6550,6 @@ class TakyonStore:
                 )
             return {"action": action, "business": slug, "path": rel}
 
-        if action == "ledger.allocate":
-            amount = float(op.get("amount") or 0)
-            if amount < 0:
-                raise TakyonError("ledger.allocate amount must be non-negative")
-            business = self._ensure_business(conn, slug)
-            cap = _budget_amount(op.get("budget") or business.get("budget"))
-            if amount > 0 and cap is None:
-                raise TakyonError(f"business {slug} has no numeric budget cap; refusing allocation")
-            if cap is not None:
-                used = conn.execute(
-                    "SELECT COALESCE(SUM(amount), 0) AS total FROM ledger_entries WHERE business_slug = ? AND status IN ('allocated', 'spent')",
-                    (slug,),
-                ).fetchone()["total"]
-                if float(used or 0) + amount > cap:
-                    raise TakyonError(f"allocation would exceed budget cap {cap}: used {used}, requested {amount}")
-            entry_id = op.get("id") or uuid.uuid4().hex
-            payload = {k: v for k, v in op.items() if k not in {"action", "business_slug", "target_scope"}}
-            conn.execute(
-                "INSERT INTO ledger_entries (id, scope, business_slug, amount, currency, kind, status, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (entry_id, target_scope, slug, amount, str(op.get("currency") or "USD"), str(op.get("kind") or "allocation"), str(op.get("status") or "allocated"), _json_dumps(payload), _now()),
-            )
-            self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=payload)
-            return {"action": action, "business": slug, "ledger_entry": entry_id, "amount": amount}
-
         if action == "job.enqueue":
             job_id = op.get("id") or uuid.uuid4().hex
             payload = dict(op.get("payload") or {})
@@ -6904,7 +6881,7 @@ class TakyonStore:
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
             "Start with business_calculate_pulse, then use takyon-business-metrics to write metrics/summary.md and record "
             "a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
-            "create workspaces, enqueue jobs, allocate budget, and adjust the next wakeup if useful. Decide the highest "
+            "create workspaces, enqueue jobs, and adjust the next wakeup if useful. Decide the highest "
             "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
             "memory inside this business scope. Read prior wake notes from metrics/wake-history.md and compare "
             "this state to those notes, including business "
@@ -7107,8 +7084,7 @@ def _ugc_ad_record(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    load_takyon_env()
-    key = os.getenv("STRIPE_SECRET_KEY")
+    key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
     if not key:
         raise TakyonError("Stripe action requires STRIPE_SECRET_KEY")
     data = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode("utf-8")
@@ -7361,7 +7337,6 @@ def handle_business_upsert_business(args: dict, **_: Any) -> str:
         "goal": args.get("goal") or "",
         "mode": args.get("mode"),
         "work_focus": args.get("work_focus") or args.get("focus"),
-        "budget": args.get("budget"),
         "metadata": args.get("metadata") or {},
     }
     return _commit_tool(args, operation, scope=f"business:{args.get('business')}")
@@ -7406,7 +7381,6 @@ def handle_business_create_workspace(args: dict, **_: Any) -> str:
         "path": args.get("path"),
         "kind": args.get("kind") or "workspace",
         "status": args.get("status") or "active",
-        "budget": args.get("budget"),
         "metadata": args.get("metadata") or {},
     }
     return _commit_tool(args, operation)
@@ -7577,22 +7551,6 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
         expected_content=expected_content,
         store=store,
     )
-
-
-def handle_business_allocate_budget(args: dict, **_: Any) -> str:
-    operation = {
-        "action": "ledger.allocate",
-        "business": args.get("business"),
-        "amount": args.get("amount"),
-        "currency": args.get("currency") or "USD",
-        "kind": args.get("kind") or "allocation",
-        "status": args.get("status") or "allocated",
-        "purpose": args.get("purpose") or "",
-        "requires_api": args.get("requires_api") or [],
-        "requires_env": args.get("requires_env") or [],
-    }
-    return _commit_tool(args, operation)
-
 
 def handle_business_configure_app_budget(args: dict, **_: Any) -> str:
     operation = {
@@ -8278,12 +8236,11 @@ def _process_subscription_event(conn: sqlite3.Connection, store: TakyonStore, su
 def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
     store = _store()
     try:
-        load_takyon_env()
         raw_body = args.get("raw_body")
         signature = args.get("stripe_signature")
         if not raw_body or not signature:
             raise TakyonError("raw_body and stripe_signature are required")
-        secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+        secret = safebox.read_env_backed_value("STRIPE_WEBHOOK_SECRET")
         if not secret:
             raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET")
         _verify_stripe_signature(str(raw_body), str(signature), secret)
@@ -8648,6 +8605,106 @@ def _release_creative_credits(
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
+    }
+
+
+def _reserve_operator_task_budget(
+    *,
+    business: str,
+    operator_user_id: str,
+    reservation_key: str,
+    estimate_cents: int,
+) -> dict[str, Any]:
+    user_id = str(operator_user_id or "").strip()
+    amount = max(0, int(estimate_cents or 0))
+    if not user_id or amount <= 0 or _db_backend() != "postgres":
+        return {
+            "source": "operator_billing",
+            "operator_user_id": user_id,
+            "reservation_key": "",
+            "reserved_cents": 0,
+            "status": "skipped",
+        }
+
+    try:
+        from . import billing
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+
+    store = _store()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            billing.open_billing_account(raw, user_id)
+            try:
+                reservation = billing.reserve(
+                    raw,
+                    user_id,
+                    amount,
+                    reservation_key,
+                    business_slug=business or None,
+                )
+            except billing.InsufficientBalance as exc:
+                raise TakyonError(
+                    "operator budget exhausted: "
+                    f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c "
+                    f"+ topup {exc.topup_available_cents}c"
+                ) from exc
+    return {
+        "source": "operator_billing",
+        "operator_user_id": user_id,
+        "reservation_key": reservation.key,
+        "reserved_cents": int(reservation.allowance_cents + reservation.topup_cents),
+        "status": "reserved",
+    }
+
+
+def _finalize_operator_task_budget(
+    *,
+    operator_user_id: str,
+    reservation_key: str,
+    reserved_cents: int,
+    consume_reserved: bool,
+) -> dict[str, Any]:
+    user_id = str(operator_user_id or "").strip()
+    reserved = max(0, int(reserved_cents or 0))
+    if not user_id or not reservation_key or reserved <= 0 or _db_backend() != "postgres":
+        return {
+            "source": "operator_billing",
+            "operator_user_id": user_id,
+            "reservation_key": reservation_key,
+            "reserved_cents": reserved,
+            "charged_cents": 0,
+            "status": "skipped",
+        }
+
+    try:
+        from . import billing
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+
+    store = _store()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            if consume_reserved:
+                # The Claude SDK worker returns no exact provider spend today, so once the run actually
+                # happened we settle the full reserved estimate instead of pretending we know the actual.
+                billing.settle(raw, reservation_key, reserved)
+                status = "settled_estimate"
+                charged_cents = reserved
+            else:
+                billing.refund(raw, reservation_key)
+                status = "released"
+                charged_cents = 0
+            balances = billing.get_billing_balances(raw, user_id)
+    return {
+        "source": "operator_billing",
+        "operator_user_id": user_id,
+        "reservation_key": reservation_key,
+        "reserved_cents": reserved,
+        "charged_cents": charged_cents,
+        "status": status,
+        "allowance_remaining_cents": int(balances.allowance_remaining_cents),
+        "topup_balance_cents": int(balances.topup_balance_cents),
     }
 
 
@@ -10770,6 +10827,9 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
+    operator_user_id = ""
+    operator_budget: dict[str, Any] = {}
+    worker_invoked = False
     try:
         business = _resolved_business_slug(args, required=True)
         worker_session_bound = bool(_session_business_slug())
@@ -10791,6 +10851,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 {"action": "workspace.upsert", "business": business, "workspace": workspace_rel},
                 str(business_row.get("work_focus") or "all"),
             )
+            operator_user_id = str(business_row.get("owner_user_id") or store._active_operator_user_id() or "").strip()
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
         app_summary = store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
@@ -10835,23 +10896,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         budget_usd = _clamp_float(args.get("budget_usd"), default=2.0, minimum=0.05, maximum=25.0)
-        budget = store.commit(
-            scope=f"business:{business}",
-            operations=[
-                {
-                    "action": "ledger.allocate",
-                    "business": business,
-                    "amount": budget_usd,
-                    "currency": "USD",
-                    "kind": "claude_agent_sdk",
-                    "status": "spent",
-                    "purpose": f"Claude Agent SDK task in {workspace_rel}",
-                    "requires_api": ["anthropic"],
-                }
-            ],
-            idempotency_key=f"{idempotency_key}:claude-sdk-budget",
-            reason=args.get("reason") or "Claude Agent SDK task budget",
-            actor=args.get("actor") or "agent",
+        operator_budget = _reserve_operator_task_budget(
+            business=business,
+            operator_user_id=operator_user_id,
+            reservation_key=f"{idempotency_key}:claude-sdk-budget",
+            estimate_cents=max(1, int(round(budget_usd * 100))),
         )
 
         max_turns = _clamp_int(
@@ -10906,6 +10955,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "maxBudgetUsd": budget_usd,
         }
 
+        worker_invoked = True
         proc = subprocess.run(
             [node, str(script)],
             input=json.dumps(payload),
@@ -10943,6 +10993,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "product source contains fake/demo auth, account, checkout, or integration state. "
                 "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
             )
+        operator_budget = _finalize_operator_task_budget(
+            operator_user_id=operator_user_id,
+            reservation_key=str(operator_budget.get("reservation_key") or ""),
+            reserved_cents=int(operator_budget.get("reserved_cents") or 0),
+            consume_reserved=worker_invoked,
+        )
         verification: dict[str, Any] | None = None
         verify_surface = False if worker_session_bound else bool(args.get("verify_surface"))
         if not worker_session_bound and not args.get("verify_surface"):
@@ -11028,7 +11084,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "source": "claude-agent-sdk",
                 "model": model,
                 "guidance_skills": resolved_guidance_skills,
-                "budget": budget,
+                "budget": operator_budget,
+                "operator_budget": operator_budget,
                 "agent_record": agent_record,
                 "verification": verification,
                 "summary": sdk_result.get("summary") or "",
@@ -11037,8 +11094,27 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             }
         )
     except subprocess.TimeoutExpired as exc:
+        try:
+            operator_budget = _finalize_operator_task_budget(
+                operator_user_id=operator_user_id,
+                reservation_key=str(operator_budget.get("reservation_key") or ""),
+                reserved_cents=int(operator_budget.get("reserved_cents") or 0),
+                consume_reserved=True,
+            )
+        except Exception:
+            operator_budget = {}
         return tool_error(f"Claude Agent SDK task timed out: {exc}", success=False)
     except Exception as exc:
+        if operator_budget and operator_budget.get("reservation_key"):
+            try:
+                _finalize_operator_task_budget(
+                    operator_user_id=operator_user_id,
+                    reservation_key=str(operator_budget.get("reservation_key") or ""),
+                    reserved_cents=int(operator_budget.get("reserved_cents") or 0),
+                    consume_reserved=worker_invoked,
+                )
+            except Exception:
+                pass
         return tool_error(str(exc), success=False)
 
 
@@ -11131,12 +11207,12 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_business",
-        "description": "Create or update a business, including goal and optional budget cap.",
+        "description": "Create or update a business, including goal and mode/focus metadata.",
         "handler": handle_business_upsert_business,
         "schema": _schema(
             "business_upsert_business",
             "Create or update a business.",
-            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "budget": {"type": "object"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "idempotency_key"],
         ),
     },
@@ -11197,7 +11273,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_create_workspace",
             "Create/update a business workspace.",
-            {"business": _BUSINESS_PROP, "path": {"type": "string"}, "kind": {"type": "string"}, "status": {"type": "string"}, "budget": {"type": "object"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "path": {"type": "string"}, "kind": {"type": "string"}, "status": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "path", "idempotency_key"],
         ),
     },
@@ -11223,12 +11299,6 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Write flexible per-business memory under research/ for strategy, pricing, product, distribution, learning, and CEO notes.",
         "handler": handle_business_record_memory,
         "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
-    },
-    {
-        "name": "business_allocate_budget",
-        "description": "Allocate or reserve budget under a business cap.",
-        "handler": handle_business_allocate_budget,
-        "schema": _schema("business_allocate_budget", "Allocate business budget.", {"business": _BUSINESS_PROP, "amount": {"type": "number"}, "currency": {"type": "string"}, "purpose": {"type": "string"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "amount", "idempotency_key"]),
     },
     {
         "name": "business_configure_app_budget",

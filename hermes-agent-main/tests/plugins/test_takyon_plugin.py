@@ -77,7 +77,13 @@ class _FakePluginContext:
 def _isolated_takyon_pg_env(monkeypatch, tmp_path, pg_store_dsn):
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|takyon-plugin-tests")
-    TakyonStore(root=tmp_path, database_url=pg_store_dsn).seed_platform_owner()
+    user_id, _ = TakyonStore(root=tmp_path, database_url=pg_store_dsn).seed_platform_owner()
+    import psycopg
+
+    from plugins.takyon import billing
+
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        billing.topup(conn, user_id, 50_000, "takyon-plugin-tests-topup")
 
 
 def _commit(store: TakyonStore, scope: str, operations: list[dict], key: str):
@@ -107,7 +113,6 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
 
     assert toolsets["business_write_file"] == "takyon"
     assert toolsets["business_publish_outreach"] == "takyon"
-    assert toolsets["business_allocate_budget"] == "takyon-authority"
     assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
     assert toolsets["business_static_ad_generate"] == "takyon-authority"
     assert toolsets["business_meta_ad_launch"] == "takyon-authority"
@@ -1275,6 +1280,49 @@ def test_claude_agent_task_uses_lighter_defaults_for_product_site_work(tmp_path,
     assert payload["effort"] == "medium"
 
 
+def test_claude_agent_task_no_longer_requires_legacy_business_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-no-legacy-budget",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            captured["payload"] = payload
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the product surface under product/site.",
+                "idempotency_key": "workspace-no-legacy-budget",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["operator_budget"]["source"] == "operator_billing"
+    assert result["operator_budget"]["status"] == "settled_estimate"
+    assert result["operator_budget"]["charged_cents"] == 200
+
+
 def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -1924,69 +1972,6 @@ def test_kill_switch_blocks_child_writes(tmp_path):
             "business:latexflow/workspace:distribution/finals",
             [{"action": "workspace.upsert", "path": "distribution/finals"}],
             "blocked",
-        )
-
-
-def test_budget_cap_is_enforced(tmp_path):
-    store = TakyonStore(tmp_path)
-    _commit(
-        store,
-        "business:latexflow",
-        [
-            {
-                "action": "business.upsert",
-                "business": "latexflow",
-                "name": "Latexflow",
-                "budget": {"amount": 10, "currency": "USD"},
-            }
-        ],
-        "init",
-    )
-    _commit(
-        store,
-        "business:latexflow",
-        [{"action": "ledger.allocate", "amount": 7, "purpose": "test"}],
-        "alloc-7",
-    )
-
-    with pytest.raises(TakyonError, match="exceed budget"):
-        _commit(
-            store,
-            "business:latexflow",
-            [{"action": "ledger.allocate", "amount": 4, "purpose": "too much"}],
-            "alloc-4",
-        )
-
-
-def test_legacy_cap_usd_budget_alias_is_honored(tmp_path):
-    store = TakyonStore(tmp_path)
-    _commit(
-        store,
-        "business:latexflow",
-        [
-            {
-                "action": "business.upsert",
-                "business": "latexflow",
-                "name": "Latexflow",
-                "budget": {"cap_usd": 10, "currency": "usd"},
-            }
-        ],
-        "init-legacy-budget",
-    )
-
-    _commit(
-        store,
-        "business:latexflow",
-        [{"action": "ledger.allocate", "amount": 7, "purpose": "test"}],
-        "alloc-7-legacy",
-    )
-
-    with pytest.raises(TakyonError, match="exceed budget"):
-        _commit(
-            store,
-            "business:latexflow",
-            [{"action": "ledger.allocate", "amount": 4, "purpose": "too much"}],
-            "alloc-4-legacy",
         )
 
 

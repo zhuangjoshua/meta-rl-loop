@@ -139,13 +139,42 @@ def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
 
     monkeypatch.setattr(runtime_app, "resolve_database_url", _fake_resolve_database_url)
     monkeypatch.setattr(
-        web_server,
-        "_env_value",
-        lambda key: "postgres://from-dashboard-env" if key == "DATABASE_URL" else "",
+        web_server.takyon_safebox,
+        "first_env_backed_value",
+        lambda *_keys: "postgres://from-dashboard-env",
     )
 
     assert web_server._resolve_runtime_database_url() == "postgres://from-dashboard-env"
     assert seen == ["postgres://from-dashboard-env"]
+
+
+def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "_env_value",
+        lambda key: {
+            "AUTH0_DOMAIN": "fourmanifold.auth0.com",
+            "AUTH0_CLIENT_ID": "client-id",
+        }.get(key, ""),
+    )
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda key: {
+            "AUTH0_CLIENT_SECRET": "client-secret",
+            "AUTH0_SECRET": "cookie-secret",
+        }.get(key, ""),
+    )
+
+    cfg = web_server._auth0_config()
+
+    assert cfg is not None
+    assert cfg.domain == "https://fourmanifold.auth0.com"
+    assert cfg.client_id == "client-id"
+    assert cfg.client_secret == "client-secret"
+    assert cfg.secret == "cookie-secret"
 
 
 def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
@@ -237,6 +266,7 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
 def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     import plugins.takyon.billing as billing
     import plugins.takyon.core as core
+    import plugins.takyon.control_api as control_api
     import psycopg
     import takyon_cli.web_server as web_server
 
@@ -267,6 +297,18 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
         billing,
         "reconcile_billing",
         lambda _conn, _uid: {"ok": True, "drift": {}, "reserved_cents": 100},
+    )
+    monkeypatch.setattr(
+        control_api,
+        "get_operator_payout_state",
+        lambda _conn, _uid, refresh_live=True: types.SimpleNamespace(
+            owed_balance_cents=0,
+            paid_out_cents=0,
+            payout_currency="usd",
+            stripe_connect_status="none",
+            payouts_enabled=False,
+            details_submitted=False,
+        ),
     )
 
     request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "auth0|1"}))

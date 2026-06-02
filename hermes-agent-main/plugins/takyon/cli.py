@@ -312,15 +312,9 @@ def _format_cli_value(value: Any) -> str:
 
     if "business" in value and "ledger" in value and "workspaces" not in value:
         business = value.get("business") or {}
-        budget = business.get("budget") or {}
-        budget_text = "not set"
-        if isinstance(budget, dict) and budget:
-            amount = budget.get("amount") or budget.get("cap") or budget.get("limit") or budget.get("monthly_cap")
-            currency = budget.get("currency") or "USD"
-            budget_text = f"{amount} {currency}" if amount is not None else json.dumps(budget, ensure_ascii=False)
         ledger = value.get("ledger") or []
         lines = [
-            f"Budget for business:{business.get('slug') or '<unknown>'}: {budget_text}",
+            f"Ledger for business:{business.get('slug') or '<unknown>'}:",
             f"Ledger entries: {len(ledger)}",
         ]
         for item in ledger[:12]:
@@ -434,8 +428,6 @@ def _format_cli_value(value: Any) -> str:
             lines.append(f"Work focus: {business.get('work_focus')}")
         if business.get("goal"):
             lines.append(f"Goal: {business.get('goal')}")
-        if business.get("budget"):
-            lines.append(f"Budget: {business.get('budget')}")
         conversations = value.get("conversations") or {}
         if conversations:
             lines.append(
@@ -532,8 +524,6 @@ def _format_operation_result(item: Any) -> str:
         cron = item.get("cron")
         cron_text = f"; cron {cron}" if cron else ""
         return f"{item.get('scope')} -> {item.get('state')}{cron_text}"
-    if action == "ledger.allocate":
-        return f"allocated {item.get('amount')} for business:{business or item.get('business')} ledger:{item.get('ledger_entry')}"
     if action == "workspace.upsert":
         workspace = str(item.get("workspace") or "")
         where = f" -> {_business_artifact_path(business, workspace)}" if business and workspace else ""
@@ -1710,9 +1700,6 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         elif action == "cron.ensure_ceo_wakeup":
             if business:
                 lines.append(f"wake schedule -> business:{business} {item.get('schedule') or item.get('cron_job')}")
-        elif action == "ledger.allocate":
-            if business:
-                lines.append(f"budget ledger -> business:{business} {item.get('ledger_entry') or ''}".rstrip())
         elif action == "job.enqueue":
             if business:
                 lines.append(f"job queued -> business:{business} {item.get('job') or item.get('id') or ''}".rstrip())

@@ -64,6 +64,7 @@ from plugins.takyon.core import (
     handle_business_request_app_magic_link,
     handle_business_verify_app_magic_link,
 )
+from plugins.takyon import safebox as takyon_safebox
 
 TAKYON_APP_SESSION_COOKIE = "takyon_app_session"
 
@@ -308,15 +309,11 @@ def _env_value(key: str) -> str:
 
 def _resolve_runtime_database_url() -> str:
     """Resolve the Postgres runtime URL from the same env sources the dashboard already uses."""
-    explicit = None
-    for key in _RUNTIME_DATABASE_URL_ENV:
-        value = _env_value(key)
-        if value:
-            explicit = value
-            break
     from plugins.takyon.runtime_app import resolve_database_url
 
-    return resolve_database_url(explicit=explicit)
+    return resolve_database_url(
+        explicit=takyon_safebox.first_env_backed_value(*_RUNTIME_DATABASE_URL_ENV) or None
+    )
 
 
 def _env_flag(key: str) -> Optional[bool]:
@@ -372,8 +369,8 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
 
     domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
     client_id = _env_value("AUTH0_CLIENT_ID")
-    client_secret = _env_value("AUTH0_CLIENT_SECRET")
-    secret = _env_value("AUTH0_SECRET")
+    client_secret = takyon_safebox.read_env_backed_value("AUTH0_CLIENT_SECRET")
+    secret = takyon_safebox.read_env_backed_value("AUTH0_SECRET")
     base_url = _default_public_base_url()
 
     required = {

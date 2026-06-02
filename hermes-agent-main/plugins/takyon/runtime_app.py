@@ -21,14 +21,13 @@ and we never quietly fall back to SQLite.
 
 from __future__ import annotations
 
-import os
-
 import psycopg
 from fastapi import FastAPI
 
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
 from .control_api import build_control_router, get_control_conn
 from .creative_gateway import build_creative_gateway_router
+from . import safebox
 
 # DATABASE_URL is canonical; POSTGRES_URL / POSTGRES_PRISMA_URL are the platform-managed aliases
 # (Supabase / Vercel). Kept identical to core.py's "database" provider aliases on purpose, so one
@@ -47,10 +46,9 @@ def resolve_database_url(explicit: str | None = None) -> str:
     everywhere → ``RuntimeNotConfigured``."""
     if explicit and explicit.strip():
         return explicit
-    for name in _DATABASE_URL_ENV:
-        value = os.environ.get(name)
-        if value and value.strip():
-            return value
+    value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
+    if value:
+        return value
     raise RuntimeNotConfigured(
         "no database URL configured; set DATABASE_URL "
         "(or POSTGRES_URL / POSTGRES_PRISMA_URL)"

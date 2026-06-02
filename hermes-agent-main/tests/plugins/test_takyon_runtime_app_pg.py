@@ -100,8 +100,11 @@ def test_build_without_database_url_raises(monkeypatch):
     # Invariant #8: no silent half-live server. With no DB configured anywhere, building refuses
     # loudly rather than starting a server that 500s every request. Needs no DB, so it runs even
     # where TAKYON_TEST_PG_DSN is unset.
+    from plugins.takyon import safebox
+
     for name in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
     with pytest.raises(RuntimeNotConfigured):
         build_runtime_app()
     with pytest.raises(RuntimeNotConfigured):

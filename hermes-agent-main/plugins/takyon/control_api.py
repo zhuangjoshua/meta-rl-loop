@@ -16,14 +16,13 @@ SQLite dashboard runtime.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import billing, business_credits, custody, rate_limit, stripe_util
+from . import billing, business_credits, custody, rate_limit, safebox, stripe_util
 from .control_plane import ResolvedPrincipal, resolve_api_key
 
 _BEARER_PREFIX = "Bearer "
@@ -639,7 +638,7 @@ def build_control_router() -> APIRouter:
         we return 503 so Stripe retries — crediting is never faked around a missing
         credential. A paid checkout.session.completed bearing metadata.purpose=takyon_topup
         credits the user once, idempotent on the Stripe event id."""
-        secret = os.environ.get("STRIPE_BILLING_WEBHOOK_SECRET")
+        secret = safebox.read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
         if not secret:
             raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
         raw = (await request.body()).decode("utf-8")

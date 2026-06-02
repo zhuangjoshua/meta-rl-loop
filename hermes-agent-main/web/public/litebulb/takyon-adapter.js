@@ -1733,12 +1733,11 @@
     const cols = ["scheduled", "running", "done"];
     const graph = renderNorthStarPanel(LIVE.workspaceOverview || {});
     body(w).innerHTML = `<div class="board-shell">
-      ${graph}
       <div class="board-cols"><div class="kanban">${cols.map((st) => {
       const items = RT.tasks.filter((t) => t.status === st);
       return `<div class="col"><div class="col-h" style="border-color:${STATUS_C[st] || "var(--ink)"}"><span>${st}</span><span class="ct">${items.length}</span></div>
         <div class="col-list">${items.map(cardHTML).join("")}</div></div>`;
-    }).join("")}</div></div></div>`;
+    }).join("")}</div></div>${graph}</div>`;
     body(w).querySelectorAll(".card").forEach((c) => {
       c.setAttribute("role", "button");
       c.tabIndex = 0;
@@ -1755,18 +1754,6 @@
   const originalLayoutMain = layoutMain;
   layoutMain = function layoutMainLiveAware() {
     originalLayoutMain();
-    if (!RT.live || !desk || desk.classList.contains("stack") || RT.moved.has("w-board")) return;
-    const board = document.getElementById("w-board");
-    if (!board) return;
-    const currentLeft = Number.parseFloat(board.style.left || "0");
-    const currentWidth = Number.parseFloat(board.style.width || "0") || board.getBoundingClientRect().width || 0;
-    if (!Number.isFinite(currentWidth) || currentWidth <= 0) return;
-    const targetWidth = Math.min(
-      currentWidth,
-      Math.min(440, Math.max(392, Math.round(currentWidth * 0.72))),
-    );
-    board.style.left = `${Math.max(12, currentLeft)}px`;
-    board.style.width = `${Math.max(320, targetWidth)}px`;
   };
 
   const originalOpenTask = openTask;

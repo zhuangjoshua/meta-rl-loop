@@ -112,16 +112,15 @@ def test_explicit_postgres_backend_env_is_still_accepted(pg_store_dsn, tmp_path,
 def test_multi_op_commit_round_trips_operator_tables(pg_store, pg_store_dsn):
     _seed_owned_business(pg_store_dsn, "seamco", mode="test")
 
-    # One atomic commit spanning six operator tables. ledger.allocate carries its own budget cap so it
-    # needs no pre-seeded budget; conversation.message.record creates a thread + message (exercising
+    # One atomic commit spanning six operator tables. control.set exercises the scope-keyed
+    # control_states UPSERT; conversation.message.record creates a thread + message (exercising
     # ON CONFLICT(business_slug, source, external_id)); agent.record binds a NULL parent_id (proving
     # None → SQL NULL through the wrapper); event.record + every other op also append an events row.
     result = pg_store.commit(
         scope="business:seamco",
         operations=[
             {"action": "workspace.upsert", "business": "seamco", "path": "product/site"},
-            {"action": "ledger.allocate", "business": "seamco", "amount": 7,
-             "purpose": "seam", "budget": {"amount": 25}},
+            {"action": "control.set", "scope": "business:seamco", "state": "paused", "reason": "seam hold"},
             {"action": "agent.record", "business": "seamco", "status": "completed"},
             {"action": "conversation.message.record", "business": "seamco", "source": "x",
              "direction": "inbound", "body": "hello", "thread_external_id": "t-1"},
@@ -141,9 +140,9 @@ def test_multi_op_commit_round_trips_operator_tables(pg_store, pg_store_dsn):
         assert conn.execute(
             "select count(*) from workspaces where business_slug='seamco' and path='product/site'"
         ).fetchone()[0] == 1
-        assert float(conn.execute(
-            "select coalesce(sum(amount),0) from ledger_entries where business_slug='seamco'"
-        ).fetchone()[0]) == 7.0
+        assert conn.execute(
+            "select count(*) from control_states where scope='business:seamco' and state='paused'"
+        ).fetchone()[0] == 1
         assert conn.execute(
             "select count(*) from agent_runs where scope='business:seamco' and status='completed'"
         ).fetchone()[0] == 1
