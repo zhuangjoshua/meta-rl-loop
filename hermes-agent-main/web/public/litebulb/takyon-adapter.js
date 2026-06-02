@@ -277,6 +277,44 @@
     return `$${(Math.max(0, cents) / 100).toFixed(2)}`;
   }
 
+  function microUsdToDollars(value) {
+    const micro = Number(value);
+    if (!Number.isFinite(micro)) return "—";
+    return `$${(Math.max(0, micro) / 1_000_000).toFixed(2)}`;
+  }
+
+  function formatMetricCount(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count)) return "0";
+    const whole = Math.max(0, Math.trunc(count));
+    if (whole >= 1_000_000) return `${(whole / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+    if (whole >= 1_000) return `${(whole / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+    return String(whole);
+  }
+
+  function renderWalletRail() {
+    const walletEl = $("#mb-credits");
+    if (!walletEl) return;
+    walletEl.style.display = "";
+    walletEl.textContent = hasOperatorAccountBalance()
+      ? `wallet ${formatBudgetCents(LIVE.operatorAccount && LIVE.operatorAccount.spendable_cents)}`
+      : "wallet n/a";
+  }
+
+  function renderTopRail() {
+    renderWalletRail();
+    const wakeEl = $("#mb-wake");
+    if (!wakeEl) return;
+    if (!RT.live) {
+      wakeEl.style.display = "none";
+      return;
+    }
+    wakeEl.style.display = "";
+    wakeEl.textContent = RT.nextWakeAt
+      ? `wake ${RT.paused ? "paused" : fmt(RT.nextWakeAt - Date.now())}`
+      : `wake ${RT.paused ? "paused" : "n/a"}`;
+  }
+
   function slugifyName(value) {
     const slug = String(value || "")
       .trim()
@@ -753,6 +791,82 @@
     return String(url || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
   }
 
+  function renderNorthStarPanel(overview) {
+    const metrics = overview && overview.metrics || {};
+    const mrrCents = Number.isFinite(Number(metrics.mrr_cents))
+      ? Math.max(0, Math.round(Number(metrics.mrr_cents)))
+      : 0;
+    const revenueCents = Number.isFinite(Number(metrics.revenue_cents))
+      ? Math.max(0, Math.round(Number(metrics.revenue_cents)))
+      : 0;
+    const signups = Number.isFinite(Number(metrics.users))
+      ? Math.max(0, Math.trunc(Number(metrics.users)))
+      : 0;
+    const checkouts = Number.isFinite(Number(metrics.checkout_intents))
+      ? Math.max(0, Math.trunc(Number(metrics.checkout_intents)))
+      : 0;
+    const paying = Number.isFinite(Number(metrics.paid_customers))
+      ? Math.max(0, Math.trunc(Number(metrics.paid_customers)))
+      : 0;
+    const queuedJobs = Number.isFinite(Number(metrics.queued_jobs))
+      ? Math.max(0, Math.trunc(Number(metrics.queued_jobs)))
+      : 0;
+    const hasConversionData = signups > 0 || checkouts > 0 || paying > 0;
+    const northStar = mrrCents > 0
+      ? {
+          label: "MRR",
+          value: `${formatBudgetCents(mrrCents)}/mo`,
+          note: paying > 0
+            ? `${formatMetricCount(paying)} paying customers are live right now.`
+            : `${formatMetricCount(signups)} sign-ups have reached the product.`,
+        }
+      : signups > 0
+        ? {
+            label: "Sign-ups",
+            value: formatMetricCount(signups),
+            note: checkouts > 0
+              ? `${formatMetricCount(checkouts)} checkout intents are moving through the funnel.`
+              : "Sign-ups exist, but nobody has started checkout yet.",
+          }
+        : {
+            label: "Progress",
+            value: "Getting started",
+            note: queuedJobs > 0
+              ? `${formatMetricCount(queuedJobs)} jobs are queued while the company comes online.`
+              : "No product metrics yet. Once customers show up, this graph becomes real.",
+          };
+    const bars = [
+      { label: "sign-ups", detail: "users", value: signups, color: "var(--blue)" },
+      { label: "checkout", detail: "intents", value: checkouts, color: "var(--amber)" },
+      { label: "paying", detail: "customers", value: paying, color: "var(--green)" },
+    ];
+    const maxValue = Math.max(...bars.map((bar) => bar.value), 1);
+    return `
+      <section class="board-graph${hasConversionData ? "" : " board-graph--empty"}">
+        <div class="board-star">
+          <div class="board-star-k">north star</div>
+          <div class="board-star-v">${esc(northStar.value)}</div>
+          <div class="board-star-note">
+            <strong style="font:700 10px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">${esc(northStar.label)}</strong>
+            ${revenueCents > 0 ? ` · lifetime revenue ${esc(formatBudgetCents(revenueCents))}` : ""}
+          </div>
+          <div class="board-star-note">${esc(northStar.note)}</div>
+        </div>
+        ${hasConversionData
+          ? `<div class="board-bars">${bars.map((bar) => {
+              const height = bar.value > 0 ? Math.max(14, Math.round((bar.value / maxValue) * 100)) : 10;
+              const fillColor = bar.value > 0 ? bar.color : "var(--paper-2)";
+              return `<div class="board-bar">
+                <div class="board-bar-v">${esc(formatMetricCount(bar.value))}</div>
+                <div class="board-bar-track"><div class="board-bar-fill" style="height:${height}%;background:${fillColor}"></div></div>
+                <div class="board-bar-l">${esc(bar.label)}<small>${esc(bar.detail)}</small></div>
+              </div>`;
+            }).join("")}</div>`
+          : ""}
+      </section>
+    `;
+  }
+
   function hasLiveProgress(snapshot) {
     const backgroundStatus = String(snapshot && snapshot.background_run && snapshot.background_run.status || "").trim().toLowerCase();
     if (backgroundStatus === "queued" || backgroundStatus === "running") return true;
@@ -1062,6 +1176,7 @@
     renderProduct();
     renderOutreach();
     renderDeliverablesWindow();
+    if (document.getElementById("w-wallet")) renderWalletWindow();
     renderPlanSummary(snapshot);
     syncOverviewActivity(snapshot);
     syncLivePollTimer(snapshot);
@@ -1148,6 +1263,8 @@
       RT.credits = dollarFromAccount();
       updateMenu();
     }
+    if (document.getElementById("w-operator")) renderOperatorWindow();
+    if (document.getElementById("w-wallet")) renderWalletWindow();
   }
 
   function openOperatorWindow() {
@@ -1170,11 +1287,7 @@
 
   function renderOperatorWindow() {
     const w = document.getElementById("w-operator");
-    if (!w || !RT.live) return;
-    const account = LIVE.operatorAccount;
-    const payoutStatus = account && account.available ? String(account.stripe_connect_status || "none") : "none";
-    const payoutButtonLabel = payoutStatus === "active" ? "open payouts" : "connect payouts";
-    const spendableCents = operatorSpendableCents(account);
+    if (!w) return;
     const businessButtons = LIVE.businesses.length
       ? LIVE.businesses.map((item) => {
           const slug = String(item && item.slug || "").trim().toLowerCase();
@@ -1203,29 +1316,7 @@
         <button class="cbtn go" id="operator-create" type="button" style="flex:1">create</button>
       </div>
       <div class="meta" id="operator-create-error" style="min-height:16px;margin-bottom:14px"></div>
-
-      <div class="lab">operator budget</div>
-      <div class="big-wake" style="font-size:28px">${spendableCents === null ? "—" : formatBudgetCents(spendableCents)}</div>
-      <div class="meta" style="margin:6px 0 10px">${!account
-        ? "Loading operator budget."
-        : !account.available
-          ? "Per-user budget unavailable."
-          : "Spendful turns use this top-level operator budget."}</div>
-      <div style="display:grid;gap:6px;margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">included remaining</span><span class="meta">${account && account.available ? formatBudgetCents(account.allowance_remaining_cents) : "—"}</span></div>
-        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">top-up balance</span><span class="meta">${account && account.available ? formatBudgetCents(account.topup_balance_cents) : "—"}</span></div>
-        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">reserved</span><span class="meta">${account && account.available ? formatBudgetCents(account.reserved_cents) : "—"}</span></div>
-        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">customer payouts</span><span class="meta">${account && account.available ? formatBudgetCents(account.owed_balance_cents) : "—"}</span></div>
-        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">connect status</span><span class="meta">${account && account.available ? esc(payoutStatus) : "—"}</span></div>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input id="operator-topup-amount" inputmode="decimal" placeholder="25" type="text" style="flex:1;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace" />
-        <button class="cbtn" id="operator-topup" type="button">top up</button>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button class="cbtn" id="operator-payouts" type="button">${esc(payoutButtonLabel)}</button>
-        <span class="meta" id="operator-billing-error"></span>
-      </div>
+      <div class="meta">Operator funding lives in the wallet rail. Business switching and creation stay here.</div>
     `;
 
     body(w).querySelectorAll("[data-biz]").forEach((button) => {
@@ -1240,7 +1331,10 @@
       if (typeof reset === "function") {
         reset();
       }
-      window.setTimeout(renderLauncherBusinesses, 0);
+      window.setTimeout(() => {
+        renderLauncherBusinesses();
+        renderWalletRail();
+      }, 0);
     });
     $("#operator-refresh", w).addEventListener("click", () => {
       void refreshOperatorShellData().then(() => renderOperatorWindow());
@@ -1257,23 +1351,117 @@
       }
       void createLiveBusinessWithOptions({ goal, name, mode, errorEl });
     });
-    $("#operator-topup", w).addEventListener("click", () => {
-      const amount = String($("#operator-topup-amount", w).value || "").trim();
-      void submitOperatorTopupFromWindow(amount);
-    });
-    $("#operator-payouts", w).addEventListener("click", () => {
-      void startOperatorPayoutConnectFromWindow();
-    });
   }
 
-  async function submitOperatorTopupFromWindow(rawAmount) {
-    const w = document.getElementById("w-operator");
-    const errorEl = w ? $("#operator-billing-error", w) : null;
+  function openWalletWindow() {
+    const win = makeWin({
+      id: "w-wallet",
+      title: "wallet · operator + business funds",
+      x: 552,
+      y: 72,
+      w: 384,
+      h: 498,
+      html: "",
+    });
+    renderWalletWindow();
+    focusWin(win);
+    void refreshOperatorShellData().then(() => renderWalletWindow()).catch(() => {
+      renderWalletWindow();
+    });
+    return win;
+  }
+
+  function renderWalletWindow() {
+    const w = document.getElementById("w-wallet");
+    if (!w) return;
+    const account = LIVE.operatorAccount;
+    const spendableCents = operatorSpendableCents(account);
+    const payoutStatus = account && account.available ? String(account.stripe_connect_status || "none") : "none";
+    const payoutButtonLabel = payoutStatus === "active" ? "Open payouts" : "Connect payouts";
+    const creativeAvailable = !!(LIVE.creativeCredits && LIVE.creativeCredits.available);
+    const creativeBalance = creativeAvailable ? wholeCredits(LIVE.creativeCredits.balance_credits) : null;
+    const creativeReserved = creativeAvailable ? wholeCredits(LIVE.creativeCredits.reserved_credits) : null;
+    const overview = LIVE.workspaceOverview || {};
+    const budget = overview.budget || {};
+    const active = LIVE.activeBusiness ? businessSummary(LIVE.activeBusiness) : null;
+    const activeName = String(active && (active.name || active.slug) || LIVE.activeBusiness || "").trim();
+    body(w).innerHTML = `
+      <div class="wallet-stack">
+        <div class="chan">
+          <div class="chan-top"><span class="chan-nm">Operator balance</span><span class="chan-st live">wallet</span></div>
+          <div class="big-wake" style="font-size:30px">${spendableCents === null ? "—" : formatBudgetCents(spendableCents)}</div>
+          <div class="wallet-note">${!account
+            ? "Loading operator budget."
+            : !account.available
+              ? "Per-user budget unavailable."
+              : "Spendful turns and wakes use this top-level operator budget."}</div>
+          <div class="stat-row"><span class="k">included remaining</span><span class="v">${account && account.available ? formatBudgetCents(account.allowance_remaining_cents) : "—"}</span></div>
+          <div class="stat-row"><span class="k">added funds</span><span class="v">${account && account.available ? formatBudgetCents(account.topup_balance_cents) : "—"}</span></div>
+          <div class="stat-row"><span class="k">reserved</span><span class="v">${account && account.available ? formatBudgetCents(account.reserved_cents) : "—"}</span></div>
+          <div class="wallet-actions">
+            <input id="wallet-topup-amount" inputmode="decimal" placeholder="25" type="text" />
+            <button class="cbtn go" id="wallet-topup" type="button">Add funds</button>
+          </div>
+          <div class="wallet-note" id="wallet-billing-error"></div>
+        </div>
+
+        <div class="chan">
+          <div class="chan-top"><span class="chan-nm">Creative credits</span><span class="chan-st${activeName ? " live" : ""}">${activeName ? "scoped" : "idle"}</span></div>
+          <div class="stat-row"><span class="k">balance</span><span class="v">${creativeBalance === null ? "—" : String(creativeBalance)}</span></div>
+          <div class="stat-row"><span class="k">reserved</span><span class="v">${creativeReserved === null ? "—" : String(creativeReserved)}</span></div>
+          <div class="wallet-note">${activeName
+            ? `<span class="wallet-business">${esc(activeName)}</span> buys fixed-price creative actions.`
+            : "Select a business to manage creative credits."}</div>
+          <div class="wallet-inline">
+            <button class="cbtn" id="wallet-buy-credits" type="button"${activeName ? "" : " disabled"}>Buy credits</button>
+            <span class="wallet-note" id="wallet-business-error"></span>
+          </div>
+        </div>
+
+        <div class="chan">
+          <div class="chan-top"><span class="chan-nm">Payouts</span><span class="chan-st${payoutStatus === "active" ? " live" : ""}">${esc(payoutStatus)}</span></div>
+          <div class="stat-row"><span class="k">owed</span><span class="v">${account && account.available ? formatBudgetCents(account.owed_balance_cents) : "—"}</span></div>
+          <div class="stat-row"><span class="k">connect status</span><span class="v">${account && account.available ? esc(payoutStatus) : "—"}</span></div>
+          <div class="wallet-inline">
+            <button class="cbtn" id="wallet-payouts" type="button">${esc(payoutButtonLabel)}</button>
+          </div>
+        </div>
+
+        <div class="chan">
+          <div class="chan-top"><span class="chan-nm">App subsidy</span><span class="chan-st${budget.app_status === "active" ? " live" : ""}">${esc(String(budget.app_status || "—"))}</span></div>
+          <div class="stat-row"><span class="k">cap</span><span class="v">${microUsdToDollars(budget.app_limit_microusd)}</span></div>
+          <div class="stat-row"><span class="k">spent</span><span class="v">${microUsdToDollars(budget.app_spent_microusd)}</span></div>
+          <div class="stat-row"><span class="k">remaining</span><span class="v">${microUsdToDollars(budget.app_remaining_microusd)}</span></div>
+          <div class="wallet-note">${activeName
+            ? `<span class="wallet-business">${esc(activeName)}</span> uses this pool for customer usage funding.`
+            : "Select a business to view its subsidy pool."}</div>
+        </div>
+      </div>
+    `;
+
+    $("#wallet-topup", w).addEventListener("click", () => {
+      const amount = String($("#wallet-topup-amount", w).value || "").trim();
+      void submitOperatorTopupFromWallet(amount);
+    });
+    $("#wallet-payouts", w).addEventListener("click", () => {
+      void startOperatorPayoutConnectFromWallet();
+    });
+    const buyButton = $("#wallet-buy-credits", w);
+    if (buyButton) {
+      buyButton.addEventListener("click", () => {
+        void startCreativeCreditsCheckoutFromWallet();
+      });
+    }
+  }
+
+  async function submitOperatorTopupFromWallet(rawAmount) {
+    const w = document.getElementById("w-wallet");
+    const errorEl = w ? $("#wallet-billing-error", w) : null;
     if (errorEl) errorEl.textContent = "";
     const dollars = Number.parseFloat(String(rawAmount || "").trim());
     const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
     if (amountCents <= 0) {
-      if (errorEl) errorEl.textContent = "Enter a valid top-up amount.";
+      if (errorEl) errorEl.textContent = "Enter a valid amount.";
       return;
     }
     try {
@@ -1282,16 +1470,45 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amount_cents: amountCents, return_path: currentReturnPath() }),
       });
-      if (!res || !res.checkout_url) throw new Error("Top-up checkout URL unavailable.");
+      if (!res || !res.checkout_url) throw new Error("Funding checkout unavailable.");
       navigateOwner(res.checkout_url);
     } catch (err) {
       if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
     }
   }
 
-  async function startOperatorPayoutConnectFromWindow() {
-    const w = document.getElementById("w-operator");
-    const errorEl = w ? $("#operator-billing-error", w) : null;
+  async function startCreativeCreditsCheckoutFromWallet() {
+    const w = document.getElementById("w-wallet");
+    const errorEl = w ? $("#wallet-business-error", w) : null;
+    if (errorEl) errorEl.textContent = "";
+    const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
+    if (!business) {
+      if (errorEl) errorEl.textContent = "Select a business to buy credits.";
+      return;
+    }
+    try {
+      const packs = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits/packs`);
+      const pack = Array.isArray(packs && packs.packs) ? packs.packs[0] : null;
+      if (!pack || !pack.id) throw new Error("No creative credit packs are configured.");
+      const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pack_id: pack.id,
+          success_path: currentReturnPath(),
+          cancel_path: currentReturnPath(),
+        }),
+      });
+      if (!res || !res.checkout_url) throw new Error("Creative credit checkout URL unavailable.");
+      navigateOwner(res.checkout_url);
+    } catch (err) {
+      if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function startOperatorPayoutConnectFromWallet() {
+    const w = document.getElementById("w-wallet");
+    const errorEl = w ? $("#wallet-billing-error", w) : null;
     if (errorEl) errorEl.textContent = "";
     try {
       const res = await fetchJSON("/api/takyon/operator/payouts/connect", {
@@ -1306,7 +1523,7 @@
       await refreshOperatorShellData().catch(() => {
         /* best effort */
       });
-      renderOperatorWindow();
+      renderWalletWindow();
     }
   }
 
@@ -1500,11 +1717,12 @@
 
   const originalUpdateMenu = updateMenu;
   updateMenu = function updateMenuLiveAware() {
-    if (!RT.live) return originalUpdateMenu();
-    $("#mb-wake").style.display = "";
-    $("#mb-credits").style.display = "";
-    $("#mb-wake").textContent = RT.nextWakeAt ? `wake ${RT.paused ? "paused" : fmt(RT.nextWakeAt - Date.now())}` : `wake ${RT.paused ? "paused" : "n/a"}`;
-    $("#mb-credits").textContent = hasOperatorAccountBalance() ? `operator $${RT.credits.toFixed(2)}` : "operator n/a";
+    if (!RT.live) {
+      originalUpdateMenu();
+      renderTopRail();
+      return;
+    }
+    renderTopRail();
   };
 
   const originalRenderBoard = renderBoard;
@@ -1513,11 +1731,14 @@
     const w = document.getElementById("w-board");
     if (!w) return;
     const cols = ["scheduled", "running", "done"];
-    body(w).innerHTML = `<div class="kanban">${cols.map((st) => {
+    const graph = renderNorthStarPanel(LIVE.workspaceOverview || {});
+    body(w).innerHTML = `<div class="board-shell">
+      ${graph}
+      <div class="board-cols"><div class="kanban">${cols.map((st) => {
       const items = RT.tasks.filter((t) => t.status === st);
       return `<div class="col"><div class="col-h" style="border-color:${STATUS_C[st] || "var(--ink)"}"><span>${st}</span><span class="ct">${items.length}</span></div>
         <div class="col-list">${items.map(cardHTML).join("")}</div></div>`;
-    }).join("")}</div>`;
+    }).join("")}</div></div></div>`;
     body(w).querySelectorAll(".card").forEach((c) => {
       c.setAttribute("role", "button");
       c.tabIndex = 0;
@@ -1611,6 +1832,7 @@
     LIVE.workspaceOverview = null;
     LIVE.workspaceSnapshot = null;
     LIVE.workspaceOutputs = [];
+    LIVE.creativeCredits = null;
     LIVE.liveTrace = new Map();
     LIVE.activeTurnTraceId = "";
     LIVE.traceLogSeen = new Set();
@@ -2078,6 +2300,7 @@
       }
       if (snapshot || board) applyBoard(board, snapshot || LIVE.workspaceSnapshot || null);
       if (document.getElementById("w-operator")) renderOperatorWindow();
+      if (document.getElementById("w-wallet")) renderWalletWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
       setStatus("running", "run");
@@ -2300,10 +2523,10 @@
 
   function bindLiveChrome() {
     [
-      ["mb-biz", openOperatorWindow, "open operator and business controls"],
-      ["mb-credits", openOperatorWindow, "open operator budget controls"],
-      ["mb-wake", openWakeWindow, "open wake schedule"],
-    ].forEach(([id, handler, label]) => {
+      ["mb-biz", openOperatorWindow, "open operator and business controls", true],
+      ["mb-credits", openWalletWindow, "open wallet", false],
+      ["mb-wake", openWakeWindow, "open wake schedule", true],
+    ].forEach(([id, handler, label, requiresLive]) => {
       const el = document.getElementById(id);
       if (!el || el.dataset.liveBound) return;
       el.dataset.liveBound = "1";
@@ -2312,11 +2535,11 @@
       el.setAttribute("title", label);
       el.style.cursor = "pointer";
       el.addEventListener("click", () => {
-        if (!RT.live) return;
+        if (requiresLive && !RT.live) return;
         handler();
       });
       el.addEventListener("keydown", (event) => {
-        if (!RT.live) return;
+        if (requiresLive && !RT.live) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           handler();
@@ -2351,11 +2574,17 @@
     }, true);
     document.getElementById("reset").addEventListener("click", () => {
       teardownLive();
-      window.setTimeout(renderLauncherBusinesses, 0);
+      window.setTimeout(() => {
+        renderLauncherBusinesses();
+        renderWalletRail();
+      }, 0);
     }, true);
     document.getElementById("mb-newidea").addEventListener("click", () => {
       teardownLive();
-      window.setTimeout(renderLauncherBusinesses, 0);
+      window.setTimeout(() => {
+        renderLauncherBusinesses();
+        renderWalletRail();
+      }, 0);
     }, true);
     window.addEventListener("beforeunload", teardownLive);
   }
@@ -2369,12 +2598,14 @@
       ]);
       LIVE.operatorAccount = account;
       rememberBusinesses(Array.isArray(businesses && businesses.businesses) ? businesses.businesses : []);
+      renderWalletRail();
       const initialBusiness = currentBusinessParam() || (LIVE.businesses.length === 1 ? String(LIVE.businesses[0].slug || "") : "");
       if (initialBusiness) {
         await mountLiveBusiness(initialBusiness);
       }
     } catch (_err) {
       renderLauncherBusinesses();
+      renderWalletRail();
     }
   }
 

@@ -199,6 +199,21 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 
 /* kanban */
 .kanban{display:flex;gap:8px;align-items:flex-start;height:100%}
+.board-shell{display:flex;flex-direction:column;gap:12px;height:100%}
+.board-graph{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:10px;padding:12px;border:2px solid var(--ink);background:#fff;box-shadow:4px 4px 0 var(--ink)}
+.board-graph--empty{grid-template-columns:1fr}
+.board-star{display:flex;flex-direction:column;gap:6px;min-width:0}
+.board-star-k{font:700 9.5px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--red)}
+.board-star-v{font-family:'Anton',Impact,sans-serif,sans-serif;font-size:34px;line-height:.95;text-transform:uppercase;color:var(--ink);text-shadow:3px 3px 0 var(--amber)}
+.board-star-note{font-size:11px;color:var(--ink-2);line-height:1.45}
+.board-bars{display:flex;gap:8px;align-items:flex-end;min-height:118px}
+.board-bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.board-bar-v{font:700 10px 'Space Mono',monospace;letter-spacing:.04em}
+.board-bar-track{width:100%;height:82px;border:1.5px solid var(--ink);background:var(--paper);display:flex;align-items:flex-end}
+.board-bar-fill{width:100%;border-top:1.5px solid var(--ink)}
+.board-bar-l{font:700 8.5px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;text-align:center;line-height:1.25}
+.board-bar-l small{display:block;font-weight:400;color:var(--muted);letter-spacing:.04em}
+.board-cols{flex:1;min-height:0}
 .col{flex:0 0 120px;display:flex;flex-direction:column;height:100%}
 .col-h{font:700 9.5px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;padding-bottom:6px;margin-bottom:7px;border-bottom:3px solid var(--ink);display:flex;justify-content:space-between;align-items:center}
 .col-h .ct{background:var(--ink);color:var(--paper);border-radius:9px;padding:0 6px;font-size:9px;line-height:15px}
@@ -249,6 +264,12 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .cbtn.go{flex:1;background:var(--ink);color:var(--paper)}
 .cbtn.go.on{background:var(--green)}
 .cbtn[disabled]{opacity:.4;cursor:not-allowed}
+.wallet-stack{display:grid;gap:10px}
+.wallet-actions{display:flex;gap:8px;align-items:center;margin-top:10px}
+.wallet-actions input{flex:1;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace}
+.wallet-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.wallet-note{font-size:11px;color:var(--muted);line-height:1.45;margin-top:6px}
+.wallet-business{font:700 9px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--red)}
 
 /* task detail */
 .badge{display:inline-block;color:var(--paper);font:700 9px 'Space Mono',monospace;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px}
@@ -276,6 +297,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
   #workspace.on{flex-direction:column}
   #chat{flex:0 0 auto;max-height:44vh;border-right:0;border-bottom:2.5px solid var(--ink)}
   .scrawl{display:none}
+  .board-graph{grid-template-columns:1fr}
 }
 </style>
 </head>

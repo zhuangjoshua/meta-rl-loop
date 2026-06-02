@@ -28,7 +28,6 @@ import {
   api,
   type TakyonBusinessFileReadResponse,
   type TakyonBusinessWorkspaceResponse,
-  type TakyonBusinessCreativeCreditsResponse,
   type TakyonOperatorAccountResponse,
   type TakyonOperatorBusinessSummary,
 } from "@/lib/api";
@@ -492,27 +491,6 @@ function operatorSpendableCents(
   if (!account?.available) return null;
   const cents = Number(account.spendable_cents ?? 0);
   return Number.isFinite(cents) ? Math.max(0, cents) : 0;
-}
-
-function currentDashboardReturnPath(): string {
-  if (typeof window === "undefined") return "/";
-  const path = window.location.pathname || "/";
-  const search = window.location.search || "";
-  return `${path}${search}`;
-}
-
-function operatorActionErrorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof Error)) return fallback;
-  const raw = error.message.replace(/^\d+:\s*/, "");
-  try {
-    const payload = JSON.parse(raw) as { detail?: unknown };
-    if (typeof payload.detail === "string" && payload.detail.trim()) {
-      return payload.detail;
-    }
-  } catch {
-    // Keep the original text when the backend didn't return JSON.
-  }
-  return raw || fallback;
 }
 
 function businessCountLabel(count: number): string {
@@ -1165,15 +1143,10 @@ export default function ChatPage() {
   const [scopeState, setScopeState] = useState<ScopeState>(EMPTY_SCOPE_STATE);
   const [operatorAccount, setOperatorAccount] =
     useState<TakyonOperatorAccountResponse | null>(null);
-  const [operatorTopupAmount, setOperatorTopupAmount] = useState("25");
-  const [operatorBillingBusy, setOperatorBillingBusy] = useState<"topup" | "connect" | null>(null);
-  const [operatorBillingError, setOperatorBillingError] = useState<string | null>(null);
   const [operatorBusinesses, setOperatorBusinesses] = useState<BusinessSummary[]>([]);
   const [operatorBusinessesAvailable, setOperatorBusinessesAvailable] = useState(false);
   const [operatorBusinessesLoading, setOperatorBusinessesLoading] = useState(true);
   const [operatorBusinessesReason, setOperatorBusinessesReason] = useState<string | null>(null);
-  const [creativeCredits, setCreativeCredits] =
-    useState<TakyonBusinessCreativeCreditsResponse | null>(null);
   const [takyonProgress, setTakyonProgress] = useState<TakyonProgressState | null>(null);
   const [pendingBusinessSlug, setPendingBusinessSlug] = useState<string | null>(null);
   const [blockedBootBusinessSlug, setBlockedBootBusinessSlug] = useState<string | null>(null);
@@ -1193,7 +1166,6 @@ export default function ChatPage() {
       : null,
   );
   const [rightOpen, setRightOpen] = useState(false);
-  const [walletOpen, setWalletOpen] = useState(false);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1324,51 +1296,6 @@ export default function ChatPage() {
     }
   }, []);
 
-  const submitOperatorTopup = useCallback(async () => {
-    const dollars = Number.parseFloat(operatorTopupAmount);
-    const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
-    if (amountCents <= 0) {
-      setOperatorBillingError("Enter a valid amount.");
-      return;
-    }
-    setOperatorBillingBusy("topup");
-    setOperatorBillingError(null);
-    try {
-      const res = await api.createTakyonOperatorTopupCheckout(
-        amountCents,
-        currentDashboardReturnPath(),
-      );
-      if (!res.checkout_url) {
-        throw new Error("Funding checkout unavailable.");
-      }
-      window.location.assign(res.checkout_url);
-    } catch (err) {
-      setOperatorBillingError(operatorActionErrorMessage(err, "Could not add funds."));
-    } finally {
-      setOperatorBillingBusy(null);
-    }
-  }, [operatorTopupAmount]);
-
-  const startOperatorPayoutConnect = useCallback(async () => {
-    setOperatorBillingBusy("connect");
-    setOperatorBillingError(null);
-    try {
-      const res = await api.createTakyonOperatorPayoutConnect(currentDashboardReturnPath());
-      if (!res.connect_url) {
-        throw new Error("Payout connect URL unavailable.");
-      }
-      window.location.assign(res.connect_url);
-    } catch (err) {
-      setOperatorBillingError(
-        operatorActionErrorMessage(err, "Payout connect failed."),
-      );
-      setOperatorBillingBusy(null);
-      await refreshOperatorAccount();
-      return;
-    }
-    setOperatorBillingBusy(null);
-  }, [refreshOperatorAccount]);
-
   const refreshOperatorBusinesses = useCallback(async () => {
     setOperatorBusinessesLoading(true);
     try {
@@ -1393,39 +1320,6 @@ export default function ChatPage() {
     } finally {
       setOperatorBusinessesLoading(false);
     }
-  }, []);
-
-  const refreshCreativeCredits = useCallback(async (business: string) => {
-    if (!business) {
-      setCreativeCredits(null);
-      return;
-    }
-    try {
-      setCreativeCredits(await api.getTakyonBusinessCreativeCredits(business));
-    } catch {
-      setCreativeCredits((prev) =>
-        prev && prev.business_slug === business
-          ? prev
-          : { available: false, business_slug: business, reason: "request_failed" },
-      );
-    }
-  }, []);
-
-  const buyCreativeCredits = useCallback(async (business: string) => {
-    const packs = await api.getTakyonBusinessCreativeCreditPacks(business);
-    const pack = Array.isArray(packs.packs) ? packs.packs[0] : null;
-    if (!pack?.id) {
-      throw new Error("No creative credit packs are configured.");
-    }
-    const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
-      business,
-      pack.id,
-      currentDashboardReturnPath(),
-    );
-    if (!checkout.checkout_url) {
-      throw new Error("Creative credit checkout URL unavailable.");
-    }
-    window.location.assign(checkout.checkout_url);
   }, []);
 
   const applyWorkspaceSnapshot = useCallback(
@@ -1464,7 +1358,6 @@ export default function ChatPage() {
         business: slug,
         items: Array.isArray(snapshot.outputs) ? snapshot.outputs : [],
       });
-      void refreshCreativeCredits(slug);
       setPendingBusinessSlug(null);
       setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
       setBlockedBootMessage((current) =>
@@ -1478,7 +1371,6 @@ export default function ChatPage() {
       return nextScope;
     },
     [
-      refreshCreativeCredits,
       searchParams,
       setSearchParams,
       visibleBusinesses,
@@ -1521,10 +1413,6 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshOperatorBusinesses();
   }, [refreshOperatorBusinesses]);
-
-  useEffect(() => {
-    void refreshCreativeCredits(activeBusinessSlug || "");
-  }, [activeBusinessSlug, refreshCreativeCredits]);
 
   useEffect(() => {
     window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
@@ -1708,10 +1596,8 @@ export default function ChatPage() {
             business: nextScope.business,
             items: Array.isArray(snapshot.outputs) ? snapshot.outputs : [],
           });
-          void refreshCreativeCredits(nextScope.business);
         } else {
           setHistoricalOutputs({ business: "", items: [] });
-          setCreativeCredits(null);
         }
         if (nextScope.business) {
           setBlockedBootBusinessSlug((current) =>
@@ -1753,7 +1639,6 @@ export default function ChatPage() {
       gw,
       noteBootIssue,
       recoverMissingSession,
-      refreshCreativeCredits,
       searchParams,
       setSearchParams,
       syncRequestedBusinessToSession,
@@ -2993,14 +2878,6 @@ export default function ChatPage() {
               </button>
             )}
             <button
-              aria-label="Open wallet"
-              className="td-pill td-ghost"
-              onClick={() => setWalletOpen(true)}
-              type="button"
-            >
-              Wallet
-            </button>
-            <button
               aria-label="Reconnect"
               className="td-pill td-ghost"
               onClick={reconnect}
@@ -3106,25 +2983,6 @@ export default function ChatPage() {
           />
         )}
 
-        <WalletPanel
-          open={walletOpen}
-          onClose={() => setWalletOpen(false)}
-          businessSlug={activeBusinessSlug}
-          creativeCredits={creativeCredits}
-          operatorAccount={operatorAccount}
-          budget={displayScope.overview?.budget}
-          onBuyCreativeCredits={buyCreativeCredits}
-          operatorBillingBusy={operatorBillingBusy}
-          operatorBillingError={operatorBillingError}
-          operatorTopupAmount={operatorTopupAmount}
-          onOperatorTopup={() => {
-            void submitOperatorTopup();
-          }}
-          onOperatorPayoutConnect={() => {
-            void startOperatorPayoutConnect();
-          }}
-          onOperatorTopupAmountChange={setOperatorTopupAmount}
-        />
       </div>
 
       <PluginSlot name="chat:bottom" />
@@ -3168,254 +3026,6 @@ function BusinessScopeSyncState({
         </div>
       </div>
     </section>
-  );
-}
-
-function OperatorBillingActions({
-  operatorBillingBusy,
-  operatorBillingError,
-  operatorTopupAmount,
-  onOperatorPayoutConnect,
-  onOperatorTopup,
-  onOperatorTopupAmountChange,
-  operatorAccount,
-}: {
-  operatorBillingBusy: "topup" | "connect" | null;
-  operatorBillingError: string | null;
-  operatorTopupAmount: string;
-  onOperatorPayoutConnect: () => void;
-  onOperatorTopup: () => void;
-  onOperatorTopupAmountChange: (value: string) => void;
-  operatorAccount: TakyonOperatorAccountResponse | null;
-}) {
-  const payoutStatus = operatorAccount?.available
-    ? String(operatorAccount.stripe_connect_status || "none")
-    : "none";
-  const payoutButtonLabel =
-    payoutStatus === "active" ? "Open payouts" : "Connect payouts";
-  return (
-    <div className="td-operator-actions">
-      <label className="td-mini-field">
-        <span className="td-eyebrow">Add funds</span>
-        <div className="td-mini-row">
-          <input
-            className="td-mini-input"
-            disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-            inputMode="decimal"
-            onChange={(event) => onOperatorTopupAmountChange(event.target.value)}
-            placeholder="25"
-            type="text"
-            value={operatorTopupAmount}
-          />
-          <button
-            className="td-mini-button"
-            disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-            onClick={onOperatorTopup}
-            type="button"
-          >
-            {operatorBillingBusy === "topup" ? "Opening…" : "Add funds"}
-          </button>
-        </div>
-      </label>
-      <button
-        className="td-mini-button td-mini-button--secondary"
-        disabled={!operatorAccount?.available || operatorBillingBusy !== null}
-        onClick={onOperatorPayoutConnect}
-        type="button"
-      >
-        {operatorBillingBusy === "connect" ? "Opening…" : payoutButtonLabel}
-      </button>
-      {operatorBillingError ? (
-        <p className="td-mini-error">{operatorBillingError}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function microUsdToDollars(value?: number): string {
-  const micro = typeof value === "number" && Number.isFinite(value) ? value : 0;
-  return BUDGET_FORMATTER.format(Math.max(0, micro) / 1_000_000);
-}
-
-function WalletPanel({
-  open,
-  onClose,
-  businessSlug,
-  creativeCredits,
-  operatorAccount,
-  budget,
-  onBuyCreativeCredits,
-  operatorBillingBusy,
-  operatorBillingError,
-  operatorTopupAmount,
-  onOperatorTopup,
-  onOperatorPayoutConnect,
-  onOperatorTopupAmountChange,
-}: {
-  open: boolean;
-  onClose: () => void;
-  businessSlug: string;
-  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
-  operatorAccount: TakyonOperatorAccountResponse | null;
-  budget?: BusinessOverviewBudget;
-  onBuyCreativeCredits: (business: string) => Promise<void>;
-  operatorBillingBusy: "topup" | "connect" | null;
-  operatorBillingError: string | null;
-  operatorTopupAmount: string;
-  onOperatorTopup: () => void;
-  onOperatorPayoutConnect: () => void;
-  onOperatorTopupAmountChange: (value: string) => void;
-}) {
-  const [buyBusy, setBuyBusy] = useState(false);
-  const [buyError, setBuyError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) {
-      setBuyBusy(false);
-      setBuyError(null);
-    }
-  }, [open]);
-
-  if (!open) return null;
-
-  const creditBalance =
-    creativeCredits?.available && typeof creativeCredits.balance_credits === "number"
-      ? Math.max(0, Math.trunc(creativeCredits.balance_credits))
-      : null;
-  const creditReserved =
-    creativeCredits?.available && typeof creativeCredits.reserved_credits === "number"
-      ? Math.max(0, Math.trunc(creativeCredits.reserved_credits))
-      : null;
-  const connectStatus = operatorAccount?.available
-    ? String(operatorAccount.stripe_connect_status || "none").toUpperCase()
-    : "—";
-
-  const handleBuy = () => {
-    if (!businessSlug) return;
-    setBuyBusy(true);
-    setBuyError(null);
-    void onBuyCreativeCredits(businessSlug)
-      .catch((err) => {
-        setBuyError(operatorActionErrorMessage(err, "Credit checkout failed."));
-      })
-      .finally(() => {
-        setBuyBusy(false);
-      });
-  };
-
-  return (
-    <>
-      <button
-        aria-label="Close wallet"
-        className="fixed inset-0 z-[65] bg-[#1a1916]/35 backdrop-blur-sm"
-        onClick={onClose}
-        type="button"
-      />
-      <aside
-        aria-label="Wallet"
-        className="td-wallet fixed inset-y-0 right-0 z-[70] flex w-[min(94vw,400px)] flex-col"
-      >
-        <header className="td-wallet-head">
-          <span className="td-t">Wallet</span>
-          <button
-            aria-label="Close wallet"
-            className="td-wallet-x"
-            onClick={onClose}
-            type="button"
-          >
-            ×
-          </button>
-        </header>
-        <div className="td-wallet-body">
-          <section className="td-wallet-sec">
-            <p className="td-eyebrow">Creative credits</p>
-            <div className="td-wallet-rows">
-              <div className="td-wallet-row">
-                <span>Balance</span>
-                <span className="td-wallet-v">{creditBalance === null ? "—" : creditBalance}</span>
-              </div>
-              <div className="td-wallet-row">
-                <span>Reserved</span>
-                <span className="td-wallet-v">{creditReserved === null ? "—" : creditReserved}</span>
-              </div>
-            </div>
-            {businessSlug ? (
-              <>
-                <button
-                  className="td-mini-button"
-                  disabled={buyBusy}
-                  onClick={handleBuy}
-                  type="button"
-                >
-                  {buyBusy ? "Opening…" : "Buy credits"}
-                </button>
-                {buyError ? <p className="td-mini-error">{buyError}</p> : null}
-              </>
-            ) : (
-              <p className="td-wallet-note">Select a business to manage creative credits.</p>
-            )}
-          </section>
-
-          <section className="td-wallet-sec">
-            <p className="td-eyebrow">Payouts</p>
-            <div className="td-wallet-rows">
-              <div className="td-wallet-row">
-                <span>Owed</span>
-                <span className="td-wallet-v">
-                  {operatorAccount?.available
-                    ? formatBudgetCents(operatorAccount.owed_balance_cents)
-                    : "—"}
-                </span>
-              </div>
-              <div className="td-wallet-row">
-                <span>Connect status</span>
-                <span className="td-wallet-v">{connectStatus}</span>
-              </div>
-            </div>
-            <OperatorBillingActions
-              operatorBillingBusy={operatorBillingBusy}
-              operatorBillingError={operatorBillingError}
-              operatorTopupAmount={operatorTopupAmount}
-              onOperatorPayoutConnect={onOperatorPayoutConnect}
-              onOperatorTopup={onOperatorTopup}
-              onOperatorTopupAmountChange={onOperatorTopupAmountChange}
-              operatorAccount={operatorAccount}
-            />
-          </section>
-
-          <section className="td-wallet-sec">
-            <p className="td-eyebrow">App subsidy</p>
-            {businessSlug ? (
-              <div className="td-wallet-rows">
-                <div className="td-wallet-row">
-                  <span>Status</span>
-                  <span className="td-wallet-v td-wallet-v--text">
-                    {budget?.app_status || "—"}
-                  </span>
-                </div>
-                <div className="td-wallet-row">
-                  <span>Cap</span>
-                  <span className="td-wallet-v">{microUsdToDollars(budget?.app_limit_microusd)}</span>
-                </div>
-                <div className="td-wallet-row">
-                  <span>Spent</span>
-                  <span className="td-wallet-v">{microUsdToDollars(budget?.app_spent_microusd)}</span>
-                </div>
-                <div className="td-wallet-row">
-                  <span>Remaining</span>
-                  <span className="td-wallet-v">
-                    {microUsdToDollars(budget?.app_remaining_microusd)}
-                  </span>
-                </div>
-              </div>
-            ) : (
-              <p className="td-wallet-note">Select a business to view its subsidy.</p>
-            )}
-            <p className="td-wallet-note">Customer usage funding.</p>
-          </section>
-        </div>
-      </aside>
-    </>
   );
 }
 
@@ -4192,25 +3802,6 @@ function CompanyWorkspace({
   const distActive =
     posts.length > 0 || publishedCount > 0 || (!!outreachStatus && outreachStatus !== "missing");
 
-  const metrics = overview.metrics || {};
-  const mrrCents =
-    typeof metrics.mrr_cents === "number" && Number.isFinite(metrics.mrr_cents)
-      ? metrics.mrr_cents
-      : 0;
-  const signups =
-    typeof metrics.users === "number" && Number.isFinite(metrics.users)
-      ? Math.max(0, Math.trunc(metrics.users))
-      : 0;
-  // Adaptive north-star: lead with revenue if it exists, else sign-ups, else an
-  // honest "getting started" state. No fabricated numbers and no fake chart —
-  // there is no time-series to plot. The funnel below stays as the supporting view.
-  const northStar =
-    mrrCents > 0
-      ? { label: "MRR", value: `$${Math.round(mrrCents / 100)}/mo` }
-      : signups > 0
-        ? { label: "Sign-ups", value: String(signups) }
-        : { label: "Progress", value: "Getting started" };
-
   // Progressive disclosure: a section only appears once it actually exists.
   // Product shows when live or a built site/preview exists; Distribution when
   // outreach is active; Deliverables is always the spine. Section numbers count
@@ -4357,14 +3948,6 @@ function CompanyWorkspace({
             </p>
           )}
         </header>
-
-        {/* North-star headline — one adaptive metric that leads with whatever
-            is most real (revenue → sign-ups → getting started). Honest, never
-            fabricated; the funnel below remains the supporting view. */}
-        <div className="td-north">
-          <div className="td-north-k">{northStar.label}</div>
-          <div className="td-north-v">{northStar.value}</div>
-        </div>
 
         {hasProduct && (
           <section className="td-block">
