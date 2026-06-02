@@ -18,6 +18,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -114,6 +115,9 @@ _SESSION_TOKEN_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN"
 _SESSION_TOKEN_FILE_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN_FILE"
 _SESSION_TOKEN_FILE_NAME = "dashboard_session_token"
 _TAKYON_DIRECT_FILE_READ_BYTES = 512 * 1024
+_TAKYON_DIRECT_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
+_TAKYON_DIRECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_TAKYON_DIRECT_MEDIA_SUFFIXES = _TAKYON_DIRECT_VIDEO_SUFFIXES | _TAKYON_DIRECT_IMAGE_SUFFIXES
 
 
 def _valid_session_token(value: str) -> bool:
@@ -139,6 +143,111 @@ def _write_dashboard_session_token(path: Path, token: str) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+
+def _takyon_direct_output_detail(path: str) -> tuple[str, str]:
+    suffix = Path(path).suffix.lower()
+    if suffix in _TAKYON_DIRECT_VIDEO_SUFFIXES:
+        return "video", "Generated video asset"
+    if suffix in _TAKYON_DIRECT_IMAGE_SUFFIXES:
+        return "image", "Generated image asset"
+    parts = path.split("/")
+    top = parts[0] if parts else ""
+    if path == "product/site/index.html":
+        return "file", "Website surface (local source)"
+    if path.startswith("product/site/"):
+        return "file", "Website source asset"
+    if path.startswith("metrics/receipts/outreach/"):
+        return "receipt", "Outreach publish receipt"
+    if path.startswith("metrics/receipts/creative-assets/"):
+        return "receipt", "Creative asset receipt"
+    if path.startswith("distribution/outreach-drafts"):
+        return "file", "Outreach draft only"
+    if "ugc" in path.lower() and suffix in {".md", ".txt"}:
+        return "file", "Creative brief draft only"
+    if path.startswith("metrics/receipts/") or top == "receipts":
+        return "receipt", "Business receipt"
+    if top in {"reports", "outputs"}:
+        return "report", "Historical output"
+    if path.startswith(("distribution/local-published/", "outreach/local-published/")):
+        return "file", "Local published outreach"
+    if top == "app":
+        return "file", "App runtime artifact"
+    if top == "brain":
+        return "file", "Business brain artifact"
+    if top == "product":
+        return "file", "Product artifact"
+    if top == "distribution":
+        return "file", "Distribution artifact"
+    return "file", "Business artifact"
+
+
+def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    try:
+        root = store._business_root(slug)
+    except Exception:
+        return []
+    if not root.exists() or not root.is_dir():
+        return []
+
+    candidates: set[Path] = set()
+    exact_paths = {
+        "product/runtime.md",
+        "product/surface.md",
+        "product/usage.md",
+        "research/index.md",
+        "metrics/summary.md",
+        "metrics/wake-history.md",
+        "product/design-brief.md",
+        "product/mvp-spec.md",
+        "product/site/index.html",
+    }
+    for rel in exact_paths:
+        path = root / rel
+        if path.is_file():
+            candidates.add(path)
+
+    recursive_roots = [
+        "outputs",
+        "reports",
+        "campaigns",
+        "distribution",
+        "outreach/local-published",
+        "product/site",
+    ]
+    allowed_suffixes = {".md", ".html", ".css", ".js", ".txt", ".json", *_TAKYON_DIRECT_MEDIA_SUFFIXES}
+    for rel_root in recursive_roots:
+        directory = root / rel_root
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in allowed_suffixes:
+                continue
+            candidates.add(path)
+
+    outputs: list[dict[str, Any]] = []
+    for path in candidates:
+        try:
+            stat = path.stat()
+            rel = str(path.relative_to(root))
+        except Exception:
+            continue
+        kind, detail = _takyon_direct_output_detail(rel)
+        outputs.append(
+            {
+                "id": f"historical:{slug}:{rel}",
+                "title": path.name,
+                "detail": detail,
+                "path": rel,
+                "kind": kind,
+                "at": int(stat.st_mtime * 1000),
+            }
+        )
+
+    outputs.sort(key=lambda item: int(item.get("at") or 0), reverse=True)
+    return outputs[: max(1, min(int(limit or 40), 100))]
 
 
 def _load_or_create_session_token() -> str:
@@ -1999,20 +2108,15 @@ async def get_takyon_business_workspace(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
-        import re
-        from pathlib import Path
-
         from plugins.takyon.core import TakyonStore
-        from tui_gateway.server import _takyon_get_background_run, _takyon_historical_outputs_payload
 
         store = TakyonStore(operator_user_id=str(principal.user_id))
         output_limit = max(1, min(int(limit or 50), 100))
-        outputs = _takyon_historical_outputs_payload(
+        outputs = _takyon_direct_historical_outputs(
             store,
             business,
             limit=output_limit,
         )
-        background_run = _takyon_get_background_run(business)
         with store._connect() as conn:
             current = store._row_to_dict(store._ensure_business(conn, business))
             latest_worker_job = None
@@ -2027,6 +2131,9 @@ async def get_takyon_business_workspace(
                 if row is not None:
                     latest_worker_job = store._row_to_dict(row)
                     break
+        background_run = None
+        latest_payload = latest_worker_job.get("payload") if isinstance(latest_worker_job, dict) else None
+        latest_payload = latest_payload if isinstance(latest_payload, dict) else {}
 
         def _brief(value: Any) -> str:
             if value is None:
@@ -2058,7 +2165,21 @@ async def get_takyon_business_workspace(
 
         task_status = _brief((background_run or {}).get("status") or (latest_worker_job or {}).get("status") or "")
         task_kind = _brief((background_run or {}).get("kind") or (latest_worker_job or {}).get("kind") or "")
-        task_detail = _brief((background_run or {}).get("detail") or "")
+        task_detail = _brief(
+            (background_run or {}).get("detail")
+            or latest_payload.get("detail")
+            or latest_payload.get("blocked_reason")
+            or latest_payload.get("error")
+            or ""
+        )
+        if task_kind or task_status:
+            background_run = {
+                "business": business,
+                "kind": task_kind,
+                "status": task_status,
+                "detail": task_detail,
+                "job_id": _brief((latest_worker_job or {}).get("id")),
+            }
         task_label = (
             "CEO bootstrap"
             if task_kind == "ceo_bootstrap"
