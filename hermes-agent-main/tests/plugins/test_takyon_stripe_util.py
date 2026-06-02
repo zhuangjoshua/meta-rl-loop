@@ -62,12 +62,44 @@ def test_verify_rejects_non_integer_timestamp():
 
 def test_request_without_key_raises(monkeypatch):
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    stripe_util._loaded_env_paths.clear()
     with pytest.raises(StripeError, match="STRIPE_SECRET_KEY"):
         stripe_request("checkout/sessions", {"mode": "payment"})
 
 
+def test_request_loads_key_from_takyon_home_env(monkeypatch, tmp_path):
+    takyon_home = tmp_path / ".takyon"
+    takyon_home.mkdir()
+    (takyon_home / ".env").write_text("STRIPE_SECRET_KEY=sk_test_from_dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
+    stripe_util._loaded_env_paths.clear()
+    captured: dict[str, str] = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id":"cs_test_from_env"}'
+
+    def _fake_urlopen(request, timeout=None):
+        captured["auth"] = request.headers.get("Authorization")
+        return _Resp()
+
+    monkeypatch.setattr(stripe_util.urllib.request, "urlopen", _fake_urlopen)
+    out = stripe_request("checkout/sessions", {"mode": "payment"})
+
+    assert out["id"] == "cs_test_from_env"
+    assert captured["auth"] == "Bearer sk_test_from_dotenv"
+
+
 def test_request_success_drops_none_and_targets_v1(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    stripe_util._loaded_env_paths.clear()
     captured: dict[str, str] = {}
 
     class _Resp:
@@ -102,6 +134,7 @@ def test_request_success_drops_none_and_targets_v1(monkeypatch):
 
 def test_request_http_error_becomes_stripe_error(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    stripe_util._loaded_env_paths.clear()
 
     def _raise(request, timeout=None):
         raise urllib.error.HTTPError(
@@ -121,6 +154,7 @@ def test_request_http_error_becomes_stripe_error(monkeypatch):
 
 def test_request_get_uses_querystring_and_no_body(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    stripe_util._loaded_env_paths.clear()
     captured: dict[str, object] = {}
 
     class _Resp:

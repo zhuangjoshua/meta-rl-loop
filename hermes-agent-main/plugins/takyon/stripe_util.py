@@ -22,13 +22,58 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv.
+    def load_dotenv(dotenv_path: Path, override: bool = False, encoding: str = "utf-8") -> bool:
+        """Tiny fallback so Stripe helpers fail on missing APIs, not imports."""
+        try:
+            lines = Path(dotenv_path).read_text(encoding=encoding).splitlines()
+        except OSError:
+            return False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip().removeprefix("export ").strip()
+            value = value.strip().strip('"').strip("'")
+            if key and (override or key not in os.environ):
+                os.environ[key] = value
+        return True
+
+from takyon_constants import get_takyon_home
+
+
+_loaded_env_paths: set[Path] = set()
 
 
 class StripeError(Exception):
     """Any Stripe REST call or webhook-signature check that failed in the control plane.
     Raised (never swallowed) so a missing key or bad signature surfaces as a clear
     error instead of a silently-faked success."""
+
+
+def _candidate_env_files() -> list[Path]:
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    repo_root = Path(__file__).resolve().parents[2]
+    return [takyon_home / ".env", repo_root / ".env"]
+
+
+def _load_control_plane_env() -> None:
+    """Load Takyon env files without overriding process-level secrets."""
+    for path in _candidate_env_files():
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in _loaded_env_paths or not resolved.exists() or not resolved.is_file():
+            continue
+        load_dotenv(dotenv_path=resolved, override=False, encoding="utf-8")
+        _loaded_env_paths.add(resolved)
 
 
 def stripe_request(
@@ -42,6 +87,7 @@ def stripe_request(
     GET params are query-encoded. Returns the parsed JSON object.
     Raises StripeError if STRIPE_SECRET_KEY is absent (the call is never faked) or Stripe
     returns a non-2xx response."""
+    _load_control_plane_env()
     key = os.environ.get("STRIPE_SECRET_KEY")
     if not key:
         raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
