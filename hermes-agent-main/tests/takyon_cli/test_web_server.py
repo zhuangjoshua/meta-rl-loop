@@ -310,6 +310,62 @@ def test_business_file_endpoint_reads_owned_file_directly(tmp_path, monkeypatch,
     assert body["truncated"] is False
 
 
+def test_business_workspace_endpoint_reads_owned_workspace_directly(
+    tmp_path,
+    monkeypatch,
+    pg_store_dsn,
+):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
+    store.commit(
+        scope="business:alpha",
+        operations=[
+            {
+                "action": "business.upsert",
+                "business": "alpha",
+                "name": "Alpha",
+                "goal": "Direct workspace load",
+            }
+        ],
+        idempotency_key="business-workspace-alpha",
+        reason="test",
+        actor="test",
+    )
+    (store._business_root("alpha") / "product").mkdir(parents=True, exist_ok=True)
+    (store._business_root("alpha") / "product" / "surface.md").write_text(
+        "# Alpha\n",
+        encoding="utf-8",
+    )
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/businesses/alpha/workspace")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["business_slug"] == "alpha"
+    assert body["current"]["slug"] == "alpha"
+    assert body["current"]["name"] == "Alpha"
+    assert isinstance(body["overview"], dict)
+    assert isinstance(body["outputs"], list)
+
+
 def test_auth0_public_path_allows_machine_facing_pg_routes():
     import takyon_cli.web_server as web_server
 

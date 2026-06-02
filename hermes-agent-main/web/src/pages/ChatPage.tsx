@@ -27,6 +27,7 @@ import { Markdown } from "@/components/Markdown";
 import {
   api,
   type TakyonBusinessFileReadResponse,
+  type TakyonBusinessWorkspaceResponse,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonOperatorAccountResponse,
   type TakyonOperatorBusinessSummary,
@@ -1324,6 +1325,63 @@ export default function ChatPage() {
     }
   }, []);
 
+  const applyWorkspaceSnapshot = useCallback(
+    (
+      business: string,
+      value: Partial<TakyonBusinessWorkspaceResponse> | null | undefined,
+      options?: {
+        syncUrl?: boolean;
+      },
+    ): ScopeState | null => {
+      const slug = normalizeBusinessLookup(business);
+      const snapshot = normalizeWorkspaceSnapshot(
+        {
+          business_slug: slug,
+          ...(value || {}),
+        } as Partial<TakyonDashboardWorkspaceResponse>,
+      );
+      if (!slug || !snapshot) return null;
+      const fallbackCurrent = optimisticBusinessSummary(visibleBusinesses, slug);
+      const nextScope = normalizeScopeState({
+        scope: `business:${slug}`,
+        business: slug,
+        businesses: visibleBusinesses,
+        current:
+          snapshot.current && Object.keys(snapshot.current).length
+            ? snapshot.current
+            : fallbackCurrent,
+        overview:
+          snapshot.overview && Object.keys(snapshot.overview).length
+            ? snapshot.overview
+            : undefined,
+      });
+      setScopeState(nextScope);
+      setWorkspaceSnapshot(snapshot);
+      setHistoricalOutputs({
+        business: slug,
+        items: Array.isArray(snapshot.outputs) ? snapshot.outputs : [],
+      });
+      void refreshCreativeCredits(slug);
+      setPendingBusinessSlug(null);
+      setBlockedBootBusinessSlug((current) => (current === slug ? null : current));
+      setBlockedBootMessage((current) =>
+        current && current.includes(`business:${slug}`) ? null : current,
+      );
+      if (options?.syncUrl) {
+        const params = new URLSearchParams(searchParams);
+        params.set("business", slug);
+        setSearchParams(params, { replace: true });
+      }
+      return nextScope;
+    },
+    [
+      refreshCreativeCredits,
+      searchParams,
+      setSearchParams,
+      visibleBusinesses,
+    ],
+  );
+
   useEffect(() => {
     connectionStateRef.current = state;
   }, [state]);
@@ -1395,6 +1453,54 @@ export default function ChatPage() {
     [gw],
   );
 
+  const syncRequestedBusinessToSession = useCallback(
+    async (
+      business: string,
+      options?: {
+        sessionId?: string;
+      },
+    ): Promise<void> => {
+      const slug = normalizeBusinessLookup(business);
+      if (!slug || !canUseConnection(connectionStateRef.current)) return;
+      let activeSessionId = options?.sessionId || sessionIdRef.current;
+      if (!activeSessionId) {
+        activeSessionId = await ensureDashboardSession(slug);
+      }
+      if (!activeSessionId || !canUseConnection(connectionStateRef.current)) return;
+      try {
+        const state = await gw.request<TakyonDashboardStateResponse>(
+          "takyon.dashboard.state",
+          {
+            session_id: activeSessionId,
+            business_slug: slug,
+            limit: 50,
+          },
+          10_000,
+        );
+        const dashboardBusinesses = Array.isArray(state.businesses)
+          ? state.businesses.filter((item): item is BusinessSummary => !!item && typeof item === "object")
+          : [];
+        if (dashboardBusinesses.length > 0) {
+          setOperatorBusinesses(dashboardBusinesses);
+          setOperatorBusinessesAvailable(true);
+          setOperatorBusinessesReason(null);
+          setOperatorBusinessesLoading(false);
+          setScopeState((prev) =>
+            normalizeScopeState({
+              ...prev,
+              businesses: dashboardBusinesses,
+            }),
+          );
+        }
+      } catch (err) {
+        if (isMissingSessionError(err)) {
+          recoverMissingSession(slug);
+        }
+      }
+    },
+    [ensureDashboardSession, gw, recoverMissingSession],
+  );
+
   const loadDashboardState = useCallback(
     async (
       requestedBusiness?: string,
@@ -1412,6 +1518,30 @@ export default function ChatPage() {
               scopeBusinessRef.current ||
               "",
       );
+      if (business) {
+        try {
+          const workspace = await api.getTakyonBusinessWorkspace(business, 50);
+          const nextScope = applyWorkspaceSnapshot(business, workspace, {
+            syncUrl: options?.syncUrl,
+          });
+          void syncRequestedBusinessToSession(business, {
+            sessionId: options?.sessionId,
+          });
+          return nextScope;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (/^404:/i.test(message)) {
+            noteBootIssue(
+              business,
+              `Could not open business:${business}. That business is not available to this account.`,
+            );
+            return null;
+          }
+          if (!canUseConnection(connectionStateRef.current)) {
+            throw err;
+          }
+        }
+      }
       let activeSessionId = options?.sessionId || sessionIdRef.current;
       if (!activeSessionId && canUseConnection(connectionStateRef.current)) {
         activeSessionId = await ensureDashboardSession(business || undefined);
@@ -1492,6 +1622,7 @@ export default function ChatPage() {
       }
     },
     [
+      applyWorkspaceSnapshot,
       ensureDashboardSession,
       gw,
       noteBootIssue,
@@ -1499,6 +1630,7 @@ export default function ChatPage() {
       refreshCreativeCredits,
       searchParams,
       setSearchParams,
+      syncRequestedBusinessToSession,
     ],
   );
 

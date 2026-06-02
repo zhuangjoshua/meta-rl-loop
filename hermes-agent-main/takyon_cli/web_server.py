@@ -1979,6 +1979,54 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/takyon/businesses/{slug}/workspace")
+async def get_takyon_business_workspace(
+    request: Request,
+    slug: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Direct authenticated workspace snapshot for a single business.
+
+    The dashboard can render a business workspace from backend truth without
+    waiting for the chat-session scope lane to finish hydrating.
+    """
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+        from tui_gateway.server import (
+            _takyon_business_overview_payload,
+            _takyon_business_payload,
+            _takyon_get_background_run,
+            _takyon_historical_outputs_payload,
+        )
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        output_limit = max(1, min(int(limit or 50), 100))
+        return {
+            "business_slug": business,
+            "current": _takyon_business_payload(store, business) or {},
+            "overview": _takyon_business_overview_payload(store, business) or {},
+            "outputs": _takyon_historical_outputs_payload(
+                store,
+                business,
+                limit=output_limit,
+            ),
+            "background_run": _takyon_get_background_run(business),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - workspace should fail honestly
+        _log.warning("dashboard business workspace read failed for %s: %s", business, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/takyon/businesses/{slug}/creative-credits")
 async def get_takyon_business_creative_credits(request: Request, slug: str) -> dict[str, Any]:
     """Read-only business creative-credit snapshot for the dashboard UI."""

@@ -125,6 +125,13 @@ export const api = {
       undefined,
       "takyon.file.read",
     ),
+  getTakyonBusinessWorkspace: (slug: string, limit = 50) =>
+    fetchJSONWithTimeout<TakyonBusinessWorkspaceResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/workspace?limit=${encodeURIComponent(String(limit))}`,
+      15_000,
+      undefined,
+      "takyon.dashboard.workspace",
+    ),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
   getSessionMessages: (id: string) =>
@@ -500,6 +507,14 @@ export interface TakyonBusinessFileReadResponse {
   size?: number;
   content?: string;
   truncated?: boolean;
+}
+
+export interface TakyonBusinessWorkspaceResponse {
+  business_slug: string;
+  current?: Record<string, unknown>;
+  overview?: Record<string, unknown>;
+  outputs?: unknown[];
+  background_run?: Record<string, unknown> | null;
 }
 
 export interface SessionInfo {
