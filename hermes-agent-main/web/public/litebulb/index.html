@@ -187,9 +187,11 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .win__bar:active{cursor:grabbing}
 .win__dots{display:flex;gap:5px}
 .win__dot{width:11px;height:11px;border-radius:50%;border:1.5px solid var(--paper)}
+.win__dotbtn{appearance:none;background:transparent;padding:0;margin:0;border:0;display:grid;place-items:center;cursor:pointer}
+.win__dotbtn:focus-visible{outline:2px solid var(--paper);outline-offset:2px}
+.win__dot--close{transition:transform .12s ease,filter .12s ease}
+.win__dotbtn:hover .win__dot--close,.win__dotbtn:focus-visible .win__dot--close{transform:scale(1.08);filter:saturate(1.15)}
 .win__title{flex:1;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.win__x{background:transparent;border:0;color:var(--paper);cursor:pointer;font:700 15px 'Space Mono',monospace;line-height:1;padding:0 2px;opacity:.7}
-.win__x:hover{opacity:1;color:var(--red)}
 .win__body{padding:13px 14px;font-size:13px;line-height:1.5;overflow:auto}
 .lab{font:700 10px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
 .meta{font-size:11px;color:var(--muted);margin-top:10px;line-height:1.45}
@@ -429,9 +431,15 @@ const setStatus=(t,s)=>{statusEl.textContent=t;statusEl.dataset.s=s;};
 /* ---------- window manager ---------- */
 let z=20; let desk;
 function focusWin(w){w.style.zIndex=++z;document.querySelectorAll('.win').forEach(x=>x.classList.remove('focus'));w.classList.add('focus');}
+function closeWin(win){
+  win.style.pointerEvents='none';
+  const fin=()=>{if(win.parentNode){win.remove();syncDock();}};
+  win.animate([{opacity:1},{opacity:0,transform:'scale(.97)'}],{duration:140}).onfinish=fin;
+  setTimeout(fin,220);
+}
 function drag(win,handle){
   handle.addEventListener('pointerdown',e=>{
-    if(e.target.closest('.win__x'))return;
+    if(e.target.closest('.win__close'))return;
     focusWin(win); if(win.id&&RT.moved)RT.moved.add(win.id);
     const dr=desk.getBoundingClientRect();
     const ox=e.clientX-(dr.left+win.offsetLeft), oy=e.clientY-(dr.top+win.offsetTop);
@@ -451,14 +459,14 @@ function makeWin({id,title,x,y,w,h,html,crt=false}){
   win.className='win'+(crt?' win--crt':''); if(id)win.id=id;
   win.style.cssText=`left:${x}px;top:${y}px;width:${w}px`;
   win.innerHTML=`<div class="win__bar"><span class="win__dots">
-      <i class="win__dot" style="background:var(--red)"></i><i class="win__dot" style="background:var(--amber)"></i><i class="win__dot" style="background:var(--blue)"></i>
-    </span><span class="win__title">${title}</span><button class="win__x" title="close" aria-label="close window">x</button></div>
+      <button class="win__dotbtn win__close" type="button" title="close" aria-label="close window"><i class="win__dot win__dot--close" style="background:var(--red)"></i></button><i class="win__dot" style="background:var(--amber)"></i><i class="win__dot" style="background:var(--blue)"></i>
+    </span><span class="win__title">${title}</span></div>
     <div class="win__body"${h?` style="height:${h}px"`:''}>${html}</div>`;
   desk.appendChild(win); focusWin(win);
   win.animate([{opacity:0,transform:'translateY(12px) scale(.98)'},{opacity:1,transform:'none'}],{duration:220,easing:'cubic-bezier(.2,.9,.25,1)'});
   drag(win,$('.win__bar',win));
   win.addEventListener('pointerdown',()=>focusWin(win));
-  $('.win__x',win).addEventListener('click',()=>{win.style.pointerEvents='none';const fin=()=>{if(win.parentNode){win.remove();syncDock();}};win.animate([{opacity:1},{opacity:0,transform:'scale(.97)'}],{duration:140}).onfinish=fin;setTimeout(fin,220);});
+  $('.win__close',win).addEventListener('click',()=>closeWin(win));
   return win;
 }
 const body=w=>$('.win__body',w);
