@@ -38,6 +38,8 @@
     toolEls: new Map(),
     assistantBubble: null,
     assistantText: "",
+    assistantDeltaSeen: false,
+    assistantTypingTimer: null,
     businesses: [],
     businessIndex: new Map(),
     operatorAccount: null,
@@ -481,21 +483,161 @@
     };
   }
 
+  function outputLaneFromPath(item) {
+    const raw = `${item && item.path || ""} ${item && item.detail || ""} ${item && item.kind || ""}`.toLowerCase();
+    if (/research/.test(raw)) return "research";
+    if (/product|site|runtime|app/.test(raw)) return "product";
+    if (/distribution|outreach|publish|receipt/.test(raw)) return "growth";
+    if (/creative|image|video|ugc|ad/.test(raw)) return "creative";
+    return "ops";
+  }
+
+  function mapDeliverableTask(item, index) {
+    const path = String(item && item.path || "").trim();
+    if (!path) return null;
+    const lane = outputLaneFromPath(item);
+    const detail = String(item && item.detail || "").trim();
+    const title = String(item && (item.title || path) || path).trim();
+    return {
+      id: String(item && item.id || `deliverable:${path}:${index}`).trim(),
+      key: String(item && item.kind || "deliverable").trim(),
+      title,
+      body: [detail, compactPath(path)].filter(Boolean).join(" · "),
+      lane,
+      assignee: lane,
+      status: "done",
+      priority: "p3",
+      created: Number(item && item.at || 0) || (Date.now() - index * 1000),
+      progress: { done: 1, total: 1 },
+      comments: [],
+      events: [
+        { kind: "deliverable", note: compactPath(path) || path },
+        ...(detail ? [{ kind: "type", note: detail }] : []),
+      ],
+      runs: [],
+      result: compactPath(path) || path,
+      block_reason: "",
+      _live: true,
+      _detailLoaded: true,
+      _fromOutput: true,
+      _deliverablePath: path,
+    };
+  }
+
+  function backgroundRunStatus(run) {
+    const raw = String(run && run.status || "").trim().toLowerCase();
+    if (!raw) return "running";
+    if (/error|fail|blocked/.test(raw)) return "blocked";
+    if (/queued|scheduled|pending|waiting/.test(raw)) return "scheduled";
+    if (/done|complete|success/.test(raw)) return "done";
+    return "running";
+  }
+
+  function humanizeKey(value) {
+    return String(value || "work")
+      .replace(/[_-]+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+
+  function cronTaskTitle(job) {
+    const raw = String(job && job.name || "").trim();
+    if (/takyon-ceo|ceo/i.test(raw)) return "CEO wake loop";
+    return raw ? humanizeKey(raw) : "Scheduled work";
+  }
+
+  function mapCronTask(job, index) {
+    if (!job || typeof job !== "object") return null;
+    const nextRun = String(job.next_run || "").trim();
+    const state = String(job.state || job.status || "").trim();
+    const detailParts = [];
+    if (nextRun) detailParts.push(`Next wake ${nextRun}`);
+    if (state) detailParts.push(`State: ${state}`);
+    return {
+      id: `cron:${String(job.id || job.name || index).trim() || index}`,
+      key: "cron",
+      title: cronTaskTitle(job),
+      body: detailParts.join(" · ") || "Scheduled CEO check.",
+      lane: "ops",
+      assignee: "cron",
+      status: "scheduled",
+      priority: "p2",
+      created: parseNextRun(nextRun) || Date.now() + index,
+      progress: { done: 0, total: 1 },
+      comments: [],
+      events: detailParts.map((note) => ({ kind: "cron", note })),
+      runs: [],
+      result: null,
+      block_reason: "",
+      _live: true,
+      _detailLoaded: true,
+      _fromCron: true,
+    };
+  }
+
+  function mapBackgroundRunTask(snapshot) {
+    const run = snapshot && snapshot.background_run;
+    if (!run || typeof run !== "object") return null;
+    const status = backgroundRunStatus(run);
+    if (status === "done") return null;
+    const label = String(run.kind || "").trim();
+    const detail = String(run.detail || "").trim();
+    const title = label ? humanizeKey(label) : "CEO background run";
+    return {
+      id: `background:${label || "run"}`,
+      key: label || "background",
+      title,
+      body: detail || "The CEO is working in the background.",
+      lane: laneFromOverviewText(`${title} ${detail}`),
+      assignee: "ceo",
+      status,
+      priority: status === "blocked" ? "p1" : status === "scheduled" ? "p2" : "p1",
+      created: Number(run.started_at || 0) * 1000 || Date.now(),
+      progress: { done: 0, total: 1 },
+      comments: [],
+      events: detail ? [{ kind: "background", note: detail }] : [],
+      runs: [],
+      result: null,
+      block_reason: status === "blocked" ? detail : "",
+      _live: true,
+      _detailLoaded: true,
+      _fromSummary: true,
+    };
+  }
+
   function applyBoard(board, snapshot) {
     const next = [];
     const cols = Array.isArray(board && board.columns) ? board.columns : [];
+    const boardTasks = [];
     cols.forEach((col) => {
       const tasks = Array.isArray(col && col.tasks) ? col.tasks : [];
       tasks.forEach((task) => {
         if (String(task && task.status || "").toLowerCase() === "archived") return;
-        next.push(mapBoardTask(task || {}));
+        boardTasks.push(mapBoardTask(task || {}));
       });
     });
+    const deliverableTasks = Array.isArray(snapshot && snapshot.outputs)
+      ? snapshot.outputs
+          .map((item, index) => mapDeliverableTask(item, index))
+          .filter(Boolean)
+      : [];
+    const cronTasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.cron)
+      ? snapshot.overview.cron
+          .map((job, index) => mapCronTask(job, index))
+          .filter(Boolean)
+          .sort((a, b) => a.created - b.created)
+      : [];
+    const backgroundTask = mapBackgroundRunTask(snapshot);
+    next.push(...cronTasks);
+    if (backgroundTask) next.push(backgroundTask);
+    next.push(...deliverableTasks);
     if (!next.length) {
       const trace = mergedTraceEntries(snapshot);
       if (trace.length) {
         trace.forEach((entry, index) => {
-          next.push(mapTraceEntry(entry || {}, index));
+          const mapped = mapTraceEntry(entry || {}, index);
+          if (!mapped || mapped.status !== "running" || mapped.key === "tool" || mapped.assignee === "runtime") return;
+          next.push(mapped);
         });
       }
     }
@@ -504,8 +646,16 @@
         ? snapshot.overview.tasks
         : [];
       overviewTasks.forEach((task, index) => {
-        next.push(mapOverviewTask(task || {}, index));
+        const mapped = mapOverviewTask(task || {}, index);
+        if (!mapped || mapped.status !== "running") return;
+        next.push(mapped);
       });
+    }
+    if (!next.some((task) => task.status === "running") && boardTasks.length) {
+      next.push(...boardTasks.filter((task) => task.status === "running"));
+    }
+    if (!next.some((task) => task.status === "scheduled") && boardTasks.length) {
+      next.push(...boardTasks.filter((task) => task.status === "scheduled"));
     }
     RT.tasks = next;
     renderBoard();
@@ -832,22 +982,9 @@
   }
 
   function renderPlanSummary(snapshot) {
-    if (!snapshot || LIVE.planBusiness === snapshot.business_slug) return;
-    const overview = snapshot.overview || {};
-    const rawTasks = Array.isArray(overview.tasks) ? overview.tasks : [];
-    const entries = rawTasks
-      .slice(0, 5)
-      .map((item) => {
-        const status = String(item && item.status || "").toLowerCase();
-        return {
-          t: String(item && (item.label || item.id || item.detail) || "task"),
-          s: status === "done" ? "done" : status === "running" || status === "ready" || status === "scheduled" ? "doing" : "todo",
-        };
-      });
-    if (entries.length > 0) {
-      addPlan(entries);
-      LIVE.planBusiness = snapshot.business_slug;
-    }
+    // Workspace snapshots still carry overview tasks, but the operator chat
+    // should not echo them back as a synthetic plan card.
+    void snapshot;
   }
 
   function traceLogSignature(entry) {
@@ -873,23 +1010,11 @@
   function syncOverviewActivity(snapshot) {
     if (!snapshot) return;
     const backgroundRun = snapshot.background_run || {};
-    const ceo = snapshot.overview && snapshot.overview.ceo_loop || {};
-    const overviewTasks = Array.isArray(snapshot.overview && snapshot.overview.tasks)
-      ? snapshot.overview.tasks
-      : [];
 
     const backgroundDetail = String(backgroundRun.detail || "").trim();
     if (backgroundDetail && backgroundDetail !== LIVE.lastBackgroundDetail) {
       ceolog(`<span class="sys">[background]</span> ${esc(backgroundDetail)}`, true);
       LIVE.lastBackgroundDetail = backgroundDetail;
-    }
-
-    const ceoHeadline = [String(ceo.headline || "").trim(), String(ceo.next_action || "").trim()]
-      .filter(Boolean)
-      .join(" · ");
-    if (ceoHeadline && ceoHeadline !== LIVE.lastCeoHeadline) {
-      addCeo(formatRichText(ceoHeadline));
-      LIVE.lastCeoHeadline = ceoHeadline;
     }
 
     const trace = mergedTraceEntries(snapshot);
@@ -902,22 +1027,6 @@
       });
       return;
     }
-
-    const signature = overviewTasks
-      .map((task) => [task && task.id, task && task.status, task && task.detail].join("|"))
-      .join("::");
-    if (!signature || signature === LIVE.lastOverviewTaskSignature) return;
-    LIVE.lastOverviewTaskSignature = signature;
-    const active = overviewTasks.filter((task) => {
-      const status = String(task && task.status || "").toLowerCase();
-      const tone = String(task && task.tone || "").toLowerCase();
-      return tone === "active" || /running|active|working|watch/.test(status);
-    });
-    active.slice(0, 4).forEach((task) => {
-      const label = String(task && task.label || "task").trim();
-      const detail = String(task && task.detail || "").trim();
-      ceolog(`<span class="l-blue">[focus]</span> ${esc(label)}${detail ? ` — ${esc(detail)}` : ""}`, true);
-    });
   }
 
   function applyWorkspace(snapshot, summary) {
@@ -964,11 +1073,8 @@
       modeEl.classList.toggle("test", RT.biz.mode !== "live");
     }
     $("#mb-biz").textContent = RT.biz.name || RT.biz.slug || "—";
-    const headline = String(ceo.headline || "").trim();
-    const detail = String(ceo.detail || "").trim();
     if (snapshot.business_slug !== LIVE.bootedBusiness) {
       addThink("connected to the live Takyon runtime.");
-      if (headline || detail) addCeo([headline, detail].filter(Boolean).map(formatRichText).join("<br>"));
       LIVE.bootedBusiness = snapshot.business_slug;
     }
   }
@@ -1406,8 +1512,7 @@
     if (!RT.live) return originalRenderBoard();
     const w = document.getElementById("w-board");
     if (!w) return;
-    const present = new Set(RT.tasks.map((t) => t.status));
-    const cols = BOARD_ORDER.filter((status) => present.has(status) || ["todo", "scheduled", "ready", "running", "review", "done"].includes(status));
+    const cols = ["scheduled", "running", "done"];
     body(w).innerHTML = `<div class="kanban">${cols.map((st) => {
       const items = RT.tasks.filter((t) => t.status === st);
       return `<div class="col"><div class="col-h" style="border-color:${STATUS_C[st] || "var(--ink)"}"><span>${st}</span><span class="ct">${items.length}</span></div>
@@ -1426,11 +1531,35 @@
     });
   };
 
+  const originalLayoutMain = layoutMain;
+  layoutMain = function layoutMainLiveAware() {
+    originalLayoutMain();
+    if (!RT.live || !desk || desk.classList.contains("stack") || RT.moved.has("w-board")) return;
+    const board = document.getElementById("w-board");
+    if (!board) return;
+    const currentLeft = Number.parseFloat(board.style.left || "0");
+    const currentWidth = Number.parseFloat(board.style.width || "0") || board.getBoundingClientRect().width || 0;
+    if (!Number.isFinite(currentWidth) || currentWidth <= 0) return;
+    const targetWidth = Math.min(
+      currentWidth,
+      Math.min(440, Math.max(392, Math.round(currentWidth * 0.72))),
+    );
+    board.style.left = `${Math.max(12, currentLeft)}px`;
+    board.style.width = `${Math.max(320, targetWidth)}px`;
+  };
+
   const originalOpenTask = openTask;
   openTask = async function openTaskLiveAware(id) {
-    originalOpenTask(id);
-    if (!RT.live) return;
     const task = RT.tasks.find((item) => item.id === id);
+    if (!RT.live) {
+      originalOpenTask(id);
+      return;
+    }
+    if (task && task._deliverablePath) {
+      void openDocument(task._deliverablePath, task.title || "Deliverable");
+      return;
+    }
+    originalOpenTask(id);
     if (!task || task._detailLoaded || task._loadingDetail) return;
     task._loadingDetail = true;
     try {
@@ -1593,6 +1722,13 @@
     });
   }
 
+  function cancelAssistantTypingAnimation() {
+    if (LIVE.assistantTypingTimer) {
+      window.clearTimeout(LIVE.assistantTypingTimer);
+      LIVE.assistantTypingTimer = null;
+    }
+  }
+
   function ensureAssistantBubble() {
     if (LIVE.assistantBubble && document.body.contains(LIVE.assistantBubble)) return LIVE.assistantBubble;
     const container = document.createElement("div");
@@ -1604,22 +1740,61 @@
     return LIVE.assistantBubble;
   }
 
+  function showAssistantPlaceholder(text) {
+    cancelAssistantTypingAnimation();
+    LIVE.assistantText = "";
+    LIVE.assistantDeltaSeen = false;
+    ensureAssistantBubble().innerHTML = `<span style="color:var(--muted);font-style:italic">${esc(text || "thinking…")}</span>`;
+    scrollChat();
+  }
+
   function appendAssistantText(text) {
     if (!text) return;
+    cancelAssistantTypingAnimation();
+    LIVE.assistantDeltaSeen = true;
     LIVE.assistantText += text;
     ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
     scrollChat();
   }
 
   function finishAssistantText(text) {
+    cancelAssistantTypingAnimation();
     if (text) LIVE.assistantText = String(text);
     if (LIVE.assistantText) {
       ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
       rememberHistoryMessage("assistant", LIVE.assistantText);
     }
     LIVE.assistantText = "";
+    LIVE.assistantDeltaSeen = false;
     LIVE.assistantBubble = null;
     scrollChat();
+  }
+
+  function typeAssistantText(text) {
+    const finalText = String(text || "").trim();
+    if (!finalText) {
+      finishAssistantText("(empty response)");
+      return;
+    }
+    cancelAssistantTypingAnimation();
+    LIVE.assistantDeltaSeen = false;
+    LIVE.assistantText = "";
+    rememberHistoryMessage("assistant", finalText);
+    const bubble = ensureAssistantBubble();
+    const total = finalText.length;
+    const chunk = Math.max(2, Math.ceil(total / 36));
+    let index = 0;
+    const step = () => {
+      index = Math.min(total, index + chunk);
+      bubble.innerHTML = formatRichText(`${finalText.slice(0, index)}${index < total ? "▌" : ""}`);
+      scrollChat();
+      if (index >= total) {
+        finishAssistantText(finalText);
+        return;
+      }
+      LIVE.assistantTypingTimer = window.setTimeout(step, total > 320 ? 18 : 24);
+    };
+    step();
   }
 
   function mergeHistoryMessages(items) {
@@ -1634,7 +1809,8 @@
         return;
       }
       if (role === "assistant") {
-        finishAssistantText(text);
+        if (LIVE.assistantBubble && !LIVE.assistantDeltaSeen && !LIVE.assistantText) typeAssistantText(text);
+        else finishAssistantText(text);
         return;
       }
       if (role === "system") {
@@ -1703,11 +1879,10 @@
         status: "running",
         updated_at: new Date().toISOString(),
       });
-      setStatus("running", "run");
+      setStatus("thinking…", "run");
       LIVE.historyRunning = true;
       syncHistoryPollTimer();
-      LIVE.assistantText = "";
-      LIVE.assistantBubble = null;
+      showAssistantPlaceholder("thinking…");
       return;
     }
     if (ev.type === "message.delta") {
@@ -1727,7 +1902,9 @@
         });
         LIVE.activeTurnTraceId = "";
       }
-      finishAssistantText(payload.text || "");
+      const finalText = String(payload.text || "");
+      if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
+      else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
       if (payload.warning) ceolog(esc(String(payload.warning)), true);
       setStatus("running", "run");
       LIVE.historyRunning = false;
@@ -1808,7 +1985,8 @@
         });
         LIVE.activeTurnTraceId = "";
       }
-      addCeo(formatRichText(text));
+      if (LIVE.assistantBubble) finishAssistantText(text);
+      else addCeo(formatRichText(text));
       setStatus("paused", "paused");
     }
   }
@@ -2079,11 +2257,13 @@
     addYou(text);
     try {
       let sessionId = await ensureSession(LIVE.activeBusiness);
+      showAssistantPlaceholder(LIVE.historyRunning ? "interrupting the current turn…" : "thinking…");
+      setStatus("thinking…", "run");
       if (LIVE.historyRunning && sessionId) {
         await rpc("session.interrupt", { session_id: sessionId }, 10000);
         await wait(400);
+        showAssistantPlaceholder("thinking…");
       }
-      setStatus("running", "run");
       LIVE.historyRunning = true;
       syncHistoryPollTimer();
       for (let attempt = 0; attempt < 8; attempt++) {
@@ -2109,7 +2289,9 @@
         }
       }
     } catch (err) {
-      addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
+      const message = err instanceof Error ? err.message : String(err);
+      if (LIVE.assistantBubble) finishAssistantText(message);
+      else addCeo(formatRichText(message));
       LIVE.historyRunning = false;
       syncHistoryPollTimer();
       setStatus("paused", "paused");

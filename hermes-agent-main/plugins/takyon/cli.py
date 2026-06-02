@@ -2786,12 +2786,10 @@ def run_takyon_command(
         return "Connector setup is handled by provider-specific skills/tools. Use `takyon secret set KEY VALUE` for credentials and keep business state in Hermes Takyon."
 
     if command in {"app-server", "api"}:
-        from .app_api import run_app_api_server
-
-        host = argv[1] if len(argv) >= 2 else "127.0.0.1"
-        port = int(argv[2]) if len(argv) >= 3 else 8787
-        run_app_api_server(host=host, port=port)
-        return None
+        return (
+            "The standalone product app API server is retired. "
+            "Use `takyon dashboard` for app-runtime rails; product generate now routes through the hardened runtime authority."
+        )
 
     if command in {"businesses", "business", "list"}:
         return store.read(scope="global", query="list_businesses")

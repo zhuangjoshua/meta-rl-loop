@@ -371,6 +371,49 @@ def _creative_credit_pack(pack_id: str) -> dict[str, Any] | None:
     return None
 
 
+def configured_creative_credit_packs() -> list[dict[str, Any]]:
+    """Return the configured creative-credit packs for shared UI/read paths."""
+    return _creative_credit_packs()
+
+
+def create_creative_credit_checkout_session(
+    user_id: str,
+    slug: str,
+    *,
+    pack_id: str,
+    success_url: str,
+    cancel_url: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create a Stripe Checkout session for one business creative-credit pack."""
+    pack = _creative_credit_pack(pack_id)
+    if pack is None:
+        raise LookupError(f"unknown_credit_pack:{pack_id}")
+    params = {
+        "mode": "payment",
+        "client_reference_id": slug,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": pack["currency"],
+        "line_items[0][price_data][unit_amount]": pack["amount_cents"],
+        "line_items[0][price_data][product_data][name]": (
+            f"Takyon creative credit pack ({pack['credits']} credits)"
+        ),
+        "metadata[purpose]": "creative_credit_pack",
+        "metadata[user_id]": user_id,
+        "metadata[business_slug]": slug,
+        "metadata[pack_id]": pack["id"],
+        "metadata[credits]": pack["credits"],
+        "payment_intent_data[metadata][purpose]": "creative_credit_pack",
+        "payment_intent_data[metadata][user_id]": user_id,
+        "payment_intent_data[metadata][business_slug]": slug,
+        "payment_intent_data[metadata][pack_id]": pack["id"],
+        "payment_intent_data[metadata][credits]": pack["credits"],
+    }
+    session = stripe_util.stripe_request("checkout/sessions", params)
+    return session, pack
+
+
 def _rate_limited_principal(
     principal: ResolvedPrincipal = Depends(_resolve_principal),
     conn=Depends(get_control_conn),
@@ -515,7 +558,7 @@ def build_control_router() -> APIRouter:
         row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
-        return {"business_slug": slug, "packs": _creative_credit_packs()}
+        return {"business_slug": slug, "packs": configured_creative_credit_packs()}
 
     @router.post("/businesses/{slug}/creative-credits/checkout")
     def create_creative_credit_checkout(
@@ -532,33 +575,16 @@ def build_control_router() -> APIRouter:
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
-        pack = _creative_credit_pack(body.pack_id)
-        if pack is None:
-            raise HTTPException(status_code=404, detail="unknown_credit_pack")
-        params = {
-            "mode": "payment",
-            "client_reference_id": slug,
-            "success_url": body.success_url,
-            "cancel_url": body.cancel_url,
-            "line_items[0][quantity]": 1,
-            "line_items[0][price_data][currency]": pack["currency"],
-            "line_items[0][price_data][unit_amount]": pack["amount_cents"],
-            "line_items[0][price_data][product_data][name]": (
-                f"Takyon creative credit pack ({pack['credits']} credits)"
-            ),
-            "metadata[purpose]": "creative_credit_pack",
-            "metadata[user_id]": principal.user_id,
-            "metadata[business_slug]": slug,
-            "metadata[pack_id]": pack["id"],
-            "metadata[credits]": pack["credits"],
-            "payment_intent_data[metadata][purpose]": "creative_credit_pack",
-            "payment_intent_data[metadata][user_id]": principal.user_id,
-            "payment_intent_data[metadata][business_slug]": slug,
-            "payment_intent_data[metadata][pack_id]": pack["id"],
-            "payment_intent_data[metadata][credits]": pack["credits"],
-        }
         try:
-            session = stripe_util.stripe_request("checkout/sessions", params)
+            session, pack = create_creative_credit_checkout_session(
+                principal.user_id,
+                slug,
+                pack_id=body.pack_id,
+                success_url=body.success_url,
+                cancel_url=body.cancel_url,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="unknown_credit_pack") from exc
         except stripe_util.StripeError as exc:
             msg = str(exc)
             if "STRIPE_SECRET_KEY" in msg:

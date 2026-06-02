@@ -61,6 +61,23 @@ _APP_SESSION_HEADER = "X-Takyon-App-Session"
 # A provider caller is a server-side closure that already holds the shared key. The endpoint only
 # ever sees this callable (or None when unconfigured) — never the key itself.
 ProviderCaller = Callable[[dict], dict]
+_CALLER_UNSET = object()
+
+
+class GatewayMessageError(Exception):
+    """Structured gateway failure suitable for HTTP surfaces and compatibility shims."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: Any,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(str(detail))
+        self.status_code = int(status_code)
+        self.detail = detail
+        self.headers = headers or {}
 
 
 def get_gateway_conn():
@@ -179,6 +196,192 @@ def _subsidy_cap_microusd(plan) -> int:
     return 0
 
 
+def broker_message_for_business(
+    conn,
+    *,
+    business_slug: str,
+    raw_session_token: str,
+    body: dict | None = None,
+    caller: ProviderCaller | None | object = _CALLER_UNSET,
+    audit_route: str = "internal_ai_gateway",
+) -> dict[str, Any]:
+    """Run the canonical app-generation broker flow for one business/app session.
+
+    This is the one hardened path that compatibility surfaces should delegate to:
+    validate app session -> reserve funding -> reserve app budget -> call shared
+    provider key server-side -> settle actual cost. The caller never sees the
+    provider key and never gets to bypass the funding/budget rails.
+    """
+    body = body or {}
+    if caller is _CALLER_UNSET:
+        caller = get_provider_caller()
+
+    if not raw_session_token:
+        raise GatewayMessageError(status_code=401, detail="missing_app_session")
+    app_user = app_identity.validate_session(conn, business_slug, raw_session_token)
+    if app_user is None:
+        raise GatewayMessageError(status_code=401, detail="invalid_app_session")
+    requested_app_user_id = body.get("app_user_id") or body.get("appUserId") or None
+    if requested_app_user_id and str(requested_app_user_id) != app_user.id:
+        raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
+
+    # Invariant #8: no provider key configured -> block with a reason. Checked
+    # after auth (so callers cannot probe config) and before reservation.
+    if caller is None:
+        raise GatewayMessageError(status_code=503, detail="provider_unconfigured")
+
+    try:
+        payload, model, estimated_input_tokens = anthropic_payload(body)
+    except Exception as exc:
+        raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
+
+    estimated_output_tokens = int(payload.get("max_tokens") or 0)
+    try:
+        estimated_cost = microusd_cost(
+            model, estimated_input_tokens, estimated_output_tokens
+        )
+        rate_source = anthropic_rates_microusd_per_token(model)[2]
+    except AnthropicPricingUnavailable as exc:
+        raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
+
+    entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    feature_name = str(body.get("feature") or "ai_generate").strip() or "ai_generate"
+    if plan is not None and not _feature_allowed(plan, feature_name):
+        raise GatewayMessageError(
+            status_code=403,
+            detail={"error": "feature_not_in_plan", "feature": feature_name},
+        )
+    if plan is not None and not _model_allowed(plan, model):
+        raise GatewayMessageError(
+            status_code=403,
+            detail={"error": "model_not_in_plan", "model": model},
+        )
+    budget = ensure_app_budget(conn, business_slug)
+    user_credit_limit = _user_credit_limit_microusd(plan)
+    subsidy_cap = _subsidy_cap_microusd(plan)
+    plan_key = None
+    if entitlement is not None and entitlement.plan_key:
+        plan_key = entitlement.plan_key
+    elif plan is not None:
+        plan_key = plan.plan_key
+
+    reservation_key = uuid.uuid4().hex
+    try:
+        app_funding.reserve_funding(
+            conn,
+            business_slug,
+            app_user_id=app_user.id,
+            reservation_key=reservation_key,
+            estimated_cost_microusd=estimated_cost,
+            user_credit_limit_microusd=user_credit_limit,
+            subsidy_cap_microusd=subsidy_cap,
+            period_start=budget.current_period_start,
+            plan_key=plan_key,
+            metadata={
+                "feature": feature_name,
+                "cost_rate_source": rate_source,
+                "route": audit_route,
+            },
+        )
+    except app_funding.InsufficientAppFunding as exc:
+        raise GatewayMessageError(
+            status_code=402,
+            detail={
+                "error": "app_funding_exhausted",
+                "requested_microusd": exc.requested_microusd,
+                "user_credit_remaining_microusd": exc.user_credit_remaining_microusd,
+                "user_subsidy_remaining_microusd": exc.user_subsidy_remaining_microusd,
+                "business_subsidy_remaining_microusd": exc.business_subsidy_remaining_microusd,
+            },
+        ) from exc
+
+    try:
+        reserve_usage(
+            conn,
+            business_slug,
+            estimated_cost_microusd=estimated_cost,
+            reservation_key=reservation_key,
+            app_user_id=app_user.id,
+            app_user_tier=app_user.tier,
+            purpose=str(body.get("purpose") or "ai_generate"),
+            route=audit_route,
+            provider="anthropic",
+            model=model,
+            metadata={"cost_rate_source": rate_source},
+        )
+    except AppBudgetInactive as exc:
+        app_funding.release_funding(
+            conn, reservation_key, metadata={"error": "app_budget_inactive"}
+        )
+        raise GatewayMessageError(
+            status_code=402,
+            detail={"error": "app_budget_inactive", "status": exc.status},
+        ) from exc
+    except AppBudgetExceeded as exc:
+        app_funding.release_funding(
+            conn, reservation_key, metadata={"error": "app_budget_exceeded"}
+        )
+        raise GatewayMessageError(
+            status_code=402,
+            detail={
+                "error": "app_budget_exceeded",
+                "hard_limit_microusd": exc.hard_limit_microusd,
+                "committed_microusd": exc.committed_microusd,
+                "requested_microusd": exc.requested_microusd,
+                "remaining_microusd": exc.remaining_microusd,
+            },
+        ) from exc
+    except AppUserNotFound as exc:
+        app_funding.release_funding(
+            conn, reservation_key, metadata={"error": "unknown_app_user"}
+        )
+        raise GatewayMessageError(status_code=400, detail="unknown_app_user") from exc
+
+    try:
+        provider_response = caller(payload)
+    except Exception as exc:
+        release_usage(conn, business_slug, reservation_key, error=str(exc))
+        app_funding.release_funding(conn, reservation_key, metadata={"error": str(exc)})
+        raise GatewayMessageError(status_code=502, detail="provider_error") from exc
+
+    usage = provider_response.get("usage") or {}
+    input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    actual_cost = microusd_cost(model, input_tokens, output_tokens)
+    provider_request_id = str(provider_response.get("id") or "")
+
+    settle_usage(
+        conn,
+        business_slug,
+        reservation_key,
+        actual_cost_microusd=actual_cost,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        provider_request_id=provider_request_id,
+        provider="anthropic",
+        model=model,
+    )
+    app_funding.settle_funding(
+        conn,
+        reservation_key,
+        actual_cost_microusd=actual_cost,
+        metadata={"provider_request_id": provider_request_id},
+    )
+
+    return {
+        "success": True,
+        "text": anthropic_text(provider_response),
+        "content": provider_response.get("content") or [],
+        "model": model,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost_microusd": estimated_cost,
+            "actual_cost_microusd": actual_cost,
+        },
+    }
+
+
 def build_ai_gateway_router() -> APIRouter:
     """Build the ``/internal/ai-gateway`` router. Call ``app.include_router(...)`` on it and override
     ``get_gateway_conn`` (and, in tests, ``get_provider_caller``) to supply the connection and the
@@ -197,177 +400,21 @@ def build_ai_gateway_router() -> APIRouter:
         """Broker one AI generation for the gateway key's business: reserve → call shared key →
         settle. Returns only the generated text/content/model/usage — never the provider key."""
         body = body or {}
-        business_slug = principal.business_slug
-
         raw_session_token = _session_token(body, app_session_token, cookie_header)
-        if not raw_session_token:
-            raise HTTPException(status_code=401, detail="missing_app_session")
-        app_user = app_identity.validate_session(conn, business_slug, raw_session_token)
-        if app_user is None:
-            raise HTTPException(status_code=401, detail="invalid_app_session")
-        requested_app_user_id = body.get("app_user_id") or body.get("appUserId") or None
-        if requested_app_user_id and str(requested_app_user_id) != app_user.id:
-            raise HTTPException(status_code=403, detail="mismatched_app_user")
-
-        # Invariant #8: no provider key configured → block with a reason. Checked AFTER auth (so an
-        # unauthenticated caller can't probe provider configuration) and BEFORE reserving (so a
-        # config gap never churns the budget).
-        if caller is None:
-            raise HTTPException(status_code=503, detail="provider_unconfigured")
-
-        # Build the provider payload from the (untrusted) request body. Bad/empty body → 400.
         try:
-            payload, model, estimated_input_tokens = anthropic_payload(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        # Cost estimate is computed SERVER-SIDE (the caller cannot declare its own) and is what the
-        # budget cap is checked against at reserve.
-        estimated_output_tokens = int(payload.get("max_tokens") or 0)
-        try:
-            estimated_cost = microusd_cost(
-                model, estimated_input_tokens, estimated_output_tokens
-            )
-            rate_source = anthropic_rates_microusd_per_token(model)[2]
-        except AnthropicPricingUnavailable as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
-        feature_name = str(body.get("feature") or "ai_generate").strip() or "ai_generate"
-        if plan is not None and not _feature_allowed(plan, feature_name):
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "feature_not_in_plan", "feature": feature_name},
-            )
-        if plan is not None and not _model_allowed(plan, model):
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "model_not_in_plan", "model": model},
-            )
-        budget = ensure_app_budget(conn, business_slug)
-        user_credit_limit = _user_credit_limit_microusd(plan)
-        subsidy_cap = _subsidy_cap_microusd(plan)
-        plan_key = None
-        if entitlement is not None and entitlement.plan_key:
-            plan_key = entitlement.plan_key
-        elif plan is not None:
-            plan_key = plan.plan_key
-
-        # THE gate: hold the estimate atomically under the budget row lock. A FRESH reservation_key
-        # per request — an internal reserve↔settle correlation id, not a client retry key — so there
-        # is no replay path that could call the provider twice against one settle.
-        reservation_key = uuid.uuid4().hex
-        try:
-            app_funding.reserve_funding(
+            return broker_message_for_business(
                 conn,
-                business_slug,
-                app_user_id=app_user.id,
-                reservation_key=reservation_key,
-                estimated_cost_microusd=estimated_cost,
-                user_credit_limit_microusd=user_credit_limit,
-                subsidy_cap_microusd=subsidy_cap,
-                period_start=budget.current_period_start,
-                plan_key=plan_key,
-                metadata={
-                    "feature": feature_name,
-                    "cost_rate_source": rate_source,
-                    "route": "internal_ai_gateway",
-                },
+                business_slug=principal.business_slug,
+                raw_session_token=raw_session_token,
+                body=body,
+                caller=caller,
+                audit_route="internal_ai_gateway",
             )
-        except app_funding.InsufficientAppFunding as exc:
+        except GatewayMessageError as exc:
             raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": "app_funding_exhausted",
-                    "requested_microusd": exc.requested_microusd,
-                    "user_credit_remaining_microusd": exc.user_credit_remaining_microusd,
-                    "user_subsidy_remaining_microusd": exc.user_subsidy_remaining_microusd,
-                    "business_subsidy_remaining_microusd": exc.business_subsidy_remaining_microusd,
-                },
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers=exc.headers or None,
             ) from exc
-
-        try:
-            reserve_usage(
-                conn,
-                business_slug,
-                estimated_cost_microusd=estimated_cost,
-                reservation_key=reservation_key,
-                app_user_id=app_user.id,
-                app_user_tier=app_user.tier,
-                purpose=str(body.get("purpose") or "ai_generate"),
-                route="internal_ai_gateway",
-                provider="anthropic",
-                model=model,
-                metadata={"cost_rate_source": rate_source},
-            )
-        except AppBudgetInactive as exc:
-            app_funding.release_funding(conn, reservation_key, metadata={"error": "app_budget_inactive"})
-            raise HTTPException(
-                status_code=402,
-                detail={"error": "app_budget_inactive", "status": exc.status},
-            ) from exc
-        except AppBudgetExceeded as exc:
-            app_funding.release_funding(conn, reservation_key, metadata={"error": "app_budget_exceeded"})
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": "app_budget_exceeded",
-                    "hard_limit_microusd": exc.hard_limit_microusd,
-                    "committed_microusd": exc.committed_microusd,
-                    "requested_microusd": exc.requested_microusd,
-                    "remaining_microusd": exc.remaining_microusd,
-                },
-            ) from exc
-        except AppUserNotFound as exc:
-            app_funding.release_funding(conn, reservation_key, metadata={"error": "unknown_app_user"})
-            raise HTTPException(status_code=400, detail="unknown_app_user") from exc
-
-        # Reservation held. Call the shared provider key server-side. On ANY failure release the hold
-        # (no spend recorded) and surface 502. On success settle at the TRUE provider cost — settle
-        # never re-checks the cap, because the money is already spent and recording truth is
-        # mandatory (mediationplan invariant #8).
-        try:
-            provider_response = caller(payload)
-        except Exception as exc:
-            release_usage(conn, business_slug, reservation_key, error=str(exc))
-            app_funding.release_funding(conn, reservation_key, metadata={"error": str(exc)})
-            raise HTTPException(status_code=502, detail="provider_error") from exc
-
-        usage = provider_response.get("usage") or {}
-        input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        actual_cost = microusd_cost(model, input_tokens, output_tokens)
-        provider_request_id = str(provider_response.get("id") or "")
-
-        settle_usage(
-            conn,
-            business_slug,
-            reservation_key,
-            actual_cost_microusd=actual_cost,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            provider_request_id=provider_request_id,
-            provider="anthropic",
-            model=model,
-        )
-        app_funding.settle_funding(
-            conn,
-            reservation_key,
-            actual_cost_microusd=actual_cost,
-            metadata={"provider_request_id": provider_request_id},
-        )
-
-        return {
-            "success": True,
-            "text": anthropic_text(provider_response),
-            "content": provider_response.get("content") or [],
-            "model": model,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "estimated_cost_microusd": estimated_cost,
-                "actual_cost_microusd": actual_cost,
-            },
-        }
 
     return router

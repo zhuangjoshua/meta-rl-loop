@@ -220,124 +220,22 @@ class TakyonAppApiHandler(BaseHTTPRequestHandler):
                 _json_response(self, status, payload)
                 return
             if route == ["generate"]:
-                token = _cookie_session(self)
-                if not token:
-                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-                    return
-                account_status, account = _tool(handle_business_read_app_account({"business": business, "session_token": token}))
-                if account_status != HTTPStatus.OK:
-                    _json_response(self, account_status, account)
-                    return
-                user = account.get("user") or {}
-                try:
-                    anthropic_payload, model, estimated_input_tokens = _anthropic_payload(body)
-                except Exception as exc:
-                    _json_response(self, HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
-                    return
-                estimated_output_tokens = int(anthropic_payload.get("max_tokens") or 0)
-                try:
-                    estimated_cost = _microusd_cost(
-                        model, estimated_input_tokens, estimated_output_tokens
-                    )
-                    rate_source = _anthropic_rates_microusd_per_token(model)[2]
-                except AnthropicPricingUnavailable as exc:
-                    _json_response(self, HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
-                    return
-                budget = _app_budget_remaining_microusd(business)
-                if budget["status"] != "active":
-                    _json_response(self, HTTPStatus.PAYMENT_REQUIRED, {"success": False, "error": "app budget is not active", "budget": budget})
-                    return
-                if estimated_cost > int(budget["remaining_microusd"]):
-                    _json_response(
-                        self,
-                        HTTPStatus.PAYMENT_REQUIRED,
-                        {
-                            "success": False,
-                            "error": "app usage would exceed budget cap",
-                            "estimated_cost_microusd": estimated_cost,
-                            "budget": budget,
-                        },
-                    )
-                    return
-                api_key = _anthropic_key()
-                if not api_key:
-                    _json_response(self, HTTPStatus.FAILED_DEPENDENCY, {"success": False, "error": "missing Anthropic API credential"})
-                    return
-                provider_request_id = ""
-                try:
-                    provider_response = _call_anthropic(anthropic_payload, api_key)
-                    provider_request_id = str(provider_response.get("id") or "")
-                    usage = provider_response.get("usage") or {}
-                    input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
-                    output_tokens = int(usage.get("output_tokens") or 0)
-                    actual_cost = _microusd_cost(model, input_tokens, output_tokens)
-                    status, usage_payload = _tool(handle_business_record_app_usage({
-                        "business": business,
-                        "app_user_id": user.get("id"),
-                        "app_user_tier": user.get("tier"),
-                        "purpose": body.get("purpose") or "ai_generate",
-                        "route": f"/api/takyon/apps/{business}/generate",
-                        "status": "completed",
-                        "estimated_cost_microusd": estimated_cost,
-                        "actual_cost_microusd": actual_cost,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "provider_request_id": provider_request_id,
-                        "provider": "anthropic",
-                        "model": model,
-                        "metadata": {
-                            "cost_rate_source": rate_source,
-                            "request_metadata": body.get("metadata") or {},
-                        },
-                        "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate:{business}:{user.get('id')}:{provider_request_id or uuid.uuid4().hex}",
-                    }))
-                    if status != HTTPStatus.OK:
-                        _json_response(self, status, usage_payload)
-                        return
-                    _json_response(
-                        self,
-                        HTTPStatus.OK,
-                        {
-                            "success": True,
-                            "text": _anthropic_text(provider_response),
-                            "content": provider_response.get("content") or [],
-                            "model": model,
-                            "usage": {
-                                "input_tokens": input_tokens,
-                                "output_tokens": output_tokens,
-                                "estimated_cost_microusd": estimated_cost,
-                                "actual_cost_microusd": actual_cost,
-                            },
-                            "receipt": usage_payload,
-                        },
-                    )
-                    return
-                except Exception as exc:
-                    _tool(handle_business_record_app_usage({
-                        "business": business,
-                        "app_user_id": user.get("id"),
-                        "app_user_tier": user.get("tier"),
-                        "purpose": body.get("purpose") or "ai_generate",
-                        "route": f"/api/takyon/apps/{business}/generate",
-                        "status": "failed",
-                        "estimated_cost_microusd": estimated_cost,
-                        "actual_cost_microusd": 0,
-                        "provider_request_id": provider_request_id,
-                        "provider": "anthropic",
-                        "model": model,
-                        "error": str(exc),
-                        "metadata": {"request_metadata": body.get("metadata") or {}},
-                        "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate-failed:{business}:{user.get('id')}:{uuid.uuid4().hex}",
-                    }))
-                    _json_response(self, HTTPStatus.BAD_GATEWAY, {"success": False, "error": str(exc)})
-                    return
+                _json_response(
+                    self,
+                    HTTPStatus.GONE,
+                    {
+                        "success": False,
+                        "error": (
+                            "legacy standalone app generate route retired; "
+                            "use the dashboard runtime authority instead"
+                        ),
+                    },
+                )
+                return
         _json_response(self, HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
 def run_app_api_server(host: str = "127.0.0.1", port: int = 8787) -> None:
-    load_takyon_env()
-    server = ThreadingHTTPServer((host, int(port)), TakyonAppApiHandler)
-    print(f"Takyon app API listening on http://{host}:{port}")
-    print("Routes: /api/takyon/apps/<business>/auth/request, /auth/verify, /session, /account, /checkout, /usage, /generate, /api/webhooks/stripe")
-    print("Compatibility route also accepted: /api/generated-apps/<business>/...")
-    server.serve_forever()
+    raise RuntimeError(
+        "legacy standalone app API server retired; use `takyon dashboard` for app-runtime rails"
+    )

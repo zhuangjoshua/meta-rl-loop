@@ -633,4 +633,150 @@ def build_creative_gateway_router() -> APIRouter:
                     ) from exc
                 raise
 
+    @router.post("/meta-control")
+    def meta_control(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        cfg = core._meta_config(require_token=True)
+        operation = str(body.get("operation") or "").strip().lower()
+        if operation not in {"activate", "pause", "set_budget"}:
+            raise HTTPException(status_code=400, detail="operation must be activate, pause, or set_budget")
+
+        ids = {
+            "campaign_id": str(body.get("campaign_id") or "").strip(),
+            "adset_id": str(body.get("adset_id") or "").strip(),
+            "ad_id": str(body.get("ad_id") or "").strip(),
+        }
+        if not ids["campaign_id"] or not ids["adset_id"] or not ids["ad_id"]:
+            raise HTTPException(status_code=400, detail="campaign_id, adset_id, and ad_id are required")
+
+        if operation == "set_budget":
+            try:
+                daily_budget_cents = int(body.get("daily_budget_cents"))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="daily_budget_cents is required for set_budget")
+            if daily_budget_cents <= 0:
+                raise HTTPException(status_code=400, detail="daily_budget_cents must be positive")
+            try:
+                core._meta_graph(
+                    "POST",
+                    ids["adset_id"],
+                    {"daily_budget": daily_budget_cents},
+                    cfg,
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "graph_version": cfg["version"],
+                    "error": str(exc),
+                    "ids": ids,
+                }
+            return {
+                "success": True,
+                "status": "budget_updated",
+                "graph_version": cfg["version"],
+                "ids": ids,
+                "daily_budget_cents": daily_budget_cents,
+                "daily_budget_usd": body.get("daily_budget_usd"),
+                "applied": [{"object": "adset", "id": ids["adset_id"], "daily_budget_cents": daily_budget_cents}],
+            }
+
+        target_status = "ACTIVE" if operation == "activate" else "PAUSED"
+        ordered_ids = [
+            ("campaign", ids["campaign_id"]),
+            ("adset", ids["adset_id"]),
+            ("ad", ids["ad_id"]),
+        ]
+        if operation == "pause":
+            ordered_ids = list(reversed(ordered_ids))
+        applied: list[dict[str, Any]] = []
+        try:
+            for kind, object_id in ordered_ids:
+                core._meta_graph("POST", object_id, {"status": target_status}, cfg)
+                applied.append({"object": kind, "id": object_id, "status": target_status})
+            return {
+                "success": True,
+                "status": "activated" if operation == "activate" else "paused",
+                "graph_version": cfg["version"],
+                "ids": ids,
+                "applied": applied,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "partial_failed" if applied else "failed",
+                "graph_version": cfg["version"],
+                "ids": ids,
+                "applied": applied or None,
+                "error": str(exc),
+            }
+
+    @router.post("/meta-insights")
+    def meta_insights(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        cfg = core._meta_config(require_token=True)
+        level = str(body.get("level") or "campaign").strip().lower()
+        if level not in {"campaign", "adset", "ad"}:
+            raise HTTPException(status_code=400, detail="level must be campaign, adset, or ad")
+
+        object_id = str(body.get(f"{level}_id") or "").strip()
+        if not object_id:
+            raise HTTPException(status_code=400, detail=f"{level}_id is required")
+
+        params: dict[str, Any] = {
+            "fields": ",".join([
+                "account_currency",
+                "campaign_id",
+                "campaign_name",
+                "adset_id",
+                "adset_name",
+                "ad_id",
+                "ad_name",
+                "date_start",
+                "date_stop",
+                "impressions",
+                "reach",
+                "clicks",
+                "spend",
+                "cpc",
+                "cpm",
+                "ctr",
+            ]),
+        }
+        time_range = body.get("time_range") if isinstance(body.get("time_range"), dict) else None
+        if time_range:
+            params["time_range"] = json.dumps(time_range)
+        else:
+            params["date_preset"] = str(body.get("date_preset") or "today").strip().lower() or "today"
+
+        try:
+            result = core._meta_graph("GET", f"{object_id}/insights", params, cfg)
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "graph_version": cfg["version"],
+                "level": level,
+                "object_id": object_id,
+                "error": str(exc),
+            }
+
+        rows = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), list) else []
+        return {
+            "success": True,
+            "status": "synced",
+            "graph_version": cfg["version"],
+            "level": level,
+            "object_id": object_id,
+            "rows": rows,
+        }
+
     return router

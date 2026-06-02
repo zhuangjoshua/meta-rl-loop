@@ -56,17 +56,6 @@ from takyon_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
-from plugins.takyon.app_api import (
-    AnthropicPricingUnavailable as _takyon_app_AnthropicPricingUnavailable,
-    SESSION_COOKIE as TAKYON_APP_SESSION_COOKIE,
-    _anthropic_key as _takyon_app_anthropic_key,
-    _anthropic_payload as _takyon_app_anthropic_payload,
-    _anthropic_rates_microusd_per_token as _takyon_app_anthropic_rates_microusd_per_token,
-    _anthropic_text as _takyon_app_anthropic_text,
-    _app_budget_remaining_microusd as _takyon_app_budget_remaining_microusd,
-    _call_anthropic as _takyon_app_call_anthropic,
-    _microusd_cost as _takyon_app_microusd_cost,
-)
 from plugins.takyon.core import (
     handle_business_create_app_checkout,
     handle_business_read_app_account,
@@ -75,6 +64,8 @@ from plugins.takyon.core import (
     handle_business_request_app_magic_link,
     handle_business_verify_app_magic_link,
 )
+
+TAKYON_APP_SESSION_COOKIE = "takyon_app_session"
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -1351,6 +1342,67 @@ def _takyon_app_route_parts(route: str) -> list[str]:
     return [part for part in route.split("/") if part]
 
 
+def _takyon_app_gateway_error_payload(detail: Any) -> dict[str, Any]:
+    if isinstance(detail, dict):
+        payload = {"success": False}
+        payload.update(detail)
+        if "error" not in payload and "detail" not in payload:
+            payload["detail"] = "gateway_error"
+        return payload
+    return {"success": False, "error": str(detail)}
+
+
+def _takyon_app_broker_generate(
+    *,
+    business: str,
+    body: dict[str, Any],
+    session_token: str,
+) -> tuple[int, dict[str, Any]]:
+    from plugins.takyon.ai_gateway import (
+        GatewayMessageError,
+        broker_message_for_business,
+    )
+    from plugins.takyon.core import _db_backend
+    from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+    if _db_backend() != "postgres":
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app generate requires the Postgres runtime authority",
+        }
+
+    try:
+        resolved_url = _resolve_runtime_database_url()
+    except RuntimeNotConfigured:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app generate authority is not configured",
+        }
+
+    try:
+        import psycopg
+    except Exception:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app generate authority requires psycopg",
+        }
+
+    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+    try:
+        payload = broker_message_for_business(
+            conn,
+            business_slug=business,
+            raw_session_token=session_token,
+            body=body,
+            audit_route=f"/api/takyon/apps/{business}/generate",
+        )
+        return int(HTTPStatus.OK), payload
+    except GatewayMessageError as exc:
+        return exc.status_code, _takyon_app_gateway_error_payload(exc.detail)
+    finally:
+        conn.close()
+
+
 # Canonical product-app rail sub-routes served by the shared Hermes app
 # runtime. On a product host (<slug>.<company-base-domain>) the business is
 # fixed by the hostname, so a generated front-end can call these rails at any
@@ -1491,104 +1543,12 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        account_status, account = _takyon_app_tool(handle_business_read_app_account({
-            "business": business,
-            "session_token": token,
-        }))
-        if account_status != int(HTTPStatus.OK):
-            return _takyon_app_json(account_status, account)
-        user = account.get("user") or {}
-        try:
-            anthropic_payload, model, estimated_input_tokens = _takyon_app_anthropic_payload(body)
-        except Exception as exc:
-            return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)})
-        estimated_output_tokens = int(anthropic_payload.get("max_tokens") or 0)
-        try:
-            estimated_cost = _takyon_app_microusd_cost(
-                model, estimated_input_tokens, estimated_output_tokens
-            )
-            rate_source = _takyon_app_anthropic_rates_microusd_per_token(model)[2]
-        except _takyon_app_AnthropicPricingUnavailable as exc:
-            return _takyon_app_json(
-                HTTPStatus.BAD_REQUEST, {"success": False, "error": str(exc)}
-            )
-        budget = _takyon_app_budget_remaining_microusd(business)
-        if budget["status"] != "active":
-            return _takyon_app_json(HTTPStatus.PAYMENT_REQUIRED, {"success": False, "error": "app budget is not active", "budget": budget})
-        if estimated_cost > int(budget["remaining_microusd"]):
-            return _takyon_app_json(
-                HTTPStatus.PAYMENT_REQUIRED,
-                {
-                    "success": False,
-                    "error": "app usage would exceed budget cap",
-                    "estimated_cost_microusd": estimated_cost,
-                    "budget": budget,
-                },
-            )
-        api_key = _takyon_app_anthropic_key()
-        if not api_key:
-            return _takyon_app_json(HTTPStatus.FAILED_DEPENDENCY, {"success": False, "error": "missing Anthropic API credential"})
-        provider_request_id = ""
-        try:
-            provider_response = _takyon_app_call_anthropic(anthropic_payload, api_key)
-            provider_request_id = str(provider_response.get("id") or "")
-            usage = provider_response.get("usage") or {}
-            input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
-            output_tokens = int(usage.get("output_tokens") or 0)
-            actual_cost = _takyon_app_microusd_cost(model, input_tokens, output_tokens)
-            status, usage_payload = _takyon_app_tool(handle_business_record_app_usage({
-                "business": business,
-                "app_user_id": user.get("id"),
-                "app_user_tier": user.get("tier"),
-                "purpose": body.get("purpose") or "ai_generate",
-                "route": f"/api/takyon/apps/{business}/generate",
-                "status": "completed",
-                "estimated_cost_microusd": estimated_cost,
-                "actual_cost_microusd": actual_cost,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "provider_request_id": provider_request_id,
-                "provider": "anthropic",
-                "model": model,
-                "metadata": {
-                    "cost_rate_source": rate_source,
-                    "request_metadata": body.get("metadata") or {},
-                },
-                "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate:{business}:{user.get('id')}:{provider_request_id or uuid.uuid4().hex}",
-            }))
-            if status != int(HTTPStatus.OK):
-                return _takyon_app_json(status, usage_payload)
-            return _takyon_app_json(HTTPStatus.OK, {
-                "success": True,
-                "text": _takyon_app_anthropic_text(provider_response),
-                "content": provider_response.get("content") or [],
-                "model": model,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "estimated_cost_microusd": estimated_cost,
-                    "actual_cost_microusd": actual_cost,
-                },
-                "receipt": usage_payload,
-            })
-        except Exception as exc:
-            _takyon_app_tool(handle_business_record_app_usage({
-                "business": business,
-                "app_user_id": user.get("id"),
-                "app_user_tier": user.get("tier"),
-                "purpose": body.get("purpose") or "ai_generate",
-                "route": f"/api/takyon/apps/{business}/generate",
-                "status": "failed",
-                "estimated_cost_microusd": estimated_cost,
-                "actual_cost_microusd": 0,
-                "provider_request_id": provider_request_id,
-                "provider": "anthropic",
-                "model": model,
-                "error": str(exc),
-                "metadata": {"request_metadata": body.get("metadata") or {}},
-                "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"generate-failed:{business}:{user.get('id')}:{uuid.uuid4().hex}",
-            }))
-            return _takyon_app_json(HTTPStatus.BAD_GATEWAY, {"success": False, "error": str(exc)})
+        status, payload = _takyon_app_broker_generate(
+            business=business,
+            body=body,
+            session_token=token,
+        )
+        return _takyon_app_json(status, payload)
 
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
@@ -2489,6 +2449,125 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "business_slug": slug,
             "reason": "read_failed",
         }
+
+
+@app.get("/api/takyon/businesses/{slug}/creative-credits/packs")
+async def get_takyon_business_creative_credit_packs(
+    request: Request, slug: str
+) -> dict[str, Any]:
+    """Dashboard wrapper exposing the existing creative-credit pack catalog."""
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        from plugins.takyon.control_api import configured_creative_credit_packs
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        import psycopg
+
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="not_found")
+        finally:
+            conn.close()
+        return {
+            "business_slug": slug,
+            "packs": configured_creative_credit_packs(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business creative credit packs failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/takyon/businesses/{slug}/creative-credits/checkout")
+async def create_takyon_business_creative_credit_checkout(
+    request: Request, slug: str
+) -> dict[str, Any]:
+    """Dashboard wrapper for the existing creative-credit Stripe checkout rail."""
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    pack_id = str(body.get("pack_id") or "").strip()
+    if not pack_id:
+        raise HTTPException(status_code=400, detail="pack_id is required")
+    success_path = _same_origin_path(str(body.get("success_path") or "/"))
+    cancel_path = _same_origin_path(str(body.get("cancel_path") or success_path))
+    try:
+        from plugins.takyon import stripe_util
+        from plugins.takyon.control_api import create_creative_credit_checkout_session
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        import psycopg
+
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="not_found")
+        finally:
+            conn.close()
+
+        session, pack = create_creative_credit_checkout_session(
+            str(principal.user_id),
+            slug,
+            pack_id=pack_id,
+            success_url=_dashboard_absolute_url(request, success_path),
+            cancel_url=_dashboard_absolute_url(request, cancel_path),
+        )
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="unknown_credit_pack") from exc
+    except stripe_util.StripeError as exc:
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(
+                status_code=503, detail="creative_credit_checkout_unconfigured"
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"stripe_error: {message}") from exc
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business creative credit checkout failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "checkout_url": session.get("url"),
+        "session_id": session.get("id"),
+        "business_slug": slug,
+        "pack_id": pack["id"],
+        "credits": pack["credits"],
+        "amount_cents": pack["amount_cents"],
+    }
 
 
 # ---------------------------------------------------------------------------

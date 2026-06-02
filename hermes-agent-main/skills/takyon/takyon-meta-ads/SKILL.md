@@ -1,7 +1,7 @@
 ---
 name: takyon-meta-ads
-description: Launch a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the access token, then create a PAUSED Campaign/AdSet/Ad. Never serves or spends; activation is out of scope. Test-mode businesses suppress everything to a local receipt.
-version: 1.0.0
+description: Launch and operate a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the token, create a PAUSED Campaign/AdSet/Ad, then explicitly activate/pause/update budget and sync ad-platform metrics through guarded tools. Test-mode businesses suppress to local receipts.
+version: 1.1.0
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -16,15 +16,19 @@ metadata:
       [
         business_read_business,
         business_meta_ad_launch,
+        business_meta_ad_control,
+        business_meta_ad_insights_sync,
       ]
     routing:
-      owns: Meta ad launch staging from a finished UGC or static-image asset, including preflight and paused Campaign/AdSet/Ad creation
+      owns: Meta ad launch staging, explicit control, and ad-platform metrics sync from a finished UGC or static-image asset
       when_to_use:
         - a finished UGC or static ad asset needs to be staged as a paused Meta campaign
         - Meta token or ad-account preflight is needed before launch work
+        - a launched Meta ad needs to be activated, paused, or have its daily budget updated
+        - ad-platform delivery metrics need to be synced into Takyon for later tracking
       do_not_use_for:
-        - activating live spend or changing live budgets
         - building the video asset itself
+        - inventing conversion attribution, CAC, or ROAS when Takyon has not recorded join keys
   takyon:
     scope: business
     allowed_roots: [product, distribution, metrics]
@@ -32,6 +36,9 @@ metadata:
     publication:
       - distribution/meta-ads/<slug>/plan.json
       - distribution/meta-ads/<slug>/receipt.json
+      - distribution/meta-ads/<slug>/actions/<idempotency>.json
+      - metrics/meta-ads/<slug>/insights.jsonl
+      - metrics/meta-ads/<slug>/syncs/<idempotency>.json
 
 required_environment_variables: [META_ACCESS_TOKEN]
 required_credential_files: []
@@ -45,17 +52,23 @@ Turn a finished UGC video or static image bundle into a **paid Meta ad** for one
 This skill is the **distribution** half of the creative pipeline: `ugc-video-ad` produces
 `product/ugc-ads/<slug>/ad.mp4`, while `static-ad-creative-generator` produces
 `product/static-ads/<slug>/...png`. This skill turns one of those assets into a Meta
-**AdCreative** and builds a **Campaign → AdSet → Ad** — **always PAUSED**.
+**AdCreative** and builds a **Campaign → AdSet → Ad** — created **PAUSED first**, then
+optionally controlled through a separate guarded tool.
 
-Two hard layers stay separate:
+Three hard layers stay separate:
 
 - **Asset layer** — the video or image. Owned by `ugc-video-ad` / `static-ad-creative-generator`,
   lives under `product/`. This skill never regenerates or edits it; it only consumes the finished asset.
-- **Launch layer** — the campaign objects + spend. Owned here, lives under `distribution/`,
-  and runs through the guarded **`business_meta_ad_launch`** tool.
+- **Launch/control layer** — the campaign objects + explicit activate/pause/budget changes.
+  Owned here, lives under `distribution/`, and runs through the guarded
+  **`business_meta_ad_launch`** and **`business_meta_ad_control`** tools.
+- **Metrics layer** — ad-platform delivery metrics only. Owned here, lives under `metrics/`,
+  and runs through **`business_meta_ad_insights_sync`**.
 
-The tool **never activates anything and never spends**. Everything it creates is `PAUSED`.
-Flipping an ad live (the actual spend decision) is deliberately not part of this skill.
+The **launch** tool never activates anything; it only creates `PAUSED` objects. Activation,
+pausing, and daily-budget changes are explicit follow-up control actions. Insights sync records
+Meta delivery metrics like spend, impressions, clicks, CTR, CPC, and CPM, but it does **not**
+invent business attribution.
 
 ## When to Use
 
@@ -64,23 +77,35 @@ Flipping an ad live (the actual spend decision) is deliberately not part of this
 - You need to verify the Meta access token / which ad accounts it can touch (preflight)
   before spending any effort.
 - You want to stage a campaign safely (PAUSED) for human review before it ever serves.
+- You need to explicitly activate, pause, or update the daily budget of a previously launched
+  Meta campaign.
+- You want to sync delivery metrics from Meta back into Takyon for future tracking.
 
-**Do not use for:** activating/un-pausing ads or changing live budgets (out of scope —
-spend is a separate, human-gated decision); non-Meta channels (use `takyon-x`
-or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
+**Do not use for:** non-Meta channels (use `takyon-x` or `takyon-distribution`); building
+the asset itself (use `ugc-video-ad` or `static-ad-creative-generator`); claiming conversion
+attribution or CAC when the join keys have not been recorded.
 
 ## Quick Reference
 
 - Primary root: `distribution/`
-- Publication paths: `distribution/meta-ads/<slug>/plan.json`, `distribution/meta-ads/<slug>/receipt.json`
-- Tool used by this skill: **`business_meta_ad_launch`** (preflight + PAUSED launch)
+- Publication paths:
+  `distribution/meta-ads/<slug>/plan.json`,
+  `distribution/meta-ads/<slug>/receipt.json`,
+  `distribution/meta-ads/<slug>/actions/<idempotency>.json`,
+  `metrics/meta-ads/<slug>/insights.jsonl`,
+  `metrics/meta-ads/<slug>/syncs/<idempotency>.json`
+- Tools used by this skill:
+  **`business_meta_ad_launch`** (preflight + PAUSED launch),
+  **`business_meta_ad_control`** (activate, pause, set_budget),
+  **`business_meta_ad_insights_sync`** (delivery metrics sync)
 - Upstream assets: `product/ugc-ads/<slug>/ad.mp4` from `ugc-video-ad` or a local image from `product/static-ads/<slug>/`
-- Safety: every object is created `PAUSED`; `daily_budget_usd` is capped by
-  `TAKYON_META_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Meta.
+- Safety: launch always creates `PAUSED`; `daily_budget_usd` is capped by
+  `TAKYON_META_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Meta; metrics sync is ad-platform only and does not imply business attribution.
 
 ## Prerequisites
 
-- The Takyon toolset must be available; **`business_meta_ad_launch`** must be registered
+- The Takyon toolset must be available; **`business_meta_ad_launch`**,
+  **`business_meta_ad_control`**, and **`business_meta_ad_insights_sync`** must be registered
   (gated in frontmatter `metadata.hermes.requires_tools`).
 - **A finished UGC video** at `product/ugc-ads/<slug>/ad.mp4` (build it first with
   `ugc-video-ad`).
@@ -118,14 +143,20 @@ or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
 - **Draft the plan:** write `distribution/meta-ads/<slug>/plan.json` from
   [templates/plan.json](templates/plan.json) (objective, daily budget, targeting, the ad
   copy + destination link, and `ad_video_path`).
-- **Launch (always PAUSED):** call `business_meta_ad_launch` with `mode: "launch"`,
-  `ad_video_path`, and the `campaign`/`adset`/`ad` blocks. In **test mode** the tool writes a
-  suppressed `receipt.json` and calls Meta **not at all**. In **live mode** it uploads the
-  video, builds the creative, and creates Campaign/AdSet/Ad **PAUSED**, then writes
-  `receipt.json` with the real object IDs.
+- **Launch (always PAUSED first):** call `business_meta_ad_launch` with `mode: "launch"`,
+  `ad_video_path` or `ad_image_path`, and the `campaign`/`adset`/`ad` blocks. In **test mode**
+  the tool writes a suppressed `receipt.json` and calls Meta **not at all**. In **live mode**
+  it uploads the asset, builds the creative, and creates Campaign/AdSet/Ad **PAUSED**, then
+  writes `receipt.json` with the real object IDs.
+- **Control (explicit):** when the operator wants to serve or stop serving, call
+  `business_meta_ad_control` using the launch slug/receipt. `activate` flips the campaign live,
+  `pause` stops it again, and `set_budget` updates the ad set daily budget under the same
+  safety cap.
+- **Metrics sync:** call `business_meta_ad_insights_sync` on the launch slug/receipt to write
+  a durable delivery snapshot under `metrics/meta-ads/<slug>/`.
 - The tool is **idempotent** on `idempotency_key`: a retry with the same key returns the
   existing receipt instead of creating duplicate Meta objects.
-- The tool **records the launch itself** (event + receipt). Do not hand-write success.
+- Each tool records its own durable truth (event + receipt/snapshot). Do not hand-write success.
 
 ## Procedure
 
@@ -144,10 +175,13 @@ or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
      Meta objects exist.
    - **Live mode** → expect `status: "created_paused"` with `ids` for video/creative/
      campaign/adset/ad, and a `receipt.json` with those IDs.
-5. **Verify** — read `distribution/meta-ads/<slug>/receipt.json`. Confirm `paused: true`.
-   For a live launch, the operator (a human) reviews the PAUSED ad in Meta Ads Manager and
-   activates it there; this skill does not activate.
-6. **Keep state truthful** — if a live step fails after some objects were created, the tool
+5. **Control if needed** — if the operator wants the ad live, call
+   `business_meta_ad_control` with `operation: "activate"` and the same slug. To stop it, use
+   `operation: "pause"`. To change pace, use `operation: "set_budget"` with
+   `daily_budget_usd`.
+6. **Sync metrics** — call `business_meta_ad_insights_sync` with `level: "campaign"` (or
+   `adset` / `ad`) to persist Meta delivery metrics under `metrics/meta-ads/<slug>/`.
+7. **Keep state truthful** — if a live step fails after some objects were created, the tool
    writes a `partial_failed` receipt with the IDs that exist. Surface that blocker; do not
    claim success.
 
@@ -157,6 +191,10 @@ or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
 - `distribution/meta-ads/<slug>/receipt.json` — the tool-written truth of the launch:
   `status` (`suppressed_test_mode` | `created_paused` | `partial_failed`), `paused`, the
   Meta object `ids` (live), the budget, and the source `ad_video_path`.
+- `distribution/meta-ads/<slug>/actions/<idempotency>.json` — the tool-written truth of each
+  control action (`activate`, `pause`, `set_budget`).
+- `metrics/meta-ads/<slug>/syncs/<idempotency>.json` and `metrics/meta-ads/<slug>/insights.jsonl`
+  — the tool-written truth of each metrics sync.
 
 ## Publication
 
@@ -164,22 +202,30 @@ or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
   the `distribution/` root, where `<slug>` derives from the campaign/video (override with
   `slug`).
 - The durable truth of a launch is the **`receipt.json`** written by
-  `business_meta_ad_launch`, plus the `meta_ad.launch` event it commits. Live external state
-  (the real Meta objects) is referenced by ID in that receipt — never claimed without it.
+  `business_meta_ad_launch`, plus the `meta_ad.launch` event it commits.
+- The durable truth of control actions is the action receipt written by
+  `business_meta_ad_control`, plus the matching `meta_ad.activate`, `meta_ad.pause`, or
+  `meta_ad.budget_update` event.
+- The durable truth of metrics sync is the sync receipt / JSONL snapshot written by
+  `business_meta_ad_insights_sync`, plus the `meta_ad.insights_sync` event.
+- Live external state (the real Meta objects) is referenced by ID in the launch receipt —
+  never claimed without it.
 - The upstream asset's truth source remains `business_ugc_ad_write` under `product/`.
 
 ## Common Pitfalls
 
-- **Treating PAUSED as live.** This skill stages ads; it never serves or spends. Activation
-  is a separate human decision in Ads Manager.
+- **Treating PAUSED as live.** Launch creates only paused objects. Serving starts only after
+  an explicit `business_meta_ad_control` activate step.
 - **Launching without preflight.** Always confirm the token + ad account first; a bad token
   fails the whole chain mid-way.
 - **No thumbnail.** A Meta video creative needs an image. If the auto thumbnail is not ready
   yet, pass `ad.image_url` or retry shortly — do not pretend the creative was made.
 - **Budget over the cap.** `daily_budget_usd` above `TAKYON_META_MAX_DAILY_BUDGET_USD` is
-  rejected. Lower it or set the env cap deliberately.
+  rejected on both launch and `set_budget`. Lower it or set the env cap deliberately.
 - **Editing the UGC mp4 here.** The video is a `product/` asset owned by `ugc-video-ad`.
-- **Hand-writing a receipt.** Only the tool writes `receipt.json`; never fake it.
+- **Assuming metrics imply attribution.** Insights sync records Meta delivery metrics, not
+  downstream business outcomes unless Takyon has separate join keys.
+- **Hand-writing receipts.** Only the tools write Meta launch/control/sync receipts; never fake them.
 
 ## Verification Checklist
 
@@ -188,20 +234,25 @@ or `takyon-distribution`); building the video itself (use `ugc-video-ad`).
 - [ ] `distribution/meta-ads/<slug>/plan.json` exists with `ad_video_path` and a capped budget.
 - [ ] Launch result + `receipt.json` show `paused: true` and the right `status`.
 - [ ] Live launches carry real Meta `ids`; test launches are `suppressed_test_mode` with no IDs.
-- [ ] No object was activated; no spend was incurred by this skill.
-- [ ] No state was written outside `distribution/` (asset stays under `product/`).
+- [ ] Any activate/pause/set_budget action has its own action receipt under `distribution/meta-ads/<slug>/actions/`.
+- [ ] Any metrics sync has a receipt under `metrics/meta-ads/<slug>/syncs/` and appended JSONL under `metrics/meta-ads/<slug>/insights.jsonl`.
+- [ ] Launch/control state stayed under `distribution/`, metrics state stayed under `metrics/`, and the asset stayed under `product/`.
 
 ## Rules
 
 1. Keep work **business-scoped** (one business per run) and one campaign per `<slug>`.
-2. **Never activate and never spend.** Only `PAUSED` objects; activation is out of scope.
-3. **Do not fake side effects** — Meta calls, object IDs, or the receipt. The tool records
-   the launch; the skill prose never claims a live launch without the tool's receipt.
-4. Use the canonical tool (`business_meta_ad_launch`) and path
-   (`distribution/meta-ads/<slug>/`) — never parallel state.
+2. **Launch paused first.** Only `business_meta_ad_launch` may create the campaign objects,
+   and it must create them `PAUSED`.
+3. **Do not fake side effects** — Meta calls, object IDs, activation, budget changes, or
+   metrics sync. The guarded tools record them; the skill prose never claims them without the
+   tool receipts.
+4. Use the canonical tools (`business_meta_ad_launch`, `business_meta_ad_control`,
+   `business_meta_ad_insights_sync`) and canonical paths — never parallel state.
 5. Keep the **asset** layer (`product/`, owned by `ugc-video-ad`) and the **launch** layer
    (`distribution/`, owned here) separate.
-6. Credentials come from env/`.env` only; never hardcode tokens.
+6. Keep **metrics** under `metrics/` and do not present ad-platform metrics as business
+   attribution unless Takyon has separate evidence.
+7. Credentials come from env/`.env` only; never hardcode tokens.
 
 ## Troubleshooting
 

@@ -26,6 +26,8 @@ from plugins.takyon.core import (
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
+    handle_business_meta_ad_control,
+    handle_business_meta_ad_insights_sync,
     handle_business_write_file,
     handle_business_meta_ad_launch,
     handle_business_publish_outreach,
@@ -109,6 +111,8 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
     assert toolsets["business_static_ad_generate"] == "takyon-authority"
     assert toolsets["business_meta_ad_launch"] == "takyon-authority"
+    assert toolsets["business_meta_ad_control"] == "takyon-authority"
+    assert toolsets["business_meta_ad_insights_sync"] == "takyon-authority"
     assert toolsets["business_verify_product_surface"] == "takyon-authority"
     assert toolsets["business_check_runtime_capabilities"] == "takyon-authority"
     assert takyon_toolset_name("business_gc") == "takyon-authority"
@@ -3078,6 +3082,37 @@ def _meta_launch_args(**overrides):
     return args
 
 
+def _write_meta_launch_receipt(tmp_path, *, business="clipbook", slug="demo-meta", mode="live"):
+    receipt_path = (
+        tmp_path
+        / "businesses"
+        / business
+        / "distribution"
+        / "meta-ads"
+        / slug
+        / "receipt.json"
+    )
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "idempotency_key": f"{slug}-launch-v1",
+        "business": business,
+        "slug": slug,
+        "success": True,
+        "mode": mode,
+        "status": "created_paused" if mode == "live" else "suppressed_test_mode",
+        "paused": True,
+        "ad_video_path": f"product/ugc-ads/{slug}/ad.mp4",
+        "ids": {
+            "creative_id": "creative-1",
+            "campaign_id": "campaign-1",
+            "adset_id": "adset-1",
+            "ad_id": "ad-1",
+        },
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    return receipt_path
+
+
 def test_business_meta_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch)
     video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
@@ -3293,6 +3328,181 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
     assert result["success"] is True
     assert result["status"] == "created_paused"
     assert result["balance_credits"] == 4
+
+
+def test_business_meta_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="test")
+    _write_meta_launch_receipt(tmp_path, mode="test")
+
+    result = json.loads(
+        handle_business_meta_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "operation": "activate",
+                "idempotency_key": "clipbook-meta-activate-test-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    assert result["operation"] == "activate"
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert receipt_abs.is_file()
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["mode"] == "test"
+
+    with store._connect() as conn:
+        event = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert event["event_type"] == "meta_ad.activate"
+
+    repeat = json.loads(
+        handle_business_meta_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "operation": "activate",
+                "idempotency_key": "clipbook-meta-activate-test-v1",
+            }
+        )
+    )
+    assert repeat["success"] is True
+    assert repeat["idempotent"] is True
+
+
+def test_business_meta_ad_control_live_activate_records_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_meta_launch_receipt(tmp_path)
+    calls: list[tuple[str, dict]] = []
+
+    def fake_gateway(endpoint, payload):
+        calls.append((endpoint, payload))
+        return {
+            "success": True,
+            "status": "activated",
+            "graph_version": "v23.0",
+            "applied": [
+                {"object": "campaign", "id": "campaign-1", "status": "ACTIVE"},
+                {"object": "adset", "id": "adset-1", "status": "ACTIVE"},
+                {"object": "ad", "id": "ad-1", "status": "ACTIVE"},
+            ],
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(
+        handle_business_meta_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "operation": "activate",
+                "idempotency_key": "clipbook-meta-activate-live-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "activated"
+    assert calls[0][0] == "meta-control"
+    assert calls[0][1]["campaign_id"] == "campaign-1"
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "meta_ad.activate"
+    payload = json.loads(row["payload_json"])
+    assert payload["receipt"].startswith("distribution/meta-ads/demo-meta/actions/")
+
+
+def test_business_meta_ad_control_rejects_over_cap_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_META_MAX_DAILY_BUDGET_USD", "10")
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_meta_launch_receipt(tmp_path)
+
+    result = json.loads(
+        handle_business_meta_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "operation": "set_budget",
+                "daily_budget_usd": 999,
+                "idempotency_key": "clipbook-meta-budget-cap-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "exceeds the safety cap" in result["error"]
+
+
+def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_meta_launch_receipt(tmp_path)
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "synced",
+            "graph_version": "v23.0",
+            "rows": [
+                {
+                    "account_currency": "USD",
+                    "campaign_id": "campaign-1",
+                    "campaign_name": "Demo Campaign",
+                    "date_start": "2026-06-01",
+                    "date_stop": "2026-06-01",
+                    "impressions": "1000",
+                    "reach": "700",
+                    "clicks": "25",
+                    "spend": "12.34",
+                    "ctr": "2.5",
+                    "cpc": "0.4936",
+                    "cpm": "12.34",
+                }
+            ],
+        },
+    )
+
+    result = json.loads(
+        handle_business_meta_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "level": "campaign",
+                "date_preset": "last_7d",
+                "idempotency_key": "clipbook-meta-insights-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "synced"
+    assert result["totals"]["spend_cents"] == 1234
+    assert result["totals"]["clicks"] == 25
+
+    metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
+    assert metrics_abs.is_file()
+    lines = [json.loads(line) for line in metrics_abs.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[-1]["totals"]["spend_cents"] == 1234
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "meta_ad.insights_sync"
+    payload = json.loads(row["payload_json"])
+    assert payload["receipt"].startswith("metrics/meta-ads/demo-meta/syncs/")
 
 
 def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):

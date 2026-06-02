@@ -5,7 +5,7 @@
     "slashPalette": {
       "defaultVisible": ["create", "use", "status", "files", "read", "pulse", "wake", "commands", "exit"],
       "contextVisible": {
-        "businessWithProductSurface": ["app-server"]
+        "businessWithProductSurface": []
       }
     },
     "thinking": {
@@ -139,7 +139,6 @@
     {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth", "palette": "advanced"},
     {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
-    {"name": "app-server", "description": "Run the local product app API server", "requiresBusiness": false, "priorityBand": "p2_growth", "palette": "contextual"},
     {"name": "gc", "description": "Garbage collect stale ephemeral Takyon state", "requiresBusiness": false, "priorityBand": "p4_maintenance", "palette": "advanced"},
     {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"}
   ],

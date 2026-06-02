@@ -175,6 +175,65 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     assert ai_gateway.get_gateway_conn in overrides
 
 
+def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.ai_gateway as ai_gateway
+    import plugins.takyon.core as core
+    import psycopg
+    import takyon_cli.web_server as web_server
+
+    calls: list[tuple[object, ...]] = []
+
+    class _Conn:
+        def close(self):
+            calls.append(("close",))
+
+    def _fake_connect(url, autocommit=True, prepare_threshold=None):
+        calls.append(("connect", url, autocommit, prepare_threshold))
+        return _Conn()
+
+    def _fake_broker(conn, *, business_slug, raw_session_token, body, audit_route, caller=object()):
+        calls.append(("broker", business_slug, raw_session_token, body, audit_route, conn.__class__.__name__))
+        return {
+            "success": True,
+            "text": "brokered",
+            "content": [{"type": "text", "text": "brokered"}],
+            "model": "claude-sonnet-4-6",
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "estimated_cost_microusd": 123,
+                "actual_cost_microusd": 111,
+            },
+        }
+
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+    monkeypatch.setattr(ai_gateway, "broker_message_for_business", _fake_broker)
+
+    client = TestClient(web_server.app)
+    resp = client.post(
+        "/api/takyon/apps/mathflow/generate",
+        json={"prompt": "hi"},
+        cookies={web_server.TAKYON_APP_SESSION_COOKIE: "sess-123"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert resp.json()["text"] == "brokered"
+    assert calls[0] == ("connect", "postgres://runtime", True, None)
+    assert calls[1][0] == "broker"
+    assert calls[1][1:5] == (
+        "mathflow",
+        "sess-123",
+        {"prompt": "hi"},
+        "/api/takyon/apps/mathflow/generate",
+    )
+    assert calls[-1] == ("close",)
+
+
 def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     import plugins.takyon.billing as billing
     import plugins.takyon.core as core

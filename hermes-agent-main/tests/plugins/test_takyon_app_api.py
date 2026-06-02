@@ -6,6 +6,7 @@ from plugins.takyon.app_api import (
     _anthropic_payload,
     _app_budget_remaining_microusd,
     _microusd_cost,
+    run_app_api_server,
 )
 from plugins.takyon.ai_provider import AnthropicPricingUnavailable
 from plugins.takyon.core import TakyonStore
@@ -75,3 +76,8 @@ def test_app_budget_remaining_counts_recorded_usage(tmp_path, monkeypatch, pg_st
     assert budget["hard_limit_microusd"] == 1000
     assert budget["used_microusd"] == 375
     assert budget["remaining_microusd"] == 625
+
+
+def test_run_app_api_server_is_retired():
+    with pytest.raises(RuntimeError, match="retired"):
+        run_app_api_server()

@@ -85,6 +85,8 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_ugc_ad_generate",
         "business_static_ad_generate",
         "business_meta_ad_launch",
+        "business_meta_ad_control",
+        "business_meta_ad_insights_sync",
         "business_set_control",
         "business_schedule_ceo_wakeup",
         "business_gc",
@@ -9558,6 +9560,136 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
     }
 
 
+def _meta_publication_paths(
+    store: "TakyonStore",
+    business: str,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt_raw = str(args.get("receipt_path") or "").strip()
+    if receipt_raw:
+        receipt_rel = _safe_relpath(receipt_raw, field="receipt_path").as_posix()
+        if not receipt_rel.startswith("distribution/meta-ads/") or not receipt_rel.endswith("/receipt.json"):
+            raise TakyonError("receipt_path must point to distribution/meta-ads/<slug>/receipt.json")
+        slug = Path(receipt_rel).parent.name
+    else:
+        slug_raw = str(args.get("slug") or "").strip()
+        if not slug_raw:
+            raise TakyonError("slug or receipt_path is required")
+        slug = _file_slug(slug_raw, "meta-ad")
+        receipt_rel = f"distribution/meta-ads/{slug}/receipt.json"
+    receipt_abs = store._resolve_business_file(business, receipt_rel)
+    publication_rel = str(Path(receipt_rel).parent).replace("\\", "/")
+    return {
+        "slug": slug,
+        "publication_rel": publication_rel,
+        "publication_abs": receipt_abs.parent,
+        "receipt_rel": receipt_rel,
+        "receipt_abs": receipt_abs,
+    }
+
+
+def _meta_load_launch_receipt(
+    store: "TakyonStore",
+    business: str,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    paths = _meta_publication_paths(store, business, args)
+    receipt_abs = paths["receipt_abs"]
+    if not receipt_abs.is_file():
+        raise TakyonError(
+            f"Meta launch receipt not found at {paths['receipt_rel']}; launch the paused Meta ad first"
+        )
+    try:
+        receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise TakyonError(f"Meta launch receipt is unreadable at {paths['receipt_rel']}: {exc}") from exc
+    if not isinstance(receipt, dict):
+        raise TakyonError(f"Meta launch receipt at {paths['receipt_rel']} is not a JSON object")
+    return {**paths, "receipt": receipt}
+
+
+def _meta_receipt_ids(receipt: Mapping[str, Any]) -> dict[str, str]:
+    ids = receipt.get("ids") if isinstance(receipt.get("ids"), dict) else {}
+    return {
+        "campaign_id": str(ids.get("campaign_id") or "").strip(),
+        "adset_id": str(ids.get("adset_id") or "").strip(),
+        "ad_id": str(ids.get("ad_id") or "").strip(),
+        "creative_id": str(ids.get("creative_id") or "").strip(),
+        "video_id": str(ids.get("video_id") or "").strip(),
+        "image_hash": str(ids.get("image_hash") or "").strip(),
+    }
+
+
+def _meta_control_event_type(operation: str) -> str:
+    op = str(operation or "").strip().lower()
+    if op == "activate":
+        return "meta_ad.activate"
+    if op == "pause":
+        return "meta_ad.pause"
+    if op == "set_budget":
+        return "meta_ad.budget_update"
+    return "meta_ad.control"
+
+
+def _meta_money_to_cents(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int((Decimal(raw) * 100).quantize(Decimal("1")))
+    except Exception:
+        return 0
+
+
+def _meta_int_metric(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "rows": len(rows),
+        "spend_cents": 0,
+        "spend_usd": 0.0,
+        "impressions": 0,
+        "reach": 0,
+        "clicks": 0,
+        "cpc": None,
+        "cpm": None,
+        "ctr": None,
+        "currency": None,
+        "date_start": None,
+        "date_stop": None,
+    }
+    for row in rows:
+        if not totals["currency"]:
+            currency = str(row.get("account_currency") or "").strip()
+            totals["currency"] = currency or None
+        start = str(row.get("date_start") or "").strip() or None
+        stop = str(row.get("date_stop") or "").strip() or None
+        if start and (totals["date_start"] is None or start < totals["date_start"]):
+            totals["date_start"] = start
+        if stop and (totals["date_stop"] is None or stop > totals["date_stop"]):
+            totals["date_stop"] = stop
+        totals["spend_cents"] += _meta_money_to_cents(row.get("spend"))
+        totals["impressions"] += _meta_int_metric(row.get("impressions"))
+        totals["reach"] += _meta_int_metric(row.get("reach"))
+        totals["clicks"] += _meta_int_metric(row.get("clicks"))
+
+    totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
+    if totals["clicks"] > 0:
+        totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
+    if totals["impressions"] > 0:
+        totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
+        totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
+    return totals
+
+
 def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
     """Preflight or launch a PAUSED Meta ad from a UGC video or static image. Never activates."""
     receipt_rel: str | None = None
@@ -9776,6 +9908,411 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "balance_credits": receipt.get("balance_credits"),
             "reserved_credits": receipt.get("reserved_credits"),
             "value": receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
+    """Activate, pause, or update the daily budget for a previously launched Meta ad."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        operation = str(args.get("operation") or "").strip().lower()
+        if operation not in {"activate", "pause", "set_budget"}:
+            raise TakyonError("operation must be one of: activate, pause, set_budget")
+
+        launch = _meta_load_launch_receipt(store, business, args)
+        receipt = launch["receipt"]
+        ids = _meta_receipt_ids(receipt)
+        if not ids["campaign_id"] or not ids["adset_id"] or not ids["ad_id"]:
+            raise TakyonError(
+                f"Meta launch receipt at {launch['receipt_rel']} does not contain campaign/adset/ad ids"
+            )
+        business_mode = _business_mode(store, business)
+        action_key = _file_slug(f"{operation}-{idempotency_key}", operation)
+        action_rel = f"{launch['publication_rel']}/actions/{action_key}.json"
+        action_abs = store._resolve_business_file(business, action_rel)
+        prior = _read_existing_receipt(action_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_meta_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "idempotent": True,
+                "operation": operation,
+                "status": prior.get("status"),
+                "receipt": action_rel,
+                "value": prior,
+            })
+
+        budget_usd = None
+        budget_cents = None
+        if operation == "set_budget":
+            raw_budget = args.get("daily_budget_usd", args.get("daily_budget"))
+            try:
+                budget_usd = float(raw_budget)
+            except (TypeError, ValueError):
+                raise TakyonError("daily_budget_usd is required for operation=set_budget")
+            if budget_usd <= 0:
+                raise TakyonError("daily_budget_usd must be positive")
+            cap = _meta_daily_budget_cap()
+            if budget_usd > cap:
+                raise TakyonError(
+                    f"daily_budget_usd {budget_usd} exceeds the safety cap of {cap} USD/day "
+                    "(set TAKYON_META_MAX_DAILY_BUDGET_USD to change)"
+                )
+            budget_usd = round(budget_usd, 2)
+            budget_cents = int(round(budget_usd * 100))
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": launch["slug"],
+            "operation": operation,
+            "launch_receipt": launch["receipt_rel"],
+            "ids": ids,
+            "created_at": _now(),
+        }
+        if budget_usd is not None:
+            base_receipt["daily_budget_usd"] = budget_usd
+            base_receipt["daily_budget_cents"] = budget_cents
+
+        if business_mode == "test":
+            control_receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "note": "Test mode recorded the Meta control action locally; no Meta objects were mutated.",
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            store.commit(
+                scope=f"business:{business}/distribution:meta-ads/{launch['slug']}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": _meta_control_event_type(operation),
+                    "payload": {**control_receipt, "publication_dir": launch["publication_rel"], "receipt": action_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or f"record suppressed meta ad {operation} (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "test",
+                "operation": operation,
+                "status": "suppressed_test_mode",
+                "receipt": action_rel,
+                "value": control_receipt,
+            })
+
+        _meta_config(require_token=True)
+        gateway_payload = {
+            "business": business,
+            "operation": operation,
+            "campaign_id": ids["campaign_id"],
+            "adset_id": ids["adset_id"],
+            "ad_id": ids["ad_id"],
+        }
+        if budget_cents is not None:
+            gateway_payload["daily_budget_cents"] = budget_cents
+            gateway_payload["daily_budget_usd"] = budget_usd
+
+        try:
+            gateway_result = _call_creative_runtime_gateway("meta-control", gateway_payload)
+        except Exception as exc:
+            control_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "operation": operation,
+                "status": control_receipt["status"],
+                "receipt": action_rel,
+                "error": str(exc),
+                "value": control_receipt,
+            })
+
+        if not gateway_result.get("success"):
+            control_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "graph_version": gateway_result.get("graph_version"),
+                "applied": gateway_result.get("applied"),
+                "error": gateway_result.get("error") or "meta control failed",
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "operation": operation,
+                "status": control_receipt["status"],
+                "receipt": action_rel,
+                "error": control_receipt["error"],
+                "value": control_receipt,
+            })
+
+        control_receipt = {
+            **base_receipt,
+            "success": True,
+            "mode": "live",
+            "status": gateway_result.get("status") or operation,
+            "graph_version": gateway_result.get("graph_version"),
+            "applied": gateway_result.get("applied"),
+            "note": "Meta control action applied through the guarded authority runtime.",
+        }
+        _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/distribution:meta-ads/{launch['slug']}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": _meta_control_event_type(operation),
+                "payload": {**control_receipt, "publication_dir": launch["publication_rel"], "receipt": action_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or f"record meta ad {operation}",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_meta_ad_control",
+            "business": business,
+            "slug": launch["slug"],
+            "mode": "live",
+            "operation": operation,
+            "status": control_receipt["status"],
+            "receipt": action_rel,
+            "value": control_receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
+    """Sync ad-platform metrics for a previously launched Meta campaign/adset/ad."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        level = str(args.get("level") or "campaign").strip().lower()
+        if level not in {"campaign", "adset", "ad"}:
+            raise TakyonError("level must be one of: campaign, adset, ad")
+
+        launch = _meta_load_launch_receipt(store, business, args)
+        receipt = launch["receipt"]
+        ids = _meta_receipt_ids(receipt)
+        object_id = ids[f"{level}_id"]
+        if not object_id:
+            raise TakyonError(
+                f"Meta launch receipt at {launch['receipt_rel']} does not contain a {level}_id"
+            )
+        business_mode = _business_mode(store, business)
+        sync_key = _file_slug(f"{level}-insights-{idempotency_key}", "meta-insights")
+        metrics_dir_rel = f"metrics/meta-ads/{launch['slug']}"
+        sync_rel = f"{metrics_dir_rel}/syncs/{sync_key}.json"
+        sync_abs = store._resolve_business_file(business, sync_rel)
+        prior = _read_existing_receipt(sync_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_meta_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "idempotent": True,
+                "level": level,
+                "status": prior.get("status"),
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "value": prior,
+            })
+
+        time_range = args.get("time_range") if isinstance(args.get("time_range"), dict) else None
+        date_preset = str(args.get("date_preset") or "today").strip().lower()
+        if not time_range and not date_preset:
+            date_preset = "today"
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": launch["slug"],
+            "launch_receipt": launch["receipt_rel"],
+            "level": level,
+            "object_id": object_id,
+            "ids": ids,
+            "date_preset": date_preset if not time_range else None,
+            "time_range": time_range,
+            "created_at": _now(),
+        }
+
+        if business_mode == "test":
+            sync_receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "rows": [],
+                "totals": _meta_aggregate_insights_rows([]),
+                "note": "Test mode recorded a local Meta insights sync receipt; no Meta API call was made.",
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            _append_jsonl(
+                store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+                {**sync_receipt, "receipt": sync_rel},
+            )
+            store.commit(
+                scope=f"business:{business}/metrics:meta-ads/{launch['slug']}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "meta_ad.insights_sync",
+                    "payload": {**sync_receipt, "metrics_dir": metrics_dir_rel, "receipt": sync_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record suppressed meta insights sync (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "test",
+                "level": level,
+                "status": "suppressed_test_mode",
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "value": sync_receipt,
+            })
+
+        _meta_config(require_token=True)
+        gateway_payload = {
+            "business": business,
+            "level": level,
+            "campaign_id": ids["campaign_id"],
+            "adset_id": ids["adset_id"],
+            "ad_id": ids["ad_id"],
+            "date_preset": date_preset,
+            "time_range": time_range,
+        }
+
+        try:
+            gateway_result = _call_creative_runtime_gateway("meta-insights", gateway_payload)
+        except Exception as exc:
+            sync_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "level": level,
+                "status": sync_receipt["status"],
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "error": str(exc),
+                "value": sync_receipt,
+            })
+
+        if not gateway_result.get("success"):
+            sync_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "graph_version": gateway_result.get("graph_version"),
+                "error": gateway_result.get("error") or "meta insights sync failed",
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "level": level,
+                "status": sync_receipt["status"],
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "error": sync_receipt["error"],
+                "value": sync_receipt,
+            })
+
+        rows = gateway_result.get("rows") if isinstance(gateway_result.get("rows"), list) else []
+        normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        totals = _meta_aggregate_insights_rows(normalized_rows)
+        sync_receipt = {
+            **base_receipt,
+            "success": True,
+            "mode": "live",
+            "status": "synced",
+            "graph_version": gateway_result.get("graph_version"),
+            "rows": normalized_rows,
+            "totals": totals,
+        }
+        _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+        _append_jsonl(
+            store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+            {**sync_receipt, "receipt": sync_rel},
+        )
+        store.commit(
+            scope=f"business:{business}/metrics:meta-ads/{launch['slug']}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": "meta_ad.insights_sync",
+                "payload": {**sync_receipt, "metrics_dir": metrics_dir_rel, "receipt": sync_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record meta insights sync",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_meta_ad_insights_sync",
+            "business": business,
+            "slug": launch["slug"],
+            "mode": "live",
+            "level": level,
+            "status": "synced",
+            "receipt": sync_rel,
+            "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+            "totals": totals,
+            "value": sync_receipt,
         })
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -10962,6 +11499,84 @@ TAKYON_TOOL_DEFINITIONS = [
                 "ad": {
                     "type": "object",
                     "description": "{name, message, link (required), call_to_action, page_id, image_url}; image_url is an optional video thumbnail fallback or static creative URL hint.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_ad_control",
+        "description": (
+            "Control a previously launched Meta ad using the canonical distribution/meta-ads/<slug>/receipt.json. "
+            "Supports activate, pause, and set_budget through the guarded authority runtime; "
+            "test-mode businesses suppress to local receipts."
+        ),
+        "handler": handle_business_meta_ad_control,
+        "schema": _schema(
+            "business_meta_ad_control",
+            "Activate, pause, or update the daily budget of a launched Meta ad.",
+            {
+                "business": _BUSINESS_PROP,
+                "operation": {
+                    "type": "string",
+                    "enum": ["activate", "pause", "set_budget"],
+                    "description": "activate and pause update campaign/adset/ad status together; set_budget updates the ad set daily budget.",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "Meta publication slug under distribution/meta-ads/<slug>/; use this or receipt_path.",
+                },
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to distribution/meta-ads/<slug>/receipt.json.",
+                },
+                "daily_budget_usd": {
+                    "type": "number",
+                    "description": "Required when operation=set_budget. Subject to TAKYON_META_MAX_DAILY_BUDGET_USD.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "operation", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_ad_insights_sync",
+        "description": (
+            "Read Meta ad-platform delivery metrics for a previously launched campaign/adset/ad and "
+            "persist truthful local snapshots under metrics/meta-ads/<slug>/. "
+            "This records ad-platform metrics only; it does not invent business attribution."
+        ),
+        "handler": handle_business_meta_ad_insights_sync,
+        "schema": _schema(
+            "business_meta_ad_insights_sync",
+            "Sync delivery metrics from Meta for a launched campaign, ad set, or ad.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {
+                    "type": "string",
+                    "description": "Meta publication slug under distribution/meta-ads/<slug>/; use this or receipt_path.",
+                },
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to distribution/meta-ads/<slug>/receipt.json.",
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["campaign", "adset", "ad"],
+                    "description": "Which launched object to query. Default campaign.",
+                },
+                "date_preset": {
+                    "type": "string",
+                    "description": "Meta date preset like today, yesterday, last_7d, this_month; ignored when time_range is supplied.",
+                },
+                "time_range": {
+                    "type": "object",
+                    "description": "Optional explicit Meta time range object like {since: YYYY-MM-DD, until: YYYY-MM-DD}.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
