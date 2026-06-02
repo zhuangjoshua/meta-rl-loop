@@ -20,6 +20,7 @@ provides_tools:
   - business_record_memory
   - business_allocate_budget
   - business_configure_app_budget
+  - business_grant_app_subsidy
   - business_upsert_app_surface_contract
   - business_upsert_app_plan
   - business_upsert_app_customer

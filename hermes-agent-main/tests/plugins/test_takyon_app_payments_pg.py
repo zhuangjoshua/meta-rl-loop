@@ -22,6 +22,7 @@ TAKYON_TEST_PG_DSN is set.
 from __future__ import annotations
 
 import os
+import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +38,7 @@ from plugins.takyon.app_payments import (  # noqa: E402
     InvalidWebhookEvent,
 )
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
+from plugins.takyon.stripe_util import build_signature_header  # noqa: E402
 
 
 def _sub() -> str:
@@ -275,6 +277,37 @@ def test_paid_checkout_accrues_to_owner_custody(pg_conn):
     assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "paid"
 
 
+def test_paid_checkout_binds_entitlement_to_initiating_app_user_id(pg_conn):
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    first = app_identity.upsert_app_user(pg_conn, slug, "first@example.com")
+    second = app_identity.upsert_app_user(pg_conn, slug, "second@example.com")
+    intent = app_payments.create_checkout_intent(
+        pg_conn,
+        slug,
+        plan_key="pro",
+        client_reference_id="ref-bound-user",
+        app_user_id=first.id,
+        customer_email=first.email,
+    )
+    result = app_payments.record_webhook_and_process(
+        pg_conn,
+        _checkout_event(
+            event_id="evt_bound_user",
+            session_id="cs_bound_user",
+            intent_id=intent.id,
+            email=second.email,
+            amount_total=1000,
+            subscription="sub_bound_user",
+        ),
+    )
+    proc = result["processed"]
+    assert proc["app_user_id"] == first.id
+    entitlements = app_entitlements.list_entitlements(pg_conn, slug, app_user_id=first.id)
+    assert len(entitlements) == 1
+    assert app_entitlements.list_entitlements(pg_conn, slug, app_user_id=second.id) == []
+
+
 def test_owner_accrual_nets_exact_app_fee(pg_conn):
     owner = _owner(pg_conn)
     slug = _business(pg_conn, owner)
@@ -506,8 +539,6 @@ def test_concurrent_identical_webhook_processes_exactly_once(pg_conn):
 
 
 def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, monkeypatch):
-    import json
-
     from psycopg.conninfo import make_conninfo
 
     from plugins.takyon import core as takyon_core
@@ -526,13 +557,21 @@ def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, 
     monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
+    event = _checkout_event(
+        event_id="evt_tool",
+        session_id="cs_tool",
+        intent_id=intent.id,
+        email="t@x.com",
+        amount_total=4000,
+        subscription="sub_tool",
+    )
+    body = json.dumps(event)
     raw = takyon_core.handle_business_record_stripe_webhook(
         {
-            "event": _checkout_event(
-                event_id="evt_tool", session_id="cs_tool", intent_id=intent.id,
-                email="t@x.com", amount_total=4000, subscription="sub_tool",
-            )
+            "raw_body": body,
+            "stripe_signature": build_signature_header(body, "whsec_test"),
         }
     )
     payload = json.loads(raw)
@@ -550,8 +589,6 @@ def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, 
 
 def test_record_stripe_webhook_tool_dedups_on_replay(pg_conn, tmp_path, monkeypatch):
     # The tool inherits the leaf's at-most-once processing: a replayed event id accrues exactly once.
-    import json
-
     from psycopg.conninfo import make_conninfo
 
     from plugins.takyon import core as takyon_core
@@ -566,13 +603,19 @@ def test_record_stripe_webhook_tool_dedups_on_replay(pg_conn, tmp_path, monkeypa
     monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
     event = _checkout_event(
         event_id="evt_tool_rp", session_id="cs_tool_rp", intent_id=intent.id,
         email="rp@x.com", amount_total=3000,
     )
-    first = json.loads(takyon_core.handle_business_record_stripe_webhook({"event": event}))
-    second = json.loads(takyon_core.handle_business_record_stripe_webhook({"event": event}))
+    body = json.dumps(event)
+    payload = {
+        "raw_body": body,
+        "stripe_signature": build_signature_header(body, "whsec_test"),
+    }
+    first = json.loads(takyon_core.handle_business_record_stripe_webhook(payload))
+    second = json.loads(takyon_core.handle_business_record_stripe_webhook(payload))
     assert first["success"] is True and second["success"] is True
     assert first["processed"]["accrued_to_owner"] is True
     assert second["processed"] is None  # deduplicated → leaf returned processed=None

@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from psycopg.conninfo import make_conninfo  # noqa: E402
 
 from plugins.takyon.ai_gateway import get_provider_caller  # noqa: E402
+from plugins.takyon import app_entitlements, app_funding, app_identity  # noqa: E402
 from plugins.takyon.app_gateway_keys import mint_gateway_key  # noqa: E402
 from plugins.takyon.app_usage import (  # noqa: E402
     get_usage_summary,
@@ -35,11 +36,18 @@ from plugins.takyon.app_usage import (  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import build_runtime_app  # noqa: E402
 
-_GENERATE_BODY = {"messages": [{"role": "user", "content": "Hello gateway"}]}
+_GENERATE_BODY = {"messages": [{"role": "user", "content": "Hello gateway"}], "max_tokens": 32}
 
 
 def _auth(raw: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {raw}"}
+
+
+def _app_auth(raw_gateway_key: str, session_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {raw_gateway_key}",
+        "X-Takyon-App-Session": session_token,
+    }
 
 
 def _provision_business(conn) -> tuple[str, str]:
@@ -53,6 +61,54 @@ def _provision_business(conn) -> tuple[str, str]:
     )
     raw, _record = mint_gateway_key(conn, slug)
     return slug, raw
+
+
+def _provision_session_user(
+    conn,
+    business_slug: str,
+    *,
+    email: str = "cust@example.com",
+    tier: str = "free",
+    included_ai_budget_microusd: int = 50_000,
+    allow_overage: bool = False,
+    subsidy_cap_microusd: int | None = None,
+    grant_subsidy_microusd: int = 50_000,
+) -> tuple[app_identity.AppUser, str]:
+    plan_key = f"{tier}-plan"
+    metadata = {}
+    if subsidy_cap_microusd is not None:
+        metadata["subsidy_cap_microusd"] = subsidy_cap_microusd
+    app_entitlements.upsert_plan_policy(
+        conn,
+        business_slug,
+        plan_key,
+        tier=tier,
+        included_ai_budget_microusd=included_ai_budget_microusd,
+        allow_overage=allow_overage,
+        metadata=metadata,
+    )
+    link, raw_magic = app_identity.create_magic_link(conn, business_slug, email)
+    session_user, session_token = app_identity.verify_magic_link(conn, business_slug, raw_magic)
+    app_entitlements.grant_entitlement(
+        conn,
+        business_slug,
+        app_user_id=session_user.app_user_id,
+        tier=tier,
+        status="active",
+        source="internal",
+        plan_key=plan_key,
+        metadata={"non_billing": True},
+    )
+    if grant_subsidy_microusd > 0:
+        app_funding.grant_business_subsidy(
+            conn,
+            business_slug,
+            grant_subsidy_microusd,
+            f"subsidy:{business_slug}:{email}",
+        )
+    user = app_identity.get_app_user(conn, business_slug, app_user_id=session_user.app_user_id)
+    assert user is not None
+    return user, session_token
 
 
 def _canned_caller():
@@ -99,9 +155,14 @@ def gateway_client(pg_conn):
 
 def test_gateway_resolves_reserves_and_settles(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_canned_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 200
     payload = resp.json()
 
@@ -161,8 +222,13 @@ def test_gateway_provider_key_never_in_response(gateway_client, pg_conn):
         return _call
 
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_caller_with_secret)
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 200
     assert secret not in resp.text
 
@@ -170,9 +236,14 @@ def test_gateway_provider_key_never_in_response(gateway_client, pg_conn):
 def test_gateway_blocks_when_provider_unconfigured(gateway_client, pg_conn):
     # Invariant #8: a valid key but no provider configured → 503 blocked, and NOTHING reserved.
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug, grant_subsidy_microusd=0)
     client = gateway_client(_none_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 503
     assert resp.json()["detail"] == "provider_unconfigured"
 
@@ -190,10 +261,15 @@ def test_provider_caller_default_blocks_when_unconfigured():
 
 def test_gateway_budget_exceeded_is_402(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     set_app_budget(pg_conn, slug, hard_limit_microusd=0)  # active, but zero headroom
     client = gateway_client(_canned_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 402
     detail = resp.json()["detail"]
     assert detail["error"] == "app_budget_exceeded"
@@ -206,10 +282,15 @@ def test_gateway_budget_exceeded_is_402(gateway_client, pg_conn):
 
 def test_gateway_budget_inactive_is_402(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     set_app_budget(pg_conn, slug, hard_limit_microusd=10_000_000, status="paused")
     client = gateway_client(_canned_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 402
     detail = resp.json()["detail"]
     assert detail["error"] == "app_budget_inactive"
@@ -219,9 +300,14 @@ def test_gateway_budget_inactive_is_402(gateway_client, pg_conn):
 
 def test_gateway_provider_error_releases_and_502(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_raising_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 502
     assert resp.json()["detail"] == "provider_error"
 
@@ -237,9 +323,14 @@ def test_gateway_provider_error_releases_and_502(gateway_client, pg_conn):
 
 def test_gateway_bad_body_is_400(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_canned_caller)
 
-    resp = client.post("/internal/ai-gateway/messages", json={}, headers=_auth(raw))
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json={},
+        headers=_app_auth(raw, session_token),
+    )
     assert resp.status_code == 400
     assert "prompt or messages" in resp.json()["detail"]
     # Nothing reserved for an unbuildable request.
@@ -248,26 +339,32 @@ def test_gateway_bad_body_is_400(gateway_client, pg_conn):
 
 def test_gateway_unknown_pricing_is_400(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_canned_caller)
 
     resp = client.post(
         "/internal/ai-gateway/messages",
         json={"messages": [{"role": "user", "content": "Hello"}], "model": "claude-imaginary-99"},
-        headers=_auth(raw),
+        headers=_app_auth(raw, session_token),
     )
     assert resp.status_code == 400
     assert "no exact Anthropic pricing" in resp.json()["detail"]
     assert list_usage_events(pg_conn, slug) == []
 
 
-def test_gateway_unknown_app_user_is_400(gateway_client, pg_conn):
+def test_gateway_mismatched_app_user_is_403(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_canned_caller)
     body = dict(_GENERATE_BODY, app_user_id=str(uuid.uuid4()))
 
-    resp = client.post("/internal/ai-gateway/messages", json=body, headers=_auth(raw))
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "unknown_app_user"
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=body,
+        headers=_app_auth(raw, session_token),
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "mismatched_app_user"
     assert list_usage_events(pg_conn, slug) == []
 
 
@@ -276,6 +373,29 @@ def test_gateway_missing_bearer_is_401(gateway_client, pg_conn):
     resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY)
     assert resp.status_code == 401
     assert resp.json()["detail"] == "missing_bearer_token"
+
+
+def test_gateway_missing_app_session_is_401(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    client = gateway_client(_canned_caller)
+    resp = client.post("/internal/ai-gateway/messages", json=_GENERATE_BODY, headers=_auth(raw))
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "missing_app_session"
+
+
+def test_gateway_suspended_user_session_is_rejected(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    user, session_token = _provision_session_user(pg_conn, slug)
+    app_identity.set_app_user_status(pg_conn, slug, user.id, "suspended")
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid_app_session"
 
 
 def test_gateway_unknown_wellformed_key_is_401(gateway_client, pg_conn):

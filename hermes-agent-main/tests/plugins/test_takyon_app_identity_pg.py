@@ -80,11 +80,22 @@ def test_upsert_idempotent_same_id_reactivates_and_preserves_name(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     first = app_identity.upsert_app_user(pg_conn, slug, "bob@example.com", name="Bob")
     pg_conn.execute("update app_users set status = 'suspended' where id = %s", (first.id,))
-    # Re-request with no name supplied: same row, reactivated, original name kept.
+    # Re-request with no explicit status keeps the existing suspension and original name.
     again = app_identity.upsert_app_user(pg_conn, slug, "bob@example.com")
     assert again.id == first.id  # upsert on (business_slug, email), not a new row
-    assert again.status == "active"
+    assert again.status == "suspended"
     assert again.name == "Bob"  # coalesce keeps the existing name when none is given
+
+
+def test_upsert_explicit_status_can_reactivate(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    first = app_identity.upsert_app_user(pg_conn, slug, "reactivate@example.com")
+    pg_conn.execute("update app_users set status = 'suspended' where id = %s", (first.id,))
+    again = app_identity.upsert_app_user(
+        pg_conn, slug, "reactivate@example.com", status="active"
+    )
+    assert again.id == first.id
+    assert again.status == "active"
 
 
 def test_upsert_normalizes_email_so_case_variants_collapse(pg_conn):
@@ -199,6 +210,14 @@ def test_verify_inactive_user_rolls_back_so_link_survives(pg_conn):
     assert app_identity.validate_session(pg_conn, slug, token) is not None
 
 
+def test_create_magic_link_rejects_inactive_user(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user = app_identity.upsert_app_user(pg_conn, slug, "inactive@example.com")
+    app_identity.set_app_user_status(pg_conn, slug, user.id, "suspended")
+    with pytest.raises(InactiveAppUser):
+        app_identity.create_magic_link(pg_conn, slug, "inactive@example.com")
+
+
 def test_concurrent_verify_redeems_exactly_once(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     _, raw = app_identity.create_magic_link(pg_conn, slug, "mallory@example.com")
@@ -235,6 +254,15 @@ def test_validate_rejects_revoked_session(pg_conn):
     _, raw = app_identity.create_magic_link(pg_conn, slug, "nina@example.com")
     _, token = app_identity.verify_magic_link(pg_conn, slug, raw)
     assert app_identity.revoke_session(pg_conn, slug, token) is True
+    assert app_identity.validate_session(pg_conn, slug, token) is None
+
+
+def test_set_status_revokes_live_sessions(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    _, raw = app_identity.create_magic_link(pg_conn, slug, "kill@example.com")
+    session, token = app_identity.verify_magic_link(pg_conn, slug, raw)
+    updated = app_identity.set_app_user_status(pg_conn, slug, session.app_user_id, "closed")
+    assert updated.status == "closed"
     assert app_identity.validate_session(pg_conn, slug, token) is None
 
 

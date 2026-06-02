@@ -3,9 +3,9 @@
 Builds on `app_identity` (the sub-user spine). Two concerns, both scoped by `business_slug`:
 
   * the per-business PLAN CATALOG (`app_plan_policies`) — what a product sells: price, tier,
-    included AI budget/action quota, Stripe product/price linkage. This is descriptive metadata
-    for the operator and the product UI; nothing here is a hard runtime gate (the enforced AI
-    budget is `app_budgets` in increment c).
+    included AI budget/action quota, Stripe product/price linkage. This remains operator/product
+    metadata first, but runtime surfaces such as the AI gateway may also consume selected plan
+    fields (for example included AI budget or model/feature metadata) as hard gates.
 
   * per-sub-user ENTITLEMENTS (`app_entitlements`) — append-a-row grants of access. A sub-user's
     EFFECTIVE tier is resolved across their grants whose status is active/trialing (highest rank
@@ -477,6 +477,26 @@ def list_entitlements(
             (business_slug,),
         ).fetchall()
     return [_ent_from_row(r) for r in rows]
+
+
+def get_active_entitlement(conn, business_slug: str, app_user_id: str) -> Entitlement | None:
+    """The entitlement currently conferring access to this sub-user, or None.
+
+    Mirrors the effective-tier resolution order: only active/trialing grants count, lower tier
+    rank wins, and the newest row breaks ties. This gives runtime callers the exact grant whose
+    plan_key/metadata should be treated as authoritative right now."""
+    placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    rank_case = (
+        "case tier when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
+        f"when 'free' then 2 else {_DEFAULT_TIER_RANK} end"
+    )
+    row = conn.execute(
+        f"select {_ENT_COLUMNS} from app_entitlements "
+        f"where business_slug = %s and app_user_id = %s and status in ({placeholders}) "
+        f"order by {rank_case} asc, updated_at desc limit 1",
+        (business_slug, app_user_id, *_ACTIVE_STATUSES),
+    ).fetchone()
+    return None if row is None else _ent_from_row(row)
 
 
 def set_subscription_status(

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 _DEFAULT_MAGIC_LINK_TTL_MINUTES = 15
 _DEFAULT_SESSION_TTL_DAYS = 30
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_VALID_APP_USER_STATUSES = {"active", "suspended", "closed"}
 
 
 class AppIdentityError(Exception):
@@ -105,6 +106,13 @@ def _normalize_email(value: str) -> str:
     return email
 
 
+def _normalize_status(value: str | None) -> str:
+    status = str(value or "active").strip().lower()
+    if status not in _VALID_APP_USER_STATUSES:
+        raise ValueError("status must be one of active, suspended, or closed")
+    return status
+
+
 def _app_user_from_row(row) -> AppUser:
     return AppUser(
         id=str(row[0]),
@@ -119,23 +127,45 @@ def _app_user_from_row(row) -> AppUser:
 _APP_USER_COLUMNS = "id, business_slug, email, name, status, tier"
 
 
-def upsert_app_user(conn, business_slug: str, email: str, *, name: str | None = None) -> AppUser:
-    """Create or reactivate a sub-user for (business, email). Idempotent on the
-    (business_slug, email) unique key: a re-request reactivates the row and keeps the
-    existing name unless a new one is supplied. Unknown business → ForeignKeyViolation
-    (fail loud). Returns the row in effect after the write."""
+def upsert_app_user(
+    conn,
+    business_slug: str,
+    email: str,
+    *,
+    name: str | None = None,
+    status: str | None = None,
+) -> AppUser:
+    """Create or update a sub-user for (business, email).
+
+    New rows default to ``active`` unless an explicit status is supplied. Existing rows keep their
+    current status unless an explicit status is supplied, so a suspended/closed user is not
+    silently reactivated by login or billing side paths. When an explicit non-active status is
+    written, all live sessions for that sub-user are revoked in the same transaction."""
     normalized = _normalize_email(email)
+    status_value = None if status is None else _normalize_status(status)
     with conn.transaction():
         row = conn.execute(
-            "insert into app_users (business_slug, email, name) values (%s, %s, %s) "
+            "insert into app_users (business_slug, email, name, status) values (%s, %s, %s, %s) "
             "on conflict (business_slug, email) do update set "
-            " status = 'active', "
+            " status = coalesce(%s, app_users.status), "
             " name = coalesce(excluded.name, app_users.name), "
             " updated_at = now() "
             f"returning {_APP_USER_COLUMNS}",
-            (business_slug, normalized, name),
+            (business_slug, normalized, name, status_value or "active", status_value),
         ).fetchone()
-    return _app_user_from_row(row)
+        user = _app_user_from_row(row)
+        if user.status != "active":
+            conn.execute(
+                "update app_sessions set revoked_at = now() "
+                "where business_slug = %s and app_user_id = %s and revoked_at is null",
+                (business_slug, user.id),
+            )
+            row = conn.execute(
+                f"select {_APP_USER_COLUMNS} from app_users where business_slug = %s and id = %s",
+                (business_slug, user.id),
+            ).fetchone()
+            user = _app_user_from_row(row)
+    return user
 
 
 def get_app_user(
@@ -180,15 +210,16 @@ def create_magic_link(
     raw = _random_token()
     with conn.transaction():
         user = conn.execute(
-            "insert into app_users (business_slug, email, name) values (%s, %s, %s) "
+            "insert into app_users (business_slug, email, name, status) values (%s, %s, %s, 'active') "
             "on conflict (business_slug, email) do update set "
-            " status = 'active', "
             " name = coalesce(excluded.name, app_users.name), "
             " updated_at = now() "
-            "returning id, email",
+            "returning id, email, status",
             (business_slug, _normalize_email(email), name),
         ).fetchone()
-        app_user_id, normalized_email = str(user[0]), str(user[1])
+        app_user_id, normalized_email, status = str(user[0]), str(user[1]), str(user[2])
+        if status != "active":
+            raise InactiveAppUser(app_user_id)
         row = conn.execute(
             "insert into app_magic_links "
             "(business_slug, app_user_id, email, token_hash, purpose, expires_at) "
@@ -292,3 +323,37 @@ def revoke_session(conn, business_slug: str, raw_session_token: str) -> bool:
             (business_slug, _hash_token(token)),
         ).fetchone()
     return row is not None
+
+
+def revoke_app_user_sessions(conn, business_slug: str, app_user_id: str) -> int:
+    """Revoke every live session for one sub-user. Returns the number of sessions revoked."""
+    with conn.transaction():
+        row = conn.execute(
+            "update app_sessions set revoked_at = now() "
+            "where business_slug = %s and app_user_id = %s and revoked_at is null "
+            "returning id",
+            (business_slug, app_user_id),
+        ).fetchall()
+    return len(row)
+
+
+def set_app_user_status(conn, business_slug: str, app_user_id: str, status: str) -> AppUser:
+    """Set one sub-user's status and revoke live sessions when the new status is non-active."""
+    status_value = _normalize_status(status)
+    with conn.transaction():
+        row = conn.execute(
+            "update app_users set status = %s, updated_at = now() "
+            "where business_slug = %s and id = %s "
+            f"returning {_APP_USER_COLUMNS}",
+            (status_value, business_slug, app_user_id),
+        ).fetchone()
+        if row is None:
+            raise AppIdentityError(f"unknown app user: {app_user_id}")
+        user = _app_user_from_row(row)
+        if user.status != "active":
+            conn.execute(
+                "update app_sessions set revoked_at = now() "
+                "where business_slug = %s and app_user_id = %s and revoked_at is null",
+                (business_slug, app_user_id),
+            )
+    return user

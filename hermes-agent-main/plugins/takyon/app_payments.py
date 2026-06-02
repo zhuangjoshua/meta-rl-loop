@@ -357,7 +357,7 @@ def _find_intent_row(conn, event_metadata: dict, session: dict):
     intent_id = event_metadata.get("checkout_intent_id")
     if intent_id:
         row = conn.execute(
-            "select id, business_slug, plan_key, customer_email from app_checkout_intents "
+            "select id, business_slug, app_user_id, plan_key, customer_email from app_checkout_intents "
             "where id = %s",
             (intent_id,),
         ).fetchone()
@@ -366,7 +366,7 @@ def _find_intent_row(conn, event_metadata: dict, session: dict):
     client_ref = session.get("client_reference_id")
     if client_ref:
         return conn.execute(
-            "select id, business_slug, plan_key, customer_email from app_checkout_intents "
+            "select id, business_slug, app_user_id, plan_key, customer_email from app_checkout_intents "
             "where client_reference_id = %s",
             (client_ref,),
         ).fetchone()
@@ -381,11 +381,12 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
     intent = _find_intent_row(conn, metadata, session)
     if intent is None:
         return {"recorded": False, "reason": "missing_checkout_intent"}
-    intent_id, business, plan_key, intent_email = (
+    intent_id, business, intent_app_user_id, plan_key, intent_email = (
         str(intent[0]),
         intent[1],
-        intent[2],
+        None if intent[2] is None else str(intent[2]),
         intent[3],
+        intent[4],
     )
     details = session.get("customer_details") if isinstance(session.get("customer_details"), dict) else {}
     customer_email = details.get("email") or session.get("customer_email") or intent_email
@@ -444,11 +445,18 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
     )
 
     app_user_id = None
-    if customer_email and (subscription_id or payment_status == "paid"):
+    if (intent_app_user_id or customer_email) and (subscription_id or payment_status == "paid"):
+        entitlement_metadata = {"raw_event_id": event.get("id")}
+        if intent_app_user_id and customer_email and intent_email and customer_email.lower() != str(intent_email).lower():
+            entitlement_metadata["checkout_email_mismatch"] = {
+                "intent_customer_email": intent_email,
+                "stripe_customer_email": customer_email,
+            }
         entitlement, _tier = app_entitlements.grant_entitlement(
             conn,
             business,
-            email=customer_email,
+            app_user_id=intent_app_user_id,
+            email=None if intent_app_user_id else customer_email,
             tier="paid",
             status="active",
             source="stripe",
@@ -456,7 +464,7 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
             stripe_subscription_id=subscription_id,
             stripe_checkout_session_id=session_id,
             plan_key=plan_key,
-            metadata={"raw_event_id": event.get("id")},
+            metadata=entitlement_metadata,
         )
         app_user_id = entitlement.app_user_id
 

@@ -71,6 +71,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_set_mode",
         "business_allocate_budget",
         "business_configure_app_budget",
+        "business_grant_app_subsidy",
         "business_verify_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
@@ -188,7 +189,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     },
     "usage": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_configure_app_budget", "business_record_app_usage"],
+        "tools": ["business_configure_app_budget", "business_record_app_usage", "business_grant_app_subsidy"],
         "endpoints": [("GET", "usage")],
         "worker_contract": [
             "Usage meters and budget warnings should reflect Takyon usage rails, not fake counters.",
@@ -3508,13 +3509,19 @@ class TakyonStore:
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
         """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
-        store delegates to on the Postgres backend (identity/entitlements/payments/usage). Imported lazily and only
+        store delegates to on the Postgres backend (identity/entitlements/payments/usage/funding). Imported lazily and only
         on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
         try:
-            from . import app_entitlements, app_identity, app_payments, app_usage
+            from . import app_entitlements, app_funding, app_identity, app_payments, app_usage
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-            from plugins.takyon import app_entitlements, app_identity, app_payments, app_usage
-        return {"identity": app_identity, "entitlements": app_entitlements, "payments": app_payments, "usage": app_usage}
+            from plugins.takyon import app_entitlements, app_funding, app_identity, app_payments, app_usage
+        return {
+            "identity": app_identity,
+            "entitlements": app_entitlements,
+            "funding": app_funding,
+            "payments": app_payments,
+            "usage": app_usage,
+        }
 
     def _init_db(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -6221,15 +6228,20 @@ class TakyonStore:
             now = _now()
             user_id = op.get("id") or uuid.uuid4().hex
             if _db_backend() == "postgres":
-                # Canonical Postgres sub-user write: app_identity.upsert_app_user owns app_users. It is
-                # deliberately narrower than the SQLite op — it forces status='active' and does not persist
-                # a caller tier/metadata/custom-id — which is acceptable here: effective tier is governed by
-                # entitlements (_sync_user_tier), 'active' is already this op's default status, and the
-                # metadata blob on app_users is not read by any downstream operator path.
+                # Canonical Postgres sub-user write: app_identity.upsert_app_user owns app_users,
+                # including the owner kill/suspend boundary. Effective tier is still governed by
+                # entitlements (_sync_user_tier), so this op persists status/name and leaves tier
+                # authority with the entitlement rail.
                 leaves = self._app_leaves()
                 try:
                     with self._leaf_conn(conn) as raw:
-                        user = leaves["identity"].upsert_app_user(raw, slug, email, name=op.get("name"))
+                        user = leaves["identity"].upsert_app_user(
+                            raw,
+                            slug,
+                            email,
+                            name=op.get("name"),
+                            status=op.get("status"),
+                        )
                 except leaves["identity"].AppIdentityError as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = user.id
@@ -7605,6 +7617,54 @@ def handle_business_configure_app_budget(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def handle_business_grant_app_subsidy(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        amount_microusd = int(float(args.get("amount_microusd") or 0))
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if amount_microusd <= 0:
+            raise TakyonError("amount_microusd must be > 0")
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        if _db_backend() != "postgres":
+            raise TakyonError("app subsidy funding requires the postgres runtime")
+        leaves = store._app_leaves()
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            try:
+                with store._leaf_conn(conn) as raw:
+                    balances = leaves["funding"].grant_business_subsidy(
+                        raw,
+                        business,
+                        amount_microusd,
+                        idempotency_key,
+                        metadata=args.get("metadata") or {},
+                    )
+            except leaves["funding"].AppFundingError as exc:
+                raise TakyonError(str(exc)) from exc
+            store._record_event(
+                conn,
+                scope=f"business:{business}/app",
+                business_slug=business,
+                event_type="app.subsidy.grant",
+                payload={
+                    "amount_microusd": amount_microusd,
+                    "balance_microusd": balances.balance_microusd,
+                },
+            )
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "amount_microusd": amount_microusd,
+                "balance_microusd": balances.balance_microusd,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     operation = {
         "action": "app.surface.upsert",
@@ -7899,10 +7959,14 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
             user_id = uuid.uuid4().hex
             conn.execute(
                 "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'free', ?, ?, ?) "
-                "ON CONFLICT(business_slug, email) DO UPDATE SET status = 'active', updated_at = excluded.updated_at",
+                "ON CONFLICT(business_slug, email) DO UPDATE SET "
+                "name = COALESCE(excluded.name, app_users.name), "
+                "updated_at = excluded.updated_at",
                 (user_id, business, email, args.get("name"), _json_dumps({"source": "magic_link"}), now, now),
             )
             user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
+            if str(user.get("status") or "active") != "active":
+                raise TakyonError("app user is not active")
             token = _random_token()
             link = f"{origin}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if origin else ""
             provider_message_id = None
@@ -7958,11 +8022,13 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
             ).fetchone())
             if not link:
                 raise TakyonError("magic link is invalid, expired, or already used")
-            now = _now()
-            conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
             user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, link["app_user_id"])).fetchone())
             if not user:
                 raise TakyonError("magic link user is missing")
+            if str(user.get("status") or "active") != "active":
+                raise TakyonError("app user is not active")
+            now = _now()
+            conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
             existing_free = conn.execute(
                 "SELECT 1 FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? AND source = 'manual' AND tier = 'free' LIMIT 1",
                 (business, user["id"]),
@@ -8165,14 +8231,20 @@ def _process_checkout_completed(conn: sqlite3.Connection, store: TakyonStore, ev
     )
     conn.execute("UPDATE app_checkout_intents SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?", (completed_at, _now(), intent["id"]))
     app_user_id = None
-    if customer_email and (subscription_id or session.get("payment_status") == "paid"):
-        email = _normalize_email(customer_email)
-        conn.execute(
-            "INSERT INTO app_users (id, business_slug, email, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', 'paid', ?, ?, ?) "
-            "ON CONFLICT(business_slug, email) DO UPDATE SET tier = 'paid', status = 'active', updated_at = excluded.updated_at",
-            (uuid.uuid4().hex, business, email, _json_dumps({"source": "stripe_checkout"}), _now(), _now()),
-        )
-        user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
+    if (intent.get("app_user_id") or customer_email) and (subscription_id or session.get("payment_status") == "paid"):
+        user = None
+        if intent.get("app_user_id"):
+            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, intent.get("app_user_id"))).fetchone())
+        if not user and customer_email:
+            email = _normalize_email(customer_email)
+            conn.execute(
+                "INSERT INTO app_users (id, business_slug, email, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'active', 'paid', ?, ?, ?) "
+                "ON CONFLICT(business_slug, email) DO UPDATE SET tier = 'paid', updated_at = excluded.updated_at",
+                (uuid.uuid4().hex, business, email, _json_dumps({"source": "stripe_checkout"}), _now(), _now()),
+            )
+            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
+        if not user:
+            return {"recorded": False, "reason": "missing_checkout_user"}
         app_user_id = user["id"]
         conn.execute(
             "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id, plan_key, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'paid', 'active', 'stripe', ?, ?, ?, ?, ?, ?, ?)",
@@ -8222,14 +8294,13 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
         load_takyon_env()
         raw_body = args.get("raw_body")
         signature = args.get("stripe_signature")
-        if raw_body and signature:
-            secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-            if not secret:
-                raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET")
-            _verify_stripe_signature(str(raw_body), str(signature), secret)
-            event = json.loads(str(raw_body))
-        else:
-            event = args.get("event") or args.get("event_payload")
+        if not raw_body or not signature:
+            raise TakyonError("raw_body and stripe_signature are required")
+        secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+        if not secret:
+            raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET")
+        _verify_stripe_signature(str(raw_body), str(signature), secret)
+        event = json.loads(str(raw_body))
         if not isinstance(event, dict):
             raise TakyonError("Stripe event payload is required")
         event_id = str(event.get("id") or uuid.uuid4().hex)
@@ -10618,6 +10689,24 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Set the business product app's overall usage budget cap for one business.",
         "handler": handle_business_configure_app_budget,
         "schema": _schema("business_configure_app_budget", "Set product app budget cap.", {"business": _BUSINESS_PROP, "hard_limit_microusd": {"type": "integer"}, "status": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "hard_limit_microusd", "idempotency_key"]),
+    },
+    {
+        "name": "business_grant_app_subsidy",
+        "description": "Credit the business-owned app subsidy pool used as fallback funding for product subusers.",
+        "handler": handle_business_grant_app_subsidy,
+        "schema": _schema(
+            "business_grant_app_subsidy",
+            "Grant product app subsidy pool balance.",
+            {
+                "business": _BUSINESS_PROP,
+                "amount_microusd": {"type": "integer"},
+                "metadata": {"type": "object"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "amount_microusd", "idempotency_key"],
+        ),
     },
     {
         "name": "business_upsert_app_surface_contract",
