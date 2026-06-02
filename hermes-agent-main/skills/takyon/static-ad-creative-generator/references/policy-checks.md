@@ -1,7 +1,7 @@
 # Policy Checks
 
 Two layers: **(A) build-time honesty rules** this skill enforces on itself, and **(B)
-platform ad-policy red flags** for Meta and Reddit. `validate_spec.py` lints specs against
+platform ad-policy red flags** for Meta. `validate_spec.py` lints specs against
 the machine-checkable signals at the bottom; the rest is human/agent judgment captured in
 `qa.policy_risks`.
 
@@ -53,12 +53,6 @@ membership.
 - No competitor logos, brand marks, characters, or licensed meme stills you lack rights to.
 - Comparison claims naming a competitor must be true and current.
 
-### 8. Reddit specifics
-- No impersonation of real users/subreddits as authentic UGC; no fabricated upvote/award
-  counts presented as real; disclose paid promotion as required; match subreddit norms.
-
----
-
 ## Pre-flight policy checklist (populate `qa.policy_risks`)
 
 - [ ] No personal-attribute targeting (situation/desire framing, not "you + condition").
@@ -68,8 +62,6 @@ membership.
 - [ ] Every testimonial / rating / logo / metric is real & rights-cleared, **or** labeled illustrative.
 - [ ] No restricted-category violation (or it's flagged and verified).
 - [ ] No unlicensed competitor/IP/meme assets.
-- [ ] Reddit: no impersonation, sponsorship disclosed.
-
 `qa.policy_risks` should be an **empty array only when every box is genuinely clear**;
 otherwise list the residual risk and its mitigation.
 
@@ -88,7 +80,7 @@ human must still confirm:
 3. **Borrowed authority:** `as seen in`, `#1 doctor`, `clinically proven` without a cited
    source → warn.
 4. **Proof-bearing angles unconfirmed:** if `strategy.angle` ∈ {`social_proof`,
-   `reddit_native`, `imessage`, `fake_ui`, `testimonial`} **and** `qa.policy_risks` does not
+   `community_native`, `imessage`, `fake_ui`, `testimonial`} **and** `qa.policy_risks` does not
    contain `real`, `rights-cleared`, `illustrative`, or `representative` → warn (you must
    declare whether the proof is real or labeled).
 5. **Competitor/IP:** `product.must_not_show` should include fabricated third-party logos /

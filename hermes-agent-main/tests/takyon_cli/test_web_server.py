@@ -200,6 +200,7 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_release_stale_tui_turn_reservations", lambda _conn, _uid: 0)
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: _Conn())
     monkeypatch.setattr(billing, "get_billing_balances", lambda _conn, _uid: balances)
@@ -218,6 +219,65 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["topup_balance_cents"] == 300
     assert result["spendable_cents"] == 2200
     assert result["owned_business_count"] == 2
+
+
+def test_release_stale_tui_turn_reservations_refunds_orphaned_hold(monkeypatch):
+    import plugins.takyon.billing as billing
+    import takyon_cli.web_server as web_server
+    from tui_gateway import server as tui_server
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def execute(self, _query, _params):
+            return _Result([("tui-turn:stale-sid:abc123",)])
+
+    released: list[str] = []
+
+    monkeypatch.setattr(tui_server, "_sessions", {}, raising=False)
+    monkeypatch.setattr(billing, "refund", lambda _conn, key: released.append(key))
+
+    count = web_server._release_stale_tui_turn_reservations(_Conn(), "user-123")
+
+    assert count == 1
+    assert released == ["tui-turn:stale-sid:abc123"]
+
+
+def test_release_stale_tui_turn_reservations_keeps_live_hold(monkeypatch):
+    import plugins.takyon.billing as billing
+    import takyon_cli.web_server as web_server
+    from tui_gateway import server as tui_server
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def execute(self, _query, _params):
+            return _Result([("tui-turn:live-sid:abc123",)])
+
+    released: list[str] = []
+
+    monkeypatch.setattr(
+        tui_server,
+        "_sessions",
+        {"live-sid": {"running": True}},
+        raising=False,
+    )
+    monkeypatch.setattr(billing, "refund", lambda _conn, key: released.append(key))
+
+    count = web_server._release_stale_tui_turn_reservations(_Conn(), "user-123")
+
+    assert count == 0
+    assert released == []
 
 
 def test_operator_businesses_endpoint_returns_owned_businesses(tmp_path, monkeypatch, pg_store_dsn):

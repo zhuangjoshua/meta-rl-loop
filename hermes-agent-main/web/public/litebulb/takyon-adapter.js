@@ -23,6 +23,10 @@
 
   const SESSION_HEADER = "X-Takyon-Session-Token";
   const BOARD_ORDER = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"];
+  const WAKE_SCHEDULE_PRESETS = ["every 30m", "every 1h", "every 2h", "every 6h", "every 12h", "every 1d"];
+  const WAKE_SCHEDULE_PATTERN = /^every\s+(\d+)\s*([mhd])$/i;
+  const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
+  const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
   const LIVE = {
     activeBusiness: "",
     sessionId: "",
@@ -41,10 +45,33 @@
     bootedBusiness: "",
     planBusiness: "",
     refreshBusy: false,
+    workspaceSnapshot: null,
+    workspaceOutputs: [],
   };
 
   function endpoint(path) {
     return `${ENV.basePath}${path}`;
+  }
+
+  function currentReturnPath() {
+    try {
+      const target = owner && owner.location ? owner.location : window.location;
+      return `${target.pathname || "/"}${target.search || ""}${target.hash || ""}`;
+    } catch (_err) {
+      return `${window.location.pathname || "/"}${window.location.search || ""}${window.location.hash || ""}`;
+    }
+  }
+
+  function navigateOwner(url) {
+    const target = normalizeOpenableUrl(url);
+    if (!target) throw new Error("No URL available.");
+    try {
+      const topWindow = owner && owner.location ? owner : window;
+      topWindow.location.assign(target);
+      return;
+    } catch (_err) {
+      window.location.assign(target);
+    }
   }
 
   function sessionHeaders(extra) {
@@ -140,6 +167,52 @@
   function dollarFromAccount() {
     const cents = Number((LIVE.operatorAccount && LIVE.operatorAccount.spendable_cents) || 0);
     return Number.isFinite(cents) ? Math.max(0, cents / 100) : 0;
+  }
+
+  function operatorSpendableCents(account) {
+    if (!account || account.available === false) return null;
+    const cents = Number(account.spendable_cents);
+    return Number.isFinite(cents) ? Math.max(0, Math.round(cents)) : null;
+  }
+
+  function hasOperatorAccountBalance() {
+    const account = LIVE.operatorAccount;
+    if (!account || account.available === false) return false;
+    return Number.isFinite(Number(account.spendable_cents));
+  }
+
+  function formatBudgetCents(value) {
+    const cents = Number(value);
+    if (!Number.isFinite(cents)) return "—";
+    return `$${(Math.max(0, cents) / 100).toFixed(2)}`;
+  }
+
+  function slugifyName(value) {
+    const slug = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "business";
+  }
+
+  function selectWakeCron(overview) {
+    const cronJobs = Array.isArray(overview && overview.cron) ? overview.cron : [];
+    if (!cronJobs.length) return null;
+    const canonical = cronJobs.find((job) => String(job && job.name || "").startsWith("takyon-ceo:"));
+    if (canonical) return canonical;
+    const fuzzy = cronJobs.find((job) => /(?:^|[-_\s])(?:ceo|wake)(?:$|[-_\s])/i.test(String(job && job.name || "")));
+    return fuzzy || cronJobs[0] || null;
+  }
+
+  function normalizeWakeSchedule(value) {
+    const trimmed = String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const match = trimmed.match(WAKE_SCHEDULE_PATTERN);
+    if (!match) return null;
+    const amount = Number.parseInt(match[1] || "", 10);
+    const unit = (match[2] || "").toLowerCase();
+    if (!Number.isFinite(amount) || amount < 1) return null;
+    return `every ${amount}${unit}`;
   }
 
   function liveStatusLabel(task) {
@@ -300,6 +373,14 @@
     return `${parts[0]}/.../${parts[parts.length - 1]}`;
   }
 
+  function mediaKindForPath(path) {
+    const match = String(path || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+    const ext = match && match[1] || "";
+    if (VIDEO_EXTENSIONS.has(ext)) return "video";
+    if (IMAGE_EXTENSIONS.has(ext)) return "image";
+    return "";
+  }
+
   function wholeCredits(value) {
     const count = Number(value);
     if (!Number.isFinite(count)) return 0;
@@ -358,6 +439,27 @@
         actionLabel: "preview",
         payload: item,
       }));
+  }
+
+  function deliverableEntries() {
+    const outputs = Array.isArray(LIVE.workspaceOutputs) ? LIVE.workspaceOutputs : [];
+    return outputs
+      .filter((item) => item && item.path && item.title)
+      .map((item) => ({
+        id: item.id || `output:${item.path}`,
+        title: String(item.title || item.path).trim(),
+        detail: String(item.detail || item.kind || "").trim(),
+        kind: String(item.kind || "file").trim().toLowerCase(),
+        path: String(item.path || "").trim(),
+        at: Number(item.at || 0),
+      }))
+      .sort((a, b) => b.at - a.at);
+  }
+
+  function deliverableActionLabel(item) {
+    if (!item || !item.path) return "";
+    if (normalizeOpenableUrl(item.url)) return "open";
+    return /\.html?$/i.test(item.path) ? "preview" : "open";
   }
 
   function previewWindow(title, html) {
@@ -420,6 +522,25 @@
     }
     const win = previewWindow(label || compactPath(targetPath) || "document", `<div class="lab">loading document</div><div class="meta">${esc(targetPath)}</div>`);
     try {
+      const mediaKind = mediaKindForPath(targetPath);
+      if (mediaKind) {
+        const sessionId = await ensureSession(business);
+        const media = await rpc("takyon.file.media", {
+          session_id: sessionId,
+          business_slug: business,
+          path: targetPath,
+        }, 20000);
+        const mediaUrl = String(media && media.url || "");
+        const mediaType = String(media && media.media_type || "");
+        body(win).innerHTML = `
+          <div class="lab">${esc(label || compactPath(targetPath) || "document")}</div>
+          <div class="meta" style="margin-bottom:10px">${esc(media && media.path || targetPath)}</div>
+          ${mediaType.startsWith("video/")
+            ? `<video controls src="${esc(mediaUrl)}" style="width:100%;max-height:calc(100% - 44px);background:#000;border:2px solid var(--ink)"></video>`
+            : `<img alt="${esc(label || compactPath(targetPath) || "document")}" src="${esc(mediaUrl)}" style="width:100%;height:auto;max-height:calc(100% - 44px);object-fit:contain;border:2px solid var(--ink);background:#fff" />`}
+        `;
+        return;
+      }
       const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/file?path=${encodeURIComponent(targetPath)}`);
       const content = String(res && res.content || "");
       body(win).innerHTML = `
@@ -458,8 +579,11 @@
     const overview = (snapshot && snapshot.overview) || {};
     const current = (snapshot && snapshot.current) || {};
     const product = overview.product || {};
-    const cron = overview.cron || {};
+    const cron = selectWakeCron(overview) || {};
     const ceo = overview.ceo_loop || {};
+    LIVE.workspaceSnapshot = snapshot || null;
+    LIVE.workspaceOverview = overview || {};
+    LIVE.workspaceOutputs = Array.isArray(snapshot && snapshot.outputs) ? snapshot.outputs : [];
     RT.biz = Object.assign({}, RT.biz || {}, {
       slug: snapshot.business_slug || RT.biz && RT.biz.slug || "",
       name: String(current.name || summary && summary.name || RT.biz && RT.biz.name || snapshot.business_slug || "litebulb").trim(),
@@ -483,6 +607,7 @@
     updateMenu();
     renderProduct();
     renderOutreach();
+    renderDeliverablesWindow();
     renderPlanSummary(snapshot);
     const modeEl = $("#mb-mode");
     if (modeEl) {
@@ -510,6 +635,316 @@
       <div class="meta" style="margin-top:6px">${esc(meta)}</div>
     </div>`;
   }
+
+  function openDeliverablesWindow() {
+    const win = makeWin({
+      id: "w-files",
+      title: "deliverables · outputs",
+      x: 648,
+      y: 84,
+      w: 360,
+      h: 360,
+      html: "",
+    });
+    renderDeliverablesWindow();
+    focusWin(win);
+    return win;
+  }
+
+  function renderDeliverablesWindow() {
+    const w = document.getElementById("w-files");
+    if (!w || !RT.live) return;
+    const items = deliverableEntries().slice(0, 16);
+    body(w).innerHTML = items.length
+      ? `<div class="lab">deliverables</div>${items.map((item, index) => buildOutreachRow(
+          item.title,
+          item.detail || compactPath(item.path),
+          "live",
+          { type: "deliverable", index, label: deliverableActionLabel(item) || "open" },
+        )).join("")}`
+      : `<div class="lab">deliverables</div><div class="meta">No deliverables yet. When the CEO ships files, receipts, or site changes, they show up here.</div>`;
+    body(w).querySelectorAll("[data-action='deliverable']").forEach((el) => {
+      const index = Number(el.getAttribute("data-action-index") || 0);
+      const run = () => {
+        const item = items[index];
+        if (!item || !item.path) return;
+        void openDocument(item.path, item.title || "Deliverable");
+      };
+      el.addEventListener("click", run);
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          run();
+        }
+      });
+    });
+  }
+
+  async function refreshOperatorShellData() {
+    const settled = await Promise.allSettled([
+      fetchJSON("/api/takyon/operator/businesses"),
+      fetchJSON("/api/takyon/operator/account"),
+    ]);
+    if (settled[0].status === "fulfilled") {
+      const res = settled[0].value;
+      rememberBusinesses(Array.isArray(res && res.businesses) ? res.businesses : []);
+    }
+    if (settled[1].status === "fulfilled") {
+      LIVE.operatorAccount = settled[1].value;
+      RT.credits = dollarFromAccount();
+      updateMenu();
+    }
+  }
+
+  function openOperatorWindow() {
+    const win = makeWin({
+      id: "w-operator",
+      title: "operator · businesses",
+      x: 120,
+      y: 76,
+      w: 420,
+      h: 470,
+      html: "",
+    });
+    renderOperatorWindow();
+    focusWin(win);
+    void refreshOperatorShellData().then(() => renderOperatorWindow()).catch(() => {
+      renderOperatorWindow();
+    });
+    return win;
+  }
+
+  function renderOperatorWindow() {
+    const w = document.getElementById("w-operator");
+    if (!w || !RT.live) return;
+    const account = LIVE.operatorAccount;
+    const payoutStatus = account && account.available ? String(account.stripe_connect_status || "none") : "none";
+    const payoutButtonLabel = payoutStatus === "active" ? "open payouts" : "connect payouts";
+    const spendableCents = operatorSpendableCents(account);
+    const businessButtons = LIVE.businesses.length
+      ? LIVE.businesses.map((item) => {
+          const slug = String(item && item.slug || "").trim().toLowerCase();
+          const active = slug && slug === LIVE.activeBusiness;
+          return `<button class="cbtn${active ? " go on" : ""}" data-biz="${esc(slug)}" type="button">${esc(item && (item.name || item.slug) || "business")}</button>`;
+        }).join("")
+      : `<span class="meta">No businesses yet.</span>`;
+    body(w).innerHTML = `
+      <div class="lab">businesses</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">${businessButtons}</div>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <button class="cbtn" id="operator-home" type="button">show intake</button>
+        <button class="cbtn" id="operator-refresh" type="button">refresh</button>
+      </div>
+
+      <div class="lab">create business</div>
+      <label class="meta" for="operator-create-name" style="display:block;margin-bottom:4px">name</label>
+      <input id="operator-create-name" type="text" placeholder="Optional name" style="width:100%;box-sizing:border-box;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace;margin-bottom:8px" />
+      <label class="meta" for="operator-create-goal" style="display:block;margin-bottom:4px">idea</label>
+      <textarea id="operator-create-goal" placeholder="Describe the company you want to build…" style="width:100%;min-height:82px;box-sizing:border-box;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.45 'Space Mono',monospace;margin-bottom:8px;resize:vertical"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+        <select id="operator-create-mode" style="border:1.5px solid var(--ink);background:#fff;padding:7px 9px;font:12px/1.4 'Space Mono',monospace">
+          <option value="test">test mode</option>
+          <option value="live">live mode</option>
+        </select>
+        <button class="cbtn go" id="operator-create" type="button" style="flex:1">create</button>
+      </div>
+      <div class="meta" id="operator-create-error" style="min-height:16px;margin-bottom:14px"></div>
+
+      <div class="lab">operator budget</div>
+      <div class="big-wake" style="font-size:28px">${spendableCents === null ? "—" : formatBudgetCents(spendableCents)}</div>
+      <div class="meta" style="margin:6px 0 10px">${!account
+        ? "Loading operator budget."
+        : !account.available
+          ? "Per-user budget unavailable."
+          : "Spendful turns use this top-level operator budget."}</div>
+      <div style="display:grid;gap:6px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">included remaining</span><span class="meta">${account && account.available ? formatBudgetCents(account.allowance_remaining_cents) : "—"}</span></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">top-up balance</span><span class="meta">${account && account.available ? formatBudgetCents(account.topup_balance_cents) : "—"}</span></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">reserved</span><span class="meta">${account && account.available ? formatBudgetCents(account.reserved_cents) : "—"}</span></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">customer payouts</span><span class="meta">${account && account.available ? formatBudgetCents(account.owed_balance_cents) : "—"}</span></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">connect status</span><span class="meta">${account && account.available ? esc(payoutStatus) : "—"}</span></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input id="operator-topup-amount" inputmode="decimal" placeholder="25" type="text" style="flex:1;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace" />
+        <button class="cbtn" id="operator-topup" type="button">top up</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="cbtn" id="operator-payouts" type="button">${esc(payoutButtonLabel)}</button>
+        <span class="meta" id="operator-billing-error"></span>
+      </div>
+    `;
+
+    body(w).querySelectorAll("[data-biz]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const slug = button.getAttribute("data-biz") || "";
+        if (!slug) return;
+        void mountLiveBusiness(slug);
+      });
+    });
+    $("#operator-home", w).addEventListener("click", () => {
+      teardownLive();
+      if (typeof reset === "function") {
+        reset();
+      }
+      window.setTimeout(renderLauncherBusinesses, 0);
+    });
+    $("#operator-refresh", w).addEventListener("click", () => {
+      void refreshOperatorShellData().then(() => renderOperatorWindow());
+    });
+    $("#operator-create", w).addEventListener("click", () => {
+      const goal = String($("#operator-create-goal", w).value || "").trim();
+      const name = String($("#operator-create-name", w).value || "").trim();
+      const mode = String($("#operator-create-mode", w).value || "test").trim().toLowerCase();
+      const errorEl = $("#operator-create-error", w);
+      errorEl.textContent = "";
+      if (!goal) {
+        errorEl.textContent = "Enter a company idea.";
+        return;
+      }
+      void createLiveBusinessWithOptions({ goal, name, mode, errorEl });
+    });
+    $("#operator-topup", w).addEventListener("click", () => {
+      const amount = String($("#operator-topup-amount", w).value || "").trim();
+      void submitOperatorTopupFromWindow(amount);
+    });
+    $("#operator-payouts", w).addEventListener("click", () => {
+      void startOperatorPayoutConnectFromWindow();
+    });
+  }
+
+  async function submitOperatorTopupFromWindow(rawAmount) {
+    const w = document.getElementById("w-operator");
+    const errorEl = w ? $("#operator-billing-error", w) : null;
+    if (errorEl) errorEl.textContent = "";
+    const dollars = Number.parseFloat(String(rawAmount || "").trim());
+    const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
+    if (amountCents <= 0) {
+      if (errorEl) errorEl.textContent = "Enter a valid top-up amount.";
+      return;
+    }
+    try {
+      const res = await fetchJSON("/api/takyon/operator/topup/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount_cents: amountCents, return_path: currentReturnPath() }),
+      });
+      if (!res || !res.checkout_url) throw new Error("Top-up checkout URL unavailable.");
+      navigateOwner(res.checkout_url);
+    } catch (err) {
+      if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function startOperatorPayoutConnectFromWindow() {
+    const w = document.getElementById("w-operator");
+    const errorEl = w ? $("#operator-billing-error", w) : null;
+    if (errorEl) errorEl.textContent = "";
+    try {
+      const res = await fetchJSON("/api/takyon/operator/payouts/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ return_path: currentReturnPath() }),
+      });
+      if (!res || !res.connect_url) throw new Error("Payout connect URL unavailable.");
+      navigateOwner(res.connect_url);
+    } catch (err) {
+      if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+      await refreshOperatorShellData().catch(() => {
+        /* best effort */
+      });
+      renderOperatorWindow();
+    }
+  }
+
+  function openWakeWindow() {
+    if (!LIVE.activeBusiness) return null;
+    const win = makeWin({
+      id: "w-wake",
+      title: "wake loop · cron",
+      x: 556,
+      y: 56,
+      w: 360,
+      h: 360,
+      html: "",
+    });
+    renderWakeWindow();
+    focusWin(win);
+    return win;
+  }
+
+  function renderWakeWindow(errorMessage) {
+    const w = document.getElementById("w-wake");
+    if (!w || !RT.live) return;
+    const overview = LIVE.workspaceOverview || {};
+    const wakeHealth = overview.wake_health || {};
+    const cron = selectWakeCron(overview);
+    const currentValue = String((w.dataset.scheduleValue || (cron && cron.schedule) || "every 6h")).trim();
+    const statusHeadline = String(wakeHealth.headline || ((cron && cron.enabled) ? "CEO wake loop is active." : "No CEO wake loop is configured.")).trim();
+    const statusDetail = String(wakeHealth.detail || ((cron && cron.schedule)
+      ? "Saving updates the recurring CEO wake cadence without triggering an immediate wake."
+      : "Save a cadence to create the recurring CEO wake loop for this business.")).trim();
+    body(w).innerHTML = `
+      <div class="lab">ceo wake loop</div>
+      <div style="display:grid;gap:8px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">status</span><strong style="font:700 12px 'Space Mono',monospace">${esc(statusHeadline)}</strong></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">current cadence</span><strong style="font:700 12px 'Space Mono',monospace">${esc((cron && cron.schedule) || "Not scheduled")}</strong></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">next run</span><strong style="font:700 12px 'Space Mono',monospace">${esc((cron && cron.next_run) || "Will be set when you save")}</strong></div>
+        <div style="display:flex;justify-content:space-between;gap:12px"><span class="meta">last run</span><strong style="font:700 12px 'Space Mono',monospace">${esc((cron && cron.last_run) || "No wake recorded yet")}</strong></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        ${WAKE_SCHEDULE_PRESETS.map((preset) => `<button class="cbtn${normalizeWakeSchedule(currentValue) === preset ? " go on" : ""}" data-wake-preset="${esc(preset)}" type="button">${esc(preset.replace(/^every\s+/i, ""))}</button>`).join("")}
+      </div>
+      <label class="meta" for="wake-schedule-input" style="display:block;margin-bottom:4px">custom interval</label>
+      <input id="wake-schedule-input" type="text" value="${esc(currentValue)}" placeholder="every 6h" style="width:100%;box-sizing:border-box;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace;margin-bottom:8px" />
+      <div class="meta" style="margin-bottom:4px">${esc(statusDetail)}</div>
+      <div class="meta" style="margin-bottom:10px">Use an interval like every 30m, every 2h, or every 1d.</div>
+      <div class="meta" id="wake-error" style="min-height:16px;margin-bottom:10px">${esc(errorMessage || "")}</div>
+      <button class="cbtn go" id="wake-save" type="button" style="width:100%">save cron</button>
+    `;
+    body(w).querySelectorAll("[data-wake-preset]").forEach((button) => {
+      button.addEventListener("click", () => {
+        w.dataset.scheduleValue = button.getAttribute("data-wake-preset") || "every 6h";
+        renderWakeWindow(errorMessage);
+      });
+    });
+    $("#wake-schedule-input", w).addEventListener("input", (event) => {
+      w.dataset.scheduleValue = event.target.value;
+    });
+    $("#wake-save", w).addEventListener("click", () => {
+      void saveWakeScheduleFromWindow();
+    });
+  }
+
+  async function saveWakeScheduleFromWindow() {
+    const w = document.getElementById("w-wake");
+    if (!w || !LIVE.activeBusiness) return;
+    const raw = String($("#wake-schedule-input", w).value || w.dataset.scheduleValue || "").trim();
+    const normalized = normalizeWakeSchedule(raw);
+    if (!normalized) {
+      renderWakeWindow("Use an interval like every 30m, every 2h, or every 1d.");
+      return;
+    }
+    try {
+      const sessionId = await ensureSession(LIVE.activeBusiness);
+      const res = await rpc("takyon.wake.schedule", {
+        session_id: sessionId,
+        schedule: normalized,
+      }, 30000);
+      const output = String(res && res.output || "").trim();
+      if (output) ceolog(esc(output), true);
+      w.dataset.scheduleValue = normalized;
+      await refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+      renderWakeWindow("");
+    } catch (err) {
+      renderWakeWindow(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const originalRenderDeliverables = renderDeliverables;
+  renderDeliverables = function renderDeliverablesLiveAware() {
+    if (!RT.live) return originalRenderDeliverables();
+    return renderDeliverablesWindow();
+  };
 
   const originalRenderProduct = renderProduct;
   renderProduct = function renderProductLiveAware() {
@@ -611,7 +1046,7 @@
     $("#mb-wake").style.display = "";
     $("#mb-credits").style.display = "";
     $("#mb-wake").textContent = RT.nextWakeAt ? `wake ${RT.paused ? "paused" : fmt(RT.nextWakeAt - Date.now())}` : `wake ${RT.paused ? "paused" : "n/a"}`;
-    $("#mb-credits").textContent = `operator $${RT.credits.toFixed(2)}`;
+    $("#mb-credits").textContent = hasOperatorAccountBalance() ? `operator $${RT.credits.toFixed(2)}` : "operator n/a";
   };
 
   const originalRenderBoard = renderBoard;
@@ -693,6 +1128,8 @@
     LIVE.planBusiness = "";
     RT.live = false;
     LIVE.workspaceOverview = null;
+    LIVE.workspaceSnapshot = null;
+    LIVE.workspaceOutputs = [];
   }
 
   function stopLiveTimers() {
@@ -730,6 +1167,25 @@
     if (/search|fetch/.test(raw)) return "fetch";
     if (/terminal|exec|run|deploy/.test(raw)) return "execute";
     return "other";
+  }
+
+  function applyToolPreview(name, preview) {
+    const toolName = String(name || "").trim();
+    const nextPreview = String(preview || "").trim();
+    if (!toolName || !nextPreview) return;
+    LIVE.toolEls.forEach((holder) => {
+      if (!holder || holder.dataset.toolName !== toolName) return;
+      const chip = holder.querySelector(".tool");
+      if (!chip || chip.classList.contains("done")) return;
+      if (holder.dataset.toolPreview === nextPreview) return;
+      holder.dataset.toolPreview = nextPreview;
+      const ttl = holder.querySelector(".ttl");
+      if (ttl) {
+        ttl.textContent = nextPreview;
+        ttl.title = nextPreview;
+      }
+      ceolog(`<span class="l-blue">[tool]</span> ${esc(toolName)} · ${esc(nextPreview)}`, true);
+    });
   }
 
   function ensureAssistantBubble() {
@@ -808,8 +1264,13 @@
         nm: payload.name || "tool",
         ttl: payload.context || payload.name || "working",
       });
+      el.dataset.toolName = String(payload.name || "tool");
       if (payload.tool_id) LIVE.toolEls.set(String(payload.tool_id), el);
       ceolog(`<span class="l-blue">[tool]</span> ${esc(payload.name || "tool")}`, true);
+      return;
+    }
+    if (ev.type === "tool.progress") {
+      applyToolPreview(payload.name, payload.preview);
       return;
     }
     if (ev.type === "tool.complete") {
@@ -905,6 +1366,9 @@
         applyWorkspace(workspace, businessSummary(business));
       }
       if (board) applyBoard(board);
+      if (document.getElementById("w-operator")) renderOperatorWindow();
+      if (document.getElementById("w-wake")) renderWakeWindow("");
+      if (document.getElementById("w-files")) renderDeliverablesWindow();
       setStatus("running", "run");
     } catch (err) {
       setStatus("paused", "paused");
@@ -1001,35 +1465,55 @@
     }, 15000);
   }
 
-  async function createLiveBusinessFromIdea() {
-    const value = (input.value || input.placeholder || "").replace(/…$/, "").trim();
-    if (!value) return;
-    const brand = deriveBrand(value);
+  async function createLiveBusinessWithOptions(options) {
+    const goal = String(options && options.goal || "").trim();
+    const name = String(options && options.name || "").trim();
+    const mode = String(options && options.mode || "test").trim().toLowerCase() === "live" ? "live" : "test";
+    const errorEl = options && options.errorEl || null;
+    if (errorEl) errorEl.textContent = "";
+    if (!goal) {
+      if (errorEl) errorEl.textContent = "Enter a company idea.";
+      return;
+    }
+    const brand = deriveBrand(name || goal);
+    const businessName = name || brand.name;
+    const businessSlug = slugifyName(name || brand.slug);
     setStatus("building…", "build");
     try {
       const sessionId = await ensureSession("");
       const result = await rpc("takyon.dashboard.create", {
         session_id: sessionId,
-        business: brand.slug,
-        business_name: brand.name,
-        goal: value,
-        mode: "test",
+        business: businessSlug,
+        business_name: businessName,
+        goal,
+        mode,
         limit: 50,
       }, 600000);
       if (Array.isArray(result && result.businesses)) rememberBusinesses(result.businesses);
-      const created = String(result && result.business_slug || brand.slug).trim().toLowerCase();
+      const created = String(result && result.business_slug || businessSlug).trim().toLowerCase();
       const summary = businessSummary(created) || {
         slug: created,
-        name: brand.name,
-        goal: value,
-        mode: "test",
+        name: businessName,
+        goal,
+        mode,
       };
       await mountLiveBusiness(created, summary);
       if (result && result.output) addCeo(formatRichText(result.output));
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       setStatus("paused", "paused");
-      addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
+      if (errorEl) {
+        errorEl.textContent = message;
+        return;
+      }
+      addCeo(formatRichText(message));
     }
+  }
+
+  async function createLiveBusinessFromIdea() {
+    const value = (input.value || input.placeholder || "").replace(/…$/, "").trim();
+    if (!value) return;
+    await createLiveBusinessWithOptions({ goal: value, mode: "test" });
   }
 
   async function submitLivePrompt() {
@@ -1052,7 +1536,35 @@
     }
   }
 
+  function bindLiveChrome() {
+    [
+      ["mb-biz", openOperatorWindow, "open operator and business controls"],
+      ["mb-credits", openOperatorWindow, "open operator budget controls"],
+      ["mb-wake", openWakeWindow, "open wake schedule"],
+    ].forEach(([id, handler, label]) => {
+      const el = document.getElementById(id);
+      if (!el || el.dataset.liveBound) return;
+      el.dataset.liveBound = "1";
+      el.setAttribute("role", "button");
+      el.setAttribute("tabindex", "0");
+      el.setAttribute("title", label);
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        if (!RT.live) return;
+        handler();
+      });
+      el.addEventListener("keydown", (event) => {
+        if (!RT.live) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          handler();
+        }
+      });
+    });
+  }
+
   function interceptClicks() {
+    bindLiveChrome();
     document.getElementById("go").addEventListener("click", (event) => {
       event.preventDefault();
       event.stopImmediatePropagation();

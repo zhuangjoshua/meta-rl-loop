@@ -41,9 +41,9 @@
     "never_show": ["real bank names", "real card numbers", "third-party brand logos"]
   },
   "platform": {
-    "platforms": ["meta", "reddit"],
-    "placements": ["feed", "reddit_feed"],
-    "aspect_ratios": ["1:1", "4:5"],
+    "platforms": ["meta"],
+    "placements": ["feed", "story"],
+    "aspect_ratios": ["1:1", "4:5", "9:16"],
     "goal": "clicks"
   },
   "constraints": {
@@ -55,7 +55,7 @@
   "angle_shortlist": [
     { "angle": "product_proof", "reason": "the dashboard itself is the proof; strong for solution-aware." },
     { "angle": "pain_agitation", "reason": "dramatizes the slow leak of forgotten charges." },
-    { "angle": "reddit_native", "reason": "fits r/personalfinance voice; native post format." },
+    { "angle": "community_native", "reason": "fits a plainspoken community-post format without needing polished creative." },
     { "angle": "comparison", "reason": "Tally vs. manually auditing statements." }
   ]
 }

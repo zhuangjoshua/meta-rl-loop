@@ -1,8 +1,8 @@
 # Static Ad Creative Generator
 
 A self-contained, backend-agnostic skill that turns a product/company input into
-**high-performance static image ad creative** for **Meta (Facebook + Instagram)** and
-**Reddit** — then optionally renders variants with **OpenAI `gpt-image-2`**.
+**high-performance static image ad creative** for **Meta (Facebook + Instagram)**, then
+optionally renders variants with **OpenAI `gpt-image-2`**.
 
 It is built for **performance advertising**, not generic image generation. Marketing
 strategy is decided first as a strict JSON **ad spec**; the image model only *renders* an
@@ -117,7 +117,7 @@ static-ad-creative-generator/
 ├── references/
 │   ├── angle-taxonomy.md         # 14 ad angles + how to choose + variant waves
 │   ├── visual-templates.md       # composition templates + art-direction + anti-artifact rules
-│   ├── platform-specs.md         # Meta/Reddit placements, safe zones, copy limits, size map
+│   ├── platform-specs.md         # Meta placements, safe zones, copy limits, size map
 │   ├── policy-checks.md          # honesty rules + platform policy + lint signals
 │   ├── prompt-compiler-rules.md  # the compiler contract
 │   └── qa-rubric.md              # the 9-check QA rubric
@@ -136,7 +136,7 @@ static-ad-creative-generator/
 └── examples/
     ├── example-input.json        # a filled creative brief (fictional product "Tally")
     ├── example-spec.json         # one complete ad spec
-    ├── example-batch.json        # 3 specs across angles
+    ├── example-batch.json        # 2 specs across angles
     └── output/                   # real dry-run output bundle
 ```
 

@@ -87,7 +87,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 ## Procedure
 
-1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. Determine whether the real need is a campaign update, a lane change, a broader distribution plan, a Reddit/forum move that should stay here, or a channel-native X move.
+1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. Determine whether the real need is a campaign update, a lane change, a broader distribution plan, a non-X discussion-thread move that should stay here, or a channel-native X move.
 2. If unresolved replies are the main issue, hand off X work to `takyon-x` or load `takyon-conversation-followup` before expanding the campaign.
 3. Inspect the current campaign workspace. `distribution/campaign/` is canonical. If only the legacy `distribution/phase-1-outreach/` tree exists, move or merge that visible campaign state into `distribution/campaign/` first. If `distribution/campaign/` is missing or too stale to trust after that check, create or refresh it with `business_create_workspace` and write the current campaign files there.
 4. Update the visible campaign artifacts: objective, audience, lanes, assets, current blockers, and next iteration. Keep them business-scoped and durable instead of burying them in chat output.

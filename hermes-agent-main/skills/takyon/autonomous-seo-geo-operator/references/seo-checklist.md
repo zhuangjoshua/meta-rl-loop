@@ -136,7 +136,7 @@ all of this as directionally sound and **probabilistic, never guaranteed**.
       cites easily. Pair `FAQPage` schema with visible Q&A only where Google supports it.
 - [ ] **Server-render content + schema** (AI crawlers generally don't run JS).
 - [ ] **Entity clarity**: consistent naming + `Organization`/`Person` schema with `sameAs`
-      to authoritative profiles. Off-site brand presence (Wikipedia, Reddit, YouTube,
+      to authoritative profiles. Off-site brand presence (Wikipedia, YouTube,
       LinkedIn) correlates more with AI visibility than backlinks — recommend it, don't
       fake it.
 - [ ] **Topical depth** across the niche's sub-topics (aim ~70%+) so the domain reads as a

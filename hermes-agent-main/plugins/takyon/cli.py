@@ -914,7 +914,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Treat ICP, offer, product model, pricing, and distribution as revisable beliefs in research/strategy.md.",
         "If conversation, outreach, or user evidence is too large or noisy to inspect cheaply, load",
         "takyon-conversation-followup and use its published follow-up note before deciding.",
-        "For channel-native public execution, prefer takyon-x for X; keep Reddit and other forum-style public execution in takyon-distribution.",
+        "For channel-native public execution, prefer takyon-x for X; keep broader non-X discussion-thread execution in takyon-distribution.",
         "Call business_calculate_pulse and use takyon-business-metrics to establish the first metrics baseline in metrics/summary.md and research/strategy.md.",
         "Seed or update compact wake notes in metrics/wake-history.md when it helps future scheduled wakes compare what happened, what changed, and what did not move.",
         "Physical subject matter does not imply physical fulfillment; unless the operator explicitly asks this business to sell,",
@@ -989,7 +989,8 @@ def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
                 "ceo_wake",
                 idempotency_key=job_key,
                 payload={"estimate_cents": _operator_turn_estimate_cents()},
-                max_attempts=1,
+                # A worker restart should requeue a wake instead of permanently blocking it.
+                max_attempts=5,
             )
             outcome = None
             record = jobs.get_job(raw, job.id)
@@ -1060,7 +1061,8 @@ def _enqueue_pg_ceo_bootstrap(
                 "ceo_bootstrap",
                 idempotency_key=_idempotency_key("operator-bootstrap", slug, uuid.uuid4().hex),
                 payload=payload,
-                max_attempts=1,
+                # Bootstrap is the create-time critical path; keep the normal queue retry cushion.
+                max_attempts=5,
             )
     return {
         "action": "ceo_bootstrap.enqueue",

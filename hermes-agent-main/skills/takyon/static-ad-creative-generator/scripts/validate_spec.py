@@ -23,7 +23,6 @@ SCHEMA_PATH = os.path.join(HERE, "..", "templates", "ad-spec.schema.json")
 
 VALID_PLACEMENTS = {
     "meta": {"feed", "story", "reels"},
-    "reddit": {"reddit_feed", "reddit_comments"},
 }
 
 # Common aspect ratios per placement (see references/platform-specs.md). Any W:H is allowed;
@@ -32,8 +31,6 @@ RECOMMENDED_RATIOS = {
     "feed": {"1:1", "4:5", "1.91:1"},
     "story": {"9:16"},
     "reels": {"9:16"},
-    "reddit_feed": {"1:1", "4:5", "1.91:1"},
-    "reddit_comments": {"1:1", "4:5"},
 }
 
 # --- policy lint vocabularies (keep in sync with references/policy-checks.md) ---
@@ -46,7 +43,7 @@ GUARANTEE_TERMS = [
     "no risk", "permanent results",
 ]
 AUTHORITY_TERMS = ["as seen in", "#1 doctor", "number one doctor", "clinically proven", "fda approved"]
-PROOF_ANGLES = {"social_proof", "reddit_native", "imessage", "fake_ui", "testimonial"}
+PROOF_ANGLES = {"social_proof", "community_native", "imessage", "fake_ui", "testimonial"}
 PROOF_OK_WORDS = ["real", "rights-cleared", "rights cleared", "illustrative", "representative", "sample", "fictional"]
 UI_CONTROL_TERMS = ["play button", "cursor", "notification", "close button", "progress bar"]
 

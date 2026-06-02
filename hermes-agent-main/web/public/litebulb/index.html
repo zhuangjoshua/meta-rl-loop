@@ -295,6 +295,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
       <button class="wbtn" data-w="w-board">board</button>
       <button class="wbtn" data-w="w-product">product</button>
       <button class="wbtn" data-w="w-status">outreach</button>
+      <button class="wbtn" data-w="w-files">deliverables</button>
       <button class="wbtn" data-w="w-ceo">ceo.log</button>
     </span>
   </div>
@@ -480,7 +481,7 @@ const SKILLS=[
   {k:'get-first-customer',lane:'growth',t:'Get the first paying customer',b:'Goal: one paying customer. Everything else serves this.',tool:{kind:'other',nm:'send_message',ttl:()=>'outreach (draft — awaiting approval)'},receipt:'growth/pipeline.md'},
   {k:'outreach-copy',lane:'growth',t:'Draft outreach copy (no send)',b:'Cold DM / email variants, ready for your approval.',tool:{kind:'edit',nm:'write_file',ttl:()=>'growth/outreach.md'},receipt:'growth/outreach.md'},
   {k:'content-engine',lane:'creative',t:'Content engine — SEO assets',b:'Briefs + drafts aimed at search visibility.',tool:{kind:'edit',nm:'write_file',ttl:()=>'content/briefs.md'},receipt:'content/briefs.md',ship:'Blog + SEO'},
-  {k:'meta-creative',lane:'creative',t:'Generate ad creative',b:'UGC + static ad concepts for Meta.',tool:{kind:'execute',nm:'image_generate',ttl:()=>'ad concept ×3'},receipt:'creative/ads/'},
+  {k:'meta-creative',lane:'creative',t:'Generate ad creative',b:'UGC + static ad concepts for Meta.',tool:{kind:'execute',nm:'image_generate',ttl:()=>'ad concept x3'},receipt:'creative/ads/'},
   {k:'measurement-plan',lane:'ops',t:'Define the measurement plan',b:'Decide the metrics before claiming any growth.',tool:{kind:'edit',nm:'write_file',ttl:()=>'metrics/plan.md'},receipt:'metrics/plan.md'},
   {k:'activity-review',lane:'ops',t:'Activity review — pick next move',b:'Summarize state, choose the next highest-impact workflow.',tool:{kind:'other',nm:'memory',ttl:()=>'state summary'},receipt:'ops/review.md'},
 ];
@@ -573,6 +574,14 @@ function renderProduct(){
 function shipFeature(f){
   if(RT.shipped.includes(f))return; RT.shipped.push(f); renderProduct();
   const feats=document.getElementById('feats'); if(feats&&feats.lastElementChild)feats.lastElementChild.classList.add('flash');
+}
+
+function renderDeliverables(){
+  const w=document.getElementById('w-files');if(!w)return;
+  const rows=RT.shipped.length
+    ? RT.shipped.map(f=>`<div class="chan"><div class="chan-top"><span class="chan-nm">${esc(f)}</span><span class="chan-st">mock</span></div><div class="meta" style="margin-top:6px">Live deliverables load when the page is served by Takyon.</div></div>`).join('')
+    : `<div class="meta">No deliverables yet.</div>`;
+  body(w).innerHTML=`<div class="lab">deliverables</div>${rows}`;
 }
 
 /* ---------- status ---------- */
@@ -734,6 +743,7 @@ function secondTick(){
 function openBoard(){makeWin({id:'w-board',title:'the board · autonomous tasks',x:16,y:12,w:560,h:430,html:''});renderBoard();}
 function openProduct(){makeWin({id:'w-product',title:'product · live preview',x:600,y:12,w:308,h:282,html:''});renderProduct();}
 function openStatus(){makeWin({id:'w-status',title:'outreach · paid channels',x:600,y:316,w:280,h:240,html:''});renderOutreach();}
+function openDeliverables(){makeWin({id:'w-files',title:'deliverables · outputs',x:648,y:84,w:360,h:360,html:''});renderDeliverables();}
 function openCeoLog(){makeWin({id:'w-ceo',title:'ceo.log · wake loop',x:16,y:466,w:560,h:150,crt:true,html:'<div id="ceofeed" aria-live="polite"></div>'});RT.ceoFeed=$('#ceofeed',document.getElementById('w-ceo'));renderLog(RT.ceoFeed);}
 const MAINW=['w-board','w-ceo','w-product','w-status'];
 function geo(){
@@ -852,7 +862,7 @@ $('#send').addEventListener('click',say);
 $('#say').addEventListener('keydown',e=>{if(e.key==='Enter')say();});
 
 /* ---------- window dock ---------- */
-const OPENERS={'w-board':openBoard,'w-product':openProduct,'w-status':openStatus,'w-ceo':openCeoLog};
+const OPENERS={'w-board':openBoard,'w-product':openProduct,'w-status':openStatus,'w-files':openDeliverables,'w-ceo':openCeoLog};
 function syncDock(){document.querySelectorAll('.wbtn').forEach(b=>b.classList.toggle('open',!!document.getElementById(b.dataset.w)));}
 function toggleWin(id){if(!desk)return;const w=document.getElementById(id);if(w){focusWin(w);}else{RT.moved.delete(id);OPENERS[id]();layoutMain();}syncDock();}
 document.querySelectorAll('.wbtn').forEach(b=>b.addEventListener('click',()=>toggleWin(b.dataset.w)));

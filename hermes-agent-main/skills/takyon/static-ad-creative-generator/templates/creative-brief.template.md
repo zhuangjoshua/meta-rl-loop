@@ -33,8 +33,8 @@ do not invent facts, testimonials, or metrics. Mark anything fictional as
 - **Things that must never appear:**
 
 ## 4. Platform & Format
-- **Platform(s):** meta | reddit
-- **Placement(s):** feed | story | reels | reddit_feed | reddit_comments
+- **Platform(s):** meta
+- **Placement(s):** feed | story | reels
 - **Aspect ratio(s):** 1:1 | 4:5 | 9:16
 - **Primary goal:** clicks | leads | trials | purchases | awareness
 

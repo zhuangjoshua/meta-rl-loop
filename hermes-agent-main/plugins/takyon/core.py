@@ -828,11 +828,6 @@ def _outreach_destination_url(
     target_url = _normalize_destination_url(target_text)
     if channel_slug in {"show_hn", "hacker_news"} or provider_slug in {"hacker_news", "news_ycombinator"}:
         return "https://news.ycombinator.com/submit"
-    if channel_slug == "reddit" or provider_slug == "reddit":
-        match = re.match(r"^/?r/([A-Za-z0-9_][A-Za-z0-9_]{1,20})/?$", target_text)
-        if match:
-            return f"https://www.reddit.com/r/{match.group(1)}/submit/"
-        return target_url
     return target_url
 
 
@@ -6927,7 +6922,7 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, publication, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
-            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle Reddit/forum threads in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
+            "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle broader non-X discussion-thread work in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "

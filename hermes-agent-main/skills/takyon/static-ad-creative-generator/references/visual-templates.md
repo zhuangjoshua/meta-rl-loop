@@ -61,9 +61,9 @@ overlay placement · composition note · prompt skeleton · pairs-with angles.
 
 ### native_social_post
 - **AR:** 4:5 / 9:16 · **Focal:** the post text · **Overlay:** is the post itself
-- A platform-native card (Reddit thread, forum post, social caption). Structure mimics the platform; copy reads like a real human, clearly representative.
-- *Skeleton:* "A Reddit-style post card: subreddit 'r/`<topic>`', upvote arrow, bold title '`<hook>`', two lines of body text, neutral UI, no real usernames."
-- Pairs: reddit_native, founder_confession, contrarian.
+- A platform-native card (community post, forum-style note, social caption). Structure mimics the surface; copy reads like a real human, clearly representative.
+- *Skeleton:* "A clean community-post card: generic community label, bold title '`<hook>`', two lines of body text, neutral UI, no real usernames."
+- Pairs: community_native, founder_confession, contrarian.
 
 ### text_conversation
 - **AR:** 9:16 / 4:5 · **Focal:** the punchline bubble · **Overlay:** none (text is in-scene)
@@ -132,8 +132,6 @@ overlay placement · composition note · prompt skeleton · pairs-with angles.
 | --- | --- | --- |
 | Meta feed | 1:1 or 4:5 | hero_product, before_after_split, comparison_table, stat_card |
 | Meta story/reels | 9:16 | device_in_hand, text_conversation, founder_selfie, native_social_post |
-| Reddit feed | 1:1 or 4:5 | native_social_post, stat_card, comparison_table |
-| Reddit comments | 1:1 | stat_card, review_screenshot |
 
 Always reserve clear negative space where `layout.overlay_position` says the text goes, and
 keep it inside the placement's safe zone (see `platform-specs.md`).

@@ -9,14 +9,14 @@ platforms: [linux, macos]
 metadata:
   hermes:
     category: takyon
-    tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, instagram, facebook, reddit, gpt-image]
+    tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, instagram, facebook, gpt-image]
     related_skills: [takyon-meta-ads, takyon-distribution, ugc-video-ad]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_static_ad_generate]
     routing:
       owns: Per-business static performance-ad image creative generation from brief to spec, prompt, QA bundle, and optional image render.
       when_to_use:
-        - A business needs static image ad variants for Meta (Facebook/Instagram) or Reddit.
+        - A business needs static image ad variants for Meta (Facebook/Instagram).
         - The operator wants multiple ad angles as reviewable specs before or alongside paid distribution work.
         - The business needs a batch creative test matrix with dry-run placeholders or optional OpenAI renders.
       do_not_use_for:
@@ -40,7 +40,7 @@ required_credential_files: []
 ## Overview
 
 This skill turns a product/company input into **static performance-ad creative** for Meta
-(Facebook + Instagram) and Reddit. It is opinionated about *advertising*, not just imagery:
+(Facebook + Instagram). It is opinionated about *advertising*, not just imagery:
 marketing strategy is decided **first**, as a strict JSON **ad spec**, and only then is an
 image model asked to render it. The image backend never invents the angle, hook, audience,
 or proof.
@@ -64,7 +64,7 @@ the image-generation API call (real spend); every other stage is local and offli
 
 ## When to Use
 
-- Turning a product URL / description / brief into **static image ad variants** for Meta or Reddit.
+- Turning a product URL / description / brief into **static image ad variants** for Meta.
 - Generating multiple **ad angles** from one product as reviewable specs.
 - Producing a **strict, reviewable ad spec** before spending money on generation.
 - **Batch** producing a test matrix of creatives across angles, placements, and aspect ratios.
@@ -116,7 +116,7 @@ a *static performance-ad creative spec generator*.
 
 - `references/angle-taxonomy.md` — the 14 ad angles, how to pick by awareness + proof, variant waves.
 - `references/visual-templates.md` — composition templates, the SSCLP art-direction framework, anti-artifact rules.
-- `references/platform-specs.md` — Meta/Reddit placements, safe zones, copy limits, the `aspect_ratio → model size` map.
+- `references/platform-specs.md` — Meta placements, safe zones, copy limits, the `aspect_ratio → model size` map.
 - `references/policy-checks.md` — advertising-policy red flags and the machine-checkable lint signals.
 - `references/prompt-compiler-rules.md` — the exact contract the prompt compiler implements.
 - `references/qa-rubric.md` — the 9-check QA rubric and scoring.

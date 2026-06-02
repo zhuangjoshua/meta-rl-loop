@@ -28,18 +28,18 @@
     },
     "platform": {
       "type": "string",
-      "enum": ["meta", "reddit"],
+      "enum": ["meta"],
       "description": "Distribution platform. 'meta' covers Facebook + Instagram."
     },
     "placement": {
       "type": "string",
-      "enum": ["feed", "story", "reels", "reddit_feed", "reddit_comments"],
+      "enum": ["feed", "story", "reels"],
       "description": "Surface inside the platform. Must be consistent with platform and aspect_ratio (see references/platform-specs.md)."
     },
     "aspect_ratio": {
       "type": "string",
       "pattern": "^[0-9]{1,2}(\\.[0-9]{1,2})?:[0-9]{1,2}(\\.[0-9]{1,2})?$",
-      "description": "Target aspect ratio as 'W:H' (decimals allowed, e.g. 1.91:1). Any ratio from 1:3 to 3:1 is supported and sized automatically for gpt-image-2. Common ad ratios — Meta feed: 1:1, 4:5, 1.91:1; Meta story/reels: 9:16; Reddit: 1:1, 4:5, 1.91:1. One creative can be rendered at several ratios via the generator's --aspect-ratio flag. See references/platform-specs.md."
+      "description": "Target aspect ratio as 'W:H' (decimals allowed, e.g. 1.91:1). Any ratio from 1:3 to 3:1 is supported and sized automatically for gpt-image-2. Common ad ratios — Meta feed: 1:1, 4:5, 1.91:1; Meta story/reels: 9:16. One creative can be rendered at several ratios via the generator's --aspect-ratio flag. See references/platform-specs.md."
     },
     "goal": {
       "type": "string",
@@ -69,7 +69,7 @@
         "angle": {
           "type": "string",
           "minLength": 3,
-          "description": "One of the angles in references/angle-taxonomy.md (e.g. pain_agitation, before_after, fake_ui, founder_confession, reddit_native, imessage, product_proof, social_proof, comparison, contrarian, meme_native, objection_handling, urgency_offer, transformation)."
+          "description": "One of the angles in references/angle-taxonomy.md (e.g. pain_agitation, before_after, fake_ui, founder_confession, community_native, imessage, product_proof, social_proof, comparison, contrarian, meme_native, objection_handling, urgency_offer, transformation)."
         },
         "hook": { "type": "string", "minLength": 3, "description": "The single scroll-stopping idea, in the audience's language." },
         "promise": { "type": "string", "minLength": 3, "description": "The payoff if they engage." },
