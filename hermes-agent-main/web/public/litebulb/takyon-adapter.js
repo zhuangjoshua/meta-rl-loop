@@ -867,6 +867,12 @@
     `;
   }
 
+  function renderGraphWindow() {
+    const w = document.getElementById("w-graph");
+    if (!w) return;
+    body(w).innerHTML = renderNorthStarPanel(LIVE.workspaceOverview || {});
+  }
+
   function hasLiveProgress(snapshot) {
     const backgroundStatus = String(snapshot && snapshot.background_run && snapshot.background_run.status || "").trim().toLowerCase();
     if (backgroundStatus === "queued" || backgroundStatus === "running") return true;
@@ -1731,13 +1737,12 @@
     const w = document.getElementById("w-board");
     if (!w) return;
     const cols = ["scheduled", "running", "done"];
-    const graph = renderNorthStarPanel(LIVE.workspaceOverview || {});
     body(w).innerHTML = `<div class="board-shell">
       <div class="board-cols"><div class="kanban">${cols.map((st) => {
       const items = RT.tasks.filter((t) => t.status === st);
       return `<div class="col"><div class="col-h" style="border-color:${STATUS_C[st] || "var(--ink)"}"><span>${st}</span><span class="ct">${items.length}</span></div>
         <div class="col-list">${items.map(cardHTML).join("")}</div></div>`;
-    }).join("")}</div></div>${graph}</div>`;
+    }).join("")}</div></div></div>`;
     body(w).querySelectorAll(".card").forEach((c) => {
       c.setAttribute("role", "button");
       c.tabIndex = 0;
@@ -1749,12 +1754,27 @@
         }
       });
     });
+    renderGraphWindow();
   };
 
   const originalLayoutMain = layoutMain;
   layoutMain = function layoutMainLiveAware() {
     originalLayoutMain();
   };
+
+  if (typeof openGraph === "function") {
+    const originalOpenGraphFn = openGraph;
+    openGraph = function openGraphLiveAware() {
+      const win = originalOpenGraphFn();
+      if (RT.live) renderGraphWindow();
+      return win;
+    };
+    try {
+      if (typeof OPENERS === "object" && OPENERS) OPENERS["w-graph"] = openGraph;
+    } catch (_err) {
+      /* OPENERS not reachable here; mountLiveBusiness still opens the graph */
+    }
+  }
 
   const originalOpenTask = openTask;
   openTask = async function openTaskLiveAware(id) {
@@ -2379,10 +2399,12 @@
       desk.classList.remove("stack");
     }
     openBoard();
+    openGraph();
     openProduct();
     openStatus();
     openCeoLog();
     syncDock();
+    renderGraphWindow();
     layoutMain();
     try {
       RT.ro = new ResizeObserver(layoutMain);
