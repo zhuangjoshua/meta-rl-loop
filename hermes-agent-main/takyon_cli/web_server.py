@@ -2088,6 +2088,63 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/takyon/businesses/{slug}/site-preview")
+async def get_takyon_business_site_preview(
+    request: Request,
+    slug: str,
+    path: str = "",
+) -> dict[str, Any]:
+    """Direct authenticated local site preview for a business workspace.
+
+    Mirrors the gateway's HTML inlining behavior without depending on the
+    session-scoped chat RPC lane.
+    """
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    requested_path = str(path or "").strip() or "product/site"
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+        from tui_gateway.server import _TAKYON_MAX_SITE_PREVIEW_BYTES, _takyon_inline_static_site
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        candidate = store._resolve_business_file(business, requested_path, sync=False)
+        if candidate.is_dir() or not candidate.suffix:
+            candidate = candidate / "index.html"
+        if not candidate.exists() or not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"site preview not found: {requested_path}")
+        if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
+            raise HTTPException(status_code=400, detail="site preview requires an HTML file or site directory")
+        size = candidate.stat().st_size
+        if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
+            raise HTTPException(status_code=413, detail=f"site preview is too large: {size} bytes")
+        business_root = store._business_root(business, sync=False)
+        source_root = (business_root / "product/site").resolve()
+        candidate_resolved = candidate.resolve()
+        html_text = _takyon_inline_static_site(
+            candidate,
+            site_root=source_root if source_root in (candidate_resolved, *candidate_resolved.parents) else None,
+        )
+        encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
+        rel = str(candidate.relative_to(business_root))
+        return {
+            "business_slug": business,
+            "path": rel,
+            "size": len(html_text.encode("utf-8")),
+            "url": f"data:text/html;charset=utf-8;base64,{encoded}",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - preview should fail honestly
+        _log.warning("dashboard business site preview failed for %s:%s: %s", business, requested_path, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/takyon/businesses/{slug}/workspace")
 async def get_takyon_business_workspace(
     request: Request,

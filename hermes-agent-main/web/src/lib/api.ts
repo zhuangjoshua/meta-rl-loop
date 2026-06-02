@@ -125,6 +125,13 @@ export const api = {
       undefined,
       "takyon.file.read",
     ),
+  getTakyonBusinessSitePreview: (slug: string, path = "") =>
+    fetchJSONWithTimeout<{ business_slug?: string; path?: string; size?: number; url?: string }>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/site-preview?path=${encodeURIComponent(path)}`,
+      15_000,
+      undefined,
+      "takyon.site.preview",
+    ),
   getTakyonBusinessWorkspace: (slug: string, limit = 50) =>
     fetchJSONWithTimeout<TakyonBusinessWorkspaceResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/workspace?limit=${encodeURIComponent(String(limit))}`,

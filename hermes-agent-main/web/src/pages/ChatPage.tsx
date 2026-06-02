@@ -386,7 +386,8 @@ interface BusinessMediaResponse extends ScopeState {
 
 type BusinessFileReadResponse = TakyonBusinessFileReadResponse;
 
-interface BusinessSitePreviewResponse extends ScopeState {
+interface BusinessSitePreviewResponse {
+  business_slug?: string;
   path?: string;
   size?: number;
   url?: string;
@@ -2253,6 +2254,7 @@ export default function ChatPage() {
     const business = activeBusinessSlug;
     if (!business) return;
     if (!progressTask) {
+      let shouldRefreshAfterFinish = false;
       setTakyonProgress((prev) => {
         if (
           !prev?.active ||
@@ -2260,8 +2262,18 @@ export default function ChatPage() {
         ) {
           return prev;
         }
+        shouldRefreshAfterFinish = true;
         return { ...prev, active: false, status: "complete" };
       });
+      if (shouldRefreshAfterFinish && canUseConnection(connectionStateRef.current) && sessionIdRef.current) {
+        void refreshBusinessSurfaces(business);
+        const timer = window.setTimeout(() => {
+          void refreshBusinessSurfaces(business);
+        }, 1250);
+        return () => {
+          window.clearTimeout(timer);
+        };
+      }
       return;
     }
     const detail = cleanText(
@@ -2685,17 +2697,13 @@ export default function ChatPage() {
 
   const resolveBusinessSitePreview = useCallback(
     async (path?: string, business?: string): Promise<BusinessSitePreviewResponse> => {
-      if (!sessionId) throw new Error("Chat is still connecting.");
       const targetBusiness = normalizeBusinessLookup(
         business || scopeBusinessRef.current || pendingBusinessSlugRef.current || "",
       );
-      return await gw.request<BusinessSitePreviewResponse>(
-        "takyon.site.preview",
-        { session_id: sessionId, business_slug: targetBusiness, path },
-        20_000,
-      );
+      if (!targetBusiness) throw new Error("Business is still connecting.");
+      return await api.getTakyonBusinessSitePreview(targetBusiness, path || "");
     },
-    [gw, sessionId],
+    [],
   );
 
   const handleSubmit = useCallback(async () => {
