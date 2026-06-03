@@ -5541,22 +5541,62 @@ def _business_slug_from_product_host(host: str) -> str:
         return ""
 
 
-def _product_host_has_business(domain: str) -> tuple[bool, str]:
+_PRODUCT_HOST_BUSINESS_CACHE_LOCK = threading.Lock()
+_PRODUCT_HOST_BUSINESS_CACHE: dict[str, tuple[float, bool, str]] = {}
+_PRODUCT_HOST_BUSINESS_POSITIVE_TTL_SECONDS = 60.0
+_PRODUCT_HOST_BUSINESS_NEGATIVE_TTL_SECONDS = 5.0
+_PRODUCT_HOST_BUSINESS_CACHE_MAX = 2048
+
+
+def _product_host_has_business_uncached(domain: str) -> tuple[bool, str]:
     slug = _business_slug_from_product_host(_host_without_port(domain))
     if not slug:
         return False, "not_product_subdomain"
     try:
         from plugins.takyon.core import TakyonStore
 
-        TakyonStore(get_takyon_home()).read(
-            scope=f"business:{slug}",
-            query="summary",
-            include=[],
-            limit=1,
-        )
+        store = TakyonStore(get_takyon_home())
+        with store._connect() as conn:
+            if store._business(conn, slug) is None:
+                return False, "business_not_found"
     except Exception:
         return False, "business_not_found"
     return True, slug
+
+
+def _product_host_has_business(domain: str) -> tuple[bool, str]:
+    normalized = _host_without_port(domain).strip().lower()
+    if not normalized:
+        return False, "not_product_subdomain"
+
+    now = time.monotonic()
+    with _PRODUCT_HOST_BUSINESS_CACHE_LOCK:
+        cached = _PRODUCT_HOST_BUSINESS_CACHE.get(normalized)
+        if cached is not None:
+            expires_at, ok, reason = cached
+            if expires_at > now:
+                return ok, reason
+            _PRODUCT_HOST_BUSINESS_CACHE.pop(normalized, None)
+
+    result = _product_host_has_business_uncached(normalized)
+    ttl = (
+        _PRODUCT_HOST_BUSINESS_POSITIVE_TTL_SECONDS
+        if result[0]
+        else _PRODUCT_HOST_BUSINESS_NEGATIVE_TTL_SECONDS
+    )
+    with _PRODUCT_HOST_BUSINESS_CACHE_LOCK:
+        if len(_PRODUCT_HOST_BUSINESS_CACHE) >= _PRODUCT_HOST_BUSINESS_CACHE_MAX:
+            stale = [
+                key
+                for key, (expires_at, _ok, _reason) in _PRODUCT_HOST_BUSINESS_CACHE.items()
+                if expires_at <= now
+            ]
+            for key in stale:
+                _PRODUCT_HOST_BUSINESS_CACHE.pop(key, None)
+            while len(_PRODUCT_HOST_BUSINESS_CACHE) >= _PRODUCT_HOST_BUSINESS_CACHE_MAX:
+                _PRODUCT_HOST_BUSINESS_CACHE.pop(next(iter(_PRODUCT_HOST_BUSINESS_CACHE)))
+        _PRODUCT_HOST_BUSINESS_CACHE[normalized] = (now + ttl, result[0], result[1])
+    return result
 
 
 @app.get("/api/product-tls/ask")
@@ -5567,7 +5607,7 @@ async def product_tls_ask(domain: str = "") -> Response:
     hostname cannot make the VPS mint certificates unless Takyon already has a
     matching business in its canonical store.
     """
-    ok, reason = _product_host_has_business(domain)
+    ok, reason = await asyncio.to_thread(_product_host_has_business, domain)
     if ok:
         return Response(status_code=200, headers={"Cache-Control": "no-store"})
     return JSONResponse(

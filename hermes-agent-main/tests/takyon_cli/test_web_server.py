@@ -6,6 +6,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -944,6 +945,43 @@ def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monke
     assert client.get("/api/product-tls/ask?domain=missing.fourmanifold.com").status_code == 404
     assert client.get("/api/product-tls/ask?domain=app.fourmanifold.com").status_code == 404
     assert client.get("/api/product-tls/ask?domain=latexflow.evil.test").status_code == 404
+
+
+def test_product_tls_ask_does_not_block_status_route(monkeypatch):
+    import httpx
+
+    import takyon_cli.web_server as web_server
+
+    original_checker = web_server._product_host_has_business
+
+    def _slow_checker(domain: str) -> tuple[bool, str]:
+        time.sleep(0.25)
+        return original_checker(domain)
+
+    monkeypatch.setattr(web_server, "_product_host_has_business", _slow_checker)
+    monkeypatch.setattr(web_server, "check_config_version", lambda: (23, 23))
+    monkeypatch.setattr(web_server, "get_running_pid", lambda: None)
+    monkeypatch.setattr(web_server, "read_runtime_status", lambda: None)
+    monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "")
+
+    async def _exercise() -> tuple[httpx.Response, float]:
+        transport = httpx.ASGITransport(app=web_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            ask_task = asyncio.create_task(
+                client.get("/api/product-tls/ask?domain=missing.fourmanifold.com")
+            )
+            await asyncio.sleep(0.02)
+            started = time.perf_counter()
+            status_resp = await client.get("/api/status")
+            elapsed = time.perf_counter() - started
+            ask_resp = await ask_task
+            assert ask_resp.status_code == 404
+            return status_resp, elapsed
+
+    status_resp, elapsed = asyncio.run(_exercise())
+
+    assert status_resp.status_code == 200
+    assert elapsed < 0.2
 
 
 class TestWebServerEndpoints:
