@@ -82,6 +82,7 @@ Current deploy reality under the tightened firewall:
 - GitHub-hosted runners cannot SSH into VPSes when the firewall allows `22` only from `73.63.144.229/32`.
 - The tracked workflow now treats that as an expected skip instead of a hard failure: it still builds/compiles, then skips any remote deploy step whose host is unreachable from the runner.
 - Until there is a reachable deploy runner or a firewall change, a green Git push does not by itself prove the operator/sub-user/Safebox hosts were updated. In that state, do the remote deploy from the allowed local machine or another explicitly allowed runner.
+- When a workflow run skips remote VPS deploys, the canonical follow-up is to run the tracked local deploy scripts from this Mac before testing production or claiming the change is live: `deploy/argon-alpha-14/deploy-runtime.sh`, `deploy/takyon-subuser/deploy-runtime.sh`, and `deploy/takyon-safebox/deploy-runtime.sh` as needed for the touched planes.
 - Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
 - The dedicated Safebox service app now runs live on `10.116.0.2:8000`, and the tracked operator/sub-user systemd units point at it with `TAKYON_SAFEBOX_URL=http://10.116.0.2:8000`.
 - The sub-user VPS now runs the tracked shared product-host Caddyfile and serves product hosts through `takyon-subuser.service`; if a product host falls back to the default Caddy page, treat that as a sub-user Caddy drift or missing `product-sites` sync, not as a frontend build issue.
