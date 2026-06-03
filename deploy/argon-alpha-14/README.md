@@ -21,8 +21,10 @@ The Caddyfile owns:
 - `app.fourmanifold.com` -> Takyon dashboard on `127.0.0.1:9119`
 - `research-composer.fourmanifold.com` -> legacy service on `127.0.0.1:9120`
 - explicit legacy static product hosts that still terminate on the operator box
+- shared dynamic `slug.fourmanifold.com` product hosts, terminated at the operator edge and proxied over the private VPC to the sub-user host on `10.116.0.3:80`
 
 Do not add a Caddy block per new normal business here. Shared dynamic
-`slug.fourmanifold.com` product routing now belongs in
-`deploy/takyon-subuser/Caddyfile`, where the product-host ask gate is served by
-the sub-user plane.
+`slug.fourmanifold.com` product routing is decided by the product-host matcher
+and TLS ask gate here, then served by `deploy/takyon-subuser/Caddyfile` on the
+sub-user plane. Normal businesses should not get new per-host blocks on either
+box.

@@ -50,10 +50,10 @@ We want all of the following at once:
   - `app.fourmanifold.com` is back to the expected Auth0-gated operator flow (`302 /auth/login` at the public root)
   - `takyon-subuser.service` is live on `134.209.123.8`
   - the tracked sub-user Caddyfile is live on `134.209.123.8`
-  - the existing `product-sites` tree has been synced from the operator host to the sub-user host, and local host-header checks now serve real product HTML through both the sub-user runtime and sub-user Caddy
+  - the existing `product-sites` tree has been synced from the operator host to the sub-user host, and public/shared product hosts now terminate on the operator edge and proxy over the private VPC to the sub-user plane; `https://dogloop.fourmanifold.com/` now returns the real product HTML through that path
 - `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
 - `.github/workflows/deploy.yml` now probes SSH reachability first and skips unreachable remote deploy steps instead of failing the whole push when GitHub-hosted runners are outside the local-only firewall allowlist
-- Honest current gap: the repo/runtime split is now live for operator Auth0/Safebox and for sub-user local host routing, but public DNS cutover for shared product hosts is still pending outside the repo, and top-level mutation is still only partially Docker-enforced: terminal/file sandboxing routes through the existing Docker backend, but not every business mutation path has been reduced to “one explicit Docker job” yet.
+- Honest current gap: the repo/runtime split is now live for operator Auth0/Safebox and for public/shared product hosts through the dedicated sub-user plane. The remaining top-level gap is narrower: terminal/file sandboxing routes through the existing Docker backend, business-scoped file tools are session-bound to the current business, and `business_claude_agent_task` is workspace-bounded with no Bash, but ordinary scoped CEO turns still do not spin up one fresh explicit Docker job per turn.
 
 ### Business files
 
@@ -67,7 +67,10 @@ We want all of the following at once:
 - `session.create` attaches `operator_user_id`.
 - Business scope changes are owner-gated.
 - Business-scoped CEO turns already run inside `isolated_business_workspace(...)`.
-- Safebox is still in-process, not isolated as a separate service yet.
+- In a scoped turn, `business_*` tools are bound to `TAKYON_SESSION_BUSINESS_SLUG`, so an agent in `business:alpha` cannot pass `business=beta` and escape to another business in the same session.
+- Business file writes also resolve through the canonical business-root containment checks, so output paths cannot escape the current business root.
+- `business_claude_agent_task` is already a bounded workspace worker lane: it allows only `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, and `Glob`, and explicitly denies `Bash`.
+- Safebox is live as a separate service now; the remaining gap on this plane is per-turn process/container freshness, not raw shared-secret reads through in-process Safebox.
 
 ### Sub-user app path
 
@@ -276,7 +279,7 @@ Current repo status:
 - implemented in `web_server.py` through `TAKYON_HOST_ROLE=subuser`
 - tracked sub-user service and Caddy config exist
 - verified live on the dedicated sub-user VPS for local host-header routing
-- public DNS cutover for shared product hosts is still pending outside the repo
+- public shared product hosts are now live through the tracked operator-edge proxy to the sub-user plane
 
 ### Phase 4. Move long/mutating sub-user tasks to isolated workers
 
@@ -290,6 +293,9 @@ Current repo status:
 - Route all business-scoped writes and long-running work through isolated workers.
 - Current repo status:
   - partially implemented through the existing terminal/file Docker backend on the tracked operator services
+  - business-scoped file tools already bind to the current session business and current isolated workspace
+  - `business_claude_agent_task` already runs in a bounded workspace with no Bash or generic shell
+  - remaining delta: ordinary scoped CEO turns still reuse the live operator process instead of always becoming one explicit fresh worker/container per turn
   - business-scoped CEO turns already run inside `isolated_business_workspace(...)`
   - remaining gap is to finish reducing non-terminal mutation paths to explicit isolated-worker semantics, not to invent a brand-new Docker backend
 - Leave shared operator process with orchestration/read/enqueue duties.
@@ -336,20 +342,25 @@ We are done only when all of these are true:
 7. Top-level business mutations and long jobs execute through isolated workers, not the shared operator process.
 8. Cross-owner business access is blocked both at scope resolution and at job/workspace execution time.
 
-## Baseline Graph: Current Top-Level Path
+## Proof Graph: Current Top-Level Path
 
 ```mermaid
 flowchart TD
-    TU["Top-level user"] --> WS["Dashboard /api/ws or /api/tui/rpc"]
-    WS --> TG["tui_gateway session"]
+    TU["Top-level user"] --> OWEB["app.fourmanifold.com"]
+    OWEB --> OVPS["Operator VPS"]
+    OVPS --> OAPP["takyon-dashboard.service"]
+    OVPS --> OWORK["takyon-worker.service"]
+    OAPP --> TG["tui_gateway / operator runtime"]
     TG --> OID["operator_user_id attached"]
     OID --> SCOPE["scope.set business:slug"]
     SCOPE --> OWNER["owner gate"]
     OWNER --> ISO["isolated_business_workspace(...)"]
     ISO --> S3["S3-backed business workspace"]
     ISO --> CEO["CEO turn runs in scratch home"]
-    CEO --> S3
-    CEO -. "Safebox still in-process today" .-> SB["Safebox module"]
+    OAPP --> SAFE["remote Safebox @ 10.116.0.2:8000"]
+    OWORK --> SAFE
+    CEO -. "business_* tools bound to session business" .-> ISO
+    CEO -. "terminal/file sandbox path uses session-keyed Docker backend" .-> DOCKER["session-keyed Docker bridge"]
 ```
 
 ## Target Graph: Operator Plane
@@ -370,17 +381,22 @@ flowchart TD
     OVPS -. "owner-gated business scope" .-> PG
 ```
 
-## Baseline Graph: Current Sub-user Path
+## Proof Graph: Current Sub-user Path
 
 ```mermaid
 flowchart TD
-    SU["Sub-user"] --> FE["Frontend"]
-    FE --> API["Current app API"]
-    API --> AUTH["app session"]
+    SU["Sub-user"] --> HOST["dogloop.fourmanifold.com / slug.fourmanifold.com"]
+    HOST --> EDGE["Operator edge Caddy"]
+    EDGE --> SVPS["Sub-user VPS"]
+    SVPS --> CADDY["sub-user Caddy"]
+    CADDY --> SAPP["takyon-subuser.service"]
+    SAPP --> AUTH["app session + tkg only"]
     AUTH --> ROUTES["auth / checkout / usage / generate"]
     ROUTES --> AIG["AI gateway with tkg + app session"]
     AIG --> PG["Postgres app budget / usage"]
+    SAPP --> SAFE["remote Safebox @ 10.116.0.2:8000"]
     AIG -. "no generic tool endpoint today" .-> X["no business tool runner"]
+    AUTH -. "tk_ rejected on app plane" .-> BLOCK["operator token rejected"]
 ```
 
 ## Target Graph: Sub-user Plane
