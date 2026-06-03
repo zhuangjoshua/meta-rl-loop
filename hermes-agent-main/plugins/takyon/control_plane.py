@@ -6,6 +6,9 @@ tenants, billing internals) is opaque. `resolve_api_key` takes a raw key and
 returns either a small `ResolvedPrincipal` (identity + owned business slugs) or
 None — never secrets, provider keys, or internals.
 
+Safebox is the granting authority for ``tk_...`` keys. Postgres mirrors only
+non-secret metadata for joins and audit.
+
 Targets the Postgres/Supabase control plane defined by the migrations in
 `db/migrations/`. Functions take a psycopg connection so they compose with any
 transaction/connection-pool strategy the caller chooses.
@@ -14,14 +17,14 @@ transaction/connection-pool strategy the caller chooses.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 
+from . import safebox
 from .billing import open_billing_account
 from .custody import open_custody_account
 from .user_api_keys import (
     generate_api_key,
-    hash_api_key,
-    is_well_formed,
     key_prefix,
 )
 
@@ -45,6 +48,26 @@ def _business_slugs_for_user(conn, user_id: str) -> tuple[str, ...]:
             (user_id,),
         ).fetchall()
     )
+
+
+def _user_api_key_mirror_hash(key_id: str) -> str:
+    return f"safebox:{key_id}"
+
+
+def _mint_api_key_record(conn, user_id: str) -> tuple[str, str]:
+    raw = generate_api_key()
+    key_id = str(uuid.uuid4())
+    try:
+        with conn.transaction():
+            conn.execute(
+                "insert into user_api_keys (id, user_id, key_hash, prefix) values (%s, %s, %s, %s)",
+                (key_id, user_id, _user_api_key_mirror_hash(key_id), key_prefix(raw)),
+            )
+            safebox.register_user_api_key(user_id, raw, key_id=key_id)
+    except Exception:
+        safebox.delete_user_api_key(key_id)
+        raise
+    return key_id, raw
 
 
 def get_or_create_user(conn, auth0_sub: str, email: str | None = None) -> tuple[str, bool]:
@@ -89,13 +112,21 @@ def provision_user_on_first_login(
     (billing + custody, both at zero) so a half-provisioned user — identity without
     ledgers — can never be observed. Both opens are idempotent on their own.
     """
-    with conn.transaction():
-        user_id, created = get_or_create_user(conn, auth0_sub, email)
-        raw = None
-        if created:
-            raw = mint_api_key(conn, user_id)
-            open_billing_account(conn, user_id)
-            open_custody_account(conn, user_id)
+    user_id = ""
+    created = False
+    raw = None
+    minted_key_id: str | None = None
+    try:
+        with conn.transaction():
+            user_id, created = get_or_create_user(conn, auth0_sub, email)
+            if created:
+                minted_key_id, raw = _mint_api_key_record(conn, user_id)
+                open_billing_account(conn, user_id)
+                open_custody_account(conn, user_id)
+    except Exception:
+        if minted_key_id:
+            safebox.delete_user_api_key(minted_key_id)
+        raise
     return user_id, created, raw
 
 
@@ -190,30 +221,33 @@ def resolve_auth0_principal(
 
 def mint_api_key(conn, user_id: str) -> str:
     """Mint THE single active key for a user. Raises if one is already active —
-    callers rotate instead. The raw key is returned exactly once; only its hash
-    and a non-secret prefix are stored."""
-    raw = generate_api_key()
-    conn.execute(
-        "insert into user_api_keys (user_id, key_hash, prefix) values (%s, %s, %s)",
-        (user_id, hash_api_key(raw), key_prefix(raw)),
-    )
+    callers rotate instead. The raw key is returned exactly once; only
+    Safebox keeps the verifier and Postgres keeps non-secret mirror metadata."""
+    _key_id, raw = _mint_api_key_record(conn, user_id)
     return raw
 
 
 def rotate_api_key(conn, user_id: str) -> str:
     """Atomically revoke the active key (if any) and mint a new one. Returns the
     new raw key. The old row is kept (revoked) for audit."""
-    with conn.transaction():
-        conn.execute(
-            "update user_api_keys set revoked_at = now() "
-            "where user_id = %s and revoked_at is null",
-            (user_id,),
-        )
-        raw = generate_api_key()
-        conn.execute(
-            "insert into user_api_keys (user_id, key_hash, prefix) values (%s, %s, %s)",
-            (user_id, hash_api_key(raw), key_prefix(raw)),
-        )
+    raw = ""
+    revoked_key_ids: list[str] = []
+    minted_key_id: str | None = None
+    try:
+        with conn.transaction():
+            conn.execute(
+                "update user_api_keys set revoked_at = now() "
+                "where user_id = %s and revoked_at is null",
+                (user_id,),
+            )
+            revoked_key_ids = safebox.revoke_user_api_keys_for_user(user_id)
+            minted_key_id, raw = _mint_api_key_record(conn, user_id)
+    except Exception:
+        if minted_key_id:
+            safebox.delete_user_api_key(minted_key_id)
+        if revoked_key_ids:
+            safebox.restore_user_api_keys(revoked_key_ids)
+        raise
     return raw
 
 
@@ -224,17 +258,20 @@ def resolve_api_key(conn, raw_key: str) -> ResolvedPrincipal | None:
     users. On success, stamps `last_used_at` and returns only identity + owned
     business slugs.
     """
-    if not is_well_formed(raw_key):
+    record = safebox.resolve_user_api_key(raw_key)
+    if record is None:
+        return None
+    key_id = str(record.get("id") or "")
+    user_id = str(record.get("user_id") or "")
+    if not key_id or not user_id:
         return None
     row = conn.execute(
-        "select k.id, k.user_id, u.status "
-        "from user_api_keys k join users u on u.id = k.user_id "
-        "where k.key_hash = %s and k.revoked_at is null",
-        (hash_api_key(raw_key),),
+        "select status from users where id = %s",
+        (user_id,),
     ).fetchone()
     if row is None:
         return None
-    key_id, user_id, status = str(row[0]), str(row[1]), row[2]
+    status = row[0]
     if status != "active":
         return None
     slugs = _business_slugs_for_user(conn, user_id)

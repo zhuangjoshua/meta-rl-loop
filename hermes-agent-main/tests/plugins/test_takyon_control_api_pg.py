@@ -21,7 +21,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from plugins.takyon import billing, business_credits, custody, stripe_util  # noqa: E402
+from plugins.takyon import billing, business_credits, custody, safebox, stripe_util  # noqa: E402
 from plugins.takyon.control_api import build_control_router, get_control_conn  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     provision_user_on_first_login,
@@ -138,10 +138,10 @@ def test_me_rejects_unknown_but_wellformed_key(client, pg_conn):
 
 
 def test_me_rejects_revoked_key(client, pg_conn):
-    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
-    pg_conn.execute(
-        "update user_api_keys set revoked_at = now() where user_id = %s", (uid,)
-    )
+    _uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    principal = resolve_api_key(pg_conn, raw)
+    assert principal is not None
+    assert safebox.revoke_user_api_key(principal.key_id) is True
     resp = client.get("/v1/me", headers=_auth(raw))
     assert resp.status_code == 401
 

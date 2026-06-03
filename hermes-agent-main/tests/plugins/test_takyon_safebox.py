@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 
 from plugins.takyon import safebox
+from plugins.takyon.user_api_keys import generate_api_key
 
 
 def test_read_env_backed_value_prefers_process_env(monkeypatch):
@@ -76,3 +78,42 @@ def test_save_and_remove_env_backed_value_round_trip(tmp_path, monkeypatch):
     assert removed is True
     assert "OPENAI_API_KEY" not in env_path.read_text(encoding="utf-8")
     assert "OPENAI_API_KEY" not in os.environ
+
+
+def test_user_api_key_round_trip_is_safebox_owned(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    raw = generate_api_key()
+    record = safebox.register_user_api_key("user-1", raw, key_id=str(uuid.uuid4()))
+
+    resolved = safebox.resolve_user_api_key(raw)
+
+    assert resolved is not None
+    assert resolved["id"] == record["id"]
+    assert resolved["user_id"] == "user-1"
+    assert resolved["prefix"] == record["prefix"]
+    assert resolved["key_hash"] != raw
+
+
+def test_user_api_key_revoke_blocks_future_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    raw = generate_api_key()
+    record = safebox.register_user_api_key("user-1", raw, key_id=str(uuid.uuid4()))
+    assert safebox.resolve_user_api_key(raw) is not None
+
+    assert safebox.revoke_user_api_key(str(record["id"])) is True
+    assert safebox.resolve_user_api_key(raw) is None
+
+
+def test_user_api_key_registry_blocks_second_active_key_for_one_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    safebox.register_user_api_key("user-1", generate_api_key(), key_id=str(uuid.uuid4()))
+
+    with pytest.raises(ValueError, match="active user api key already exists"):
+        safebox.register_user_api_key(
+            "user-1",
+            generate_api_key(),
+            key_id=str(uuid.uuid4()),
+        )

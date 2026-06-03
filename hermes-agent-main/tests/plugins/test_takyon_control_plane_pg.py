@@ -12,6 +12,7 @@ import pytest
 psycopg = pytest.importorskip("psycopg")
 from psycopg import errors as pg_errors  # noqa: E402
 
+from plugins.takyon import safebox  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     get_or_create_user,
     mint_api_key,
@@ -66,10 +67,21 @@ def test_resolve_rejects_garbage_and_unknown(pg_conn):
 def test_resolve_rejects_revoked_key(pg_conn):
     uid, _ = get_or_create_user(pg_conn, _sub())
     raw = mint_api_key(pg_conn, uid)
+    principal = resolve_api_key(pg_conn, raw)
+    assert principal is not None
+    assert safebox.revoke_user_api_key(principal.key_id) is True
+    assert resolve_api_key(pg_conn, raw) is None
+
+
+def test_db_revoke_alone_does_not_become_auth_authority(pg_conn):
+    uid, _ = get_or_create_user(pg_conn, _sub())
+    raw = mint_api_key(pg_conn, uid)
     pg_conn.execute(
         "update user_api_keys set revoked_at = now() where user_id = %s", (uid,)
     )
-    assert resolve_api_key(pg_conn, raw) is None
+    principal = resolve_api_key(pg_conn, raw)
+    assert principal is not None
+    assert principal.user_id == uid
 
 
 def test_mint_twice_violates_one_active(pg_conn):
