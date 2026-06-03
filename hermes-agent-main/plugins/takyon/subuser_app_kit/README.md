@@ -20,7 +20,8 @@ Normal pattern:
 
 1. Import `surface-context.js`.
 2. Create one runtime client with `createSubuserRuntimeClient(...)`.
-3. Use `packs.js` to choose a shell direction.
-4. Build the actual product UI around that truth.
+3. Treat only `rail_state=live` as callable; `unknown`, `blocked`, and `broken` stay visibly non-live.
+4. Use `packs.js` to choose a shell direction.
+5. Build the actual product UI around that truth.
 
 The kit is intentionally framework-agnostic so static HTML, vanilla JS, React, or Next source can all use the same runtime boundary.

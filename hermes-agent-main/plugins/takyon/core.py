@@ -234,7 +234,8 @@ SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset(
     {"free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"}
 )
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
-SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unverified"})
+SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
+_LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
 SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
 SUBUSER_KIT_DIRNAME = "_takyon"
 
@@ -600,11 +601,12 @@ def _normalize_subuser_rail_state(
     for key, value in raw.items():
         rail = re.sub(r"[\s-]+", "_", str(key or "").strip().lower())
         state = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+        state = _LEGACY_SUBUSER_RAIL_STATE_ALIASES.get(state, state)
         if rail not in PRODUCT_RUNTIME_RAILS or state not in SUBUSER_RAIL_STATE_CHOICES:
             continue
         normalized[rail] = state
     for rail in declared_rails:
-        normalized.setdefault(rail, "unverified")
+        normalized.setdefault(rail, "unknown")
     return {rail: normalized[rail] for rail in declared_rails if rail in normalized}
 
 
@@ -774,7 +776,7 @@ def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: s
     runtime_features = context.get("runtimeFeatures") if isinstance(context.get("runtimeFeatures"), list) else []
     if runtime_features:
         for rail in runtime_features:
-            lines.append(f"- {rail}: {rail_state.get(rail) or 'unverified'}")
+            lines.append(f"- {rail}: {rail_state.get(rail) or 'unknown'}")
     else:
         lines.append("- none declared")
     lines.extend(["", "## Routes", ""])
@@ -889,7 +891,7 @@ def _subuser_app_worker_contract_block(
         lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
         if rail_state:
-            lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'unverified'}" for rail in runtime_features))
+            lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'unknown'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
 
@@ -4827,7 +4829,7 @@ class TakyonStore:
                     surface_lines.append(f"  - Canonical tools: {', '.join(tools)}")
             surface_lines.extend(["", "## Rail State", ""])
             for rail in selected_runtime_rails:
-                surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'unverified'}")
+                surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'unknown'}")
         if inventory:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
@@ -11806,7 +11808,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
                 "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
-                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unverified."},
+                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},

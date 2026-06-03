@@ -81,7 +81,7 @@ Use this skill to create or materially improve the business-owned product surfac
 1. Call `business_read_business` and identify the current offer, source path, publish target, and blocker state. If `product/design-brief.md` or `product/surface.md` exist, load them with `business_read_file`.
 2. If there is no canonical surface contract or the source path is wrong, call `business_upsert_app_surface_contract` first. Default to a real source path under `product/site/`; do not invent a publish target without recording it.
 3. If the product will claim runtime-backed behavior such as auth, checkout, billing, usage, entitlements, account, or generate, record those as `runtime_features` on the surface contract before delegating source work.
-4. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `live`, `blocked`, `broken`, or `unverified`.
+4. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `live`, `blocked`, `broken`, or `unknown`.
 5. If `product/site/` or the expected source directory does not exist, create it with `business_create_workspace` and write the initial structure there before claiming product work is underway.
 6. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
 7. Write or patch `product/design-brief.md` so it names the audience, offer, routes, constraints, and what evidence this product surface is supposed to create next.

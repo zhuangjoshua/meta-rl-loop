@@ -23,7 +23,7 @@ function stateTone(state) {
 export function renderRailBadge(rail, state) {
   const tone = stateTone(state);
   return `<span class="tk-pill tk-pill-${tone}">${escapeHtml(rail)}: ${escapeHtml(
-    state || "unverified",
+    state || "unknown",
   )}</span>`;
 }
 
@@ -33,7 +33,7 @@ export function renderRailStatusList(context = {}) {
     return `<div class="tk-note">No runtime rails declared for this surface.</div>`;
   }
   const items = rails
-    .map((rail) => renderRailBadge(rail, context.railState?.[rail] || "unverified"))
+    .map((rail) => renderRailBadge(rail, context.railState?.[rail] || "unknown"))
     .join("");
   return `<div class="tk-pill-row">${items}</div>`;
 }
