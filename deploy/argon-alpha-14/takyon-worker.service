@@ -24,6 +24,7 @@ EnvironmentFile=-/opt/takyon/.takyon/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true

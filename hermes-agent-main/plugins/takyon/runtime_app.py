@@ -21,7 +21,12 @@ and we never quietly fall back to SQLite.
 
 from __future__ import annotations
 
+import os
+import platform
+from pathlib import Path
+
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from fastapi import FastAPI
 
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
@@ -33,6 +38,23 @@ from . import safebox
 # (Supabase / Vercel). Kept identical to core.py's "database" provider aliases on purpose, so one
 # deploy variable feeds both the SQLite-era config reader and this Postgres host.
 _DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
+_ALLOW_POSTGRES_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"
+_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
+_HOST_ROLE_ALIASES = {
+    "": "",
+    "all": "combined",
+    "combined": "combined",
+    "default": "combined",
+    "operator": "operator",
+    "dashboard": "operator",
+    "subuser": "subuser",
+    "app": "subuser",
+    "product": "subuser",
+    "safebox": "safebox",
+}
+_APPROVED_REMOTE_POSTGRES_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
+_APPROVED_REMOTE_POSTGRES_HOME_PREFIXES = (Path("/opt/takyon/.takyon"),)
+_LOOPBACK_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class RuntimeNotConfigured(RuntimeError):
@@ -40,15 +62,101 @@ class RuntimeNotConfigured(RuntimeError):
     reason, never a silent fallback)."""
 
 
+class DatabaseAccessDenied(RuntimeError):
+    """Raised when a Takyon process tries to open Postgres from an unapproved host/runtime."""
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalized_host_role() -> str:
+    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
+    return _HOST_ROLE_ALIASES.get(raw, raw)
+
+
+def _resolved_takyon_home() -> Path | None:
+    raw = str(os.getenv("TAKYON_HOME") or "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except Exception:
+        return None
+
+
+def _conninfo_hosts(value: str) -> tuple[str, ...]:
+    try:
+        info = conninfo_to_dict(value)
+    except Exception:
+        return ()
+    hosts: list[str] = []
+    for key in ("host", "hostaddr"):
+        raw = str(info.get(key) or "").strip()
+        if not raw:
+            continue
+        for part in raw.split(","):
+            host = part.strip().strip("[]").lower()
+            if host:
+                hosts.append(host)
+    return tuple(hosts)
+
+
+def _conninfo_is_local_only(value: str) -> bool:
+    hosts = _conninfo_hosts(value)
+    if not hosts:
+        # libpq with no host means a local Unix socket on the current machine.
+        return True
+    for host in hosts:
+        if host in _LOOPBACK_DB_HOSTS:
+            continue
+        if host.startswith("/"):
+            continue
+        return False
+    return True
+
+
+def _approved_remote_postgres_runtime() -> bool:
+    if platform.system().lower() != "linux":
+        return False
+    if _normalized_host_role() not in _APPROVED_REMOTE_POSTGRES_HOST_ROLES:
+        return False
+    home = _resolved_takyon_home()
+    if home is None:
+        return False
+    return any(home == prefix or prefix in home.parents for prefix in _APPROVED_REMOTE_POSTGRES_HOME_PREFIXES)
+
+
+def _enforce_database_url_policy(value: str) -> str:
+    if _env_truthy(_ALLOW_POSTGRES_OUTSIDE_VPS_ENV):
+        return value
+    system = platform.system().lower()
+    if system == "darwin":
+        raise DatabaseAccessDenied(
+            "Postgres access is blocked on macOS by default; use the VPS-hosted Takyon runtime, "
+            f"or set {_ALLOW_POSTGRES_OUTSIDE_VPS_ENV}=1 for an intentional local override"
+        )
+    if _conninfo_is_local_only(value):
+        return value
+    if _approved_remote_postgres_runtime():
+        return value
+    raise DatabaseAccessDenied(
+        "Remote Postgres access is blocked outside approved Takyon VPS runtimes; "
+        f"role={_normalized_host_role() or 'unset'} takyon_home={_resolved_takyon_home() or 'unset'} "
+        f"platform={platform.system()} host={','.join(_conninfo_hosts(value)) or 'unknown'}. "
+        f"Use {_ALLOW_POSTGRES_OUTSIDE_VPS_ENV}=1 only for an intentional override."
+    )
+
+
 def resolve_database_url(explicit: str | None = None) -> str:
     """The configured Postgres URL: an explicit argument wins (tests point it at a throwaway DB),
     else the first non-empty of DATABASE_URL / POSTGRES_URL / POSTGRES_PRISMA_URL. Absent
     everywhere → ``RuntimeNotConfigured``."""
     if explicit and explicit.strip():
-        return explicit
+        return _enforce_database_url_policy(explicit)
     value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
     if value:
-        return value
+        return _enforce_database_url_policy(value)
     raise RuntimeNotConfigured(
         "no database URL configured; set DATABASE_URL "
         "(or POSTGRES_URL / POSTGRES_PRISMA_URL)"

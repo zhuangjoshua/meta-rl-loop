@@ -148,6 +148,64 @@ def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
     assert seen == ["postgres://from-dashboard-env"]
 
 
+def test_dashboard_embedded_worker_defaults_off(monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    started: list[str] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+            self._alive = False
+            started.append(f"init:{name}:{int(bool(daemon))}")
+
+        def is_alive(self):
+            return self._alive
+
+        def start(self):
+            started.append("start")
+            self._alive = True
+
+    monkeypatch.delenv("TAKYON_DASHBOARD_EMBEDDED_WORKER", raising=False)
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(web_server, "_DASHBOARD_WORKER_THREAD", None)
+
+    web_server._start_dashboard_worker_if_postgres()
+
+    assert started == []
+
+
+def test_dashboard_embedded_worker_requires_explicit_opt_in(monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    started: list[str] = []
+
+    class _FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+            self._alive = False
+            started.append(f"init:{name}:{int(bool(daemon))}")
+
+        def is_alive(self):
+            return self._alive
+
+        def start(self):
+            started.append("start")
+            self._alive = True
+
+    monkeypatch.setenv("TAKYON_DASHBOARD_EMBEDDED_WORKER", "1")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(web_server, "_DASHBOARD_WORKER_THREAD", None)
+
+    web_server._start_dashboard_worker_if_postgres()
+
+    assert started == ["init:takyon-dashboard-worker:1", "start"]
+
+
 def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
     import takyon_cli.web_server as web_server
 

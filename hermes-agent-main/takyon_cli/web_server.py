@@ -1306,17 +1306,12 @@ def _start_dashboard_worker_if_postgres() -> None:
     """Mount a local worker loop alongside the dashboard when no separate daemon is assumed.
 
     The jobs queue is already multi-worker safe (`FOR UPDATE SKIP LOCKED` + idempotent handlers),
-    so mounting one lightweight in-process drain makes localhost and single-service deploys behave
-    like the product promise instead of stalling at "queued and waiting for the worker".
+    so an explicit opt-in lightweight in-process drain remains available for local/dev runtimes.
+    Production Postgres should drain through the tracked VPS worker service, not whichever dashboard
+    process happened to start nearby.
     """
-    if str(os.getenv("TAKYON_DASHBOARD_EMBEDDED_WORKER") or "1").strip().lower() in {
-        "0",
-        "false",
-        "no",
-        "off",
-        "disable",
-        "disabled",
-    }:
+    raw = str(os.getenv("TAKYON_DASHBOARD_EMBEDDED_WORKER") or "").strip().lower()
+    if raw not in {"1", "true", "yes", "on", "enable", "enabled"}:
         return
     try:
         from plugins.takyon.core import _db_backend

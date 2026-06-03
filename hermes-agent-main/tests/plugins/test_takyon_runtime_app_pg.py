@@ -26,6 +26,7 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import (  # noqa: E402
+    DatabaseAccessDenied,
     RuntimeNotConfigured,
     build_runtime_app,
     resolve_database_url,
@@ -109,3 +110,30 @@ def test_build_without_database_url_raises(monkeypatch):
         build_runtime_app()
     with pytest.raises(RuntimeNotConfigured):
         resolve_database_url()
+
+
+def test_resolve_database_url_blocks_macos_by_default(monkeypatch):
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Darwin")
+    monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+
+    with pytest.raises(DatabaseAccessDenied, match="blocked on macOS by default"):
+        resolve_database_url(explicit="postgresql://localhost/testdb")
+
+
+def test_resolve_database_url_allows_explicit_override(monkeypatch):
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Darwin")
+    monkeypatch.setenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", "1")
+
+    assert resolve_database_url(explicit="postgresql://localhost/testdb") == "postgresql://localhost/testdb"
+
+
+def test_resolve_database_url_allows_remote_on_approved_vps_runtime(monkeypatch):
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Linux")
+    monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setenv("TAKYON_HOME", "/opt/takyon/.takyon")
+
+    assert (
+        resolve_database_url(explicit="postgresql://db.example.com/prod")
+        == "postgresql://db.example.com/prod"
+    )

@@ -9,6 +9,7 @@ WorkingDirectory=/opt/takyon/hermes-agent-main
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_HOST_ROLE=safebox
 ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
