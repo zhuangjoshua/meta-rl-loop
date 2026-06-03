@@ -796,6 +796,11 @@ def test_http_path_allowed_for_host_roles():
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
         host="app.fourmanifold.com",
+        path="/api/product-tls/ask",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="app.fourmanifold.com",
         path="/api/takyon/apps/latexflow/account",
     ) is False
     assert web_server._http_path_allowed_for_host_role(

@@ -772,6 +772,8 @@ def _http_path_allowed_for_host_role(*, role: str, host: str, path: str) -> bool
     if role == _HOST_ROLE_OPERATOR:
         if product_business:
             return False
+        if path == "/api/product-tls/ask":
+            return True
         if _is_app_plane_path(path):
             return False
     return True
