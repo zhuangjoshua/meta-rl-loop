@@ -77,6 +77,7 @@ Current deploy reality under the tightened firewall:
 - The tracked workflow now treats that as an expected skip instead of a hard failure: it still builds/compiles, then skips any remote deploy step whose host is unreachable from the runner.
 - Until there is a reachable deploy runner or a firewall change, a green Git push does not by itself prove the operator/sub-user/Safebox hosts were updated. In that state, do the remote deploy from the allowed local machine or another explicitly allowed runner.
 - Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
+- The dedicated Safebox service app exists, and callers can switch to it with `TAKYON_SAFEBOX_URL`, but the tracked operator/sub-user systemd units must stay on local Safebox mode until the Safebox VPS is actually bootstrapped and healthy. Do not point production services at `10.116.0.2:8000` before that host is live.
 
 Fast path for ordinary code/docs/UI changes:
 

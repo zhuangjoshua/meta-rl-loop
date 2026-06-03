@@ -11,7 +11,6 @@ Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
-Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
 Environment=TERMINAL_CONTAINER_PERSISTENT=false

@@ -12,7 +12,6 @@ Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_DB_BACKEND=postgres
 Environment=TAKYON_HOST_ROLE=subuser
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
-Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build
 Restart=always
 RestartSec=5

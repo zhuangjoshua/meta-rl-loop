@@ -46,6 +46,7 @@ We want all of the following at once:
     - `deploy/takyon-safebox/*`
 - `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
 - `.github/workflows/deploy.yml` now probes SSH reachability first and skips unreachable remote deploy steps instead of failing the whole push when GitHub-hosted runners are outside the local-only firewall allowlist
+- The dedicated Safebox service app and remote-client mode exist in code, but the tracked operator/sub-user service units intentionally stay on local Safebox mode until the Safebox VPS is bootstrapped and healthy.
 - Honest current gap: the repo/runtime split is now wired, but live cutover is not finished yet. Safebox is still not confirmed running as its own live service, DNS/Caddy cutover for shared product hosts is still pending, and top-level mutation is only partially Docker-enforced: terminal/file sandboxing now routes through the existing Docker backend, but not every business mutation path has been reduced to “one explicit Docker job” yet.
 
 ### Business files
