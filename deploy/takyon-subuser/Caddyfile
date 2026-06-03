@@ -1,0 +1,45 @@
+{
+	auto_https disable_redirects
+	on_demand_tls {
+		ask http://127.0.0.1:9119/api/product-tls/ask
+	}
+}
+
+# Shared dynamic product subdomains.
+# The app runtime itself decides whether a hostname belongs to a real business;
+# Caddy only forwards eligible product hosts to the sub-user plane.
+https:// {
+	tls {
+		on_demand
+	}
+
+	@product {
+		host *.fourmanifold.com
+		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
+	}
+	handle @product {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host {host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	respond "not found" 404
+}
+
+:80 {
+	@product {
+		host *.fourmanifold.com
+		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
+	}
+	handle @product {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host {host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	respond "not found" 404
+}

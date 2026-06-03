@@ -287,7 +287,7 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
         reserved_cents=700,
     )
 
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
     monkeypatch.setattr(web_server, "_release_stale_tui_turn_reservations", lambda _conn, _uid: 0)
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
@@ -322,6 +322,24 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["owned_business_count"] == 2
 
 
+def test_local_dashboard_principal_falls_back_to_platform_owner(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(user_id="platform-user", status="active", business_slugs=("alpha",))
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: None)
+    monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _headers: False)
+    monkeypatch.setattr(web_server, "_resolve_local_dashboard_principal", lambda: principal)
+
+    request = types.SimpleNamespace(
+        state=types.SimpleNamespace(auth0_user=None),
+        headers={"host": "127.0.0.1:9119"},
+    )
+
+    resolved = web_server._resolve_dashboard_request_principal(request)
+    assert resolved is principal
+
+
 def test_release_stale_tui_turn_reservations_refunds_orphaned_hold(monkeypatch):
     import plugins.takyon.billing as billing
     import takyon_cli.web_server as web_server
@@ -335,7 +353,8 @@ def test_release_stale_tui_turn_reservations_refunds_orphaned_hold(monkeypatch):
             return self._rows
 
     class _Conn:
-        def execute(self, _query, _params):
+        def execute(self, query, _params):
+            assert "like 'tui-turn:%%'" in query
             return _Result([("tui-turn:stale-sid:abc123",)])
 
     released: list[str] = []
@@ -362,7 +381,8 @@ def test_release_stale_tui_turn_reservations_keeps_live_hold(monkeypatch):
             return self._rows
 
     class _Conn:
-        def execute(self, _query, _params):
+        def execute(self, query, _params):
+            assert "like 'tui-turn:%%'" in query
             return _Result([("tui-turn:live-sid:abc123",)])
 
     released: list[str] = []
@@ -665,6 +685,119 @@ def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monk
     assert ("GET", "mathflow", "account") in calls
     # The dashboard host did not dispatch to a product rail.
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
+
+
+def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        resp = client.get(
+            "/api/takyon/apps/mathflow/account",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Authorization": "Bearer tk_attacksurface1234567890123456789012345678901234",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "owner_token_rejected_on_app_plane"
+
+
+def test_http_path_allowed_for_host_roles():
+    import takyon_cli.web_server as web_server
+
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.fourmanifold.com",
+        path="/",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="app.fourmanifold.com",
+        path="/api/generated-apps/latexflow/account",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="app.fourmanifold.com",
+        path="/api/status",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.fourmanifold.com",
+        path="/api/status",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="app.fourmanifold.com",
+        path="/api/status",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="app.fourmanifold.com",
+        path="/api/takyon/apps/latexflow/account",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="latexflow.fourmanifold.com",
+        path="/",
+    ) is False
+
+
+def test_subuser_role_blocks_dashboard_plane(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        health = client.get("/healthz", headers={"Host": "localhost:9119"})
+        blocked_status = client.get("/api/status", headers={"Host": "localhost:9119"})
+        blocked_rpc = client.post(
+            "/api/tui/rpc",
+            json={"jsonrpc": "2.0", "id": "rpc-1", "method": "session.create", "params": {}},
+            headers={"Host": "localhost:9119"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert health.status_code == 200
+    assert health.json()["role"] == "subuser"
+    assert blocked_status.status_code == 404
+    assert blocked_rpc.status_code == 404
+
+
+def test_operator_role_blocks_public_app_plane(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        status = client.get("/api/status", headers={"Host": "localhost:9119"})
+        blocked_app = client.get(
+            "/api/takyon/apps/latexflow/account",
+            headers={"Host": "localhost:9119"},
+        )
+        blocked_product = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert status.status_code == 200
+    assert blocked_app.status_code == 404
+    assert blocked_product.status_code == 404
 
 
 def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch, pg_store_dsn):

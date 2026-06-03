@@ -1,8 +1,5 @@
 {
 	auto_https disable_redirects
-	on_demand_tls {
-		ask http://127.0.0.1:9119/api/product-tls/ask
-	}
 }
 
 app.fourmanifold.com {
@@ -11,28 +8,6 @@ app.fourmanifold.com {
 
 research-composer.fourmanifold.com {
 	reverse_proxy 127.0.0.1:9120
-}
-
-# Takyon shared product subdomain route.
-# New business product hosts are approved by the dashboard ask endpoint, which
-# only allows existing one-label business slugs under fourmanifold.com.
-https:// {
-	tls {
-		on_demand
-	}
-
-	@product {
-		host *.fourmanifold.com
-		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-	}
-	handle @product {
-		reverse_proxy 127.0.0.1:9119 {
-			header_up Host {host}
-			header_up X-Forwarded-Proto https
-		}
-	}
-
-	respond "not found" 404
 }
 
 :80 {
@@ -50,10 +25,7 @@ https:// {
 	}
 
 	handle {
-		reverse_proxy 127.0.0.1:9119 {
-			header_up Host app.fourmanifold.com
-			header_up X-Forwarded-Proto https
-		}
+		respond "not found" 404
 	}
 }
 

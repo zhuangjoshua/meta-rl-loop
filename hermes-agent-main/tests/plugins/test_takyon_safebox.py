@@ -4,8 +4,10 @@ import os
 import uuid
 
 import pytest
+from starlette.testclient import TestClient
 
 from plugins.takyon import safebox
+from plugins.takyon.safebox_app import build_safebox_app
 from plugins.takyon.user_api_keys import generate_api_key
 
 
@@ -117,3 +119,66 @@ def test_user_api_key_registry_blocks_second_active_key_for_one_user(tmp_path, m
             generate_api_key(),
             key_id=str(uuid.uuid4()),
         )
+
+
+def test_remote_safebox_env_reads_delegate_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {"value": "sk-remote"}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    assert safebox.read_env_backed_value("OPENAI_API_KEY") == "sk-remote"
+    assert calls == [("GET", "/v1/env/OPENAI_API_KEY", None)]
+
+
+def test_remote_safebox_user_key_register_delegates_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    raw = generate_api_key()
+    key_id = str(uuid.uuid4())
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {"record": {"id": key_id, "user_id": "user-1"}}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    record = safebox.register_user_api_key("user-1", raw, key_id=key_id)
+
+    assert record == {"id": key_id, "user_id": "user-1"}
+    assert calls == [
+        (
+            "POST",
+            "/v1/user-api-keys/register",
+            {
+                "user_id": "user-1",
+                "raw_key": raw,
+                "key_id": key_id,
+                "created_at": None,
+            },
+        )
+    ]
+
+
+def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    client = TestClient(build_safebox_app())
+
+    unauthorized = client.get("/v1/env/OPENAI_API_KEY")
+    assert unauthorized.status_code == 401
+
+    headers = {"Authorization": "Bearer shared-token"}
+    saved = client.post("/v1/env/OPENAI_API_KEY", json={"value": "sk-live"}, headers=headers)
+    assert saved.status_code == 200
+    assert saved.json() == {"ok": True}
+
+    read_back = client.get("/v1/env/OPENAI_API_KEY", headers=headers)
+    assert read_back.status_code == 200
+    assert read_back.json() == {"value": "sk-live"}

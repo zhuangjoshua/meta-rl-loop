@@ -103,6 +103,11 @@ def _app_route(parts: list[str]) -> tuple[str, list[str], bool] | None:
     return None
 
 
+def _owner_token_on_app_plane(handler: BaseHTTPRequestHandler) -> bool:
+    auth = str(handler.headers.get("authorization") or "").strip()
+    return auth.startswith("Bearer tk_")
+
+
 class TakyonAppApiHandler(BaseHTTPRequestHandler):
     server_version = "TakyonAppAPI/0.1"
 
@@ -114,6 +119,9 @@ class TakyonAppApiHandler(BaseHTTPRequestHandler):
         return [part for part in parsed.path.split("/") if part], parse_qs(parsed.query)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name.
+        if _owner_token_on_app_plane(self):
+            _json_response(self, HTTPStatus.FORBIDDEN, {"success": False, "error": "owner_token_rejected_on_app_plane"})
+            return
         parts, query = self._parts()
         app_route = _app_route(parts)
         if app_route:
@@ -142,6 +150,9 @@ class TakyonAppApiHandler(BaseHTTPRequestHandler):
         _json_response(self, HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib method name.
+        if _owner_token_on_app_plane(self):
+            _json_response(self, HTTPStatus.FORBIDDEN, {"success": False, "error": "owner_token_rejected_on_app_plane"})
+            return
         parts, _query = self._parts()
         if parts == ["api", "webhooks", "stripe"]:
             length = int(self.headers.get("content-length") or 0)

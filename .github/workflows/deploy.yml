@@ -50,7 +50,8 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "caddy=0" >> "$GITHUB_OUTPUT"
+            echo "operator_caddy=0" >> "$GITHUB_OUTPUT"
+            echo "subuser_caddy=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           BEFORE="${{ github.event.before }}"
@@ -58,10 +59,36 @@ jobs:
             BEFORE="$(git rev-list --max-parents=0 HEAD)"
           fi
           if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qx 'deploy/argon-alpha-14/Caddyfile'; then
-            echo "caddy=1" >> "$GITHUB_OUTPUT"
+            echo "operator_caddy=1" >> "$GITHUB_OUTPUT"
           else
-            echo "caddy=0" >> "$GITHUB_OUTPUT"
+            echo "operator_caddy=0" >> "$GITHUB_OUTPUT"
           fi
+          if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qx 'deploy/takyon-subuser/Caddyfile'; then
+            echo "subuser_caddy=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "subuser_caddy=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare Safebox VPS SSH key
+        id: safebox_ssh
+        shell: bash
+        env:
+          TAKYON_SAFEBOX_VPS_HOST: ${{ secrets.TAKYON_SAFEBOX_VPS_HOST }}
+          TAKYON_SAFEBOX_VPS_USER: ${{ secrets.TAKYON_SAFEBOX_VPS_USER }}
+          TAKYON_SAFEBOX_VPS_SSH_KEY: ${{ secrets.TAKYON_SAFEBOX_VPS_SSH_KEY }}
+        run: |
+          if [[ -z "${TAKYON_SAFEBOX_VPS_HOST:-}" || -z "${TAKYON_SAFEBOX_VPS_SSH_KEY:-}" ]]; then
+            echo "configured=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$TAKYON_SAFEBOX_VPS_SSH_KEY" > "$HOME/.ssh/takyon_safebox"
+          chmod 600 "$HOME/.ssh/takyon_safebox"
+          ssh-keyscan -T 10 -H "$TAKYON_SAFEBOX_VPS_HOST" >> "$HOME/.ssh/known_hosts" || \
+            echo "ssh-keyscan failed for $TAKYON_SAFEBOX_VPS_HOST; continuing because deploy commands use StrictHostKeyChecking=accept-new" >&2
+          echo "TAKYON_SAFEBOX_DEPLOY_HOST=${TAKYON_SAFEBOX_VPS_USER:-root}@$TAKYON_SAFEBOX_VPS_HOST" >> "$GITHUB_ENV"
+          echo "TAKYON_SAFEBOX_DEPLOY_KEY=$HOME/.ssh/takyon_safebox" >> "$GITHUB_ENV"
+          echo "configured=1" >> "$GITHUB_OUTPUT"
 
       - name: Prepare VPS SSH key
         shell: bash
@@ -79,6 +106,14 @@ jobs:
             echo "ssh-keyscan failed for $TAKYON_VPS_HOST; continuing because deploy commands use StrictHostKeyChecking=accept-new" >&2
           echo "TAKYON_VPS_HOST=${TAKYON_VPS_USER:-root}@$TAKYON_VPS_HOST" >> "$GITHUB_ENV"
           echo "TAKYON_VPS_KEY=$HOME/.ssh/takyon_argon_alpha14" >> "$GITHUB_ENV"
+
+      - name: Deploy Safebox runtime to VPS
+        if: steps.safebox_ssh.outputs.configured == '1'
+        env:
+          TAKYON_RUN_WEB_BUILD: "0"
+          TAKYON_VPS_HOST: ${{ env.TAKYON_SAFEBOX_DEPLOY_HOST }}
+          TAKYON_VPS_KEY: ${{ env.TAKYON_SAFEBOX_DEPLOY_KEY }}
+        run: deploy/takyon-safebox/deploy-runtime.sh
 
       - name: Redeploy Vercel frontdoor
         env:
@@ -98,6 +133,36 @@ jobs:
 
       - name: Deploy runtime to VPS
         env:
-          TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.caddy }}
+          TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.operator_caddy }}
           TAKYON_RUN_WEB_BUILD: "0"
         run: deploy/argon-alpha-14/deploy-runtime.sh
+
+      - name: Prepare sub-user VPS SSH key
+        id: subuser_ssh
+        shell: bash
+        env:
+          TAKYON_SUBUSER_VPS_HOST: ${{ secrets.TAKYON_SUBUSER_VPS_HOST }}
+          TAKYON_SUBUSER_VPS_USER: ${{ secrets.TAKYON_SUBUSER_VPS_USER }}
+          TAKYON_SUBUSER_VPS_SSH_KEY: ${{ secrets.TAKYON_SUBUSER_VPS_SSH_KEY }}
+        run: |
+          if [[ -z "${TAKYON_SUBUSER_VPS_HOST:-}" || -z "${TAKYON_SUBUSER_VPS_SSH_KEY:-}" ]]; then
+            echo "configured=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$TAKYON_SUBUSER_VPS_SSH_KEY" > "$HOME/.ssh/takyon_subuser"
+          chmod 600 "$HOME/.ssh/takyon_subuser"
+          ssh-keyscan -T 10 -H "$TAKYON_SUBUSER_VPS_HOST" >> "$HOME/.ssh/known_hosts" || \
+            echo "ssh-keyscan failed for $TAKYON_SUBUSER_VPS_HOST; continuing because deploy commands use StrictHostKeyChecking=accept-new" >&2
+          echo "TAKYON_SUBUSER_DEPLOY_HOST=${TAKYON_SUBUSER_VPS_USER:-root}@$TAKYON_SUBUSER_VPS_HOST" >> "$GITHUB_ENV"
+          echo "TAKYON_SUBUSER_DEPLOY_KEY=$HOME/.ssh/takyon_subuser" >> "$GITHUB_ENV"
+          echo "configured=1" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy sub-user runtime to VPS
+        if: steps.subuser_ssh.outputs.configured == '1'
+        env:
+          TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.subuser_caddy }}
+          TAKYON_RUN_WEB_BUILD: "0"
+          TAKYON_VPS_HOST: ${{ env.TAKYON_SUBUSER_DEPLOY_HOST }}
+          TAKYON_VPS_KEY: ${{ env.TAKYON_SUBUSER_DEPLOY_KEY }}
+        run: deploy/takyon-subuser/deploy-runtime.sh

@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +74,8 @@ _SAFEBOX_DIRNAME = "safebox"
 _USER_API_KEYS_FILE_NAME = "user_api_keys.json"
 _USER_API_KEYS_STATE_VERSION = 1
 _USER_API_KEYS_MUTEX = threading.RLock()
+_SAFEBOX_REMOTE_URL_ENV = "TAKYON_SAFEBOX_URL"
+_SAFEBOX_REMOTE_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 
 
 def is_sensitive_env_key(key: str) -> bool:
@@ -80,6 +85,47 @@ def is_sensitive_env_key(key: str) -> bool:
     if name in _EXACT_SENSITIVE_ENV_KEYS:
         return True
     return name.endswith(_SENSITIVE_ENV_SUFFIXES)
+
+
+def _remote_base_url() -> str:
+    return str(os.environ.get(_SAFEBOX_REMOTE_URL_ENV) or "").strip().rstrip("/")
+
+
+def _remote_enabled() -> bool:
+    return bool(_remote_base_url())
+
+
+def _remote_headers(*, with_json: bool = False) -> dict[str, str]:
+    headers: dict[str, str] = {"Accept": "application/json"}
+    token = str(os.environ.get(_SAFEBOX_REMOTE_TOKEN_ENV) or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if with_json:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _remote_json(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    base = _remote_base_url()
+    if not base:
+        raise RuntimeError("Safebox remote URL is not configured")
+    body: bytes | None = None
+    headers = _remote_headers(with_json=payload is not None)
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(f"{base}{path}", data=body, method=method.upper(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        detail = raw.strip() or exc.reason
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            parsed = {"detail": detail}
+        raise RuntimeError(f"Safebox remote {method.upper()} {path} failed: {parsed}") from exc
 
 
 def _require_sensitive(key: str) -> str:
@@ -193,6 +239,21 @@ def register_user_api_key(
     created_at: str | None = None,
 ) -> dict[str, str | None]:
     """Register a top-level ``tk_...`` API key in Safebox."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/user-api-keys/register",
+            {
+                "user_id": str(user_id or "").strip(),
+                "raw_key": str(raw_key or ""),
+                "key_id": str(key_id or "").strip(),
+                "created_at": str(created_at or "").strip() or None,
+            },
+        )
+        record = payload.get("record")
+        if not isinstance(record, dict):
+            raise RuntimeError("Safebox remote register_user_api_key returned no record")
+        return record
     owner = str(user_id or "").strip()
     if not owner:
         raise ValueError("missing user_id")
@@ -225,6 +286,14 @@ def register_user_api_key(
 
 def resolve_user_api_key(raw_key: str) -> dict[str, str | None] | None:
     """Resolve a presented raw ``tk_...`` key against the Safebox registry."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/user-api-keys/resolve",
+            {"raw_key": str(raw_key or "")},
+        )
+        record = payload.get("record")
+        return record if isinstance(record, dict) else None
     if not is_well_formed(raw_key):
         return None
     presented_hash = hash_api_key(raw_key)
@@ -240,6 +309,16 @@ def resolve_user_api_key(raw_key: str) -> dict[str, str | None] | None:
 
 def revoke_user_api_key(key_id: str, *, revoked_at: str | None = None) -> bool:
     """Revoke one Safebox-owned top-level API key by id."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/user-api-keys/revoke",
+            {
+                "key_id": str(key_id or "").strip(),
+                "revoked_at": str(revoked_at or "").strip() or None,
+            },
+        )
+        return bool(payload.get("revoked"))
     key_ref = str(key_id or "").strip()
     if not key_ref:
         return False
@@ -258,6 +337,17 @@ def revoke_user_api_keys_for_user(
     revoked_at: str | None = None,
 ) -> list[str]:
     """Revoke every active top-level API key owned by one Takyon user."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/user-api-keys/revoke-for-user",
+            {
+                "user_id": str(user_id or "").strip(),
+                "revoked_at": str(revoked_at or "").strip() or None,
+            },
+        )
+        revoked = payload.get("revoked_ids")
+        return [str(item) for item in revoked] if isinstance(revoked, list) else []
     owner = str(user_id or "").strip()
     if not owner:
         return []
@@ -277,6 +367,9 @@ def revoke_user_api_keys_for_user(
 
 def restore_user_api_keys(key_ids: list[str]) -> None:
     """Undo a staged revoke when an outer transactional caller rolls back."""
+    if _remote_enabled():
+        _remote_json("POST", "/v1/user-api-keys/restore", {"key_ids": list(key_ids or [])})
+        return
     wanted = {
         str(key_id or "").strip()
         for key_id in key_ids
@@ -292,6 +385,12 @@ def restore_user_api_keys(key_ids: list[str]) -> None:
 
 def delete_user_api_key(key_id: str) -> bool:
     """Delete one Safebox key record outright for transactional cleanup."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "DELETE",
+            f"/v1/user-api-keys/{urllib.parse.quote(str(key_id or '').strip(), safe='')}",
+        )
+        return bool(payload.get("deleted"))
     key_ref = str(key_id or "").strip()
     if not key_ref:
         return False
@@ -304,6 +403,12 @@ def delete_user_api_key(key_id: str) -> bool:
 
 def read_env_backed_value(key: str) -> str:
     """Read one sensitive env-backed value from env or TAKYON_HOME/.env."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "GET",
+            f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
+        )
+        return str(payload.get("value") or "").strip()
     name = _require_sensitive(key)
     value = os.environ.get(name)
     if value is not None:
@@ -313,6 +418,13 @@ def read_env_backed_value(key: str) -> str:
 
 def first_env_backed_value(*keys: str) -> str:
     """Return the first non-empty sensitive value across env-backed aliases."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/env/first",
+            {"keys": [str(key or "").strip() for key in keys]},
+        )
+        return str(payload.get("value") or "").strip()
     for key in keys:
         value = read_env_backed_value(key)
         if value:
@@ -322,6 +434,13 @@ def first_env_backed_value(*keys: str) -> str:
 
 def save_env_backed_value(key: str, value: str) -> None:
     """Persist one sensitive env-backed value through the Safebox authority."""
+    if _remote_enabled():
+        _remote_json(
+            "POST",
+            f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
+            {"value": value},
+        )
+        return
     if is_managed():
         managed_error(f"set {key}")
         return
@@ -331,6 +450,12 @@ def save_env_backed_value(key: str, value: str) -> None:
 
 def remove_env_backed_value(key: str) -> bool:
     """Remove one sensitive env-backed value through the Safebox authority."""
+    if _remote_enabled():
+        payload = _remote_json(
+            "DELETE",
+            f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
+        )
+        return bool(payload.get("removed"))
     if is_managed():
         managed_error(f"remove {key}")
         return False
@@ -340,6 +465,16 @@ def remove_env_backed_value(key: str) -> bool:
 
 def sensitive_env_snapshot() -> Dict[str, str]:
     """Return the merged env-backed sensitive-key snapshot."""
+    if _remote_enabled():
+        payload = _remote_json("GET", "/v1/env/snapshot")
+        snapshot = payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return {}
+        return {
+            str(key or "").strip(): str(value or "").strip()
+            for key, value in snapshot.items()
+            if str(key or "").strip()
+        }
     snapshot = {
         key: str(value or "").strip()
         for key, value in load_env().items()
@@ -353,6 +488,11 @@ def sensitive_env_snapshot() -> Dict[str, str]:
 
 def list_env_backed_keys(*, sensitive_only: bool = True) -> list[str]:
     """List env-backed keys known to Safebox."""
+    if _remote_enabled():
+        flag = "1" if sensitive_only else "0"
+        payload = _remote_json("GET", f"/v1/env?{urllib.parse.urlencode({'sensitive_only': flag})}")
+        keys = payload.get("keys")
+        return [str(item or "").strip() for item in keys] if isinstance(keys, list) else []
     if sensitive_only:
         return sorted(sensitive_env_snapshot().keys())
     merged = {key: value for key, value in load_env().items()}

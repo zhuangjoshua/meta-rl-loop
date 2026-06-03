@@ -19,57 +19,20 @@ Do not recreate `polsia3`, do not restore `polsia3/takyon`, and do not describe 
 
 ## Deployment Notes
 
-Takyon now has three VPS classes in production `NYC1 / default-nyc1`:
+The current Takyon VPS target is `137.184.75.57` (`argon-alpha-14`). Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access.
 
-- Operator VPS: `137.184.75.57` (`argon-alpha-14`) — current public operator/runtime host
-- Safebox VPS: `67.205.158.170` (`takyon-safebox`) — private secret/funding authority host
-- Sub-user VPS: `134.209.123.8` (`takyon-subuser`) — public app/runtime host for product subusers
-
-Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct operator-VPS access. Do not assume the same unit files, open ports, or public role on the Safebox or sub-user hosts.
-
-The public operator hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code. Product hosts such as `slug.fourmanifold.com` are the sub-user plane and should eventually point at the sub-user VPS, not the operator box.
+The public dashboard hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code.
 
 For `app.fourmanifold.com`, the intended operator experience is the embedded Takyon business/chat UI, not the plain dashboard Sessions shell. On the VPS, make sure `takyon-dashboard.service` starts the dashboard with `takyon dashboard --tui` or sets `TAKYON_DASHBOARD_TUI=1`. If the host shows `/sessions`, `Sessions`, `Models`, or `Logs` as the main landing view, treat that as a dashboard startup-mode misconfiguration on the VPS rather than a frontend deploy failure.
 
-Firewall state is now part of the deployment contract:
-
-- `argon-alpha` protects the operator VPS and should currently allow only:
-  - `SSH 22` from `73.63.144.229/32`
-  - `HTTP 80` from `All IPv4` and `All IPv6`
-  - `HTTPS 443` from `All IPv4` and `All IPv6`
-- `takyon-safebox-fw` protects the Safebox VPS and should currently allow only:
-  - `SSH 22` from `73.63.144.229/32`
-  - `TCP 8000` from private VPC CIDR `10.116.0.0/20`
-- `takyon-subuser-fw` protects the sub-user VPS and should currently allow only:
-  - `SSH 22` from `73.63.144.229/32`
-  - `HTTP 80` from `All IPv4` and `All IPv6`
-  - `HTTPS 443` from `All IPv4` and `All IPv6`
-- Safebox must not expose a public app surface.
-- Operator and sub-user hosts must not expose Docker APIs or worker-control ports publicly.
-- If a firewall rule conflicts with the topology in `SAFETY_PLAN.md`, fix the firewall instead of weakening the code boundary to match the old rule.
-
-When the operator asks to push or deploy Takyon, keep the rails distinct:
+When the operator asks to push or deploy Takyon, keep the three rails distinct:
 
 1. Git push uses the outer workspace repo at `/Users/Zygote/Downloads/takyon`, not the nested `hermes-agent-main` git metadata. Stage only the intended hunks, commit in the outer repo, and push `origin main` unless the operator asked for a branch.
-2. Operator deploy updates the active operator runtime on `137.184.75.57`. The operator runtime is `/opt/takyon/hermes-agent-main` and may not be a git checkout, so deploy changed runtime files with `rsync`/`ssh`, then compile touched Python files and restart `takyon-dashboard.service`. Verify with `systemctl is-active takyon-dashboard.service` and source checks on the operator VPS.
-3. Safebox deploy updates the dedicated Safebox service host. Do not piggyback secret authority changes onto the operator runtime and pretend the boundary exists if the Safebox host was not updated too.
-4. Sub-user deploy updates the public app/runtime host. Do not claim product-app routing, `tkg_` isolation, or app-plane code changed in production unless that host was updated too.
-5. VPS routing is now split across tracked deploy directories:
-   - operator plane: `deploy/argon-alpha-14/Caddyfile` + `deploy/argon-alpha-14/takyon-dashboard.service`
-   - sub-user plane: `deploy/takyon-subuser/Caddyfile` + `deploy/takyon-subuser/takyon-subuser.service`
-   - Safebox plane: `deploy/takyon-safebox/takyon-safebox.service`
-   Apply Caddy with the matching `apply-caddyfile.sh` on the target host. Do not hand-add new per-business Caddy blocks for normal businesses.
-6. Vercel deploy is the `app` project frontdoor only. It is not the canonical Takyon runtime and successful Vercel deploys do not prove prompt, skill, registry, or backend changes reached any VPS. Do not run `vercel deploy` from the workspace root; that uploads the wrong artifact. Use `vercel redeploy` against the current known-good `app` frontdoor production deployment, or deploy an equivalent tiny frontdoor artifact, then verify `vercel inspect app.fourmanifold.com` is Ready and aliased. Treat Vercel alias state separately from DNS: `app.fourmanifold.com` may still resolve to the VPS and return Caddy/uvicorn headers even when Vercel has a Ready alias.
+2. VPS deploy updates the active runtime. The VPS runtime is `/opt/takyon/hermes-agent-main` and may not be a git checkout, so deploy changed runtime files with `rsync`/`ssh` using `~/.ssh/takyon_argon_alpha14`, then compile touched Python files and restart `takyon-dashboard.service`. Verify with `systemctl is-active takyon-dashboard.service` and source checks on the VPS.
+3. VPS Caddy config is tracked at `deploy/argon-alpha-14/Caddyfile`; apply it with `deploy/argon-alpha-14/apply-caddyfile.sh`. This is the repeatable source for `app.fourmanifold.com` and shared `slug.fourmanifold.com` product routing. Do not hand-add new per-business Caddy blocks for normal businesses.
+4. Vercel deploy is the `app` project frontdoor only. It is not the canonical Takyon runtime and successful Vercel deploys do not prove prompt, skill, registry, or backend changes reached the VPS. Do not run `vercel deploy` from the workspace root; that uploads the wrong artifact. Use `vercel redeploy` against the current known-good `app` frontdoor production deployment, or deploy an equivalent tiny frontdoor artifact, then verify `vercel inspect app.fourmanifold.com` is Ready and aliased. Treat Vercel alias state separately from DNS: `app.fourmanifold.com` may still resolve to the VPS and return Caddy/uvicorn headers even when Vercel has a Ready alias.
 
-The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now multi-host aware when the corresponding GitHub secrets are configured. It should:
-
-- always build the dashboard bundle and compile Python
-- optionally redeploy Vercel frontdoor when `VERCEL_TOKEN` exists
-- deploy the operator plane via `deploy/argon-alpha-14/deploy-runtime.sh`
-- deploy the Safebox plane via `deploy/takyon-safebox/deploy-runtime.sh` when `TAKYON_SAFEBOX_VPS_HOST`, `TAKYON_SAFEBOX_VPS_USER`, and `TAKYON_SAFEBOX_VPS_SSH_KEY` are configured
-- deploy the sub-user plane via `deploy/takyon-subuser/deploy-runtime.sh` when `TAKYON_SUBUSER_VPS_HOST`, `TAKYON_SUBUSER_VPS_USER`, and `TAKYON_SUBUSER_VPS_SSH_KEY` are configured
-
-Required operator secrets remain `TAKYON_VPS_HOST`, `TAKYON_VPS_USER`, and `TAKYON_VPS_SSH_KEY`. Optional Vercel metadata secrets remain `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`.
+The deployment workflow is tracked at `.github/workflows/deploy.yml`: pushing `main` should run the dashboard web build, compile Python, redeploy the current Vercel `app.fourmanifold.com` frontdoor when `VERCEL_TOKEN` is configured, rsync the active runtime to the VPS, restart `takyon-dashboard.service`, apply tracked Caddy only when `deploy/argon-alpha-14/Caddyfile` changed, and verify the public dashboard host. Required GitHub secrets are `TAKYON_VPS_HOST`, `TAKYON_VPS_USER`, `TAKYON_VPS_SSH_KEY`, and optional Vercel metadata secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`. After pushing, verify the workflow with `gh run list` / `gh run watch`; if it fails or has not run, do not assume production updated.
 
 Fast path for ordinary code/docs/UI changes:
 

@@ -711,6 +711,69 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/plugins/rescan",
 })
 
+_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
+_HOST_ROLE_COMBINED = "combined"
+_HOST_ROLE_OPERATOR = "operator"
+_HOST_ROLE_SUBUSER = "subuser"
+_HOST_ROLE_ALIASES = {
+    "": _HOST_ROLE_COMBINED,
+    "all": _HOST_ROLE_COMBINED,
+    "combined": _HOST_ROLE_COMBINED,
+    "default": _HOST_ROLE_COMBINED,
+    "operator": _HOST_ROLE_OPERATOR,
+    "dashboard": _HOST_ROLE_OPERATOR,
+    "subuser": _HOST_ROLE_SUBUSER,
+    "app": _HOST_ROLE_SUBUSER,
+    "product": _HOST_ROLE_SUBUSER,
+}
+_APP_PLANE_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/takyon/apps/",
+    "/api/generated-apps/",
+    "/site/",
+)
+_APP_PLANE_EXACT_PATHS: frozenset[str] = frozenset({
+    "/api/product-tls/ask",
+    "/api/webhooks/stripe",
+})
+_OPERATOR_ONLY_HTTP_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/pty",
+    "/api/ws",
+    "/api/tui/rpc",
+    "/api/pub",
+    "/api/events",
+)
+
+
+def _host_role() -> str:
+    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
+    return _HOST_ROLE_ALIASES.get(raw, _HOST_ROLE_COMBINED)
+
+
+def _is_app_plane_path(path: str) -> bool:
+    return path in _APP_PLANE_EXACT_PATHS or path.startswith(_APP_PLANE_PATH_PREFIXES)
+
+
+def _http_path_allowed_for_host_role(*, role: str, host: str, path: str) -> bool:
+    product_business = _business_slug_from_product_host(_host_without_port(host))
+    if role == _HOST_ROLE_SUBUSER:
+        if path == "/healthz":
+            return True
+        if path in _APP_PLANE_EXACT_PATHS:
+            return True
+        if path.startswith(_APP_PLANE_PATH_PREFIXES):
+            return True
+        if product_business:
+            if not path.startswith("/api/"):
+                return True
+            return _normalize_product_rail_route(path) is not None
+        return False
+    if role == _HOST_ROLE_OPERATOR:
+        if product_business:
+            return False
+        if _is_app_plane_path(path):
+            return False
+    return True
+
 
 def _is_public_api_path(path: str) -> bool:
     if path in _PUBLIC_API_PATHS:
@@ -910,6 +973,24 @@ async def product_app_rail_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def host_role_middleware(request: Request, call_next):
+    """Restrict the server surface to the configured host role.
+
+    ``combined`` keeps the historical single-host behavior. ``operator`` drops
+    the public product-app plane; ``subuser`` drops dashboard/operator routes
+    and serves only product hosts + the narrow app-runtime rails.
+    """
+    role = _host_role()
+    if role != _HOST_ROLE_COMBINED and not _http_path_allowed_for_host_role(
+        role=role,
+        host=request.headers.get("host", ""),
+        path=request.url.path,
+    ):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
+
 @app.get("/auth/login")
 async def auth0_login(request: Request):
     cfg = _auth0_config()
@@ -1047,6 +1128,63 @@ def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
         return None
 
 
+def _resolve_local_dashboard_principal() -> Any | None:
+    """Return the server-side localhost/dashboard principal when Auth0 is not required."""
+    try:
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return None
+        import psycopg
+
+        from plugins.takyon.control_plane import (
+            resolve_platform_owner_id,
+            resolve_user_principal,
+        )
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _resolve_runtime_database_url()
+        except RuntimeNotConfigured:
+            return None
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            owner_user_id = resolve_platform_owner_id(conn)
+            if not owner_user_id:
+                return None
+            return resolve_user_principal(
+                conn,
+                owner_user_id,
+                key_id="dashboard-local-platform-owner",
+            )
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - localhost falls back gracefully
+        _log.warning("local dashboard principal resolution failed: %s", exc)
+        return None
+
+
+def _resolve_dashboard_headers_principal(headers: Any) -> Any | None:
+    cfg = _auth0_config()
+    principal = _resolve_dashboard_principal(
+        _session_from_cookie_header(headers.get("cookie", ""), cfg) if cfg else None
+    )
+    if principal is not None:
+        return principal
+    if _auth0_required_for_host(headers):
+        return None
+    return _resolve_local_dashboard_principal()
+
+
+def _resolve_dashboard_request_principal(request: Request) -> Any | None:
+    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    if principal is not None:
+        return principal
+    if _auth0_required_for_host(request.headers):
+        return None
+    return _resolve_local_dashboard_principal()
+
+
 def _tui_turn_session_id(reservation_key: str) -> str:
     key = str(reservation_key or "").strip()
     if not key.startswith("tui-turn:"):
@@ -1096,7 +1234,7 @@ def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
         "from billing_entries r "
         "where r.user_id = %s "
         "  and r.kind = 'reserve' "
-        "  and r.reservation_key like 'tui-turn:%' "
+        "  and r.reservation_key like 'tui-turn:%%' "
         "  and not exists ("
         "    select 1 from billing_entries f "
         "    where f.reservation_key = r.reservation_key "
@@ -1145,6 +1283,70 @@ def _seed_platform_owner_if_postgres() -> None:
             _log.debug("Platform owner already provisioned (user %s)", user_id)
     except Exception as exc:  # noqa: BLE001 - never block the dashboard on a startup seed failure
         _log.error("Platform-owner startup seed failed (dashboard still starting): %s", exc)
+
+
+_DASHBOARD_WORKER_THREAD: threading.Thread | None = None
+_DASHBOARD_WORKER_LOCK = threading.Lock()
+
+
+def _dashboard_worker_poll_seconds() -> float:
+    raw = str(os.getenv("TAKYON_DASHBOARD_WORKER_POLL_SECONDS") or "").strip()
+    if not raw:
+        return 2.0
+    try:
+        return max(0.25, float(raw))
+    except ValueError:
+        return 2.0
+
+
+def _start_dashboard_worker_if_postgres() -> None:
+    """Mount a local worker loop alongside the dashboard when no separate daemon is assumed.
+
+    The jobs queue is already multi-worker safe (`FOR UPDATE SKIP LOCKED` + idempotent handlers),
+    so mounting one lightweight in-process drain makes localhost and single-service deploys behave
+    like the product promise instead of stalling at "queued and waiting for the worker".
+    """
+    if str(os.getenv("TAKYON_DASHBOARD_EMBEDDED_WORKER") or "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disable",
+        "disabled",
+    }:
+        return
+    try:
+        from plugins.takyon.core import _db_backend
+
+        if _db_backend() != "postgres":
+            return
+    except Exception as exc:  # noqa: BLE001 - never block the dashboard on worker bootstrap
+        _log.error("Dashboard worker preflight failed (dashboard still starting): %s", exc)
+        return
+
+    global _DASHBOARD_WORKER_THREAD
+    with _DASHBOARD_WORKER_LOCK:
+        if _DASHBOARD_WORKER_THREAD is not None and _DASHBOARD_WORKER_THREAD.is_alive():
+            return
+
+        def _run_dashboard_worker() -> None:
+            try:
+                from plugins.takyon.worker import run_worker_loop
+
+                run_worker_loop(
+                    worker_id=f"dashboard-worker-{os.getpid()}",
+                    poll_interval=_dashboard_worker_poll_seconds(),
+                    dispatch=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - keep the dashboard alive and log the failure
+                _log.exception("Dashboard embedded worker exited: %s", exc)
+
+        _DASHBOARD_WORKER_THREAD = threading.Thread(
+            target=_run_dashboard_worker,
+            name="takyon-dashboard-worker",
+            daemon=True,
+        )
+        _DASHBOARD_WORKER_THREAD.start()
 
 
 @app.get("/auth/callback")
@@ -1349,6 +1551,11 @@ def _takyon_app_gateway_error_payload(detail: Any) -> dict[str, Any]:
     return {"success": False, "error": str(detail)}
 
 
+def _takyon_owner_token_on_app_plane(request: Request) -> bool:
+    auth = str(request.headers.get("authorization") or "").strip()
+    return auth.startswith("Bearer tk_")
+
+
 def _takyon_app_broker_generate(
     *,
     business: str,
@@ -1439,6 +1646,11 @@ def _normalize_product_rail_route(path: str) -> Optional[str]:
 
 
 async def _takyon_app_get(request: Request, business: str, route: str) -> Response:
+    if _takyon_owner_token_on_app_plane(request):
+        return _takyon_app_json(
+            HTTPStatus.FORBIDDEN,
+            {"success": False, "error": "owner_token_rejected_on_app_plane"},
+        )
     parts = _takyon_app_route_parts(route)
     if parts == ["auth", "verify"]:
         status, payload = _takyon_app_tool(handle_business_verify_app_magic_link({
@@ -1467,6 +1679,11 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
 
 
 async def _takyon_app_post(request: Request, business: str, route: str) -> Response:
+    if _takyon_owner_token_on_app_plane(request):
+        return _takyon_app_json(
+            HTTPStatus.FORBIDDEN,
+            {"success": False, "error": "owner_token_rejected_on_app_plane"},
+        )
     try:
         body = await _takyon_app_read_json(request)
     except json.JSONDecodeError as exc:
@@ -1578,6 +1795,11 @@ async def takyon_app_stripe_webhook(request: Request):
         "stripe_signature": request.headers.get("stripe-signature") or "",
     }))
     return _takyon_app_json(status, payload)
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok", "role": _host_role()}
 
 
 # ---------------------------------------------------------------------------
@@ -1984,7 +2206,7 @@ async def get_status():
 @app.get("/api/takyon/operator/account")
 async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
     """Read-only operator billing snapshot for the dashboard UI."""
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         return {
             "available": False,
@@ -2071,7 +2293,7 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
 
 @app.post("/api/takyon/operator/topup/checkout")
 async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, Any]:
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     try:
@@ -2108,7 +2330,7 @@ async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, A
 
 @app.post("/api/takyon/operator/payouts/connect")
 async def create_takyon_operator_payout_connect(request: Request) -> dict[str, Any]:
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     try:
@@ -2160,7 +2382,7 @@ async def refresh_takyon_operator_payout_connect(
     request: Request,
     return_to: str = "/",
 ) -> Response:
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     safe_return = _same_origin_path(return_to or "/")
@@ -2208,7 +2430,7 @@ async def get_takyon_operator_businesses(request: Request) -> dict[str, Any]:
     This stays deliberately separate from session/workspace scope hydration so
     a failed business open cannot erase the global portfolio list.
     """
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         return {
             "available": False,
@@ -2246,7 +2468,7 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
     Uses the operator principal + canonical Takyon store directly instead of
     routing through session-scoped chat RPC state.
     """
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
@@ -2293,7 +2515,7 @@ async def get_takyon_business_site_preview(
     Mirrors the gateway's HTML inlining behavior without depending on the
     session-scoped chat RPC lane.
     """
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
@@ -2350,7 +2572,7 @@ async def get_takyon_business_workspace(
     The dashboard can render a business workspace from backend truth without
     waiting for the chat-session scope lane to finish hydrating.
     """
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
@@ -2383,7 +2605,7 @@ async def get_takyon_business_workspace(
 @app.get("/api/takyon/businesses/{slug}/creative-credits")
 async def get_takyon_business_creative_credits(request: Request, slug: str) -> dict[str, Any]:
     """Read-only business creative-credit snapshot for the dashboard UI."""
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         return {
             "available": False,
@@ -2453,7 +2675,7 @@ async def get_takyon_business_creative_credit_packs(
     request: Request, slug: str
 ) -> dict[str, Any]:
     """Dashboard wrapper exposing the existing creative-credit pack catalog."""
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     if slug not in principal.business_slugs:
@@ -5501,8 +5723,17 @@ def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
     return channel if _VALID_CHANNEL_RE.match(channel) else None
 
 
+async def _ws_reject_if_host_role_disallows(ws: WebSocket) -> bool:
+    if _host_role() == _HOST_ROLE_SUBUSER:
+        await ws.close(code=4404)
+        return True
+    return False
+
+
 @app.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
+    if await _ws_reject_if_host_role_disallows(ws):
+        return
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return
@@ -5522,10 +5753,7 @@ async def pty_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    cfg = _auth0_config()
-    principal = _resolve_dashboard_principal(
-        _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
-    )
+    principal = _resolve_dashboard_headers_principal(ws.headers)
 
     await ws.accept()
 
@@ -5636,6 +5864,8 @@ async def pty_ws(ws: WebSocket) -> None:
 
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
+    if await _ws_reject_if_host_role_disallows(ws):
+        return
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await _ws_reject(ws, "/api/ws", 4403, "embedded_chat_disabled")
         return
@@ -5659,10 +5889,7 @@ async def gateway_ws(ws: WebSocket) -> None:
 
     from tui_gateway.ws import handle_ws
 
-    cfg = _auth0_config()
-    principal = _resolve_dashboard_principal(
-        _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
-    )
+    principal = _resolve_dashboard_headers_principal(ws.headers)
 
     await ws.accept()
     await handle_ws(ws, principal=principal, preaccepted=True)
@@ -5677,6 +5904,8 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
     submission, interrupts, file/status reads, and session history keep working
     when an intermediary drops WebSocket upgrades.
     """
+    if _host_role() == _HOST_ROLE_SUBUSER:
+        raise HTTPException(status_code=404, detail="Not Found")
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         raise HTTPException(status_code=403, detail="embedded chat disabled")
 
@@ -5688,9 +5917,7 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
     }
 
     if req["method"] == "session.create":
-        principal = _resolve_dashboard_principal(
-            getattr(request.state, "auth0_user", None)
-        )
+        principal = _resolve_dashboard_request_principal(request)
         if principal is not None:
             params = dict(req.get("params") or {})
             params.setdefault("_takyon_operator_user_id", str(principal.user_id))
@@ -5727,6 +5954,8 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
 
 @app.websocket("/api/pub")
 async def pub_ws(ws: WebSocket) -> None:
+    if await _ws_reject_if_host_role_disallows(ws):
+        return
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await _ws_reject(ws, "/api/pub", 4403, "embedded_chat_disabled")
         return
@@ -5764,6 +5993,8 @@ async def pub_ws(ws: WebSocket) -> None:
 
 @app.websocket("/api/events")
 async def events_ws(ws: WebSocket) -> None:
+    if await _ws_reject_if_host_role_disallows(ws):
+        return
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await _ws_reject(ws, "/api/events", 4403, "embedded_chat_disabled")
         return
@@ -6840,11 +7071,14 @@ def start_server(
     app.state.bound_host = host
     app.state.bound_port = port
     _configure_local_product_publish(host, port)
+    role = _host_role()
 
     # Phase 8 serving flip: on the Postgres backend, idempotently seed the single platform owner so
     # the shared control plane has a resolvable owner for any business this runtime creates. Guarded
     # no-op off Postgres; never raises (it must not stop the dashboard from binding).
-    _seed_platform_owner_if_postgres()
+    if role != _HOST_ROLE_SUBUSER:
+        _seed_platform_owner_if_postgres()
+        _start_dashboard_worker_if_postgres()
 
     if open_browser:
         import webbrowser
@@ -6878,6 +7112,7 @@ def start_server(
             )
 
     print(f"  Takyon Web UI → http://{host}:{port}")
+    print(f"  Host role → {role}")
     if auth0_cfg:
         public_host = _configured_public_host()
         scope = "all hosts" if auth0_cfg.force else (public_host or "configured public host")

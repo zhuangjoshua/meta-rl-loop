@@ -20,9 +20,9 @@ The Caddyfile owns:
 
 - `app.fourmanifold.com` -> Takyon dashboard on `127.0.0.1:9119`
 - `research-composer.fourmanifold.com` -> legacy service on `127.0.0.1:9120`
-- shared product subdomains through Caddy on-demand TLS
-- Caddy's ask gate: `http://127.0.0.1:9119/api/product-tls/ask`
+- explicit legacy static product hosts that still terminate on the operator box
 
-Do not add a Caddy block per new business. New `slug.fourmanifold.com` hosts
-should route through the shared product subdomain route and be approved by the
-Takyon ask endpoint only when the business exists.
+Do not add a Caddy block per new normal business here. Shared dynamic
+`slug.fourmanifold.com` product routing now belongs in
+`deploy/takyon-subuser/Caddyfile`, where the product-host ask gate is served by
+the sub-user plane.
