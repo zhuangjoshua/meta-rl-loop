@@ -3001,7 +3001,7 @@ def _product_next_service_metadata(source_root: Path) -> tuple[dict[str, Any] | 
     if "start" not in scripts:
         return None, "Next.js product source has no package.json start script for production serving"
     if not (source_root / ".next").exists():
-        return None, "Next.js build output .next is missing after verification"
+        return None, "Next.js build output .next is missing after the refresh/build step"
     manager_name = _javascript_package_manager_name(source_root, package_data)
     manager = _javascript_package_manager_command(manager_name)
     start_command = _javascript_run_script_command(manager, "start", root=source_root)
@@ -11149,7 +11149,7 @@ def _apply_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, plan: 
                 _json_dumps(_legacy_surface_routes(site_root)),
                 _json_dumps({"source": "legacy product site"}),
                 _json_dumps({"no_hardcoded_product_ui": True, "backend_runtime_only": True}),
-                "Detected by Takyon business upgrade v1 from existing product source. Not a deploy or verification receipt.",
+                "Detected by Takyon business upgrade v1 from existing product source. Not a deploy or surface-refresh receipt.",
                 _json_dumps({"takyon_upgrade": "takyon-business-upgrade-v1", "legacy_detected": True}),
                 now,
                 now,
@@ -11257,7 +11257,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             "guidance_skills": resolved_guidance_skills,
                             "summary": "",
                             "error": error_text,
-                            "verification": None,
+                            "surface_refresh": None,
                         },
                     }
                 ],
@@ -11550,7 +11550,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "budget": operator_budget,
                 "operator_budget": operator_budget,
                 "agent_record": agent_record,
-                "verification": verification,
+                "surface_refresh": surface_refresh,
                 "summary": sdk_result.get("summary") or "",
                 "error": sdk_result.get("error"),
                 "pretend_product_findings": pretend_findings,
@@ -11619,7 +11619,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "handler": handle_business_check_runtime_capabilities,
         "schema": _schema(
             "business_check_runtime_capabilities",
-            "Check runtimes and package-manager capabilities for product builds, app verification, and scoped workers.",
+            "Check runtimes and package-manager capabilities for product builds, product surface refreshes, and scoped workers.",
             {
                 "capabilities": {"type": "array", "items": {"type": "string"}, "description": "Executable or capability names to inspect, such as node, npm, python, uv, git, or rg."},
                 "ecosystems": {"type": "array", "items": {"type": "string"}, "description": "Optional ecosystems to ensure when supported, such as javascript, javascript-package-manager, or python."},

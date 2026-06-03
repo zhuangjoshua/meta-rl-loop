@@ -2799,6 +2799,7 @@ def test_business_session_allows_claude_agent_surface_refresh(tmp_path, monkeypa
         assert result["success"] is True
         assert result["surface_refresh"]["status"] == "passed"
         assert result["surface_refresh"]["publish"]["status"] == "published"
+        assert "verification" not in result
         assert captured["source_path"] == "product/site"
     finally:
         clear_session_vars(tokens)
@@ -2844,6 +2845,8 @@ def test_claude_agent_task_records_failed_worker_run_on_prelaunch_gate(tmp_path,
     assert payload["source"] == "claude-agent-sdk"
     assert payload["workspace"] == "product/site"
     assert payload["error"] == "anthropic access missing"
+    assert payload["surface_refresh"] is None
+    assert "verification" not in payload
 
 
 def test_conversation_messages_append_permanent_corpus(tmp_path):

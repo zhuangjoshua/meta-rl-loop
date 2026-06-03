@@ -125,7 +125,7 @@ Default to `claude-design-openai` when no stronger style signal exists.
 
 1. The worker may not invent backend behavior.
 2. The worker may not escape the business workspace.
-3. Product verification failures are blockers, not success.
+3. Product surface refresh blockers are blockers, not success.
 4. Customer-facing product/UI copy should not expose stale or accidental foundation-model labels.
 
 ## Troubleshooting
