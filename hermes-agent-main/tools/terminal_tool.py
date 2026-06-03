@@ -936,6 +936,35 @@ _cleanup_running = False
 _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 
 
+def _session_scoped_task_id() -> Optional[str]:
+    """Best-effort session/container key for gateway-scoped business runs.
+
+    When Takyon is running inside the operator/app gateway, the current turn may
+    already be scoped to one business scratch workspace. Reusing the legacy
+    shared ``default`` container in that case defeats isolation and makes Docker
+    cwd-mounting ambiguous. If a session key exists, use a stable per-session
+    container key instead of the process-global default.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        session_key = str(get_session_env("TAKYON_SESSION_KEY", "") or "").strip()
+        if session_key:
+            return f"session:{session_key}"
+    except Exception:
+        return None
+    return None
+
+
+def _session_workspace_root() -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env("TAKYON_SESSION_WORKSPACE_ROOT", "") or "").strip()
+    except Exception:
+        return ""
+
+
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     """
     Register environment overrides for a specific task/rollout.
@@ -985,6 +1014,9 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     """
     if task_id and task_id in _task_env_overrides:
         return task_id
+    session_task_id = _session_scoped_task_id()
+    if session_task_id:
+        return session_task_id
     return "default"
 
 
@@ -1011,6 +1043,7 @@ def _get_env_config() -> Dict[str, Any]:
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     env_type = os.getenv("TERMINAL_ENV", "local")
+    session_workspace_root = _session_workspace_root()
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
 
@@ -1018,13 +1051,13 @@ def _get_env_config() -> Dict[str, Any]:
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
     if env_type == "local":
-        default_cwd = os.getcwd()
+        default_cwd = session_workspace_root or os.getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
     elif env_type == "vercel_sandbox":
         default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
     else:
-        default_cwd = "/root"
+        default_cwd = session_workspace_root or "/root"
 
     # Read TERMINAL_CWD but sanity-check it for container backends.
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
@@ -1036,7 +1069,7 @@ def _get_env_config() -> Dict[str, Any]:
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
-        docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
+        docker_cwd_source = os.getenv("TERMINAL_CWD") or session_workspace_root or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
             any(candidate.startswith(p) for p in host_prefixes)

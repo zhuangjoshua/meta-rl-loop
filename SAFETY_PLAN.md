@@ -38,12 +38,15 @@ We want all of the following at once:
   - `takyon_cli.web_server` now supports explicit host roles via `TAKYON_HOST_ROLE=combined|operator|subuser`
   - `subuser` role serves only product hosts plus app-runtime rails and rejects dashboard/operator chat surfaces
   - `operator` role rejects product hosts and public app-runtime routes
+  - the tracked operator services now set `TERMINAL_ENV=docker` and `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true`
+  - the existing tool Docker backend now uses the gateway session key as its sandbox key and prefers the session workspace root as cwd, so scoped operator shell/file tools stop sharing one global default container
   - tracked deploy/service assets now exist for all three planes:
     - `deploy/argon-alpha-14/*`
     - `deploy/takyon-subuser/*`
     - `deploy/takyon-safebox/*`
-  - `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
-- Honest current gap: the repo/runtime split is now wired, but live cutover is not finished yet. Safebox is still not confirmed running as its own live service, DNS/Caddy cutover for shared product hosts is still pending, and top-level business mutation is still not Docker-enforced.
+- `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
+- `.github/workflows/deploy.yml` now probes SSH reachability first and skips unreachable remote deploy steps instead of failing the whole push when GitHub-hosted runners are outside the local-only firewall allowlist
+- Honest current gap: the repo/runtime split is now wired, but live cutover is not finished yet. Safebox is still not confirmed running as its own live service, DNS/Caddy cutover for shared product hosts is still pending, and top-level mutation is only partially Docker-enforced: terminal/file sandboxing now routes through the existing Docker backend, but not every business mutation path has been reduced to “one explicit Docker job” yet.
 
 ### Business files
 
@@ -278,8 +281,9 @@ Current repo status:
 - Audit operator-facing mutating paths.
 - Route all business-scoped writes and long-running work through isolated workers.
 - Current repo status:
-  - not implemented as Docker enforcement yet
-  - important existing truth: business-scoped CEO turns already run inside `isolated_business_workspace(...)`, so the remaining gap is process/container isolation, not shared-business path writes inside a scoped turn
+  - partially implemented through the existing terminal/file Docker backend on the tracked operator services
+  - business-scoped CEO turns already run inside `isolated_business_workspace(...)`
+  - remaining gap is to finish reducing non-terminal mutation paths to explicit isolated-worker semantics, not to invent a brand-new Docker backend
 - Leave shared operator process with orchestration/read/enqueue duties.
 
 ### Phase 6. Add more compute without changing trust boundaries
@@ -291,6 +295,12 @@ Current repo status:
   - drain sub-user job queue
   - call shared Safebox
 - Do not duplicate secret authority onto each worker host.
+
+Deploy note under the current firewall:
+
+- GitHub-hosted runners can no longer SSH into the VPSes while `22` is restricted to `73.63.144.229/32`.
+- The tracked workflow now skips unreachable remote deploy steps cleanly and still reports build/compile status.
+- Full push-to-all-hosts automation therefore still depends on either a reachable deploy runner or a firewall change.
 
 ## Capability Preservation
 

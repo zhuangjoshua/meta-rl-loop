@@ -79,6 +79,7 @@ jobs:
         run: |
           if [[ -z "${TAKYON_SAFEBOX_VPS_HOST:-}" || -z "${TAKYON_SAFEBOX_VPS_SSH_KEY:-}" ]]; then
             echo "configured=0" >> "$GITHUB_OUTPUT"
+            echo "reachable=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -m 700 -d "$HOME/.ssh"
@@ -89,8 +90,15 @@ jobs:
           echo "TAKYON_SAFEBOX_DEPLOY_HOST=${TAKYON_SAFEBOX_VPS_USER:-root}@$TAKYON_SAFEBOX_VPS_HOST" >> "$GITHUB_ENV"
           echo "TAKYON_SAFEBOX_DEPLOY_KEY=$HOME/.ssh/takyon_safebox" >> "$GITHUB_ENV"
           echo "configured=1" >> "$GITHUB_OUTPUT"
+          if nc -z -w 5 "$TAKYON_SAFEBOX_VPS_HOST" 22; then
+            echo "reachable=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Safebox VPS SSH is not reachable from this GitHub runner; skipping remote deploy."
+            echo "reachable=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare VPS SSH key
+        id: operator_ssh
         shell: bash
         env:
           TAKYON_VPS_HOST: ${{ secrets.TAKYON_VPS_HOST }}
@@ -106,9 +114,15 @@ jobs:
             echo "ssh-keyscan failed for $TAKYON_VPS_HOST; continuing because deploy commands use StrictHostKeyChecking=accept-new" >&2
           echo "TAKYON_VPS_HOST=${TAKYON_VPS_USER:-root}@$TAKYON_VPS_HOST" >> "$GITHUB_ENV"
           echo "TAKYON_VPS_KEY=$HOME/.ssh/takyon_argon_alpha14" >> "$GITHUB_ENV"
+          if nc -z -w 5 "$TAKYON_VPS_HOST" 22; then
+            echo "reachable=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Operator VPS SSH is not reachable from this GitHub runner; skipping remote deploy."
+            echo "reachable=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Deploy Safebox runtime to VPS
-        if: steps.safebox_ssh.outputs.configured == '1'
+        if: steps.safebox_ssh.outputs.configured == '1' && steps.safebox_ssh.outputs.reachable == '1'
         env:
           TAKYON_RUN_WEB_BUILD: "0"
           TAKYON_VPS_HOST: ${{ env.TAKYON_SAFEBOX_DEPLOY_HOST }}
@@ -132,6 +146,7 @@ jobs:
           npx --yes vercel@latest inspect app.fourmanifold.com --token "$VERCEL_TOKEN" "${scope_args[@]}"
 
       - name: Deploy runtime to VPS
+        if: steps.operator_ssh.outputs.reachable == '1'
         env:
           TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.operator_caddy }}
           TAKYON_RUN_WEB_BUILD: "0"
@@ -147,6 +162,7 @@ jobs:
         run: |
           if [[ -z "${TAKYON_SUBUSER_VPS_HOST:-}" || -z "${TAKYON_SUBUSER_VPS_SSH_KEY:-}" ]]; then
             echo "configured=0" >> "$GITHUB_OUTPUT"
+            echo "reachable=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           install -m 700 -d "$HOME/.ssh"
@@ -157,9 +173,15 @@ jobs:
           echo "TAKYON_SUBUSER_DEPLOY_HOST=${TAKYON_SUBUSER_VPS_USER:-root}@$TAKYON_SUBUSER_VPS_HOST" >> "$GITHUB_ENV"
           echo "TAKYON_SUBUSER_DEPLOY_KEY=$HOME/.ssh/takyon_subuser" >> "$GITHUB_ENV"
           echo "configured=1" >> "$GITHUB_OUTPUT"
+          if nc -z -w 5 "$TAKYON_SUBUSER_VPS_HOST" 22; then
+            echo "reachable=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Sub-user VPS SSH is not reachable from this GitHub runner; skipping remote deploy."
+            echo "reachable=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Deploy sub-user runtime to VPS
-        if: steps.subuser_ssh.outputs.configured == '1'
+        if: steps.subuser_ssh.outputs.configured == '1' && steps.subuser_ssh.outputs.reachable == '1'
         env:
           TAKYON_APPLY_CADDY: ${{ steps.changes.outputs.subuser_caddy }}
           TAKYON_RUN_WEB_BUILD: "0"

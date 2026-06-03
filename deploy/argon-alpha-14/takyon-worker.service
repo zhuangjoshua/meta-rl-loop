@@ -22,6 +22,9 @@ Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
+Environment=TERMINAL_ENV=docker
+Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
+Environment=TERMINAL_CONTAINER_PERSISTENT=false
 # DATABASE_URL is read from /opt/takyon/.takyon/.env by load_takyon_env() at startup, exactly like
 # the dashboard. The worker is inherently Postgres (jobs/wake_schedules are PG-only); it does NOT
 # consult TAKYON_DB_BACKEND, and it raises loudly (invariant #8) if no DATABASE_URL is configured.

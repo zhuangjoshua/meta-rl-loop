@@ -14,6 +14,7 @@ import os
 import sys
 from pathlib import Path
 import pytest
+from gateway.session_context import clear_session_vars, set_session_vars
 
 # Ensure repo root is importable
 _repo_root = Path(__file__).resolve().parent.parent.parent
@@ -143,12 +144,36 @@ class TestCwdHandling:
         assert config["cwd"] == "/workspace"
         assert config["host_cwd"] == "/home/user/project"
 
+    def test_docker_session_workspace_root_maps_to_workspace_when_enabled(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        workspace_root = str(tmp_path / "scratch")
+        Path(workspace_root).mkdir(parents=True, exist_ok=True)
+        tokens = set_session_vars(workspace_root=workspace_root)
+        try:
+            config = _tt_mod._get_env_config()
+        finally:
+            clear_session_vars(tokens)
+        assert config["cwd"] == "/workspace"
+        assert config["host_cwd"] == workspace_root
+
     def test_local_backend_uses_getcwd(self, monkeypatch):
         """Local backend should use os.getcwd(), not /root."""
         monkeypatch.setenv("TERMINAL_ENV", "local")
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
         config = _tt_mod._get_env_config()
         assert config["cwd"] == os.getcwd()
+
+    def test_local_backend_prefers_session_workspace_root(self, monkeypatch):
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        tokens = set_session_vars(workspace_root="/tmp/takyon-session-workspace")
+        try:
+            config = _tt_mod._get_env_config()
+        finally:
+            clear_session_vars(tokens)
+        assert config["cwd"] == "/tmp/takyon-session-workspace"
 
     def test_create_environment_passes_docker_host_cwd_and_flag(self, monkeypatch):
         """Docker host cwd and mount flag should reach DockerEnvironment."""

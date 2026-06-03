@@ -71,6 +71,13 @@ The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now 
 
 Required operator secrets remain `TAKYON_VPS_HOST`, `TAKYON_VPS_USER`, and `TAKYON_VPS_SSH_KEY`. Optional Vercel metadata secrets remain `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`.
 
+Current deploy reality under the tightened firewall:
+
+- GitHub-hosted runners cannot SSH into VPSes when the firewall allows `22` only from `73.63.144.229/32`.
+- The tracked workflow now treats that as an expected skip instead of a hard failure: it still builds/compiles, then skips any remote deploy step whose host is unreachable from the runner.
+- Until there is a reachable deploy runner or a firewall change, a green Git push does not by itself prove the operator/sub-user/Safebox hosts were updated. In that state, do the remote deploy from the allowed local machine or another explicitly allowed runner.
+- Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
+
 Fast path for ordinary code/docs/UI changes:
 
 1. Run only the focused local checks needed for the touched surface, plus `git diff --check`.
@@ -128,6 +135,7 @@ For the operator/dashboard path, the canonical spend gate is the top-level Takyo
 - Do not reintroduce legacy create-time bootstrap caps or `--budget` as a normal operator path. The old `business.budget_json` cap is legacy compatibility state, not the intended budgeting model.
 - Do not expose user-editable wake cadence or legacy budget fields in the dashboard create UI. The operator UI may show read-only budget state and can rely on backend/default wake policy, but should not present those as normal editable setup knobs.
 - For business/product runtime spend, use the real downstream rail instead: `app_usage.py` for product usage budgets, and the creative-credit rail for fixed-price creative/ad actions.
+- The tracked operator services now run with `TERMINAL_ENV=docker`, `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true`, and non-persistent containers so the existing terminal/file sandbox backend keys itself off the Takyon session and mounts the current business scratch workspace instead of reusing one process-global default container for scoped business work.
 
 ## Safebox Authority
 

@@ -17,6 +17,7 @@ Docker Backend in ``website/docs/user-guide/configuration.md``.
 
 import pytest
 
+from gateway.session_context import clear_session_vars, set_session_vars
 from tools import terminal_tool
 
 
@@ -52,6 +53,15 @@ def test_subagent_task_id_collapses_to_default():
 def test_arbitrary_session_id_collapses_to_default():
     # Session UUIDs or anything else without an override still collapse.
     assert terminal_tool._resolve_container_task_id("sess-123e4567-e89b-12d3") == "default"
+
+
+def test_gateway_session_key_gets_its_own_container_key():
+    tokens = set_session_vars(session_key="rpc-session-42")
+    try:
+        assert terminal_tool._resolve_container_task_id(None) == "session:rpc-session-42"
+        assert terminal_tool._resolve_container_task_id("subagent-0-deadbeef") == "session:rpc-session-42"
+    finally:
+        clear_session_vars(tokens)
 
 
 def test_rl_task_with_override_keeps_its_own_id():
