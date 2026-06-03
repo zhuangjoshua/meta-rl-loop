@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 caddyfile="${script_dir}/Caddyfile"
 
 vps_host="${TAKYON_VPS_HOST:-root@134.209.123.8}"
-vps_key="${TAKYON_VPS_KEY:-${HOME}/.ssh/takyon_subuser}"
+vps_key="${TAKYON_VPS_KEY:-${HOME}/.ssh/takyon_argon_alpha14}"
 remote_caddyfile="${TAKYON_REMOTE_CADDYFILE:-/etc/caddy/Caddyfile}"
 remote_tmp="/tmp/takyon-subuser-caddyfile.$$"
 

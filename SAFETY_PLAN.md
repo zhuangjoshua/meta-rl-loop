@@ -18,7 +18,7 @@ We want all of the following at once:
 
 ## Current Truth
 
-### Rollout status as of 2026-06-02
+### Rollout status as of 2026-06-03
 
 - Existing operator droplet confirmed: `ubuntu-s-2vcpu-4gb-120gb-intel-nyc1` at `137.184.75.57` in `NYC1` on VPC `default-nyc1`.
 - New Safebox droplet created: `takyon-safebox` (`1 GB / 1 vCPU / 25 GB`, droplet id `574885009`, public `67.205.158.170`, private `10.116.0.2`) in the same `NYC1` / `default-nyc1` network.
@@ -44,10 +44,16 @@ We want all of the following at once:
     - `deploy/argon-alpha-14/*`
     - `deploy/takyon-subuser/*`
     - `deploy/takyon-safebox/*`
+- Live split status is now partially cut over:
+  - `takyon-safebox.service` is live on `67.205.158.170` and healthy on private `10.116.0.2:8000`
+  - operator `takyon-dashboard.service` and `takyon-worker.service` point at remote Safebox with `TAKYON_SAFEBOX_URL=http://10.116.0.2:8000`
+  - `app.fourmanifold.com` is back to the expected Auth0-gated operator flow (`302 /auth/login` at the public root)
+  - `takyon-subuser.service` is live on `134.209.123.8`
+  - the tracked sub-user Caddyfile is live on `134.209.123.8`
+  - the existing `product-sites` tree has been synced from the operator host to the sub-user host, and local host-header checks now serve real product HTML through both the sub-user runtime and sub-user Caddy
 - `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
 - `.github/workflows/deploy.yml` now probes SSH reachability first and skips unreachable remote deploy steps instead of failing the whole push when GitHub-hosted runners are outside the local-only firewall allowlist
-- The dedicated Safebox service app and remote-client mode exist in code, but the tracked operator/sub-user service units intentionally stay on local Safebox mode until the Safebox VPS is bootstrapped and healthy.
-- Honest current gap: the repo/runtime split is now wired, but live cutover is not finished yet. Safebox is still not confirmed running as its own live service, DNS/Caddy cutover for shared product hosts is still pending, and top-level mutation is only partially Docker-enforced: terminal/file sandboxing now routes through the existing Docker backend, but not every business mutation path has been reduced to “one explicit Docker job” yet.
+- Honest current gap: the repo/runtime split is now live for operator Auth0/Safebox and for sub-user local host routing, but public DNS cutover for shared product hosts is still pending outside the repo, and top-level mutation is still only partially Docker-enforced: terminal/file sandboxing routes through the existing Docker backend, but not every business mutation path has been reduced to “one explicit Docker job” yet.
 
 ### Business files
 
@@ -252,7 +258,7 @@ Do not run a separate full Safebox on every worker host.
 Current repo status:
 
 - implemented in code and deploy assets
-- not yet verified live on the dedicated Safebox VPS
+- verified live on the dedicated Safebox VPS
 
 ### Phase 3. Lock the sub-user plane
 
@@ -269,7 +275,8 @@ Current repo status:
 
 - implemented in `web_server.py` through `TAKYON_HOST_ROLE=subuser`
 - tracked sub-user service and Caddy config exist
-- live traffic cutover still pending
+- verified live on the dedicated sub-user VPS for local host-header routing
+- public DNS cutover for shared product hosts is still pending outside the repo
 
 ### Phase 4. Move long/mutating sub-user tasks to isolated workers
 

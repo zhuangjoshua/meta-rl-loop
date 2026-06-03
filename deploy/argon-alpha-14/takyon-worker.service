@@ -21,6 +21,7 @@ WorkingDirectory=/opt/takyon/hermes-agent-main
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
 Environment=TERMINAL_CONTAINER_PERSISTENT=false

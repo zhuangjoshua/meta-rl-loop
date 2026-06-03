@@ -25,7 +25,7 @@ Takyon now has three VPS classes in production `NYC1 / default-nyc1`:
 - Safebox VPS: `67.205.158.170` (`takyon-safebox`) — private secret/funding authority host
 - Sub-user VPS: `134.209.123.8` (`takyon-subuser`) — public app/runtime host for product subusers
 
-Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct operator-VPS access. Do not assume the same unit files, open ports, or public role on the Safebox or sub-user hosts.
+Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access. That key is the current tracked default for operator, Safebox, and sub-user deploy scripts unless the operator explicitly swaps to host-specific keys. Do not assume the same unit files, open ports, or public role on the Safebox or sub-user hosts.
 
 The public operator hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code. Product hosts such as `slug.fourmanifold.com` are the sub-user plane and should eventually point at the sub-user VPS, not the operator box.
 
@@ -59,6 +59,7 @@ When the operator asks to push or deploy Takyon, keep the rails distinct:
    - sub-user plane: `deploy/takyon-subuser/Caddyfile` + `deploy/takyon-subuser/takyon-subuser.service`
    - Safebox plane: `deploy/takyon-safebox/takyon-safebox.service`
    Apply Caddy with the matching `apply-caddyfile.sh` on the target host. Do not hand-add new per-business Caddy blocks for normal businesses.
+   The current sub-user runtime still serves existing static product hosts from `$TAKYON_HOME/product-sites`, so the tracked sub-user bootstrap/deploy path must keep syncing `product-sites` from the current operator source host until that surface moves to a different canonical backend.
 6. Vercel deploy is the `app` project frontdoor only. It is not the canonical Takyon runtime and successful Vercel deploys do not prove prompt, skill, registry, or backend changes reached any VPS. Do not run `vercel deploy` from the workspace root; that uploads the wrong artifact. Use `vercel redeploy` against the current known-good `app` frontdoor production deployment, or deploy an equivalent tiny frontdoor artifact, then verify `vercel inspect app.fourmanifold.com` is Ready and aliased. Treat Vercel alias state separately from DNS: `app.fourmanifold.com` may still resolve to the VPS and return Caddy/uvicorn headers even when Vercel has a Ready alias.
 
 The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now multi-host aware when the corresponding GitHub secrets are configured. It should:
@@ -77,7 +78,8 @@ Current deploy reality under the tightened firewall:
 - The tracked workflow now treats that as an expected skip instead of a hard failure: it still builds/compiles, then skips any remote deploy step whose host is unreachable from the runner.
 - Until there is a reachable deploy runner or a firewall change, a green Git push does not by itself prove the operator/sub-user/Safebox hosts were updated. In that state, do the remote deploy from the allowed local machine or another explicitly allowed runner.
 - Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
-- The dedicated Safebox service app exists, and callers can switch to it with `TAKYON_SAFEBOX_URL`, but the tracked operator/sub-user systemd units must stay on local Safebox mode until the Safebox VPS is actually bootstrapped and healthy. Do not point production services at `10.116.0.2:8000` before that host is live.
+- The dedicated Safebox service app now runs live on `10.116.0.2:8000`, and the tracked operator/sub-user systemd units point at it with `TAKYON_SAFEBOX_URL=http://10.116.0.2:8000`.
+- The sub-user VPS now runs the tracked shared product-host Caddyfile and serves product hosts through `takyon-subuser.service`; if a product host falls back to the default Caddy page, treat that as a sub-user Caddy drift or missing `product-sites` sync, not as a frontend build issue.
 
 Fast path for ordinary code/docs/UI changes:
 

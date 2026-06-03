@@ -6,7 +6,7 @@ RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@67.205.158.170}"
-TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_safebox}"
+TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-safebox.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-safebox.service}"
