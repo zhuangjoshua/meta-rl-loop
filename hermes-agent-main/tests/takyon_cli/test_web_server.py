@@ -601,6 +601,61 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     assert missing_response.json()["error"] == "product site file not found"
 
 
+def test_product_subdomain_materializes_published_site_from_storage(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import plugins.takyon.storage as takyon_storage
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read(self, **_kwargs):
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "published",
+                        "published_at": "2026-06-03T05:37:01.783509+00:00",
+                        "source_path": "product/site",
+                    }
+                }
+            }
+
+    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+        assert slug == "latexflow"
+        site = Path(dest_dir) / "product" / "site"
+        site.mkdir(parents=True, exist_ok=True)
+        (site / "index.html").write_text(
+            "<!doctype html><title>Latexflow</title><main>Materialized from storage</main>",
+            encoding="utf-8",
+        )
+        return takyon_storage.SyncReport(downloaded=("product/site/index.html",))
+
+    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
+    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "Materialized from storage" in response.text
+    assert (site_root / "latexflow" / "index.html").exists()
+    assert (site_root / "latexflow" / ".takyon-published-at").exists()
+
+
 def test_normalize_product_rail_route_handles_path_variants():
     import takyon_cli.web_server as web_server
 
