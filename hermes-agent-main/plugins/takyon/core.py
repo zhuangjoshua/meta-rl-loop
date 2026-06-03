@@ -10840,8 +10840,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
-        if worker_session_bound and args.get("verify_surface"):
-            raise TakyonError("trusted product surface verification is available only on the authority tool surface")
 
         workspace_raw = str(args.get("workspace") or ".").strip() or "."
         workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
@@ -11000,8 +10998,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             consume_reserved=worker_invoked,
         )
         verification: dict[str, Any] | None = None
-        verify_surface = False if worker_session_bound else bool(args.get("verify_surface"))
-        if not worker_session_bound and not args.get("verify_surface"):
+        verify_surface = bool(args.get("verify_surface"))
+        if not worker_session_bound and not verify_surface:
             normalized_workspace = workspace_rel.strip("/").lower()
             verify_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
         if sdk_result.get("success") and verify_surface:

@@ -2668,7 +2668,7 @@ def test_claude_agent_task_rejects_noncanonical_workspace(tmp_path, monkeypatch)
     assert "must stay under one of" in str(result.get("error") or "")
 
 
-def test_business_session_blocks_trusted_surface_verification(tmp_path, monkeypatch):
+def test_business_session_allows_claude_agent_surface_verification(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2691,8 +2691,10 @@ def test_business_session_blocks_trusted_surface_verification(tmp_path, monkeypa
                 }
             )
         )
-        assert result["success"] is False
-        assert "authority tool surface" in str(result.get("error") or "")
+        assert result["success"] is True
+        assert result["verification"]["status"] == "passed"
+        assert result["verification"]["publish"]["status"] == "published"
+        assert captured["source_path"] == "product/site"
     finally:
         clear_session_vars(tokens)
 
@@ -2732,6 +2734,35 @@ def test_conversation_messages_append_permanent_corpus(tmp_path):
     assert len(lines) == 1
     row = json.loads(lines[0])
     assert row["business"] == "latexflow"
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            Path(payload["cwd"], "index.html").write_text("<h1>Alpha</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    captured: dict[str, object] = {}
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        captured["source_path"] = kwargs["source_path"]
+        return {
+            "status": "passed",
+            "done_gate_status": "passed",
+            "publish": {
+                "status": "published",
+                "public_url": "https://alpha.fourmanifold.com/",
+                "blocker": "",
+            },
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "inventory": {},
+        }
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+
     assert row["thread_external_id"] == "post-1"
     assert row["body"] == "Does it support git sync?"
     assert "conversation.message.record" in events.read_text(encoding="utf-8")
