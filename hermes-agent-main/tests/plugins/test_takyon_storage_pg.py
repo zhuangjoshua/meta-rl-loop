@@ -292,3 +292,27 @@ def test_with_business_workspace_does_not_sync_up_on_exception(tmp_path):
     # The crash did NOT sync up: the last good remote state is preserved untouched.
     after = backend.list_digests(storage.object_prefix("biz-x"))
     assert after == before
+
+
+def test_with_business_workspace_can_sync_partial_progress_on_exception(tmp_path):
+    backend = _backend(tmp_path)
+    seed = tmp_path / "seed"
+    _seed_workspace(seed)
+    storage.sync_up(backend, "biz-x", seed)
+
+    scratch = tmp_path / "scratch"
+    with pytest.raises(RuntimeError, match="boom"):
+        with storage.with_business_workspace(
+            backend,
+            "biz-x",
+            scratch,
+            sync_on_exception=True,
+        ) as root:
+            (root / "metrics").mkdir(parents=True, exist_ok=True)
+            (root / "metrics" / "summary.md").write_text("partial progress\n")
+            raise RuntimeError("boom")
+
+    resumed = tmp_path / "resumed"
+    resumed.mkdir()
+    storage.sync_down(backend, "biz-x", resumed)
+    assert (resumed / "metrics" / "summary.md").read_text() == "partial progress\n"

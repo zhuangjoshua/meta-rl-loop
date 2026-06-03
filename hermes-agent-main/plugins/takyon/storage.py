@@ -43,6 +43,7 @@ adds a bucket↔table two-write drift hazard.)
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -59,6 +60,7 @@ MAX_OBJECT_BYTES = 256 * 1024 * 1024  # 256 MiB — bound a single object so a s
 _MAX_KEY_DEPTH = 48
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_LOCAL_DIRNAME = "storage"
+logger = logging.getLogger(__name__)
 
 
 class StorageError(Exception):
@@ -441,16 +443,34 @@ def with_business_workspace(
     *,
     delete_remote: bool = True,
     delete_local: bool = True,
+    sync_on_exception: bool = False,
 ) -> Iterator[Path]:
     """Worker integration seam: sync-down on enter → yield the scratch ``root`` → sync-up on **clean**
     exit. On an exception the body raises through WITHOUT syncing up, so a crashed run never clobbers
-    the last good remote state (the requeued job re-syncs the last good tree). Mounting this around the
-    worker's per-job run is the operator-gated cutover step."""
+    the last good remote state (the requeued job re-syncs the last good tree) unless
+    ``sync_on_exception`` is enabled for a caller that wants partial progress preserved. Mounting this
+    around the worker's per-job run is the operator-gated cutover step."""
     root_path = Path(root).expanduser()
     root_path.mkdir(parents=True, exist_ok=True)
     sync_down(backend, slug, root_path, delete_local=delete_local)
-    yield root_path
-    sync_up(backend, slug, root_path, delete_remote=delete_remote)
+    try:
+        yield root_path
+    except BaseException as exc:
+        if sync_on_exception:
+            try:
+                sync_up(backend, slug, root_path, delete_remote=delete_remote)
+            except Exception as sync_exc:  # pragma: no cover - defensive logging path
+                logger.warning(
+                    "failed to sync partial business workspace for %s after exception: %s",
+                    slug,
+                    sync_exc,
+                    exc_info=True,
+                )
+                if hasattr(exc, "add_note"):
+                    exc.add_note(f"partial workspace sync failed for {slug}: {sync_exc}")
+        raise
+    else:
+        sync_up(backend, slug, root_path, delete_remote=delete_remote)
 
 
 @contextmanager
@@ -462,6 +482,7 @@ def isolated_business_workspace(
     scratch_parent: str | os.PathLike[str] | None = None,
     delete_remote: bool = True,
     delete_local: bool = True,
+    sync_on_exception: bool = False,
 ) -> Iterator[Path]:
     """Materialize one business into a private per-run scratch Takyon home.
 
@@ -491,6 +512,7 @@ def isolated_business_workspace(
             workspace,
             delete_remote=delete_remote,
             delete_local=delete_local,
+            sync_on_exception=sync_on_exception,
         ):
             yield home
     finally:

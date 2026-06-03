@@ -11343,13 +11343,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 
         max_turns = _clamp_int(
             args.get("max_turns"),
-            default=8 if customer_facing_product_workspace else 12,
+            default=16 if customer_facing_product_workspace else 12,
             minimum=1,
             maximum=40,
         )
         timeout_ms = _clamp_int(
             args.get("timeout_ms"),
-            default=180_000 if customer_facing_product_workspace else 300_000,
+            default=300_000,
             minimum=30_000,
             maximum=1_800_000,
         )
@@ -12153,8 +12153,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
-                "max_turns": {"type": "integer", "description": "SDK turn cap, default 8 for product/site work and 12 otherwise"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 180000 for product/site work and 300000 otherwise"},
+                "max_turns": {"type": "integer", "description": "SDK turn cap, default 16 for product/site work and 12 otherwise"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000 for product/site work and 300000 otherwise"},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
                 "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 180 for product/site work and 300 otherwise"},

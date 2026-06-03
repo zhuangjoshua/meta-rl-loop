@@ -446,7 +446,11 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                 "status": "running",
             },
         )
-        with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
+        with _business_workspace_execution_context(
+            slug,
+            operator_user_id=owner_user_id,
+            sync_on_exception=True,
+        ) as workspace_home:
             tokens = set_session_vars(
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),
@@ -551,7 +555,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 "status": "running",
             },
         )
-        with _business_workspace_execution_context(slug, operator_user_id=owner_user_id) as workspace_home:
+        with _business_workspace_execution_context(
+            slug,
+            operator_user_id=owner_user_id,
+            sync_on_exception=True,
+        ) as workspace_home:
             tokens = set_session_vars(
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),

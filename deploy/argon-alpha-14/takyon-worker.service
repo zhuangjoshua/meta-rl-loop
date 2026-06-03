@@ -18,6 +18,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/takyon/hermes-agent-main
+EnvironmentFile=-/opt/takyon/.takyon/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/root
 Environment=PYTHONUNBUFFERED=1
@@ -25,9 +26,10 @@ Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
 Environment=TERMINAL_CONTAINER_PERSISTENT=false
-# DATABASE_URL is read from /opt/takyon/.takyon/.env by load_takyon_env() at startup, exactly like
-# the dashboard. The worker is inherently Postgres (jobs/wake_schedules are PG-only); it does NOT
-# consult TAKYON_DB_BACKEND, and it raises loudly (invariant #8) if no DATABASE_URL is configured.
+# The worker now loads the shared Takyon env file directly before startup, and load_takyon_env() still
+# remains the in-process fallback. The worker is inherently Postgres (jobs/wake_schedules are PG-only);
+# it does NOT consult TAKYON_DB_BACKEND, and it raises loudly (invariant #8) if no DATABASE_URL is
+# configured.
 ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli worker
 Restart=always
 RestartSec=5

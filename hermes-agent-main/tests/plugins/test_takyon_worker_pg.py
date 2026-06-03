@@ -260,6 +260,34 @@ def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
     assert (resumed / "metrics" / "summary.md").read_text() == "fresh\n"
 
 
+def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tmp_path):
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    seed = tmp_path / "seed"
+    (seed / "research").mkdir(parents=True, exist_ok=True)
+    (seed / "research" / "strategy.md").write_text("seed\n")
+    storage.sync_up(backend, "acme", seed)
+
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+
+    def _fake_turn(*, slug, **_kw):
+        workspace_root = get_session_env("TAKYON_SESSION_WORKSPACE_ROOT")
+        workspace = Path(workspace_root) / "businesses" / slug
+        (workspace / "product").mkdir(parents=True, exist_ok=True)
+        (workspace / "product" / "surface.md").write_text("partial surface\n")
+        raise RuntimeError("turn interrupted")
+
+    monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
+
+    with pytest.raises(RuntimeError, match="turn interrupted"):
+        worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+
+    resumed = tmp_path / "resumed"
+    storage.sync_down(backend, "acme", resumed)
+    assert (resumed / "product" / "surface.md").read_text() == "partial surface\n"
+
+
 def test_zero_cost_turn_reports_zero_cents(monkeypatch):
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none"))

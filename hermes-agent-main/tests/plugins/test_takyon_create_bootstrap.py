@@ -112,5 +112,5 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
         "goal": "overleaf competitor",
         "mode": "test",
         "schedule": "every 6h",
-        "max_turns": 10,
+        "max_turns": 20,
     }

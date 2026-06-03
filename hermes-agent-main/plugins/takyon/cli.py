@@ -30,7 +30,7 @@ _TAKYON_SKILL_ALIASES = {
     "claude-agent-sdk": "takyon-claude-agent-sdk",
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
-_DEFAULT_BOOTSTRAP_MAX_TURNS = 10
+_DEFAULT_BOOTSTRAP_MAX_TURNS = 20
 
 
 _CLI_ONLY_COMMANDS = {
@@ -594,7 +594,12 @@ def _scope_for_business(slug: str) -> str:
 
 
 @contextlib.contextmanager
-def _business_workspace_execution_context(slug: str, *, operator_user_id: str | None = None):
+def _business_workspace_execution_context(
+    slug: str,
+    *,
+    operator_user_id: str | None = None,
+    sync_on_exception: bool = False,
+):
     from . import storage
 
     load_takyon_env()
@@ -603,6 +608,7 @@ def _business_workspace_execution_context(slug: str, *, operator_user_id: str | 
         backend,
         slug,
         owner_label=str(operator_user_id or slug),
+        sync_on_exception=sync_on_exception,
     ) as workspace_home:
         yield workspace_home
 

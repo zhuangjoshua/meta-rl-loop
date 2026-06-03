@@ -1219,7 +1219,7 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
 
 
-def test_claude_agent_task_uses_lighter_defaults_for_product_site_work(tmp_path, monkeypatch):
+def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1258,8 +1258,8 @@ def test_claude_agent_task_uses_lighter_defaults_for_product_site_work(tmp_path,
 
     payload = captured["payload"]
     assert result["success"] is True
-    assert payload["maxTurns"] == 8
-    assert payload["timeoutMs"] == 180000
+    assert payload["maxTurns"] == 16
+    assert payload["timeoutMs"] == 300000
     assert payload["effort"] == "medium"
 
 
