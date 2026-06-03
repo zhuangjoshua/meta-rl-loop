@@ -357,6 +357,10 @@ def _shutdown_sessions() -> None:
     for session in list(_sessions.values()):
         _finalize_session(session, end_reason="tui_shutdown")
         try:
+            _terminate_isolated_turn_proc(session.get("takyon_turn_proc"))
+        except Exception:
+            pass
+        try:
             worker = session.get("slash_worker")
             if worker:
                 worker.close()
@@ -1877,6 +1881,299 @@ def _wire_callbacks(sid: str):
     set_secret_capture_callback(secret_cb)
 
 
+def _apply_usage_snapshot(
+    agent,
+    usage_snapshot: dict[str, Any] | None,
+    *,
+    session_id: str = "",
+) -> None:
+    if agent is None:
+        return
+    if isinstance(usage_snapshot, dict):
+        for key, value in usage_snapshot.items():
+            try:
+                setattr(agent, key, value)
+            except Exception:
+                pass
+    if session_id:
+        try:
+            agent.session_id = session_id
+        except Exception:
+            pass
+
+
+def _terminate_isolated_turn_proc(proc) -> None:
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        return
+    try:
+        proc.wait(timeout=1.5)
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=1.5)
+    except Exception:
+        pass
+
+
+def _build_isolated_turn_payload(
+    session: dict,
+    agent,
+    run_message: Any,
+    history: list[dict[str, Any]],
+    *,
+    operator_user_id: str,
+    business_slug: str,
+) -> dict[str, Any]:
+    gateway_ctx = getattr(agent, "_takyon_operator_gateway_context", None)
+    requested_provider = str(
+        getattr(gateway_ctx, "requested_provider", "") or getattr(agent, "provider", "") or ""
+    ).strip()
+    upstream_base_url = str(
+        getattr(gateway_ctx, "upstream_base_url", "") or getattr(agent, "base_url", "") or ""
+    ).strip()
+    return {
+        "session_key": str(session.get("session_key") or ""),
+        "operator_user_id": operator_user_id,
+        "business_slug": business_slug,
+        "run_message": run_message,
+        "history": history,
+        "model": str(getattr(agent, "model", "") or ""),
+        "runtime": {
+            "provider": str(getattr(agent, "provider", "") or ""),
+            "requested_provider": requested_provider or str(getattr(agent, "provider", "") or ""),
+            "api_mode": str(getattr(agent, "api_mode", "") or ""),
+            "base_url": upstream_base_url,
+        },
+        "agent_config": {
+            "max_iterations": int(getattr(agent, "max_iterations", 90) or 90),
+            "verbose_logging": bool(session.get("tool_progress_mode") == "verbose"),
+            "reasoning_config": getattr(agent, "reasoning_config", None),
+            "service_tier": getattr(agent, "service_tier", None),
+            "enabled_toolsets": list(getattr(agent, "enabled_toolsets", None) or []),
+            "disabled_toolsets": list(getattr(agent, "disabled_toolsets", None) or []),
+            "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None),
+            "providers_allowed": getattr(agent, "providers_allowed", None),
+            "providers_ignored": getattr(agent, "providers_ignored", None),
+            "providers_order": getattr(agent, "providers_order", None),
+            "provider_sort": getattr(agent, "provider_sort", None),
+            "provider_require_parameters": bool(
+                getattr(agent, "provider_require_parameters", False)
+            ),
+            "provider_data_collection": getattr(agent, "provider_data_collection", None),
+            "openrouter_min_coding_score": getattr(
+                agent, "openrouter_min_coding_score", None
+            ),
+            "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
+            "fallback_model": getattr(agent, "_fallback_model", None),
+            "checkpoints_enabled": bool(getattr(agent, "_checkpoint_mgr", None)),
+            "pass_session_id": bool(getattr(agent, "pass_session_id", False)),
+            "skip_context_files": bool(getattr(agent, "skip_context_files", False)),
+            "skip_memory": bool(getattr(agent, "skip_memory", False)),
+        },
+    }
+
+
+def _forward_isolated_turn_event(
+    sid: str,
+    session: dict,
+    event: str,
+    payload: dict[str, Any],
+    streamer,
+) -> None:
+    if event == "message.delta":
+        text = str(payload.get("text") or "")
+        delta_payload = {"text": text}
+        if streamer and (r := streamer.feed(text)) is not None:
+            delta_payload["rendered"] = r
+        _emit("message.delta", sid, delta_payload)
+        return
+    if event == "tool.start":
+        name = str(payload.get("name") or "").strip()
+        context = str(payload.get("context") or "").strip()
+        entry_kind, label, detail, skill_name = _takyon_trace_tool_shape(name, None, context)
+        _takyon_record_session_runtime_event(
+            session,
+            kind="ceo_turn",
+            status="trace",
+            detail=detail or label,
+            trace={
+                "kind": entry_kind,
+                "entry_key": f"tool:{payload.get('tool_id') or name}",
+                "label": label,
+                "detail": detail or label,
+                "status": "running",
+                "tool_name": name,
+                "skill_name": skill_name,
+                "preview": context,
+                "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+            },
+        )
+        _emit("tool.start", sid, payload)
+        return
+    if event == "tool.complete":
+        name = str(payload.get("name") or "").strip()
+        detail = str(payload.get("summary") or name or "Tool completed.").strip()
+        _takyon_record_session_runtime_event(
+            session,
+            kind="ceo_turn",
+            status="trace",
+            detail=detail,
+            trace={
+                "kind": "tool",
+                "entry_key": f"tool:{payload.get('tool_id') or name}",
+                "label": _takyon_trace_label(name),
+                "detail": detail,
+                "status": "completed",
+                "tool_name": name,
+                "summary": str(payload.get("summary") or "").strip(),
+                "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+            },
+        )
+        _emit("tool.complete", sid, payload)
+        return
+    if event == "tool.progress":
+        _emit("tool.progress", sid, payload)
+        return
+    if event in {
+        "tool.generating",
+        "thinking.delta",
+        "reasoning.delta",
+        "reasoning.available",
+        "status.update",
+        "review.summary",
+    }:
+        _emit(event, sid, payload)
+
+
+def _run_isolated_gateway_turn(
+    sid: str,
+    session: dict,
+    agent,
+    run_message: Any,
+    history: list[dict[str, Any]],
+    *,
+    operator_user_id: str,
+    business_slug: str,
+    streamer,
+) -> dict[str, Any]:
+    payload = _build_isolated_turn_payload(
+        session,
+        agent,
+        run_message,
+        history,
+        operator_user_id=operator_user_id,
+        business_slug=business_slug,
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tui_gateway.isolated_turn_worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        cwd=os.getcwd(),
+        env=os.environ.copy(),
+    )
+    session["takyon_turn_proc"] = proc
+    session.pop("takyon_turn_interrupted", None)
+    stderr_tail: list[str] = []
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            text = line.rstrip()
+            if not text:
+                continue
+            stderr_tail.append(text)
+            if len(stderr_tail) > 40:
+                del stderr_tail[:-40]
+            print(text, file=sys.stderr)
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    final: dict[str, Any] | None = None
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            kind = str(msg.get("type") or "")
+            if kind == "event":
+                _forward_isolated_turn_event(
+                    sid,
+                    session,
+                    str(msg.get("event") or ""),
+                    dict(msg.get("payload") or {}),
+                    streamer,
+                )
+                continue
+            if kind == "request":
+                answer = _block(
+                    str(msg.get("event") or ""),
+                    sid,
+                    dict(msg.get("payload") or {}),
+                    timeout=int(msg.get("timeout") or 300),
+                )
+                proc.stdin.write(
+                    json.dumps(
+                        {
+                            "type": "response",
+                            "request_id": msg.get("request_id"),
+                            "value": answer,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                proc.stdin.flush()
+                continue
+            if kind == "result":
+                final = msg
+                break
+            if kind == "error":
+                raise RuntimeError(str(msg.get("message") or "isolated turn failed"))
+        rc = proc.wait(timeout=5.0)
+        if final is None:
+            if session.pop("takyon_turn_interrupted", False):
+                return {
+                    "result": {"final_response": "", "messages": history, "interrupted": True},
+                    "usage": {},
+                    "usage_snapshot": {},
+                    "session_id": str(getattr(agent, "session_id", "") or ""),
+                    "session_estimated_cost_usd": float(
+                        getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0
+                    ),
+                }
+            stderr = "\n".join(stderr_tail[-8:]).strip()
+            detail = stderr or f"isolated turn exited with code {rc}"
+            raise RuntimeError(detail)
+        return final
+    finally:
+        session.pop("takyon_turn_proc", None)
+        session.pop("takyon_turn_interrupted", None)
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        _terminate_isolated_turn_proc(proc)
+
+
 def _render_personality_prompt(value) -> str:
     if isinstance(value, dict):
         parts = [value.get("system_prompt", "")]
@@ -2902,6 +3199,10 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"closed": False})
     _finalize_session(session)
     try:
+        _terminate_isolated_turn_proc(session.get("takyon_turn_proc"))
+    except Exception:
+        pass
+    try:
         from tools.approval import unregister_gateway_notify
 
         unregister_gateway_notify(session["session_key"])
@@ -2979,6 +3280,11 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    session["takyon_turn_interrupted"] = True
+    try:
+        _terminate_isolated_turn_proc(session.get("takyon_turn_proc"))
+    except Exception:
+        pass
     if hasattr(session["agent"], "interrupt"):
         session["agent"].interrupt()
     # Scope the pending-prompt release to THIS session.  A global
@@ -3567,32 +3873,71 @@ def _run_prompt_submit(
                     getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0
                 )
 
-            def _stream(delta):
-                payload = {"text": delta}
-                if streamer and (r := streamer.feed(delta)) is not None:
-                    payload["rendered"] = r
-                _emit("message.delta", sid, payload)
-
-            workspace_context = (
-                _business_workspace_execution_context(
-                    current_business,
-                    operator_user_id=resolved_operator_user_id,
-                )
-                if current_business
-                else contextlib.nullcontext(None)
-            )
-            with workspace_context as workspace_home:
-                session_tokens = _set_session_context(
-                    session["session_key"],
-                    operator_user_id=_takyon_operator_user_id(session),
-                    workspace_root=str(workspace_home or ""),
-                    business_slug=current_business,
-                )
-                result = agent.run_conversation(
+            worker_usage = None
+            turn_cost_after_usd = turn_cost_before_usd
+            if getattr(agent, "_takyon_operator_gateway", False):
+                worker_result = _run_isolated_gateway_turn(
+                    sid,
+                    session,
+                    agent,
                     run_message,
-                    conversation_history=list(history),
-                    stream_callback=_stream,
+                    list(history),
+                    operator_user_id=resolved_operator_user_id,
+                    business_slug=current_business,
+                    streamer=streamer,
                 )
+                result = worker_result.get("result")
+                worker_usage = (
+                    dict(worker_result.get("usage") or {})
+                    if isinstance(worker_result, dict)
+                    else None
+                )
+                _apply_usage_snapshot(
+                    agent,
+                    worker_result.get("usage_snapshot")
+                    if isinstance(worker_result, dict)
+                    else None,
+                    session_id=str(
+                        (worker_result.get("session_id") or "")
+                        if isinstance(worker_result, dict)
+                        else ""
+                    ),
+                )
+                try:
+                    turn_cost_after_usd = float(
+                        (worker_result.get("session_estimated_cost_usd"))
+                        if isinstance(worker_result, dict)
+                        else turn_cost_before_usd
+                    )
+                except (TypeError, ValueError):
+                    turn_cost_after_usd = turn_cost_before_usd
+            else:
+                def _stream(delta):
+                    payload = {"text": delta}
+                    if streamer and (r := streamer.feed(delta)) is not None:
+                        payload["rendered"] = r
+                    _emit("message.delta", sid, payload)
+
+                workspace_context = (
+                    _business_workspace_execution_context(
+                        current_business,
+                        operator_user_id=resolved_operator_user_id,
+                    )
+                    if current_business
+                    else contextlib.nullcontext(None)
+                )
+                with workspace_context as workspace_home:
+                    session_tokens = _set_session_context(
+                        session["session_key"],
+                        operator_user_id=_takyon_operator_user_id(session),
+                        workspace_root=str(workspace_home or ""),
+                        business_slug=current_business,
+                    )
+                    result = agent.run_conversation(
+                        run_message,
+                        conversation_history=list(history),
+                        stream_callback=_stream,
+                    )
 
             last_reasoning = None
             status_note = None

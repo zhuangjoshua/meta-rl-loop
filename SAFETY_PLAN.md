@@ -53,7 +53,10 @@ We want all of the following at once:
   - the existing `product-sites` tree has been synced from the operator host to the sub-user host, and public/shared product hosts now terminate on the operator edge and proxy over the private VPC to the sub-user plane; `https://dogloop.fourmanifold.com/` now returns the real product HTML through that path
 - `.github/workflows/deploy.yml` now has optional Safebox/sub-user deploy steps when their host secrets are configured
 - `.github/workflows/deploy.yml` now probes SSH reachability first and skips unreachable remote deploy steps instead of failing the whole push when GitHub-hosted runners are outside the local-only firewall allowlist
-- Honest current gap: the repo/runtime split is now live for operator Auth0/Safebox and for public/shared product hosts through the dedicated sub-user plane. The remaining top-level gap is narrower: terminal/file sandboxing routes through the existing Docker backend, business-scoped file tools are session-bound to the current business, and `business_claude_agent_task` is workspace-bounded with no Bash, but ordinary scoped CEO turns still do not spin up one fresh explicit Docker job per turn.
+- Honest current gap: the repo/runtime split is now live for operator Auth0/Safebox and for public/shared product hosts through the dedicated sub-user plane. The remaining top-level gap is now split in two:
+  - repo/code: interactive operator turns now use a fresh isolated child runner instead of the shared live process
+  - live/deploy: production does not get that new turn-runner path until the next operator VPS deploy
+  - longer-term hardening: this is still a fresh process on the operator host, not yet a per-turn Docker container, and product hosts still terminate on the operator edge first
 
 ### Business files
 
@@ -344,6 +347,8 @@ We are done only when all of these are true:
 
 ## Proof Graph: Current Top-Level Path
 
+This is the current **repo/code** shape after the isolated-turn change. Live production matches this only after the next operator VPS deploy.
+
 ```mermaid
 flowchart TD
     TU["Top-level user"] --> OWEB["app.fourmanifold.com"]
@@ -354,24 +359,30 @@ flowchart TD
     TG --> OID["operator_user_id attached"]
     OID --> SCOPE["scope.set business:slug"]
     SCOPE --> OWNER["owner gate"]
-    OWNER --> ISO["isolated_business_workspace(...)"]
+    OWNER --> TURN["direct isolated turn worker<br/>fresh child process per prompt.submit turn"]
+    TURN --> ISO["isolated_business_workspace(...)"]
     ISO --> S3["S3-backed business workspace"]
-    ISO --> CEO["CEO turn runs in scratch home"]
+    TURN --> CEO["CEO turn runs out-of-process"]
     OAPP --> SAFE["remote Safebox @ 10.116.0.2:8000"]
     OWORK --> SAFE
     CEO -. "business_* tools bound to session business" .-> ISO
-    CEO -. "terminal/file sandbox path uses session-keyed Docker backend" .-> DOCKER["session-keyed Docker bridge"]
+    CEO -. "terminal/file sandbox path still uses session-keyed Docker backend" .-> DOCKER["session-keyed Docker bridge"]
 ```
 
 ## Target Graph: Operator Plane
+
+Refinement versus the original target: interactive CEO turns should be isolated direct calls rather than durable queued jobs-per-turn. Background work still uses the worker/job plane.
 
 ```mermaid
 flowchart TD
     TU["Top-level user"] --> OWEB["Operator dashboard / chat"]
     OWEB --> OVPS["Operator VPS"]
-    OVPS --> TG["tui_gateway / CEO runtime"]
+    OVPS --> TG["tui_gateway / parent orchestrator"]
     OVPS --> OAPI["Operator-only API"]
     OVPS --> JQ["Operator job queue"]
+    TG --> TURN["Direct isolated CEO-turn runner"]
+    TURN --> S3["One business scratch workspace"]
+    TURN --> SB["Safebox VPS"]
     JQ --> OWORK["Isolated operator worker container"]
     OWORK --> S3["S3 business workspace"]
     OWORK --> PG["Postgres"]

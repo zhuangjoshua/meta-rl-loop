@@ -2905,6 +2905,46 @@ def test_prompt_submit_emits_operator_account_refresh_after_settlement(monkeypat
         server._sessions.pop("sid", None)
 
 
+def test_session_interrupt_terminates_isolated_turn_proc():
+    class _Proc:
+        def __init__(self):
+            self.terminated = 0
+            self.killed = 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated += 1
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.killed += 1
+
+    class _Agent:
+        def __init__(self):
+            self.interrupted = 0
+
+        def interrupt(self):
+            self.interrupted += 1
+
+    proc = _Proc()
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, takyon_turn_proc=proc)
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.interrupt", "params": {"session_id": "sid"}}
+        )
+        assert resp.get("result", {}).get("status") == "interrupted"
+        assert proc.terminated == 1
+        assert agent.interrupted == 1
+        assert server._sessions["sid"]["takyon_turn_interrupted"] is True
+    finally:
+        server._sessions.pop("sid", None)
+
+
 # ---------------------------------------------------------------------------
 # session.interrupt must only cancel pending prompts owned by the calling
 # session — it must not blast-resolve clarify/sudo/secret prompts on
@@ -3760,6 +3800,88 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
         resumed = tmp_path / "resumed"
         storage.sync_down(storage.LocalStorageBackend(bucket), "acme", resumed)
         assert (resumed / "metrics" / "turn.md").read_text() == "fresh\n"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_gateway_agent_uses_isolated_turn_runner(monkeypatch):
+    emitted: list[tuple] = []
+    called: dict[str, object] = {}
+
+    class _Agent:
+        _takyon_operator_gateway = True
+        session_id = "session-key"
+        session_estimated_cost_usd = 0.0
+        model = "test-model"
+        provider = "openrouter"
+        api_mode = "chat_completions"
+        base_url = "https://openrouter.ai/api/v1"
+        max_iterations = 90
+        enabled_toolsets = ["takyon", "web", "skills", "todo"]
+        disabled_toolsets = ["terminal", "file"]
+        request_overrides = {}
+        reasoning_config = None
+        service_tier = None
+        pass_session_id = False
+        skip_context_files = False
+        skip_memory = False
+
+        def run_conversation(self, *args, **kwargs):
+            raise AssertionError("inline run_conversation should not be used")
+
+    def _fake_runner(
+        sid,
+        session,
+        agent,
+        run_message,
+        history,
+        *,
+        operator_user_id,
+        business_slug,
+        streamer,
+    ):
+        called["sid"] = sid
+        called["run_message"] = run_message
+        called["history"] = list(history)
+        called["business_slug"] = business_slug
+        return {
+            "result": {
+                "final_response": "isolated ok",
+                "messages": [{"role": "assistant", "content": "isolated ok"}],
+            },
+            "usage": {"total": 12},
+            "usage_snapshot": {"session_total_tokens": 12},
+            "session_id": "session-key",
+            "session_estimated_cost_usd": 0.0,
+        }
+
+    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "hello isolated"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert called["sid"] == "sid"
+        assert "hello isolated" in str(called["run_message"])
+        assert "business:acme" in str(called["run_message"])
+        assert called["business_slug"] == "acme"
+        assert server._sessions["sid"]["history"] == [
+            {"role": "assistant", "content": "isolated ok"}
+        ]
+        complete = [evt for evt in emitted if evt and evt[0] == "message.complete"]
+        assert complete
+        assert complete[-1][2]["text"] == "isolated ok"
     finally:
         server._sessions.pop("sid", None)
 
