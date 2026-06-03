@@ -316,3 +316,73 @@ def test_with_business_workspace_can_sync_partial_progress_on_exception(tmp_path
     resumed.mkdir()
     storage.sync_down(backend, "biz-x", resumed)
     assert (resumed / "metrics" / "summary.md").read_text() == "partial progress\n"
+
+
+def test_sync_excludes_dependency_and_build_caches(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    _seed_workspace(src)
+    (src / "product" / "site" / "node_modules").mkdir(parents=True, exist_ok=True)
+    (src / "product" / "site" / "node_modules" / "left-pad.js").write_text("module.exports = 1;\n")
+    (src / "product" / "site" / ".next" / "server").mkdir(parents=True, exist_ok=True)
+    (src / "product" / "site" / ".next" / "server" / "app.js").write_text("compiled\n")
+    (src / "product" / "site" / "src").mkdir(parents=True, exist_ok=True)
+    (src / "product" / "site" / "src" / "app.js").write_text("source\n")
+
+    report = storage.sync_up(backend, "biz-x", src, delete_remote=True)
+    assert "product/site/node_modules/left-pad.js" not in report.uploaded
+    assert "product/site/.next/server/app.js" not in report.uploaded
+    assert "product/site/src/app.js" in report.uploaded
+
+    backend.put(
+        "biz-x/product/site/node_modules/legacy/index.js",
+        b"legacy\n",
+        digest=storage.digest_bytes(b"legacy\n"),
+    )
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    down = storage.sync_down(backend, "biz-x", dest)
+    assert "product/site/node_modules/legacy/index.js" in down.skipped
+    assert not (dest / "product" / "site" / "node_modules").exists()
+    assert not (dest / "product" / "site" / ".next").exists()
+    assert (dest / "product" / "site" / "src" / "app.js").read_text() == "source\n"
+
+    cleanup = storage.sync_up(backend, "biz-x", src, delete_remote=True)
+    assert "product/site/node_modules/legacy/index.js" in cleanup.deleted
+
+
+def test_supabase_listing_skips_head_requests_for_excluded_paths():
+    class _Paginator:
+        def paginate(self, **_kwargs):
+            yield {
+                "Contents": [
+                    {"Key": "biz-x/product/site/node_modules/pkg/index.js"},
+                    {"Key": "biz-x/product/site/index.html"},
+                ]
+            }
+
+    class _Client:
+        def __init__(self):
+            self.head_calls: list[str] = []
+
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            return _Paginator()
+
+        def head_object(self, *, Bucket, Key):
+            self.head_calls.append(Key)
+            assert Bucket == "bucket"
+            return {"Metadata": {"sha256": "abc123"}}
+
+        def get_object(self, *, Bucket, Key):  # pragma: no cover - should not be reached here
+            raise AssertionError((Bucket, Key))
+
+    backend = storage.SupabaseS3StorageBackend.__new__(storage.SupabaseS3StorageBackend)
+    backend.bucket = "bucket"
+    backend._client = _Client()
+
+    digests = backend.list_digests("biz-x/")
+    assert digests["biz-x/product/site/node_modules/pkg/index.js"] == "<excluded>"
+    assert digests["biz-x/product/site/index.html"] == "abc123"
+    assert backend._client.head_calls == ["biz-x/product/site/index.html"]

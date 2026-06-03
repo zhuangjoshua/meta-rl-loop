@@ -60,6 +60,22 @@ MAX_OBJECT_BYTES = 256 * 1024 * 1024  # 256 MiB — bound a single object so a s
 _MAX_KEY_DEPTH = 48
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_LOCAL_DIRNAME = "storage"
+_EXCLUDED_DIGEST = "<excluded>"
+_SYNC_EXCLUDED_SEGMENTS: frozenset[str] = frozenset({
+    ".cache",
+    ".git",
+    ".next",
+    ".pytest_cache",
+    ".turbo",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+})
+_SYNC_EXCLUDED_SUFFIXES: frozenset[str] = frozenset({
+    ".pyc",
+    ".pyo",
+})
 logger = logging.getLogger(__name__)
 
 
@@ -155,7 +171,15 @@ def _read_file_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _walk_local_digests(root: Path) -> dict[str, str]:
+def _sync_path_excluded(rel: str) -> bool:
+    safe = _safe_rel(rel)
+    parts = Path(safe).parts
+    if any(part in _SYNC_EXCLUDED_SEGMENTS for part in parts):
+        return True
+    return Path(safe).suffix.lower() in _SYNC_EXCLUDED_SUFFIXES
+
+
+def _walk_local_digests(root: Path, *, include_excluded: bool = False) -> dict[str, str]:
     """Map every regular file under ``root`` to its sha256, keyed by POSIX path relative to ``root``.
     Symlinks and atomic-write temp files are skipped; an unsafe relative path raises."""
     out: dict[str, str] = {}
@@ -164,12 +188,22 @@ def _walk_local_digests(root: Path) -> dict[str, str]:
     for dirpath, dirnames, filenames in os.walk(root):
         # Don't follow symlinked directories (containment).
         dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
+        if not include_excluded:
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in _SYNC_EXCLUDED_SEGMENTS
+            ]
         for name in filenames:
             abs_path = Path(dirpath, name)
             if abs_path.is_symlink() or _is_scratch_tempfile(name):
                 continue
             rel = abs_path.relative_to(root).as_posix()
             _safe_rel(rel)  # raise on anything that couldn't be a safe object key
+            if _sync_path_excluded(rel):
+                if include_excluded:
+                    out[rel] = _EXCLUDED_DIGEST
+                continue
             out[rel] = digest_bytes(_read_file_bytes(abs_path))
     return out
 
@@ -240,7 +274,7 @@ class LocalStorageBackend:
         base = (self.root / safe_prefix) if safe_prefix else self.root
         return {
             f"{safe_prefix}/{rel}" if safe_prefix else rel: dg
-            for rel, dg in _walk_local_digests(base).items()
+            for rel, dg in _walk_local_digests(base, include_excluded=True).items()
         }
 
 
@@ -326,6 +360,10 @@ class SupabaseS3StorageBackend:
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
                 key = obj["Key"]
+                rel = key[len(prefix):] if prefix and key.startswith(prefix) else key
+                if rel and _sync_path_excluded(rel):
+                    out[key] = _EXCLUDED_DIGEST
+                    continue
                 head = self._client.head_object(Bucket=self.bucket, Key=key)
                 dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
                 if not dg:
@@ -415,6 +453,9 @@ def sync_down(
     seen: set[str] = set()
     for full, dg in sorted(remote.items()):
         rel = _safe_rel(full[len(prefix):], field="object key")
+        if dg == _EXCLUDED_DIGEST or _sync_path_excluded(rel):
+            skipped.append(rel)
+            continue
         seen.add(rel)
         if local.get(rel) == dg:
             skipped.append(rel)
