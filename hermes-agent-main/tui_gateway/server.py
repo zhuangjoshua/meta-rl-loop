@@ -2542,6 +2542,54 @@ def _content_display_text(content: Any) -> str:
     return str(content)
 
 
+_TAKYON_CREATE_TEST_MODE_PREFIX = (
+    "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode."
+)
+_TAKYON_BUDGET_GUARD_PREFIX = (
+    "Budget guard: the operator appears to be asking for a new business but did not state a budget."
+)
+_TAKYON_SCOPED_OPERATOR_SUFFIX = (
+    "\n\nFirst read this business state with Takyon business tools. Honor the business work_focus field "
+    "if it is marketing-only or product-only. Keep all durable writes business-scoped."
+)
+_TAKYON_GLOBAL_OPERATOR_SUFFIX = (
+    "\n\nUse global reads for businesses, credentials, policy, skills, and budgets. "
+    "For any business/product/customer state change, create or select the business and use concrete business_* tools."
+)
+
+
+def _sanitize_user_history_display_text(text: str) -> str:
+    value = str(text or "")
+    changed = True
+    while changed:
+        changed = False
+        if value.startswith(_TAKYON_CREATE_TEST_MODE_PREFIX + "\n\n"):
+            value = value[len(_TAKYON_CREATE_TEST_MODE_PREFIX + "\n\n") :]
+            changed = True
+            continue
+        if value.startswith(_TAKYON_BUDGET_GUARD_PREFIX):
+            parts = value.split("\n\n", 1)
+            if len(parts) == 2:
+                value = parts[1]
+                changed = True
+                continue
+
+    marker = "\n\nOperator request:\n"
+    if value.startswith("Scope: business:") and marker in value and value.endswith(
+        _TAKYON_SCOPED_OPERATOR_SUFFIX
+    ):
+        head, request = value.split(marker, 1)
+        if "\nCEO role: scoped business operator." in head:
+            return request[: -len(_TAKYON_SCOPED_OPERATOR_SUFFIX)]
+    if value.startswith("Scope: global") and marker in value and value.endswith(
+        _TAKYON_GLOBAL_OPERATOR_SUFFIX
+    ):
+        head, request = value.split(marker, 1)
+        if "\nCEO role: account/root-scope operator." in head:
+            return request[: -len(_TAKYON_GLOBAL_OPERATOR_SUFFIX)]
+    return value
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -2556,6 +2604,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             content_text = str(m.get("display_text"))
         else:
             content_text = _content_display_text(m.get("content"))
+        if role == "user":
+            content_text = _sanitize_user_history_display_text(content_text)
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})

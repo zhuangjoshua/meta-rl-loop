@@ -560,6 +560,51 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
 
+def test_history_to_messages_hides_scoped_operator_wrapper():
+    history = [
+        {
+            "role": "user",
+            "content": (
+                "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode.\n\n"
+                "Scope: business:appointmentslabs\n"
+                "CEO role: scoped business operator.\n\n"
+                "Operator request:\n"
+                "reply with exactly createe2eok\n\n"
+                "First read this business state with Takyon business tools. Honor the business work_focus field "
+                "if it is marketing-only or product-only. Keep all durable writes business-scoped."
+            ),
+        }
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "reply with exactly createe2eok"}
+    ]
+
+
+def test_history_to_messages_hides_budget_guarded_global_wrapper():
+    history = [
+        {
+            "role": "user",
+            "content": (
+                "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
+                "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
+                "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
+                "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
+                "Scope: global\n"
+                "CEO role: account/root-scope operator. Global is not the CEO; it is the top-level Takyon scope.\n\n"
+                "Operator request:\n"
+                "create a new business for dog grooming\n\n"
+                "Use global reads for businesses, credentials, policy, skills, and budgets. "
+                "For any business/product/customer state change, create or select the business and use concrete business_* tools."
+            ),
+        }
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "create a new business for dog grooming"}
+    ]
+
+
 def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     captured = {}
 
