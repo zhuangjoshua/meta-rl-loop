@@ -14,6 +14,8 @@
 Description=Takyon Worker (Postgres job drain + CEO wake dispatch)
 After=network-online.target
 Wants=network-online.target
+After=docker.service
+Wants=docker.service
 
 [Service]
 Type=simple

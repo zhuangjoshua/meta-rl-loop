@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
+BOOTSTRAP_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/bootstrap-host.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 
@@ -12,14 +13,21 @@ TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-dashboard.service}"
 TAKYON_REMOTE_WORKER_SERVICE_FILE="${TAKYON_REMOTE_WORKER_SERVICE_FILE:-/etc/systemd/system/takyon-worker.service}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
+TAKYON_BOOTSTRAP_HOST="${TAKYON_BOOTSTRAP_HOST:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SMOKE_HOST="${TAKYON_SMOKE_HOST:-https://app.fourmanifold.com/}"
 TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER:-}"
 TAKYON_SMOKE_CONNECT_TIMEOUT="${TAKYON_SMOKE_CONNECT_TIMEOUT:-5}"
 TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
+TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$BOOTSTRAP_SCRIPT" ]]; then
+  echo "bootstrap script not found: $BOOTSTRAP_SCRIPT" >&2
   exit 1
 fi
 
@@ -36,6 +44,14 @@ fi
 if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   echo "deploy key not found: $TAKYON_VPS_KEY" >&2
   exit 1
+fi
+
+if [[ "$TAKYON_BOOTSTRAP_HOST" == "1" ]]; then
+  TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+  TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+  TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+  TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" \
+    "$BOOTSTRAP_SCRIPT"
 fi
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
@@ -70,6 +86,14 @@ scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
   grep -F -- '--tui' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null
+  systemctl enable docker >/dev/null
+  systemctl start docker
+  systemctl is-active --quiet docker
+  docker version >/dev/null
+  if ! docker image inspect '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' >/dev/null 2>&1; then
+    docker pull '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE'
+  fi
+  docker run --rm --entrypoint node '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' --version >/dev/null
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl restart takyon-dashboard.service

@@ -8,6 +8,18 @@ Apply it with:
 deploy/argon-alpha-14/apply-caddyfile.sh
 ```
 
+Bootstrap and deploy the operator host with:
+
+```bash
+deploy/argon-alpha-14/bootstrap-host.sh
+deploy/argon-alpha-14/deploy-runtime.sh
+```
+
+The operator plane's tracked runtime contract includes Docker because
+`business_claude_agent_task` defaults `product/site` work onto the isolated
+Docker rail. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
+if the operator host cannot run the tracked Claude Agent SDK container image.
+
 The tracked dashboard systemd unit lives at:
 
 ```bash

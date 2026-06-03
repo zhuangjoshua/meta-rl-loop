@@ -51,7 +51,7 @@ Firewall state is now part of the deployment contract:
 When the operator asks to push or deploy Takyon, keep the rails distinct:
 
 1. Git push uses the outer workspace repo at `/Users/Zygote/Downloads/takyon`, not the nested `hermes-agent-main` git metadata. Stage only the intended hunks, commit in the outer repo, and push `origin main` unless the operator asked for a branch.
-2. Operator deploy updates the active operator runtime on `137.184.75.57`. The operator runtime is `/opt/takyon/hermes-agent-main` and may not be a git checkout, so deploy changed runtime files with `rsync`/`ssh`, then compile touched Python files and restart `takyon-dashboard.service`. Verify with `systemctl is-active takyon-dashboard.service` and source checks on the operator VPS.
+2. Operator deploy updates the active operator runtime on `137.184.75.57`. The operator runtime is `/opt/takyon/hermes-agent-main` and may not be a git checkout, so use the tracked operator rails under `deploy/argon-alpha-14/`: bootstrap the host with `deploy/argon-alpha-14/bootstrap-host.sh` when needed, then deploy with `deploy/argon-alpha-14/deploy-runtime.sh`. The tracked operator contract now includes Docker because `business_claude_agent_task` defaults `product/site` work onto the isolated Docker rail; deploy must fail fast if Docker or the tracked Claude worker image is unavailable. Verify with `systemctl is-active takyon-dashboard.service`, `systemctl is-active takyon-worker.service`, `docker version`, and source checks on the operator VPS.
 3. Safebox deploy updates the dedicated Safebox service host. Do not piggyback secret authority changes onto the operator runtime and pretend the boundary exists if the Safebox host was not updated too.
 4. Sub-user deploy updates the public app/runtime host. Do not claim product-app routing, `tkg_` isolation, or app-plane code changed in production unless that host was updated too.
 5. VPS routing is now split across tracked deploy directories:
@@ -68,6 +68,7 @@ The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now 
 
 - always build the dashboard bundle and compile Python
 - optionally redeploy Vercel frontdoor when `VERCEL_TOKEN` exists
+- bootstrap the operator plane when provisioning/drift repair is needed via `deploy/argon-alpha-14/bootstrap-host.sh`
 - deploy the operator plane via `deploy/argon-alpha-14/deploy-runtime.sh`
 - deploy the Safebox plane via `deploy/takyon-safebox/deploy-runtime.sh` when `TAKYON_SAFEBOX_VPS_HOST`, `TAKYON_SAFEBOX_VPS_USER`, and `TAKYON_SAFEBOX_VPS_SSH_KEY` are configured
 - deploy the sub-user plane via `deploy/takyon-subuser/deploy-runtime.sh` when `TAKYON_SUBUSER_VPS_HOST`, `TAKYON_SUBUSER_VPS_USER`, and `TAKYON_SUBUSER_VPS_SSH_KEY` are configured
@@ -140,7 +141,7 @@ For the operator/dashboard path, the canonical spend gate is the top-level Takyo
 - Do not reintroduce legacy create-time bootstrap caps or `--budget` as a normal operator path. The old `business.budget_json` cap is legacy compatibility state, not the intended budgeting model.
 - Do not expose user-editable wake cadence or legacy budget fields in the dashboard create UI. The operator UI may show read-only budget state and can rely on backend/default wake policy, but should not present those as normal editable setup knobs.
 - For business/product runtime spend, use the real downstream rail instead: `app_usage.py` for product usage budgets, and the creative-credit rail for fixed-price creative/ad actions.
-- The tracked operator services now run with `TERMINAL_ENV=docker`, `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true`, and non-persistent containers so the existing terminal/file sandbox backend keys itself off the Takyon session and mounts the current business scratch workspace instead of reusing one process-global default container for scoped business work.
+- The tracked operator services now run with `TERMINAL_ENV=docker`, `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true`, and non-persistent containers so the existing terminal/file sandbox backend keys itself off the Takyon session and mounts the current business scratch workspace instead of reusing one process-global default container for scoped business work. Treat Docker on the operator host as a tracked prerequisite, not an optional convenience: if the host cannot run the tracked Claude worker image, operator deploy is broken and should fail loudly.
 
 ## Safebox Authority
 
