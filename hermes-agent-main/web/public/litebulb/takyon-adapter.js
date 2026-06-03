@@ -436,6 +436,19 @@
     return Array.from(byKey.values()).sort((a, b) => traceUpdatedAtMs(a && a.updated_at) - traceUpdatedAtMs(b && b.updated_at));
   }
 
+  function liveStatusFromSnapshot(snapshot) {
+    if (LIVE.historyRunning) return { text: "thinking…", state: "run" };
+    const trace = mergedTraceEntries(snapshot);
+    if (trace.some((entry) => traceStatus(entry) === "running")) {
+      return { text: "running", state: "run" };
+    }
+    const background = mapBackgroundRunTask(snapshot);
+    if (background && background.status === "running") {
+      return { text: "running", state: "run" };
+    }
+    return { text: "idle", state: "idle" };
+  }
+
   function mapTraceEntry(entry, index) {
     const kind = String(entry && entry.kind || "note").trim().toLowerCase();
     const label = String(entry && (entry.label || entry.skill_name || entry.tool_name || entry.id || `trace ${index + 1}`) || `trace ${index + 1}`).trim();
@@ -2135,7 +2148,6 @@
       if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
       else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
       if (payload.warning) ceolog(esc(String(payload.warning)), true);
-      setStatus("running", "run");
       LIVE.historyRunning = false;
       syncHistoryPollTimer();
       void refreshBusinessData(LIVE.activeBusiness);
@@ -2304,13 +2316,15 @@
       if (snapshot) {
         LIVE.workspaceOverview = snapshot.overview || {};
         applyWorkspace(snapshot, businessSummary(business));
+        const nextStatus = liveStatusFromSnapshot(snapshot);
+        setStatus(nextStatus.text, nextStatus.state);
       }
       if (snapshot || board) applyBoard(board, snapshot || LIVE.workspaceSnapshot || null);
       if (document.getElementById("w-operator")) renderOperatorWindow();
       if (document.getElementById("w-wallet")) renderWalletWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
-      setStatus("running", "run");
+      if (!snapshot) setStatus("idle", "idle");
     } catch (err) {
       setStatus("paused", "paused");
       addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
