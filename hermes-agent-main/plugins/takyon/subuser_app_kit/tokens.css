@@ -1,0 +1,122 @@
+:root {
+  --tk-bg: #f6f4ec;
+  --tk-surface: #fffdf7;
+  --tk-ink: #1d1a17;
+  --tk-muted: #6f675f;
+  --tk-border: #ddd5ca;
+  --tk-accent: #165d4a;
+  --tk-accent-soft: #e3f0ea;
+  --tk-warn: #8b5b00;
+  --tk-warn-soft: #fff1cf;
+  --tk-danger: #8a1f1f;
+  --tk-danger-soft: #fde3e0;
+}
+
+.tk-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.tk-grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.tk-card {
+  background: var(--tk-surface);
+  border: 1px solid var(--tk-border);
+  border-radius: 18px;
+  color: var(--tk-ink);
+  padding: 1rem;
+  box-shadow: 0 12px 30px rgba(29, 26, 23, 0.05);
+}
+
+.tk-card span,
+.tk-card p {
+  color: var(--tk-muted);
+}
+
+.tk-card-head {
+  margin-bottom: 0.75rem;
+}
+
+.tk-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.tk-pill {
+  border-radius: 999px;
+  border: 1px solid var(--tk-border);
+  display: inline-flex;
+  font-size: 0.8rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.7rem;
+}
+
+.tk-pill-success {
+  background: var(--tk-accent-soft);
+  color: var(--tk-accent);
+}
+
+.tk-pill-warn {
+  background: var(--tk-warn-soft);
+  color: var(--tk-warn);
+}
+
+.tk-pill-danger {
+  background: var(--tk-danger-soft);
+  color: var(--tk-danger);
+}
+
+.tk-pill-muted {
+  background: transparent;
+  color: var(--tk-muted);
+}
+
+.tk-blocked {
+  border-style: dashed;
+}
+
+.tk-note {
+  color: var(--tk-muted);
+  font-size: 0.95rem;
+}
+
+.tk-code {
+  background: #1f1f1f;
+  border-radius: 14px;
+  color: #f4f1ea;
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-x: auto;
+  padding: 0.85rem 1rem;
+  white-space: pre-wrap;
+}
+
+.tk-button {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-weight: 600;
+  gap: 0.4rem;
+  padding: 0.65rem 1rem;
+  text-decoration: none;
+}
+
+.tk-button-ghost {
+  border: 1px solid var(--tk-border);
+  color: var(--tk-ink);
+}
+
+.tk-plan {
+  min-height: 180px;
+}
+
+.tk-plan-head,
+.tk-price {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}

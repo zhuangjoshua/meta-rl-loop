@@ -22,7 +22,7 @@ from plugins.takyon.core import (
     _canonicalize_business_product_links,
     _product_publish_target,
     _scan_for_pretend_product_state,
-    _verify_product_surface_path,
+    _refresh_product_surface_path,
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
@@ -42,7 +42,7 @@ from plugins.takyon.core import (
     handle_business_upsert_app_surface_contract,
     handle_business_upsert_business,
     takyon_toolset_name,
-    handle_business_verify_product_surface,
+    handle_business_refresh_product_surface,
 )
 
 
@@ -118,7 +118,7 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_meta_ad_launch"] == "takyon-authority"
     assert toolsets["business_meta_ad_control"] == "takyon-authority"
     assert toolsets["business_meta_ad_insights_sync"] == "takyon-authority"
-    assert toolsets["business_verify_product_surface"] == "takyon-authority"
+    assert toolsets["business_refresh_product_surface"] == "takyon-authority"
     assert toolsets["business_check_runtime_capabilities"] == "takyon-authority"
     assert takyon_toolset_name("business_gc") == "takyon-authority"
     assert takyon_toolset_name("business_record_event") == "takyon"
@@ -154,7 +154,7 @@ def test_bootstrap_prompt_deprioritizes_full_distribution_batch_for_first_publis
     assert "distribution/campaign/" in prompt
     assert "business_publish_outreach" in prompt
     assert "Do not treat a full multi-lane opening campaign batch as part of the first-site critical path." in prompt
-    assert "one verified surface plus the next recorded move is enough to complete the initial turn" in prompt
+    assert "one refreshed surface plus the next recorded move is enough to complete the initial turn" in prompt
     assert "3 evidence-backed lanes" not in prompt
     assert "6 total" not in prompt
 
@@ -167,7 +167,7 @@ def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
     assert "product/site/" in prompt
     assert "default bootstrap surface mode is app_shell" in prompt
     assert "product/surface.md records that source_path truthfully" in prompt
-    assert "Do not expand product/runtime.md" in prompt
+    assert "Do not create extra runtime notes or mirror markdown ahead of that" in prompt
 
 
 def test_bootstrap_prompt_treats_fresh_create_as_greenfield_and_research_bounded():
@@ -187,7 +187,7 @@ def test_bootstrap_prompt_orders_surface_before_distribution_before_runtime():
 
     surface_index = prompt.index("Then use takyon-build-product")
     distribution_index = prompt.index("After that surface is live, record the next opening distribution move under distribution/campaign/.")
-    runtime_index = prompt.index("Do not expand product/runtime.md")
+    runtime_index = prompt.index("Do not create extra runtime notes or mirror markdown ahead of that")
 
     assert surface_index < distribution_index < runtime_index
 
@@ -199,7 +199,7 @@ def test_bootstrap_prompt_orders_research_before_surface_before_verify():
 
     research_index = prompt.index("Do bounded market research first")
     surface_index = prompt.index("Then use takyon-build-product")
-    verify_index = prompt.index("Once product/site/ exists with real source, complete the same-turn build plus business_verify_product_surface")
+    verify_index = prompt.index("Only follow with business_refresh_product_surface once the delegated source pass is done.")
 
     assert research_index < surface_index < verify_index
 
@@ -230,7 +230,7 @@ def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch
     assert not (product_root / "usage.md").exists()
 
 
-def test_runtime_mirror_files_resume_once_real_public_surface_exists(tmp_path, monkeypatch):
+def test_runtime_mirror_files_stay_absent_by_default_even_after_real_public_surface_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -257,11 +257,12 @@ def test_runtime_mirror_files_resume_once_real_public_surface_exists(tmp_path, m
     )
 
     product_root = tmp_path / "businesses" / "latexflow" / "product"
-    assert (product_root / "runtime.md").exists()
-    assert (product_root / "plans.md").exists()
-    assert (product_root / "customers.md").exists()
-    assert (product_root / "billing.md").exists()
-    assert (product_root / "usage.md").exists()
+    assert (product_root / "surface.md").exists()
+    assert not (product_root / "runtime.md").exists()
+    assert not (product_root / "plans.md").exists()
+    assert not (product_root / "customers.md").exists()
+    assert not (product_root / "billing.md").exists()
+    assert not (product_root / "usage.md").exists()
 
 
 def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
@@ -533,7 +534,7 @@ def test_app_plan_normalizes_interval_and_records_validation_warnings(tmp_path):
     assert plan["metadata"]["takyon_plan_validation"]["status"] == "warning"
 
 
-def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypatch):
+def test_active_surface_requires_product_refresh_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -558,7 +559,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
     (site / "index.html").chmod(0o600)
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
@@ -569,9 +570,9 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     )
 
     assert verification["success"] is True
-    assert verification["verification"]["status"] == "passed"
-    assert verification["verification"]["inventory"]["status"] == "collected"
-    assert verification["verification"]["inventory"]["routes"] == ["/"]
+    assert verification["surface_refresh"]["status"] == "passed"
+    assert verification["surface_refresh"]["inventory"]["status"] == "collected"
+    assert verification["surface_refresh"]["inventory"]["routes"] == ["/"]
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
@@ -579,7 +580,7 @@ def test_active_surface_requires_product_verification_receipt(tmp_path, monkeypa
     assert app["product_inventory"]["routes"] == ["/"]
     assert app["product_surface"]["local_continuable_work"] == []
     assert (tmp_path / "published-sites" / "latexflow" / "index.html").exists()
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "passed"
+    assert app["surface_contract"]["publish_receipt_path"]
     assert app["surface_contract"]["routes"] == ["/"]
     pulse = store.calculate_pulse("latexflow")
     assert pulse["current_state"]["product_surface"]["inventory_status"] == "collected"
@@ -606,7 +607,7 @@ def test_product_surface_projection_turns_stale_when_source_changes_after_publis
     site.mkdir(parents=True)
     index = site / "index.html"
     index.write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-    handle_business_verify_product_surface(
+    handle_business_refresh_product_surface(
         {
             "business": "latexflow",
             "source_path": "product/site",
@@ -623,12 +624,8 @@ def test_product_surface_projection_turns_stale_when_source_changes_after_publis
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "unverified"
     assert app["surface_contract"]["publish_status"] == "published"
-    freshness = app["surface_contract"]["metadata"]["takyon_projection_freshness"]["product_surface"]
-    assert freshness["status"] == "stale"
-    assert freshness["authoritative"] is False
-    assert "changed after the last business_verify_product_surface receipt" in freshness["reason"]
     assert any(
-        "changed after the last business_verify_product_surface receipt" in item
+        "product source has not been published" not in item
         for item in app["product_surface"]["local_continuable_work"]
     )
 
@@ -652,7 +649,7 @@ def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_ch
     site = tmp_path / "businesses" / "latexflow" / "product" / "site"
     site.mkdir(parents=True)
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-    handle_business_verify_product_surface(
+    handle_business_refresh_product_surface(
         {
             "business": "latexflow",
             "source_path": "product/site",
@@ -672,17 +669,12 @@ def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_ch
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
     assert "- Status: unverified" in surface_md
     assert "- Publish status: published" in surface_md
-    assert "changed after the last business_verify_product_surface receipt" in surface_md
     assert app["surface_contract"]["status"] == "unverified"
     assert app["surface_contract"]["publish_status"] == "published"
-    freshness = app["surface_contract"]["metadata"]["takyon_projection_freshness"]["product_surface"]
-    assert freshness["status"] == "stale"
-    assert freshness["authoritative"] is False
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "stale"
     assert (tmp_path / "published-sites" / "latexflow" / "index.html").read_text(encoding="utf-8") == "<h1>Latexflow</h1>\n"
 
 
-def test_artifact_write_leaves_new_product_site_unverified_until_explicit_verify(tmp_path, monkeypatch):
+def test_artifact_write_leaves_new_product_site_unverified_until_explicit_refresh(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -710,14 +702,13 @@ def test_artifact_write_leaves_new_product_site_unverified_until_explicit_verify
     assert app["surface_contract"]["status"] == "unverified"
     assert app["surface_contract"]["publish_status"] == "not_published"
     assert app["surface_contract"]["public_url"] == ""
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "unverified"
     assert "product source has not been published" in app["product_surface"]["local_continuable_work"]
     assert not (tmp_path / "published-sites" / "sitecheck" / "index.html").exists()
     receipt_dir = tmp_path / "businesses" / "sitecheck" / "metrics" / "receipts" / "product-surface"
     assert not receipt_dir.exists()
 
 
-def test_surface_upsert_leaves_existing_product_site_unverified_until_explicit_verify(tmp_path, monkeypatch):
+def test_surface_upsert_leaves_existing_product_site_unverified_until_explicit_refresh(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
@@ -745,7 +736,6 @@ def test_surface_upsert_leaves_existing_product_site_unverified_until_explicit_v
     assert app["surface_contract"]["status"] == "unverified"
     assert app["surface_contract"]["publish_status"] == "not_published"
     assert app["surface_contract"]["public_url"] == ""
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "unverified"
     assert "product source has not been published" in app["product_surface"]["local_continuable_work"]
     assert not (tmp_path / "published-sites" / "siteafterwrite" / "index.html").exists()
     receipt_dir = tmp_path / "businesses" / "siteafterwrite" / "metrics" / "receipts" / "product-surface"
@@ -785,7 +775,7 @@ def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_
     (site / "index.html").write_text("<h1>BriefPilot</h1><p>Join the waitlist.</p>\n", encoding="utf-8")
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "briefpilot",
                 "source_path": "product/site",
@@ -793,10 +783,9 @@ def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_
                 "idempotency_key": "verify-app-like-claim-only",
             }
         )
-    )["verification"]
+    )["surface_refresh"]
 
     assert verification["status"] == "blocked"
-    assert verification["done_gate_status"] == "blocked"
     assert verification["publish"]["status"] == "published"
     assert verification["publish"]["public_url"] == "https://briefpilot.fourmanifold.com/"
     assert "generated source does not include a working app subroute" in verification["blocker"]
@@ -806,7 +795,6 @@ def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_
     assert app["surface_contract"]["publish_status"] == "published"
     assert app["surface_contract"]["public_url"] == "https://briefpilot.fourmanifold.com/"
     assert app["surface_contract"]["publish_blocker"]
-    assert app["surface_contract"]["metadata"]["takyon_surface_validation"]["status"] == "warning"
 
 
 def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
@@ -870,7 +858,7 @@ def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
     )
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "briefpilot",
                 "source_path": "product/site",
@@ -878,10 +866,9 @@ def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
                 "idempotency_key": "verify-static-spa-app",
             }
         )
-    )["verification"]
+    )["surface_refresh"]
 
     assert verification["status"] == "passed"
-    assert verification["done_gate_status"] == "passed"
     inventory = verification["inventory"]
     assert inventory["routes"] == ["/", "/app"]
     assert inventory["declared_routes"] == ["/app"]
@@ -928,7 +915,7 @@ def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_pa
     )
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "install": False,
@@ -938,11 +925,10 @@ def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_pa
     )
 
     assert verification["success"] is True
-    receipt = verification["verification"]
+    receipt = verification["surface_refresh"]
     assert receipt["status"] == "missing"
-    assert receipt["effective_publish_policy"] == "publish_after_verify"
+    assert receipt["effective_publish_policy"] == "publish_after_refresh"
     assert receipt["requested_publish_policy"] == "shared_renderer"
-    assert receipt["done_gate_status"] == "blocked"
     assert receipt["publish"]["status"] == "blocked"
     assert receipt["publish"]["public_url"] == ""
     assert receipt["blocker"]
@@ -975,7 +961,7 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
@@ -983,10 +969,9 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
                 "idempotency_key": "verify-static-site-caddy",
             }
         )
-    )["verification"]
+    )["surface_refresh"]
 
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
-    assert verification["done_gate_status"] == "passed"
     assert verification["publish"]["status"] == "published"
     assert verification["publish"]["caddyfile"] == str(tmp_path / "Caddyfile")
     assert "latexflow.fourmanifold.com" in caddyfile
@@ -998,7 +983,7 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
     assert ((tmp_path / "published-sites" / "latexflow" / "index.html").stat().st_mode & 0o777) == 0o644
 
 
-def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypatch):
+def test_product_surface_refresh_detects_nested_workspace_prefix(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1012,7 +997,7 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     (nested / "index.html").write_text("<h1>Nested</h1>\n", encoding="utf-8")
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
@@ -1023,11 +1008,11 @@ def test_product_verification_detects_nested_workspace_prefix(tmp_path, monkeypa
     )
 
     assert verification["success"] is True
-    assert verification["verification"]["status"] == "failed"
-    assert "duplicate workspace prefix" in verification["verification"]["error"]
+    assert verification["surface_refresh"]["status"] == "failed"
+    assert "duplicate workspace prefix" in verification["surface_refresh"]["error"]
 
 
-def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch):
+def test_business_refresh_product_surface_uses_longer_default_timeout(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeStore:
@@ -1048,7 +1033,6 @@ def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch
         captured["timeout_seconds"] = kwargs["timeout_seconds"]
         return {
             "status": "passed",
-            "done_gate_status": "passed",
             "publish": {
                 "status": "published",
                 "public_url": "https://latexflow.fourmanifold.com/",
@@ -1059,15 +1043,15 @@ def test_business_verify_product_surface_uses_longer_default_timeout(monkeypatch
         }
 
     monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore())
-    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
     monkeypatch.setattr(
         takyon_core,
-        "_product_surface_verification_operations",
+        "_product_surface_refresh_operations",
         lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
     )
 
     result = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "idempotency_key": "verify-default-timeout",
@@ -1093,7 +1077,7 @@ def test_bundled_claude_design_guidance_skills_exist():
     assert expected.issubset(found)
 
 
-def test_business_verify_product_surface_treats_null_install_as_default_true(monkeypatch):
+def test_business_refresh_product_surface_treats_null_install_as_default_true(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeStore:
@@ -1114,7 +1098,6 @@ def test_business_verify_product_surface_treats_null_install_as_default_true(mon
         captured["install"] = kwargs["install"]
         return {
             "status": "passed",
-            "done_gate_status": "passed",
             "publish": {
                 "status": "published",
                 "public_url": "https://latexflow.fourmanifold.com/",
@@ -1125,15 +1108,15 @@ def test_business_verify_product_surface_treats_null_install_as_default_true(mon
         }
 
     monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore())
-    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
     monkeypatch.setattr(
         takyon_core,
-        "_product_surface_verification_operations",
+        "_product_surface_refresh_operations",
         lambda **_: [{"action": "event.record", "business": "latexflow", "scope": "business:latexflow", "event_type": "test", "payload": {}}],
     )
 
     result = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "install": None,
@@ -1323,6 +1306,60 @@ def test_claude_agent_task_no_longer_requires_legacy_business_budget(tmp_path, m
     assert result["operator_budget"]["charged_cents"] == 200
 
 
+def test_claude_agent_task_syncs_isolated_workspace_outputs_before_return(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-isolated-sync",
+    )
+
+    scratch_home = tmp_path / "worker-home"
+    tokens = set_session_vars(
+        business_slug="latexflow",
+        workspace_root=str(scratch_home),
+    )
+
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    try:
+        result = json.loads(
+            handle_business_claude_agent_task(
+                {
+                    "business": "latexflow",
+                    "workspace": "product/site",
+                    "instruction": "Build the product surface under product/site.",
+                    "idempotency_key": "workspace-isolated-sync",
+                    "install": False,
+                }
+            )
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result["success"] is True
+    assert result["operator_budget"]["status"] == "covered_by_session_budget"
+    assert (tmp_path / "storage" / "latexflow" / "product" / "site" / "index.html").exists()
+    content = TakyonStore(tmp_path).read(
+        scope="business:latexflow",
+        query="read_file",
+        path="product/site/index.html",
+    )["content"]
+    assert "<h1>Latexflow</h1>" in content
+
+
 def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -1429,6 +1466,7 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
     assert "Hermes runtime UI contract" in instruction
+    assert "Hermes sub-user app plane contract" in instruction
     assert "Declared runtime-backed features: auth, checkout, generate" in instruction
     assert "Runtime API base: /api/takyon/apps/latexflow" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
@@ -1438,9 +1476,52 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/generate" in instruction
     assert "Treat POST <runtime_api_base>/generate as the public product contract for AI generation" in instruction
     assert "product code should not call providers or internal authority endpoints directly" in instruction
+    assert "`tk_` top-level operator tokens never belong in product code" in instruction
+    assert "`tkg_` is the app/business AI mediation boundary, not a customer login or session token" in instruction
+    assert "No app plans are configured yet. Do not render pricing cards" in instruction
 
 
-def test_runtime_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
+def test_claude_agent_task_uses_docker_lane_for_product_site_when_terminal_env_is_docker(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_docker_runner(*, payload, workspace_path, timeout_ms):
+        captured["payload"] = payload
+        captured["workspace_path"] = str(workspace_path)
+        Path(workspace_path, "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the product shell.",
+                "idempotency_key": "workspace-docker-lane",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["payload"]["cwd"] == str(tmp_path / "businesses" / "latexflow" / "product" / "site")
+    assert captured["payload"]["allowBash"] is True
+    assert captured["workspace_path"].endswith("product/site")
+
+
+def test_surface_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1463,16 +1544,14 @@ def test_runtime_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch
                 "runtime_features": ["auth", "checkout"],
             }
         ],
-        "surface-runtime-md-rails",
+        "surface-runtime-rails",
     )
 
-    runtime_md = (tmp_path / "businesses" / "latexflow" / "product" / "runtime.md").read_text(encoding="utf-8")
-    assert "## Selected Runtime Rails" in runtime_md
-    assert "- auth — owner: takyon-app-runtime" in runtime_md
-    assert "- checkout — owner: takyon-app-runtime" in runtime_md
-    assert "## Rails By Owner" in runtime_md
-    assert "### takyon-app-runtime" in runtime_md
-    assert "Tools: business_create_app_checkout, business_record_stripe_webhook" in runtime_md
+    surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
+    assert "## Runtime Rails" in surface_md
+    assert "- auth — owner: takyon-app-runtime" in surface_md
+    assert "- checkout — owner: takyon-app-runtime" in surface_md
+    assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in surface_md
 
 
 def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_path, monkeypatch):
@@ -1683,8 +1762,8 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     )
 
     assert result["success"] is True
-    assert result["verification"]["status"] == "passed"
-    assert result["verification"]["publish"]["status"] == "published"
+    assert result["surface_refresh"]["status"] == "passed"
+    assert result["surface_refresh"]["publish"]["status"] == "published"
     assert (tmp_path / "published-sites" / "latexflow" / "index.html").exists()
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
@@ -1692,7 +1771,7 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
 
 
-def test_claude_agent_task_treats_null_install_as_default_true_for_verification(tmp_path, monkeypatch):
+def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refresh(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1715,7 +1794,6 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_verification(
         captured["install"] = kwargs["install"]
         return {
             "status": "passed",
-            "done_gate_status": "passed",
             "publish": {
                 "status": "published",
                 "public_url": "https://latexflow.fourmanifold.com/",
@@ -1729,7 +1807,7 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_verification(
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
     monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
-    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -1747,7 +1825,7 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_verification(
     assert captured["install"] is True
 
 
-def test_product_verification_defaults_publish_root_to_takyon_home_product_sites(tmp_path, monkeypatch):
+def test_product_surface_refresh_defaults_publish_root_to_takyon_home_product_sites(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", "")
     monkeypatch.setenv("PUBLIC_COMPANY_SITE_ROOT", "")
@@ -1764,7 +1842,7 @@ def test_product_verification_defaults_publish_root_to_takyon_home_product_sites
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
 
     verification = json.loads(
-        handle_business_verify_product_surface(
+        handle_business_refresh_product_surface(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
@@ -1775,10 +1853,9 @@ def test_product_verification_defaults_publish_root_to_takyon_home_product_sites
     )
 
     assert verification["success"] is True
-    assert verification["verification"]["status"] == "passed"
-    assert verification["verification"]["done_gate_status"] == "passed"
-    assert verification["verification"]["publish"]["status"] == "published"
-    assert verification["verification"]["publish"]["publish_root"] == str(tmp_path / "product-sites" / "latexflow")
+    assert verification["surface_refresh"]["status"] == "passed"
+    assert verification["surface_refresh"]["publish"]["status"] == "published"
+    assert verification["surface_refresh"]["publish"]["publish_root"] == str(tmp_path / "product-sites" / "latexflow")
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
@@ -1794,7 +1871,7 @@ def test_product_inventory_is_nonfatal_for_unreadable_source_file(tmp_path, monk
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
     (site / "bad.js").write_bytes(b"\xff\xfe\x00")
 
-    verification = _verify_product_surface_path(business_root, "product/site", install=False)
+    verification = _refresh_product_surface_path(business_root, "product/site", install=False)
 
     assert verification["status"] == "passed"
     assert verification["inventory"]["status"] == "collected"
@@ -1869,14 +1946,14 @@ def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, m
     )
     monkeypatch.setattr("plugins.takyon.core._resolve_runtime_executable", lambda name: None)
 
-    verification = _verify_product_surface_path(business_root, "product/site", install=True)
+    verification = _refresh_product_surface_path(business_root, "product/site", install=True)
 
     assert verification["status"] == "passed"
     assert verification["kind"] == "static_source_present"
     assert verification["checks"] == []
 
 
-def test_verify_next_product_with_static_export_still_runs_build(tmp_path, monkeypatch):
+def test_refresh_next_product_with_static_export_still_runs_build(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "feedbackpilot"
     site = business_root / "product" / "site"
     site.mkdir(parents=True)
@@ -1902,11 +1979,11 @@ def test_verify_next_product_with_static_export_still_runs_build(tmp_path, monke
     )
     monkeypatch.setattr(
         takyon_core,
-        "_run_verification_command",
+        "_run_surface_command",
         lambda command, **kwargs: {"command": command, "status": "passed"},
     )
 
-    verification = _verify_product_surface_path(business_root, "product/site", install=True)
+    verification = _refresh_product_surface_path(business_root, "product/site", install=True)
 
     assert verification["status"] == "passed"
     assert verification["kind"] == "node_build"
@@ -2668,7 +2745,7 @@ def test_claude_agent_task_rejects_noncanonical_workspace(tmp_path, monkeypatch)
     assert "must stay under one of" in str(result.get("error") or "")
 
 
-def test_business_session_allows_claude_agent_surface_verification(tmp_path, monkeypatch):
+def test_business_session_allows_claude_agent_surface_refresh(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2678,6 +2755,34 @@ def test_business_session_allows_claude_agent_surface_verification(tmp_path, mon
         "init-alpha",
     )
 
+    def fake_run(command, *, input=None, **kwargs):
+        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
+            payload = json.loads(input or "{}")
+            Path(payload["cwd"], "index.html").write_text("<h1>Alpha</h1>\n", encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+
+    captured: dict[str, object] = {}
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        captured["source_path"] = kwargs["source_path"]
+        return {
+            "status": "passed",
+            "publish": {
+                "status": "published",
+                "public_url": "https://alpha.fourmanifold.com/",
+                "blocker": "",
+            },
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "inventory": {},
+        }
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
+
     tokens = set_session_vars(business_slug="alpha")
     try:
         result = json.loads(
@@ -2686,17 +2791,59 @@ def test_business_session_allows_claude_agent_surface_verification(tmp_path, mon
                     "business": "alpha",
                     "workspace": "product/site",
                     "instruction": "Update the product surface.",
-                    "verify_surface": True,
-                    "idempotency_key": "claude-verify-blocked",
+                    "refresh_surface": True,
+                    "idempotency_key": "claude-refresh-surface",
                 }
             )
         )
         assert result["success"] is True
-        assert result["verification"]["status"] == "passed"
-        assert result["verification"]["publish"]["status"] == "published"
+        assert result["surface_refresh"]["status"] == "passed"
+        assert result["surface_refresh"]["publish"]["status"] == "published"
         assert captured["source_path"] == "product/site"
     finally:
         clear_session_vars(tokens)
+
+
+def test_claude_agent_task_records_failed_worker_run_on_prelaunch_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        "init-alpha-prelaunch-failure",
+    )
+
+    def fail_api_gate(*args, **kwargs):
+        raise TakyonError("anthropic access missing")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", fail_api_gate)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "alpha",
+                "workspace": "product/site",
+                "instruction": "Build the first product surface.",
+                "idempotency_key": "claude-prelaunch-failure",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "anthropic access missing" in str(result.get("error") or "")
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT status, result_json, scope FROM agent_runs WHERE scope = ? ORDER BY updated_at DESC LIMIT 1",
+            ("business:alpha/workspace:product/site",),
+        ).fetchone()
+    assert row is not None
+    assert str(row[0]) == "failed"
+    payload = json.loads(str(row[1] or "{}"))
+    assert payload["source"] == "claude-agent-sdk"
+    assert payload["workspace"] == "product/site"
+    assert payload["error"] == "anthropic access missing"
 
 
 def test_conversation_messages_append_permanent_corpus(tmp_path):
@@ -2734,35 +2881,6 @@ def test_conversation_messages_append_permanent_corpus(tmp_path):
     assert len(lines) == 1
     row = json.loads(lines[0])
     assert row["business"] == "latexflow"
-    def fake_run(command, *, input=None, **kwargs):
-        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
-            payload = json.loads(input or "{}")
-            Path(payload["cwd"], "index.html").write_text("<h1>Alpha</h1>\n", encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
-
-    captured: dict[str, object] = {}
-
-    def fake_finalize(**kwargs: object) -> dict[str, object]:
-        captured["source_path"] = kwargs["source_path"]
-        return {
-            "status": "passed",
-            "done_gate_status": "passed",
-            "publish": {
-                "status": "published",
-                "public_url": "https://alpha.fourmanifold.com/",
-                "blocker": "",
-            },
-            "receipt_path": "metrics/receipts/product-surface/test.json",
-            "inventory": {},
-        }
-
-    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
-    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
-    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
-    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
-    monkeypatch.setattr(takyon_core, "_finalize_product_surface_verification", fake_finalize)
-
     assert row["thread_external_id"] == "post-1"
     assert row["body"] == "Does it support git sync?"
     assert "conversation.message.record" in events.read_text(encoding="utf-8")

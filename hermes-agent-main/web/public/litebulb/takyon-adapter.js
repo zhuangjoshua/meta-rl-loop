@@ -825,29 +825,36 @@
       ? Math.max(0, Math.trunc(Number(metrics.queued_jobs)))
       : 0;
     const hasConversionData = signups > 0 || checkouts > 0 || paying > 0;
-    const northStar = mrrCents > 0
-      ? {
-          label: "MRR",
-          value: `${formatBudgetCents(mrrCents)}/mo`,
-          note: paying > 0
-            ? `${formatMetricCount(paying)} paying customers are live right now.`
-            : `${formatMetricCount(signups)} sign-ups have reached the product.`,
-        }
-      : signups > 0
-        ? {
-            label: "Sign-ups",
-            value: formatMetricCount(signups),
-            note: checkouts > 0
-              ? `${formatMetricCount(checkouts)} checkout intents are moving through the funnel.`
-              : "Sign-ups exist, but nobody has started checkout yet.",
-          }
-        : {
-            label: "Progress",
-            value: "Getting started",
-            note: queuedJobs > 0
-              ? `${formatMetricCount(queuedJobs)} jobs are queued while the company comes online.`
-              : "No product metrics yet. Once customers show up, this graph becomes real.",
-          };
+    const tiers = {
+      mrr: {
+        label: "MRR",
+        hero: `${formatBudgetCents(mrrCents)}/mo`,
+        pill: mrrCents > 0 ? `${formatBudgetCents(mrrCents)}/mo` : "$0",
+        note: paying > 0
+          ? `${formatMetricCount(paying)} paying customers are live right now.`
+          : `${formatMetricCount(signups)} sign-ups have reached the product.`,
+      },
+      signups: {
+        label: "Sign-ups",
+        hero: formatMetricCount(signups),
+        pill: formatMetricCount(signups),
+        note: checkouts > 0
+          ? `${formatMetricCount(checkouts)} checkout intents are moving through the funnel.`
+          : "Sign-ups exist, but nobody has started checkout yet.",
+      },
+      progress: {
+        label: "Progress",
+        hero: "Getting started",
+        pill: "—",
+        note: queuedJobs > 0
+          ? `${formatMetricCount(queuedJobs)} jobs are queued while the company comes online.`
+          : "No product metrics yet. Once customers show up, this graph becomes real.",
+      },
+    };
+    const tierOrder = ["mrr", "signups", "progress"];
+    const adaptiveTier = mrrCents > 0 ? "mrr" : signups > 0 ? "signups" : "progress";
+    const activeTier = LIVE.northStarTab && tiers[LIVE.northStarTab] ? LIVE.northStarTab : adaptiveTier;
+    const northStar = tiers[activeTier];
     const bars = [
       { label: "sign-ups", detail: "users", value: signups, color: "var(--blue)" },
       { label: "checkout", detail: "intents", value: checkouts, color: "var(--amber)" },
@@ -858,13 +865,17 @@
       <section class="board-graph${hasConversionData ? "" : " board-graph--empty"}">
         <div class="board-star">
           <div class="board-star-k">north star</div>
-          <div class="board-star-v">${esc(northStar.value)}</div>
+          <div class="board-star-v">${esc(northStar.hero)}</div>
           <div class="board-star-note">
             <strong style="font:700 10px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">${esc(northStar.label)}</strong>
             ${revenueCents > 0 ? ` · lifetime revenue ${esc(formatBudgetCents(revenueCents))}` : ""}
           </div>
           <div class="board-star-note">${esc(northStar.note)}</div>
         </div>
+        <div class="board-tabs">${tierOrder.map((key) => {
+          const tier = tiers[key];
+          return `<button class="board-tab${key === activeTier ? " on" : ""}" data-tab="${key}" type="button"><span class="board-tab-k">${esc(tier.label)}</span><span class="board-tab-v">${esc(tier.pill)}</span></button>`;
+        }).join("")}</div>
         ${hasConversionData
           ? `<div class="board-bars">${bars.map((bar) => {
               const height = bar.value > 0 ? Math.max(14, Math.round((bar.value / maxValue) * 100)) : 10;
@@ -884,6 +895,12 @@
     const w = document.getElementById("w-graph");
     if (!w) return;
     body(w).innerHTML = renderNorthStarPanel(LIVE.workspaceOverview || {});
+    body(w).querySelectorAll(".board-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        LIVE.northStarTab = btn.getAttribute("data-tab") || "";
+        renderGraphWindow();
+      });
+    });
   }
 
   function hasLiveProgress(snapshot) {
@@ -1647,34 +1664,31 @@
     const live = String(product.publish_status || RT.biz.publishStatus || "").trim().toLowerCase() === "published" || !!RT.biz.publicUrl;
     const hasLocalPreview = !!String(website.path || "").trim();
     const previewPath = hasLocalPreview ? previewPathForLive() : "";
-    const productLabel = live ? "live product" : hasLocalPreview ? "local preview" : "product in progress";
-    const hostLabel = live
-      ? prettyHost(RT.biz.publicUrl)
-      : hasLocalPreview
-        ? compactPath(String(website.path || "").trim())
-        : "no site yet";
-    const publishTarget = prettyHost(website.publish_target || product.publish_target || "");
-    body(w).innerHTML = `<div class="mini"><div class="mini__page">
-      <div class="lab">${productLabel}</div>
-      <div class="mini__h">${esc(RT.biz.name || RT.biz.slug || "Litebulb")}</div>
-      <div class="meta" style="margin:6px 0 0">${esc(hostLabel)}</div>
-      <p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p>
-      ${!live && publishTarget ? `<p class="meta" style="margin:0 0 12px">Publish target: ${esc(publishTarget)}${String(product.publish_status || "").trim().toLowerCase() === "published" ? "" : " · not live yet"}</p>` : ""}
-      ${live || hasLocalPreview
-        ? `<button type="button" class="mini__cta" id="product-open-cta" style="border:0;cursor:pointer">${live ? "open website →" : "open local preview →"}</button>`
-        : `<div class="meta" style="margin:0 0 12px">Preview appears after the site exists.</div>`}
-      ${(RT.shipped || []).length ? `<div class="mini__feats" id="feats">${(RT.shipped || []).map((f) => `<div>${esc(f)}</div>`).join("")}</div>` : ""}</div></div>`;
-    const cta = body(w).querySelector("#product-open-cta");
-    if (cta) {
-      cta.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (RT.biz.publicUrl) {
-          openUrlInNewTab(RT.biz.publicUrl);
-          return;
-        }
-        void openSitePreview(previewPath, `${RT.biz.name || RT.biz.slug || "Product"} preview`);
-      });
+    const directUrl = live ? normalizeOpenableUrl(RT.biz.publicUrl) : "";
+    const hostLabel = live ? (prettyHost(RT.biz.publicUrl) || "live site") : hasLocalPreview ? "local preview" : "no site yet";
+    const hasSite = live || hasLocalPreview;
+    // Avoid rebuilding (and reloading the iframe) when nothing material changed.
+    const sig = JSON.stringify([live, directUrl, hasLocalPreview, previewPath, hostLabel]);
+    if (w.dataset.productSig === sig) return;
+    w.dataset.productSig = sig;
+    const frameTitle = `${RT.biz.name || RT.biz.slug || "product"} preview`;
+    body(w).innerHTML = `<div class="mini">
+      <div class="mini__bar"><i></i><i></i><i></i><span>${esc(hostLabel)}</span></div>
+      ${hasSite
+        ? `<iframe class="mini__frame" id="product-frame" title="${esc(frameTitle)}"${directUrl ? ` src="${esc(directUrl)}"` : ""}></iframe>`
+        : `<div class="mini__page"><div class="lab">no site yet</div><p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p><div class="meta">A live preview of the site appears here once it exists.</div></div>`}
+    </div>`;
+    if (hasSite && !directUrl && previewPath) {
+      const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
+      if (business) {
+        fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/site-preview?path=${encodeURIComponent(previewPath)}`)
+          .then((res) => {
+            const url = normalizeOpenableUrl(res && res.url);
+            const frame = document.getElementById("product-frame");
+            if (url && frame && frame.getAttribute("src") !== url) frame.src = url;
+          })
+          .catch(() => {});
+      }
     }
   };
 

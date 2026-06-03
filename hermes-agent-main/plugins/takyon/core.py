@@ -73,7 +73,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_set_mode",
         "business_configure_app_budget",
         "business_grant_app_subsidy",
-        "business_verify_product_surface",
+        "business_refresh_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
         "business_grant_app_entitlement",
@@ -113,10 +113,26 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 """
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
-- Call ONLY the exact runtime endpoints listed below. Use each path verbatim, including the full Runtime API base prefix. Do not shorten, rename, or invent rail paths.
+- Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
 - If a declared runtime feature is not wired yet, keep the blocked state visible and name the missing runtime step.
 - Do not claim undeclared runtime-backed features without first updating the app surface contract.
+"""
+SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
+- You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI.
+- Never build operator/admin routes, `/v1`, `/api/ws`, `/api/tui/rpc`, raw business-tool controls, shell/file access UI, or direct provider/authority dashboards into product code.
+- `tk_` top-level operator tokens never belong in product code, browser code, or customer flows.
+- `tkg_` is the app/business AI mediation boundary, not a customer login or session token.
+- Customer identity comes only from the app session rails and account/session endpoints.
+- Only declared runtime-backed features may look live. Undeclared or unwired features must stay absent or visibly blocked.
+- Long-running or mutating customer actions are typed app jobs only when explicitly declared; never replace them with generic tool access.
+"""
+WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
+- You may edit files only inside the current workspace.
+- You may not call Takyon `business_*` tools, publish, deploy, verify, send, charge, post externally, or mutate operator/admin authority.
+- For `product/site` work in the Docker lane, you may use Bash only for local build/test/install/cleanup inside the isolated workspace.
+- If a task needs unsupported external execution or authority actions, finish the local source work you can do and report the blocker in your final summary.
+- Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -193,8 +209,9 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "usage": {
         "owner_skill": "takyon-app-runtime",
         "tools": ["business_configure_app_budget", "business_record_app_usage", "business_grant_app_subsidy"],
-        "endpoints": [("GET", "usage")],
+        "endpoints": [("GET", "account"), ("POST", "usage")],
         "worker_contract": [
+            "Usage summary currently reads from the account rail and usage metering writes through POST /usage.",
             "Usage meters and budget warnings should reflect Takyon usage rails, not fake counters.",
             "If usage tracking is not wired yet, say so instead of simulating quotas.",
         ],
@@ -204,13 +221,22 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "tools": [],
         "endpoints": [("POST", "generate")],
         "worker_contract": [
-            "Treat POST <runtime_api_base>/generate as the public product contract for AI generation; product code should not call providers or internal authority endpoints directly.",
+            "Treat POST /generate on product hosts or POST <runtime_api_base>/generate off-host as the public product contract for AI generation; product code should not call providers or internal authority endpoints directly.",
             "That public runtime route brokers server-side through the shared Takyon AI authority, which owns provider credentials, funding checks, and spend settlement.",
             "Treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as generation-not-configured (keep the action visible but clearly blocked; never fake a completion).",
             "Use the returned {text, content, model, usage} as the only source of truth for output and spend; do not invent token counts or cost.",
         ],
     },
 }
+
+SUBUSER_APP_MODE_CHOICES = frozenset({"standard_saas", "ai_tool", "api_product"})
+SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset(
+    {"free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"}
+)
+SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
+SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unverified"})
+SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
+SUBUSER_KIT_DIRNAME = "_takyon"
 
 _POSTGRES_POOL_MAX_SIZE = max(
     1,
@@ -324,9 +350,9 @@ _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
-_DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_verify"
+_DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_refresh"
 _DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
-_DEFAULT_PRODUCT_DONE_GATE = "business_verify_product_surface:verified_and_published_or_exact_blocker"
+_DEFAULT_PRODUCT_DONE_GATE = "business_refresh_product_surface:published_or_exact_blocker"
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
 _PRODUCT_SERVICE_PORT_MIN = 9200
 _PRODUCT_SERVICE_PORT_MAX = 9799
@@ -336,12 +362,8 @@ _DOMAIN_RE = re.compile(
 
 _COMMENTARY_BUSINESS_PATHS = {
     "product/surface.md",
-    "product/runtime.md",
     "product/design-brief.md",
-    "product/plans.md",
-    "product/customers.md",
-    "product/billing.md",
-    "product/usage.md",
+    "distribution/surface.md",
     "metrics/summary.md",
     "metrics/wake-history.md",
     "summary.md",
@@ -556,6 +578,138 @@ def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     return _normalize_runtime_features(metadata.get("runtime_features"))
 
 
+def _normalize_subuser_surface_choice(
+    value: Any,
+    *,
+    allowed: frozenset[str],
+) -> str:
+    text = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+    if not text or text not in allowed:
+        return ""
+    return text
+
+
+def _normalize_subuser_rail_state(
+    raw: Any,
+    *,
+    declared_rails: list[str],
+) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raw = {}
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        rail = re.sub(r"[\s-]+", "_", str(key or "").strip().lower())
+        state = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+        if rail not in PRODUCT_RUNTIME_RAILS or state not in SUBUSER_RAIL_STATE_CHOICES:
+            continue
+        normalized[rail] = state
+    for rail in declared_rails:
+        normalized.setdefault(rail, "unverified")
+    return {rail: normalized[rail] for rail in declared_rails if rail in normalized}
+
+
+def _surface_subuser_app_metadata(surface: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(surface, dict):
+        return {}
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    payload = metadata.get("subuser_app") if isinstance(metadata.get("subuser_app"), dict) else {}
+    return dict(payload)
+
+
+def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _surface_subuser_app_metadata(surface)
+    runtime_features = _surface_runtime_features(surface)
+    app_mode = _normalize_subuser_surface_choice(
+        payload.get("app_mode"),
+        allowed=SUBUSER_APP_MODE_CHOICES,
+    )
+    subscription_style = _normalize_subuser_surface_choice(
+        payload.get("subscription_style"),
+        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
+    )
+    api_mode = _normalize_subuser_surface_choice(
+        payload.get("api_mode"),
+        allowed=SUBUSER_API_MODE_CHOICES,
+    )
+    rail_state = _normalize_subuser_rail_state(
+        payload.get("rail_state"),
+        declared_rails=runtime_features,
+    )
+    frontend_api_mode = str(payload.get("frontend_api_mode") or SUBUSER_FRONTEND_API_MODE).strip()
+    if not frontend_api_mode:
+        frontend_api_mode = SUBUSER_FRONTEND_API_MODE
+    kit_path = str(payload.get("kit_path") or SUBUSER_KIT_DIRNAME).strip() or SUBUSER_KIT_DIRNAME
+    return {
+        "app_mode": app_mode,
+        "subscription_style": subscription_style,
+        "api_mode": api_mode,
+        "frontend_api_mode": frontend_api_mode,
+        "kit_path": kit_path,
+        "rail_state": rail_state,
+    }
+
+
+def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
+    shape = _surface_subuser_app_shape(surface)
+    routes = _surface_routes(surface)
+    return {
+        "business": slug,
+        "appMode": shape.get("app_mode") or "",
+        "subscriptionStyle": shape.get("subscription_style") or "",
+        "apiMode": shape.get("api_mode") or "",
+        "frontendApiMode": shape.get("frontend_api_mode") or SUBUSER_FRONTEND_API_MODE,
+        "kitPath": shape.get("kit_path") or SUBUSER_KIT_DIRNAME,
+        "runtimeApiBase": str((surface or {}).get("runtime_api_base") or f"/api/takyon/apps/{slug}"),
+        "runtimeFeatures": _surface_runtime_features(surface),
+        "railState": shape.get("rail_state") or {},
+        "routes": routes,
+        "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
+        "publicUrl": str((surface or {}).get("public_url") or ""),
+        "notes": str((surface or {}).get("notes") or ""),
+    }
+
+
+def _merge_subuser_app_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    runtime_features: list[str],
+    app_mode: Any = None,
+    subscription_style: Any = None,
+    api_mode: Any = None,
+    rail_state: Any = None,
+) -> dict[str, Any]:
+    merged = dict(metadata if isinstance(metadata, dict) else {})
+    existing = merged.get("subuser_app") if isinstance(merged.get("subuser_app"), dict) else {}
+    next_payload = dict(existing)
+    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
+    normalized_subscription = _normalize_subuser_surface_choice(
+        subscription_style,
+        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
+    )
+    normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
+    if normalized_app_mode:
+        next_payload["app_mode"] = normalized_app_mode
+    elif "app_mode" not in next_payload and existing.get("app_mode"):
+        next_payload["app_mode"] = existing.get("app_mode")
+    if normalized_subscription:
+        next_payload["subscription_style"] = normalized_subscription
+    elif "subscription_style" not in next_payload and existing.get("subscription_style"):
+        next_payload["subscription_style"] = existing.get("subscription_style")
+    if normalized_api_mode:
+        next_payload["api_mode"] = normalized_api_mode
+    elif "api_mode" not in next_payload and existing.get("api_mode"):
+        next_payload["api_mode"] = existing.get("api_mode")
+    normalized_rail_state = _normalize_subuser_rail_state(
+        rail_state if rail_state is not None else existing.get("rail_state"),
+        declared_rails=runtime_features,
+    )
+    next_payload["rail_state"] = normalized_rail_state
+    next_payload["frontend_api_mode"] = SUBUSER_FRONTEND_API_MODE
+    next_payload["kit_path"] = SUBUSER_KIT_DIRNAME
+    merged["subuser_app"] = next_payload
+    return merged
+
+
 def _runtime_rails_for_owner(surface: dict[str, Any] | None, owner_skill: str) -> list[tuple[str, dict[str, Any]]]:
     owner = str(owner_skill or "").strip().lower()
     selected = _surface_runtime_features(surface)
@@ -581,6 +735,96 @@ def _canonical_product_surface_source_path(source_path: str) -> str:
     return normalized
 
 
+def _subuser_app_kit_source_dir() -> Path:
+    return Path(__file__).resolve().parent / "subuser_app_kit"
+
+
+def _render_runtime_endpoint_hints(
+    endpoints: list[tuple[str, str]],
+    *,
+    runtime_api_base: str,
+) -> str:
+    rendered: list[str] = []
+    base = runtime_api_base.rstrip("/")
+    for method, route in endpoints:
+        if base:
+            rendered.append(f"{method} /{route} on product hosts or {method} {base}/{route} off-host")
+        else:
+            rendered.append(f"{method} /{route} on product hosts or {method} <runtime_api_base>/{route} off-host")
+    return ", ".join(rendered)
+
+
+def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: str) -> str:
+    context = _subuser_surface_context_payload(surface, slug=slug)
+    rail_state = context.get("railState") if isinstance(context.get("railState"), dict) else {}
+    lines = [
+        "# Subuser App Context",
+        "",
+        f"- Business: {slug}",
+        f"- App mode: {context.get('appMode') or 'not set'}",
+        f"- Subscription style: {context.get('subscriptionStyle') or 'not set'}",
+        f"- API mode: {context.get('apiMode') or 'not set'}",
+        f"- Frontend API mode: {context.get('frontendApiMode') or SUBUSER_FRONTEND_API_MODE}",
+        f"- Runtime API base fallback: {context.get('runtimeApiBase') or f'/api/takyon/apps/{slug}'}",
+        f"- Kit path: {context.get('kitPath') or SUBUSER_KIT_DIRNAME}",
+        "",
+        "## Declared Rails",
+        "",
+    ]
+    runtime_features = context.get("runtimeFeatures") if isinstance(context.get("runtimeFeatures"), list) else []
+    if runtime_features:
+        for rail in runtime_features:
+            lines.append(f"- {rail}: {rail_state.get(rail) or 'unverified'}")
+    else:
+        lines.append("- none declared")
+    lines.extend(["", "## Routes", ""])
+    routes = context.get("routes") if isinstance(context.get("routes"), list) else []
+    if routes:
+        lines.extend(f"- {route}" for route in routes)
+    else:
+        lines.append("- none recorded")
+    lines.extend([
+        "",
+        "## Freedom Boundary",
+        "",
+        "- Preserve runtime semantics.",
+        "- Redesign the product freely above that substrate.",
+        "- Keep business-specific copy and UI outside the managed `_takyon/` support files.",
+        "",
+    ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _materialize_subuser_app_kit(
+    workspace_root: Path,
+    *,
+    slug: str,
+    surface: dict[str, Any] | None,
+) -> None:
+    target_root = workspace_root / SUBUSER_KIT_DIRNAME
+    target_root.mkdir(parents=True, exist_ok=True)
+    kit_source = _subuser_app_kit_source_dir()
+    if kit_source.exists():
+        for path in sorted(kit_source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(kit_source)
+            destination = target_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+    context_payload = _subuser_surface_context_payload(surface, slug=slug)
+    (target_root / "surface-context.js").write_text(
+        "export const subuserSurfaceContext = "
+        + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
+        + ";\nexport default subuserSurfaceContext;\n",
+        encoding="utf-8",
+    )
+    (target_root / "surface-context.md").write_text(
+        _subuser_app_kit_context_markdown(surface, slug=slug),
+        encoding="utf-8",
+    )
+
+
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     runtime_features = _surface_runtime_features(surface)
     if not runtime_features:
@@ -592,25 +836,192 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     lines = [RUNTIME_UI_CONTRACT_INTRO.rstrip(), ""]
     lines.append(f"- Declared runtime-backed features: {', '.join(runtime_features)}")
     if runtime_api_base:
-        lines.append(f"- Runtime API base: {runtime_api_base}")
+        lines.append(f"- Runtime API base fallback: {runtime_api_base}")
+    lines.append("- Product-host rail mode: same-origin bare rails on subuser product hosts, prefixed fallback off-host.")
     lines.extend(["", "Selected runtime rails:"])
     for rail in runtime_features:
         spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
         owner = str(spec.get("owner_skill") or "unknown")
         lines.append(f"- {rail} (owner: {owner})")
         endpoints = spec.get("endpoints") or []
-        if endpoints and base:
-            rendered = ", ".join(f"{method} {base}/{route}" for method, route in endpoints)
-            lines.append(f"  - Exact runtime endpoints: {rendered}")
-        elif endpoints:
-            rendered = ", ".join(f"{method} <runtime_api_base>/{route}" for method, route in endpoints)
-            lines.append(f"  - Exact runtime endpoints: {rendered}")
+        if endpoints:
+            rendered = _render_runtime_endpoint_hints(endpoints, runtime_api_base=base)
+            lines.append(f"  - Reachable runtime endpoints: {rendered}")
         tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
         if tools:
             lines.append(f"  - Canonical tools: {', '.join(tools)}")
         for item in spec.get("worker_contract") or []:
             lines.append(f"  - {str(item).strip()}")
     return "\n".join(lines).strip()
+
+
+def _app_summary_has_configured_plans(app_summary: dict[str, Any] | None) -> bool:
+    if not isinstance(app_summary, dict):
+        return False
+    plans = app_summary.get("plans")
+    if not isinstance(plans, list):
+        return False
+    return any(isinstance(plan, dict) and str(plan.get("plan_key") or "").strip() for plan in plans)
+
+
+def _subuser_app_worker_contract_block(
+    surface: dict[str, Any] | None,
+    *,
+    plans_configured: bool,
+) -> str:
+    runtime_features = _surface_runtime_features(surface)
+    shape = _surface_subuser_app_shape(surface)
+    runtime_api_base = ""
+    routes = []
+    if isinstance(surface, dict):
+        runtime_api_base = str(surface.get("runtime_api_base") or "").strip()
+        raw_routes = surface.get("routes") or []
+        if isinstance(raw_routes, list):
+            routes = [str(route).strip() for route in raw_routes if str(route).strip()]
+    lines = [SUBUSER_APP_WORKER_CONTRACT_INTRO.rstrip(), ""]
+    if routes:
+        lines.append(f"- Current declared product routes: {', '.join(routes)}")
+    lines.append(f"- App mode: {shape.get('app_mode') or 'not set'}")
+    lines.append(f"- Subscription style: {shape.get('subscription_style') or 'not set'}")
+    lines.append(f"- API mode: {shape.get('api_mode') or 'not set'}")
+    lines.append(f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}")
+    if runtime_features:
+        lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
+        rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
+        if rail_state:
+            lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'unverified'}" for rail in runtime_features))
+    if runtime_api_base:
+        lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
+
+    if "auth" in runtime_features:
+        lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
+    else:
+        lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
+
+    if "generate" in runtime_features:
+        generate_target = f"{runtime_api_base.rstrip('/')}/generate" if runtime_api_base else "<runtime_api_base>/generate"
+        lines.append(f"- AI generation must call POST /generate on product hosts or POST {generate_target} off-host. Do not call providers directly or invent output/spend state.")
+    else:
+        lines.append("- AI generation is not declared for this surface. Do not present a live AI chat/generate flow.")
+
+    if "checkout" not in runtime_features and "billing" not in runtime_features:
+        lines.append("- Checkout/billing rails are not declared. Do not render pricing cards, upgrade buttons, subscriptions, or paid-tier UI as live.")
+    elif not plans_configured:
+        lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
+
+    if "usage" in runtime_features:
+        lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
+
+    lines.append("- Do not use localStorage or hardcoded browser state as the source of truth for auth, account, usage, billing, or generated results.")
+    return "\n".join(lines).strip()
+
+
+def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
+    shape = _surface_subuser_app_shape(surface)
+    lines = [
+        "Prepared subuser app kit:",
+        "- Managed kit files are available under `./_takyon/` in this workspace.",
+        "- `./_takyon/surface-context.js` exports the current app truth for this business.",
+        "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
+        "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
+        "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
+        "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
+        f"- Preserve runtime semantics, but redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
+    ]
+    return "\n".join(lines).strip()
+
+
+def _claude_agent_summary_is_blocked(summary: Any) -> bool:
+    text = str(summary or "").strip()
+    if not text:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return bool(lines and lines[-1].startswith("BLOCKED:"))
+
+
+def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
+    mode = str(os.getenv("TAKYON_CLAUDE_AGENT_DOCKER", "auto") or "auto").strip().lower()
+    if mode in {"0", "false", "no", "off"}:
+        return False
+    if mode in {"1", "true", "yes", "force"}:
+        return True
+    # Product/site work is the highest-risk delegated source lane, so default it onto the
+    # isolated Docker rail instead of falling back to a host subprocess when no override is set.
+    return _workspace_needs_runtime_ui_contract(workspace_rel)
+
+
+def _run_claude_agent_task_in_docker(
+    *,
+    payload: dict[str, Any],
+    workspace_path: Path,
+    timeout_ms: int,
+) -> subprocess.CompletedProcess[str]:
+    from tools.environments.docker import _build_security_args, find_docker
+
+    docker = find_docker()
+    if not docker:
+        raise TakyonError("docker runtime unavailable for isolated Claude Agent SDK product/site tasks")
+
+    repo_root = _repo_root().resolve()
+    image = str(
+        os.getenv("TAKYON_CLAUDE_AGENT_DOCKER_IMAGE")
+        or os.getenv("TERMINAL_DOCKER_IMAGE")
+        or "nikolaik/python-nodejs:python3.11-nodejs20"
+    ).strip()
+    payload = {
+        **payload,
+        "cwd": "/workspace",
+        "root": "/workspace",
+    }
+    runtime_env = _runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"})
+    env_keys = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_AGENT_SDK_CLIENT_APP",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ]
+    env_args: list[str] = []
+    for key in env_keys:
+        value = runtime_env.get(key)
+        if value is not None and value != "":
+            env_args.extend(["-e", f"{key}={value}"])
+
+    run_cmd = [
+        docker,
+        "run",
+        "--rm",
+        "--init",
+        "--read-only",
+        *(_build_security_args(run_as_host_user=False)),
+        "--tmpfs",
+        "/root:rw,exec,size=512m",
+        "--tmpfs",
+        "/home:rw,exec,size=512m",
+        "--mount",
+        f"type=bind,src={workspace_path},dst=/workspace",
+        "--mount",
+        f"type=bind,src={repo_root},dst=/repo,readonly",
+        "-w",
+        "/repo",
+        *env_args,
+        image,
+        "node",
+        "/repo/scripts/takyon-claude-agent-task.mjs",
+    ]
+    return subprocess.run(
+        run_cmd,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=str(repo_root),
+        timeout=(timeout_ms / 1000.0) + 30,
+        env=runtime_env,
+    )
 
 
 def _find_guidance_skill_file(identifier: str) -> Path | None:
@@ -1443,6 +1854,7 @@ _PRODUCT_PROJECT_FILENAMES = {
 _PRODUCT_SOURCE_SKIP_DIRS = {
     ".git",
     ".next",
+    "_takyon",
     "__fixtures__",
     "build",
     "dist",
@@ -1503,23 +1915,22 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bfetch\s*\("),
     re.compile(r"\bXMLHttpRequest\b"),
     re.compile(r"/api/takyon/apps/"),
+    re.compile(r"\bcreateSubuserRuntimeClient\s*\("),
+    re.compile(r"_takyon/runtime-client"),
     re.compile(r"\bHermes\b.*\bruntime\b", re.IGNORECASE),
 )
-# Rail integrations count only when the call targets the canonical, reachable
-# runtime base (/api/takyon/apps/<slug>/ or /api/generated-apps/<slug>/). A bare
-# rail path such as /auth/request is NOT proxied to the shared runtime, so it is
-# unreachable; requiring the canonical prefix here makes the verification gate
-# reject drifted/unreachable front-ends and route them back through the normal
-# worker retry loop instead of shipping a broken "rail not wired" surface.
+# On subuser product hosts, bare same-origin rails resolve to the shared runtime.
+# Off-host, the canonical prefixed runtime base remains the fallback.
 _RUNTIME_BASE_PREFIX = r"/api/(?:takyon/apps|generated-apps)/[^'\"`\s)]+/"
+_PRODUCT_HOST_RAIL_PREFIX = r"(?:/api/(?:takyon/apps|generated-apps)/[^'\"`\s)]+/)?"
 _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("runtime_api", re.compile(r"/api/takyon/apps/|/api/generated-apps/", re.IGNORECASE)),
-    ("auth", re.compile(_RUNTIME_BASE_PREFIX + r"auth/(?:request|verify)\b", re.IGNORECASE)),
-    ("session", re.compile(_RUNTIME_BASE_PREFIX + r"session\b", re.IGNORECASE)),
-    ("account", re.compile(_RUNTIME_BASE_PREFIX + r"account\b", re.IGNORECASE)),
-    ("checkout", re.compile(_RUNTIME_BASE_PREFIX + r"checkout\b", re.IGNORECASE)),
-    ("usage", re.compile(_RUNTIME_BASE_PREFIX + r"usage\b", re.IGNORECASE)),
-    ("generate", re.compile(_RUNTIME_BASE_PREFIX + r"generate\b", re.IGNORECASE)),
+    ("runtime_api", re.compile(r"/api/takyon/apps/|/api/generated-apps/|\bcreateSubuserRuntimeClient\s*\(|_takyon/runtime-client", re.IGNORECASE)),
+    ("auth", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"auth/(?:request|verify)\b|\.\s*requestAuth\s*\(", re.IGNORECASE)),
+    ("session", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
+    ("account", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
+    ("checkout", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"checkout\b|\.\s*checkout\s*\(", re.IGNORECASE)),
+    ("usage", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"usage\b|\.\s*recordUsage\s*\(", re.IGNORECASE)),
+    ("generate", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"generate\b|\.\s*generate\s*\(", re.IGNORECASE)),
 )
 _PRODUCT_WORKFLOW_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("form", re.compile(r"<form\b", re.IGNORECASE)),
@@ -1935,13 +2346,13 @@ def _validate_product_surface_contract(
     base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
     if kind["ai"]:
         if "generate" not in integrations:
-            return False, f"AI-backed product surface must call the canonical runtime route {base_hint}/generate verbatim (a bare /generate path is not proxied to the runtime and will 404)"
+            return False, f"AI-backed product surface must call the shared runtime generate rail on product hosts (`/generate`) or via the fallback runtime base ({base_hint}/generate)"
         if not ({"auth", "session", "account"} & integrations):
-            return False, f"AI-backed product surface must call the canonical app-session route {base_hint}/session or {base_hint}/auth/request used by generate (use the full runtime base prefix, not a bare path)"
+            return False, f"AI-backed product surface must use the shared app-session rails (`/session`, `/account`, `/auth/request` on product hosts, or the fallback base {base_hint}/...)"
     if kind["auth"] and not ({"auth", "session", "account"} & integrations):
-        return False, f"auth/session product surface must call the canonical runtime routes {base_hint}/auth/request and {base_hint}/session verbatim (a bare /auth or /session path is not proxied to the runtime and will 404)"
+        return False, f"auth/session product surface must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
     if kind["checkout"] and "checkout" not in integrations:
-        return False, f"checkout/billing product surface must call the canonical runtime route {base_hint}/checkout verbatim or mark checkout unavailable (a bare /checkout path is not proxied to the runtime and will 404)"
+        return False, f"checkout/billing product surface must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
     return True, ""
 
 
@@ -2018,7 +2429,7 @@ def _repair_nested_workspace_prefix(workspace_path: Path, workspace: str) -> dic
     }
 
 
-def _run_verification_command(
+def _run_surface_command(
     command: list[str],
     *,
     cwd: Path,
@@ -2137,7 +2548,7 @@ def _static_surface_can_skip_package_manager(root: Path, scripts: dict[str, Any]
     return bool(re.match(r"^(?::|true|echo\b|printf\b|exit\s+0\b)", build))
 
 
-def _verify_product_surface_path(
+def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
     *,
@@ -2237,7 +2648,7 @@ def _verify_product_surface_path(
         return result
     if install:
         if package_manager.get("available"):
-            install_check = _run_verification_command(
+            install_check = _run_surface_command(
                 _javascript_install_command(package_manager),
                 cwd=root,
                 timeout_seconds=timeout_seconds,
@@ -2260,7 +2671,7 @@ def _verify_product_surface_path(
             "missing_capabilities": [package_manager_name, "node"],
         })
         return result
-    build_check = _run_verification_command(build_command, cwd=root, timeout_seconds=timeout_seconds)
+    build_check = _run_surface_command(build_command, cwd=root, timeout_seconds=timeout_seconds)
     result["checks"].append(build_check)
     if build_check["status"] != "passed":
         result.update({"status": "failed", "error": "product build failed"})
@@ -2274,7 +2685,7 @@ def _verify_product_surface_path(
                 "missing_capabilities": [package_manager_name, "node"],
             })
             return result
-        typecheck = _run_verification_command(typecheck_command, cwd=root, timeout_seconds=timeout_seconds)
+        typecheck = _run_surface_command(typecheck_command, cwd=root, timeout_seconds=timeout_seconds)
         result["checks"].append(typecheck)
         if typecheck["status"] != "passed":
             result.update({"status": "failed", "error": "product typecheck failed"})
@@ -2338,12 +2749,9 @@ _TAKYON_PATH_EXACT_ALIASES = {
     "brain/business-model.md": "research/strategy.md",
     "brain/pulse.md": "metrics/summary.md",
     "brain/wake_journal.md": "metrics/wake-history.md",
-    "app/index.md": "product/runtime.md",
+    "app/index.md": "product/surface.md",
     "app/surface.md": "product/surface.md",
-    "app/plans.md": "product/plans.md",
-    "app/customers.md": "product/customers.md",
-    "app/billing.md": "product/billing.md",
-    "app/usage.md": "product/usage.md",
+    "sales/surface.md": "distribution/surface.md",
     "conversations/index.md": "metrics/conversations/index.md",
     "conversations/corpus/messages.jsonl": "metrics/conversations/corpus/messages.jsonl",
     "conversations/corpus/events.jsonl": "metrics/conversations/corpus/events.jsonl",
@@ -3661,9 +4069,9 @@ class TakyonStore:
               theme_json TEXT,
               constraints_json TEXT,
               publish_target TEXT,
-              publish_policy TEXT NOT NULL DEFAULT 'publish_after_verify',
+              publish_policy TEXT NOT NULL DEFAULT 'publish_after_refresh',
               mode_behavior TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface',
-              done_gate TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker',
+              done_gate TEXT NOT NULL DEFAULT 'business_refresh_product_surface:published_or_exact_blocker',
               public_url TEXT,
               publish_status TEXT NOT NULL DEFAULT 'not_published',
               published_at TEXT,
@@ -3860,9 +4268,9 @@ class TakyonStore:
         surface_additions = {
             "runtime_features_json": "TEXT",
             "publish_target": "TEXT",
-            "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_verify'",
+            "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_refresh'",
             "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
-            "done_gate": "TEXT NOT NULL DEFAULT 'business_verify_product_surface:verified_and_published_or_exact_blocker'",
+            "done_gate": "TEXT NOT NULL DEFAULT 'business_refresh_product_surface:published_or_exact_blocker'",
             "public_url": "TEXT",
             "publish_status": "TEXT NOT NULL DEFAULT 'not_published'",
             "published_at": "TEXT",
@@ -3907,6 +4315,26 @@ class TakyonStore:
                 """,
                 (_DEFAULT_PRODUCT_PUBLISH_POLICY, _DEFAULT_PRODUCT_MODE_BEHAVIOR, _DEFAULT_PRODUCT_DONE_GATE),
             )
+        conn.execute(
+            """
+            UPDATE app_surface_contracts
+            SET
+              publish_policy = ?,
+              updated_at = COALESCE(updated_at, ?)
+            WHERE publish_policy = 'publish_after_verify'
+            """,
+            (_DEFAULT_PRODUCT_PUBLISH_POLICY, _now()),
+        )
+        conn.execute(
+            """
+            UPDATE app_surface_contracts
+            SET
+              done_gate = ?,
+              updated_at = COALESCE(updated_at, ?)
+            WHERE done_gate = 'business_verify_product_surface:verified_and_published_or_exact_blocker'
+            """,
+            (_DEFAULT_PRODUCT_DONE_GATE, _now()),
+        )
 
     def _sync_business_workspace_cache(self, slug: str, root: Path) -> None:
         if self._workspace_root_override is not None:
@@ -4243,84 +4671,27 @@ class TakyonStore:
             "publish_receipt_path": "",
             "publish_blocker": "",
             "notes": "No product surface contract has been recorded yet.",
-            "metadata": {},
+            "metadata": {
+                "subuser_app": {
+                    "frontend_api_mode": SUBUSER_FRONTEND_API_MODE,
+                    "kit_path": SUBUSER_KIT_DIRNAME,
+                }
+            },
             "created_at": None,
             "updated_at": None,
         }
 
     def _reconcile_app_surface_contract(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
-        surface = dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
-        source_path = str(surface.get("source_path") or "").strip()
-        claimed_truth = (
-            str(surface.get("status") or "").strip().lower() in {"active", "publish_blocked"}
-            or str(surface.get("publish_status") or "").strip().lower() in {"published", "blocked"}
-            or bool(str(surface.get("publish_receipt_path") or "").strip())
-        )
-        if not source_path or not claimed_truth:
-            return surface
-        root = self._business_root(slug) / source_path
-        has_source_files = bool(root.exists() and root.is_dir() and _product_source_files(root, limit=1))
-        if not has_source_files:
-            return surface
-        latest = self._latest_surface_verification(conn, slug, source_path)
-        freshness = _projection_freshness(
-            projection="app.surface",
-            evidence=f"{source_path}/**",
-            projection_updated_at=(latest or {}).get("event_created_at"),
-            evidence_updated_at=_latest_tree_file_updated_at(root, skip_hidden=True, skip_predicate=_product_source_is_skipped),
-            stale_reason=(
-                "product source exists but has not been reconciled by business_verify_product_surface"
-                if not latest
-                else "product source changed after the last business_verify_product_surface receipt"
-            ),
-        )
-        if not freshness:
-            return surface
-        metadata = dict(surface.get("metadata") or {}) if isinstance(surface.get("metadata"), dict) else {}
-        freshness_map = dict(metadata.get("takyon_projection_freshness") or {}) if isinstance(metadata.get("takyon_projection_freshness"), dict) else {}
-        freshness_map["product_surface"] = freshness
-        prior_validation = metadata.get("takyon_surface_validation") if isinstance(metadata.get("takyon_surface_validation"), dict) else None
-        validation: dict[str, Any] = {
-            "status": "stale",
-            "reason": freshness["reason"],
-            "source_path": source_path,
-            "evidence_updated_at": freshness["evidence_updated_at"],
-            "projection_updated_at": freshness["projection_updated_at"],
-        }
-        if prior_validation:
-            validation["last_authoritative_validation"] = prior_validation
-        metadata["takyon_projection_freshness"] = freshness_map
-        metadata["takyon_surface_validation"] = validation
-        surface["metadata"] = metadata
-        if str(surface.get("status") or "").strip().lower() in {"active", "publish_blocked"}:
-            surface["status"] = "unverified"
-        return surface
+        return dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
 
     def _app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
         return self._reconcile_app_surface_contract(conn, slug)
 
-    def _latest_surface_verification(self, conn: sqlite3.Connection, slug: str, source_path: str | None) -> dict[str, Any] | None:
-        if not source_path:
-            return None
-        rows = conn.execute(
-            "SELECT * FROM events WHERE business_slug = ? AND event_type = 'product.surface.verify' ORDER BY created_at DESC LIMIT 25",
-            (slug,),
-        ).fetchall()
-        for row in rows:
-            event = self._row_to_dict(row) or {}
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if payload.get("source_path") == source_path:
-                return {**payload, "event_created_at": event.get("created_at")}
-        return None
-
     def _product_surface_evidence(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
         surface = surface if isinstance(surface, dict) else self._app_surface_contract(conn, slug)
         source_path = str(surface.get("source_path") or "").strip()
-        latest = self._latest_surface_verification(conn, slug, source_path) if source_path else None
-        inventory = latest.get("inventory") if isinstance((latest or {}).get("inventory"), dict) else {}
-        if not inventory and source_path:
-            inventory = _product_inventory(self._business_root(slug), source_path, surface=surface)
-        elif isinstance(inventory, dict):
+        inventory = _product_inventory(self._business_root(slug), source_path, surface=surface) if source_path else {}
+        if isinstance(inventory, dict):
             inventory = {
                 **inventory,
                 "public_url": str(surface.get("public_url") or inventory.get("public_url") or ""),
@@ -4333,13 +4704,8 @@ class TakyonStore:
             local_work.append("missing product source path")
         elif not has_source_files:
             local_work.append("missing product source files")
-        elif not latest:
-            local_work.append("product source has not been published")
-        else:
-            if latest.get("status") not in {"passed"}:
-                local_work.append(f"product publish check is {latest.get('status') or 'unknown'}")
-            if latest.get("done_gate_status") not in {"passed"}:
-                local_work.append(latest.get("blocker") or "product is complete only when published or an exact blocker is recorded")
+        elif str(surface.get("publish_status") or "").strip().lower() != "published":
+            local_work.append(str(surface.get("publish_blocker") or "product source has not been published"))
         risk_issues = {
             str(item.get("issue") or "")
             for item in (inventory.get("risk_markers") or [])
@@ -4350,20 +4716,15 @@ class TakyonStore:
             local_work.append("product source has pretend-state findings")
         elif risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
-        surface_metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-        freshness = surface_metadata.get("takyon_projection_freshness") if isinstance(surface_metadata.get("takyon_projection_freshness"), dict) else {}
-        product_surface_freshness = freshness.get("product_surface") if isinstance(freshness.get("product_surface"), dict) else {}
-        if product_surface_freshness.get("status") == "stale":
-            local_work.append(product_surface_freshness.get("reason") or "product surface projection is stale; rerun business_verify_product_surface")
         return {
             "surface_status": str(surface.get("status") or "missing"),
             "publish_status": str(surface.get("publish_status") or ""),
             "public_url": str(surface.get("public_url") or ""),
             "source_path": source_path,
             "has_source_files": has_source_files,
-            "latest_verification": latest or {},
+            "latest_receipt_path": str(surface.get("publish_receipt_path") or ""),
+            "publish_blocker": str(surface.get("publish_blocker") or ""),
             "inventory": inventory or {},
-            "projection_freshness": product_surface_freshness or {},
             "local_continuable_work": local_work[:8],
         }
 
@@ -4379,85 +4740,20 @@ class TakyonStore:
         status = str(requested_status or "draft").strip().lower()
         if status != "active":
             return status, metadata
-        validation: dict[str, Any] = {"requested_status": "active"}
         if not source_path:
-            validation.update({"status": "unverified", "reason": "missing source_path"})
-            return "unverified", {**metadata, "takyon_surface_validation": validation}
+            return "unverified", metadata
         root = self._business_root(slug) / source_path
         source_files = _product_source_files(root, limit=2)
         if not root.exists() or not root.is_dir() or not source_files:
-            validation.update({"status": "unverified", "reason": "source path is missing or empty", "source_path": source_path})
-            return "unverified", {**metadata, "takyon_surface_validation": validation}
-        latest = self._latest_surface_verification(conn, slug, source_path)
-        if not latest:
-            validation.update({
-                "status": "unverified",
-                "reason": "no product.surface.publish receipt for source_path",
-                "source_path": source_path,
-            })
-            return "unverified", {**metadata, "takyon_surface_validation": validation}
-        publish = latest.get("publish") if isinstance(latest.get("publish"), dict) else {}
-        if publish.get("status") == "published":
-            if latest.get("status") == "passed" and latest.get("done_gate_status") == "passed":
-                return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
-            validation.update(
-                {
-                    "status": "warning",
-                    "reason": "published with advisory verification blockers",
-                    "source_path": source_path,
-                    "latest_verification": latest,
-                }
-            )
-            return status, {**metadata, "takyon_surface_validation": validation}
-        if latest.get("status") != "passed":
-            validation.update({
-                "status": "unverified",
-                "reason": "no passing product.surface.publish receipt for source_path",
-                "source_path": source_path,
-                "latest_verification": latest,
-            })
-            return "unverified", {**metadata, "takyon_surface_validation": validation}
-        if latest.get("done_gate_status") != "passed" or publish.get("status") != "published":
-            validation.update({
-                "status": "publish_blocked",
-                "reason": "no published product.surface receipt for source_path",
-                "source_path": source_path,
-                "latest_verification": latest,
-            })
-            return "publish_blocked", {**metadata, "takyon_surface_validation": validation}
-        return status, {**metadata, "takyon_surface_validation": {"status": "passed", "receipt": latest.get("receipt_path")}}
+            return "unverified", metadata
+        return status, metadata
 
     def _rewrite_app_files(self, conn: sqlite3.Connection, slug: str) -> None:
         root = self._business_root(slug) / "product"
-        budget = self._ensure_app_budget(conn, slug)
         surface = self._app_surface_contract(conn, slug)
+        shape = _surface_subuser_app_shape(surface)
         surface_evidence = self._product_surface_evidence(conn, slug, surface)
         inventory = surface_evidence.get("inventory") if isinstance(surface_evidence.get("inventory"), dict) else {}
-        plans = [
-            self._row_to_dict(row)
-            for row in conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? ORDER BY price_cents ASC, plan_key ASC", (slug,)).fetchall()
-        ]
-        users = [
-            self._row_to_dict(row)
-            for row in conn.execute(f"SELECT id, business_slug, email, name, status, tier, {self._app_user_metadata_select()}, created_at, updated_at FROM app_users WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 200", (slug,)).fetchall()
-        ]
-        revenue = conn.execute(
-            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ?",
-            (slug,),
-        ).fetchone()
-        usage = conn.execute(
-            "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS actual, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COUNT(*) AS count FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-            (slug, budget["current_period_start"]),
-        ).fetchone()
-        checkout_count = conn.execute("SELECT COUNT(*) AS count FROM app_checkout_intents WHERE business_slug = ?", (slug,)).fetchone()
-        has_real_surface = bool(surface_evidence.get("source_path")) and bool(surface_evidence.get("has_source_files"))
-        has_runtime_state = bool(
-            plans
-            or users
-            or int(revenue["count"] or 0)
-            or int(checkout_count["count"] or 0)
-            or int(usage["count"] or 0)
-        )
 
         surface_lines = [
             "# App Surface Contract",
@@ -4473,7 +4769,7 @@ class TakyonStore:
             f"- Status: {surface.get('status') or 'missing'}",
             f"- Design brief path: {surface.get('design_brief_path') or 'product/design-brief.md'}",
             f"- Source path: {surface.get('source_path') or 'not set'}",
-            f"- Runtime API base: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
+            f"- Runtime API base fallback: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
             f"- Runtime features: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
             f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
             f"- Publish policy: {surface.get('publish_policy') or _DEFAULT_PRODUCT_PUBLISH_POLICY}",
@@ -4485,6 +4781,14 @@ class TakyonStore:
             f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
             f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             f"- Notes: {surface.get('notes') or 'not set'}",
+            "",
+            "## App Shape",
+            "",
+            f"- App mode: {shape.get('app_mode') or 'not set'}",
+            f"- Subscription style: {shape.get('subscription_style') or 'not set'}",
+            f"- API mode: {shape.get('api_mode') or 'not set'}",
+            f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}",
+            f"- Managed kit path: {shape.get('kit_path') or SUBUSER_KIT_DIRNAME}",
             "",
             "## Routes",
             "",
@@ -4504,11 +4808,26 @@ class TakyonStore:
         surface_lines.extend(_markdown_kv_lines(surface.get("theme"), empty="business design brief"))
         surface_lines.extend(["", "## Constraints", ""])
         surface_lines.extend(_markdown_kv_lines(surface.get("constraints"), empty="no hardcoded product UI"))
-        metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-        validation = metadata.get("takyon_surface_validation") if isinstance(metadata.get("takyon_surface_validation"), dict) else {}
-        if validation:
-            surface_lines.extend(["", "## Verification", ""])
-            surface_lines.extend(_markdown_kv_lines(validation, empty="unverified"))
+        selected_runtime_rails = _surface_runtime_features(surface)
+        surface_lines.extend(["", "## Runtime Rails", ""])
+        if not selected_runtime_rails:
+            surface_lines.append("- No runtime rails declared.")
+        else:
+            for rail in selected_runtime_rails:
+                spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
+                owner = str(spec.get("owner_skill") or "unknown").strip() or "unknown"
+                surface_lines.append(f"- {rail} — owner: {owner}")
+                endpoints = spec.get("endpoints") or []
+                runtime_api_base = str(surface.get("runtime_api_base") or "").strip().rstrip("/")
+                if endpoints:
+                    rendered = _render_runtime_endpoint_hints(endpoints, runtime_api_base=runtime_api_base)
+                    surface_lines.append(f"  - Reachable runtime endpoints: {rendered}")
+                tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
+                if tools:
+                    surface_lines.append(f"  - Canonical tools: {', '.join(tools)}")
+            surface_lines.extend(["", "## Rail State", ""])
+            for rail in selected_runtime_rails:
+                surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'unverified'}")
         if inventory:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
@@ -4538,195 +4857,166 @@ class TakyonStore:
                         f"- {item.get('path')}:{item.get('line') or '?'} {_markdown_scalar(item.get('snippet'))}"
                     )
         _atomic_write_text(root / "surface.md", "\n".join(surface_lines).rstrip() + "\n")
-
-        runtime_files = [
-            root / "runtime.md",
-            root / "plans.md",
-            root / "customers.md",
-            root / "billing.md",
-            root / "usage.md",
-        ]
-        if not has_real_surface and not has_runtime_state:
-            for path in runtime_files:
-                if path.exists():
-                    path.unlink()
-            return
-
-        selected_runtime_rails = _surface_runtime_features(surface)
-        rails_by_owner: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-        for rail in selected_runtime_rails:
-            spec = PRODUCT_RUNTIME_RAILS.get(rail)
-            if not spec:
-                continue
-            owner = str(spec.get("owner_skill") or "unknown").strip() or "unknown"
-            rails_by_owner.setdefault(owner, []).append((rail, spec))
-
-        index = [
-            "# App Runtime Source Of Truth",
-            "",
-            f"Business: {slug}",
-            "",
-            "This business uses Hermes Takyon app rails for product customer auth, sessions, plan policy, Stripe checkout, entitlements, subscription reconciliation, revenue events, and app usage budget.",
-            "",
-            "Do not store magic-link tokens, session tokens, Stripe secrets, or customer payment data in business files.",
-            "",
-            "## Files",
-            "",
-            "- [Plans](plans.md)",
-            "- [Customers](customers.md)",
-            "- [Billing](billing.md)",
-            "- [Usage Budget](usage.md)",
-            "- [Surface Contract](surface.md)",
-        ]
-        index.extend(["", "## Selected Runtime Rails", ""])
-        if not selected_runtime_rails:
-            index.append("- No runtime rails declared.")
-        else:
-            for rail in selected_runtime_rails:
-                spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
-                owner = str(spec.get("owner_skill") or "unknown")
-                tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
-                index.append(f"- {rail} — owner: {owner}")
-                if tools:
-                    index.append(f"  - Tools: {', '.join(tools)}")
-        index.extend(["", "## Rails By Owner", ""])
-        if not rails_by_owner:
-            index.append("- No runtime rail ownership is currently declared.")
-        else:
-            for owner, items in rails_by_owner.items():
-                index.extend(["", f"### {owner}", ""])
-                for rail, spec in items:
-                    tools = [str(tool).strip() for tool in spec.get("tools") or [] if str(tool).strip()]
-                    index.append(f"- {rail}")
-                    if tools:
-                        index.append(f"  - Tools: {', '.join(tools)}")
-                    for item in spec.get("worker_contract") or []:
-                        index.append(f"  - UI contract: {str(item).strip()}")
-        _atomic_write_text(root / "runtime.md", "\n".join(index) + "\n")
-
-        plan_lines = ["# App Plans", "", f"Business: {slug}", ""]
-        if not plans:
-            plan_lines.append("No app plans configured.")
-        for plan in plans:
-            plan_lines.extend([
-                f"## {plan['plan_key']}",
-                "",
-                f"- Tier: {plan['tier']}",
-                f"- Price: {plan['price_cents']} {plan['currency']} cents",
-                f"- Billing interval: {plan['billing_interval']}",
-                f"- Included AI budget microusd: {plan['included_ai_budget_microusd']}",
-                f"- Included action quota: {plan['included_action_quota']}",
-                f"- Overage: {'allowed' if plan['allow_overage'] else 'not allowed'}",
-                f"- Stripe price: {plan.get('stripe_price_id') or 'not linked'}",
-                "",
-            ])
-        _atomic_write_text(root / "plans.md", "\n".join(plan_lines).rstrip() + "\n")
-
-        customer_lines = ["# App Customers", "", f"Business: {slug}", ""]
-        if not users:
-            customer_lines.append("No product customers recorded.")
-        for user in users:
-            customer_lines.append(f"- {user['email']} — {user['status']} — {user['tier']} — {user['id']}")
-        _atomic_write_text(root / "customers.md", "\n".join(customer_lines).rstrip() + "\n")
-
-        billing_lines = [
-            "# App Billing",
-            "",
-            f"Business: {slug}",
-            "",
-            f"- Revenue events: {int(revenue['count'] or 0)}",
-            f"- Revenue cents: {int(revenue['cents'] or 0)}",
-            f"- Checkout intents: {int(checkout_count['count'] or 0)}",
-        ]
-        _atomic_write_text(root / "billing.md", "\n".join(billing_lines) + "\n")
-
-        usage_lines = [
-            "# App Usage Budget",
-            "",
-            f"Business: {slug}",
-            "",
-            f"- Status: {budget['status']}",
-            f"- Hard limit microusd: {budget['hard_limit_microusd']}",
-            f"- Current period: {budget['current_period_start']} to {budget['current_period_end']}",
-            f"- Usage events this period: {int(usage['count'] or 0)}",
-            f"- Estimated cost microusd: {int(usage['estimated'] or 0)}",
-            f"- Actual cost microusd: {int(usage['actual'] or 0)}",
-        ]
-        _atomic_write_text(root / "usage.md", "\n".join(usage_lines) + "\n")
-
-    def _auto_verify_product_surface_for_source_change(
-        self,
-        conn: sqlite3.Connection,
-        slug: str,
-        *,
-        changed_rel: str,
-    ) -> None:
-        surface = self._stored_app_surface_contract(conn, slug)
         source_path = str(surface.get("source_path") or "").strip()
-        rel = str(changed_rel or "").strip().strip("/")
-        if not source_path or not rel:
-            return
-        if not _workspace_needs_runtime_ui_contract(source_path):
-            return
-        if rel != source_path and not rel.startswith(f"{source_path}/"):
-            return
-        source_root = self._resolve_business_file(slug, source_path, sync=False)
-        if not source_root.exists() or not source_root.is_dir():
-            return
+        if source_path and _workspace_needs_runtime_ui_contract(source_path):
+            source_root = (self._business_root(slug) / source_path).resolve()
+            if self._business_root(slug).resolve() in (source_root, *source_root.parents):
+                _materialize_subuser_app_kit(source_root, slug=slug, surface=surface)
 
-        requested_publish_policy = str(
-            surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY
-        ).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-        publish_policy = (
-            "publish_after_verify"
-            if _is_shared_renderer_publish_policy(requested_publish_policy)
-            else requested_publish_policy
+    def _distribution_surface_evidence(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
+        root = self._business_root(slug)
+        campaign_root = root / "distribution" / "campaign"
+        local_publish_root = root / "distribution" / "local-published"
+        receipt_root = root / "metrics" / "receipts" / "outreach"
+
+        def sample_files(base: Path, *, limit: int = 12) -> list[str]:
+            if not base.exists() or not base.is_dir():
+                return []
+            files: list[str] = []
+            for path in sorted(base.rglob("*")):
+                if len(files) >= limit:
+                    break
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(base)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
+                files.append(path.relative_to(root).as_posix())
+            return files
+
+        def latest_file(base: Path, *, suffixes: tuple[str, ...] = ()) -> dict[str, Any]:
+            best: tuple[datetime, Path] | None = None
+            if not base.exists() or not base.is_dir():
+                return {}
+            for path in base.rglob("*"):
+                if not path.is_file():
+                    continue
+                if suffixes and path.suffix.lower() not in suffixes:
+                    continue
+                rel = path.relative_to(base)
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
+                try:
+                    updated = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                except OSError:
+                    continue
+                if best is None or updated > best[0]:
+                    best = (updated, path)
+            if best is None:
+                return {}
+            return {
+                "path": best[1].relative_to(root).as_posix(),
+                "updated_at": _datetime_to_iso(best[0]),
+            }
+
+        latest_publish_job = self._row_to_dict(
+            conn.execute(
+                f"""
+                SELECT id, kind, status, payload_json, created_at, updated_at
+                FROM {self._work_requests_table()}
+                WHERE business_slug = ?
+                  AND (
+                    LOWER(kind) LIKE '%publish_outreach%'
+                    OR LOWER(kind) LIKE '%outreach%'
+                    OR LOWER(kind) LIKE '%campaign%'
+                  )
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (slug,),
+            ).fetchone()
         )
-        publish_target = _product_publish_target(slug, surface.get("publish_target"))
-        receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
-        verification = _finalize_product_surface_verification(
-            store=self,
-            business=slug,
-            surface=surface,
-            source_path=source_path,
-            publish_target=publish_target,
-            requested_publish_policy=requested_publish_policy,
-            publish_policy=publish_policy,
-            install=False,
-            timeout_seconds=180,
-            receipt_path=receipt_path,
-            verification_source="source_path_refresh",
+        unresolved_replies = int(
+            (
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM conversation_messages
+                    WHERE business_slug = ?
+                      AND direction = 'inbound'
+                      AND status = 'needs_response'
+                    """,
+                    (slug,),
+                ).fetchone()
+                or {}
+            ).get("count")
+            or 0
         )
-        parsed_scope = {"raw": f"business:{slug}", "business": slug}
-        for operation in _product_surface_verification_operations(
-            business=slug,
-            verification=verification,
-            surface=surface,
-            publish_target=publish_target,
-            publish_policy=publish_policy,
-            requested_publish_policy=requested_publish_policy,
-            activate_on_success=True,
-        ):
-            normalized = self._normalize_operation(conn, parsed_scope, operation)
-            self._apply_operation(
-                conn,
-                parsed_scope,
-                normalized,
-                reason="product source changed; auto-verify surface",
-                actor="system",
-            )
+        return {
+            "campaign_workspace": "distribution/campaign/",
+            "campaign_files": sample_files(campaign_root),
+            "latest_local_artifact": latest_file(local_publish_root),
+            "latest_receipt": latest_file(receipt_root, suffixes=(".json",)),
+            "latest_publish_job": latest_publish_job or {},
+            "unresolved_replies": unresolved_replies,
+        }
+
+    def _rewrite_distribution_files(self, conn: sqlite3.Connection, slug: str) -> None:
+        root = self._business_root(slug) / "distribution"
+        evidence = self._distribution_surface_evidence(conn, slug)
+        latest_job = evidence.get("latest_publish_job") if isinstance(evidence.get("latest_publish_job"), dict) else {}
+        latest_artifact = evidence.get("latest_local_artifact") if isinstance(evidence.get("latest_local_artifact"), dict) else {}
+        latest_receipt = evidence.get("latest_receipt") if isinstance(evidence.get("latest_receipt"), dict) else {}
+
+        lines = [
+            "# Distribution Surface",
+            "",
+            f"Business: {slug}",
+            "",
+            "## Contract",
+            "",
+            f"- Campaign workspace: {evidence.get('campaign_workspace') or 'distribution/campaign/'}",
+            f"- Latest publish job: {latest_job.get('kind') or 'none'} ({latest_job.get('status') or 'not queued'})",
+            f"- Latest local artifact: {latest_artifact.get('path') or 'none'}",
+            f"- Latest receipt: {latest_receipt.get('path') or 'none'}",
+            f"- Unresolved replies: {evidence.get('unresolved_replies') or 0}",
+            "",
+            "## Campaign Workspace",
+            "",
+        ]
+        campaign_files = evidence.get("campaign_files") or []
+        if campaign_files:
+            lines.extend(f"- {path}" for path in campaign_files[:12])
+        else:
+            lines.append("- No visible campaign files yet.")
+        lines.extend(["", "## Publication", ""])
+        if latest_artifact:
+            lines.append(f"- Latest local artifact: {latest_artifact.get('path')} ({latest_artifact.get('updated_at') or 'unknown time'})")
+        else:
+            lines.append("- No local published artifact recorded.")
+        if latest_receipt:
+            lines.append(f"- Latest receipt: {latest_receipt.get('path')} ({latest_receipt.get('updated_at') or 'unknown time'})")
+        else:
+            lines.append("- No outreach receipt recorded.")
+        if latest_job:
+            lines.extend([
+                "",
+                "## Latest Publish Job",
+                "",
+                f"- Kind: {latest_job.get('kind') or 'unknown'}",
+                f"- Status: {latest_job.get('status') or 'unknown'}",
+                f"- Updated at: {latest_job.get('updated_at') or latest_job.get('created_at') or 'unknown'}",
+            ])
+        _atomic_write_text(root / "surface.md", "\n".join(lines).rstrip() + "\n")
 
     def _refresh_surface_projection_files_for_path(self, conn: sqlite3.Connection, slug: str, rel_path: str) -> None:
         surface = self._stored_app_surface_contract(conn, slug)
         source_path = str(surface.get("source_path") or "").strip()
         rel = str(rel_path or "").strip().strip("/")
-        if not source_path or not rel:
+        if not rel:
             return
-        if rel == source_path or rel.startswith(f"{source_path}/"):
+        if source_path and (rel == source_path or rel.startswith(f"{source_path}/")):
             self._rewrite_app_files(conn, slug)
             # Product source mutations should leave the surface unverified/stale until one explicit
-            # completion check runs. Avoid firing the terminal verifier on every partial write while
+            # completion check runs. Avoid firing the terminal refresh on every partial write while
             # a product/site tree is still assembling.
+            return
+        if (
+            rel.startswith("distribution/campaign/")
+            or rel.startswith("distribution/local-published/")
+            or rel.startswith("metrics/receipts/outreach/")
+        ):
+            self._rewrite_distribution_files(conn, slug)
 
     def _app_summary(self, conn: sqlite3.Connection, slug: str, limit: int) -> dict[str, Any]:
         budget = self._ensure_app_budget(conn, slug)
@@ -4767,7 +5057,7 @@ class TakyonStore:
                 self._row_to_dict(row)
                 for row in conn.execute("SELECT * FROM app_checkout_intents WHERE business_slug = ? ORDER BY updated_at DESC LIMIT ?", (slug, limit)).fetchall()
             ],
-            "filesystem_index": "product/runtime.md",
+            "filesystem_index": "product/surface.md",
         }
 
     def calculate_pulse(self, slug: str, *, limit: int = 10) -> dict[str, Any]:
@@ -5113,8 +5403,8 @@ class TakyonStore:
                         "public_url": product_evidence.get("public_url"),
                         "source_path": product_evidence.get("source_path"),
                         "has_source_files": product_evidence.get("has_source_files"),
-                        "latest_verification_status": (product_evidence.get("latest_verification") or {}).get("status"),
-                        "done_gate_status": (product_evidence.get("latest_verification") or {}).get("done_gate_status"),
+                        "latest_receipt_path": product_evidence.get("latest_receipt_path"),
+                        "publish_blocker": product_evidence.get("publish_blocker"),
                         "inventory_status": (product_evidence.get("inventory") or {}).get("status"),
                         "risk_marker_count": len((product_evidence.get("inventory") or {}).get("risk_markers") or []),
                         "claim_snippet_count": len((product_evidence.get("inventory") or {}).get("claim_snippets") or []),
@@ -5989,6 +6279,15 @@ class TakyonStore:
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
+            existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            metadata = _merge_subuser_app_metadata(
+                {**existing_metadata, **metadata},
+                runtime_features=runtime_features,
+                app_mode=op.get("app_mode"),
+                subscription_style=op.get("subscription_style"),
+                api_mode=op.get("api_mode"),
+                rail_state=op.get("rail_state"),
+            )
             status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
             now = _now()
             conn.execute(
@@ -6038,7 +6337,7 @@ class TakyonStore:
             )
             self._rewrite_app_files(conn, slug)
             self._sync_business_workspace_remote(slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "metadata": metadata})
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "app_mode": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("app_mode") or ""), "subscription_style": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("subscription_style") or ""), "api_mode": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("api_mode") or ""), "rail_state": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("rail_state") or {}), "metadata": metadata})
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
         if action == "app.surface.publish_result":
@@ -6568,6 +6867,8 @@ class TakyonStore:
             if suppressed:
                 event_payload["missing_credentials_suppressed"] = suppressed
                 event_payload["external_side_effects"] = "suppressed"
+            if _job_kind_matches(op.get("kind"), ("ad", "campaign", "distribution", "outreach", "post", "social", "x-social")):
+                self._rewrite_distribution_files(conn, slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=event_payload)
             result = {"action": action, "business": slug, "job": job_id}
             if suppressed:
@@ -6684,6 +6985,7 @@ class TakyonStore:
                 result["destination_url"] = destination_url
             if destination_label:
                 result["destination_label"] = destination_label
+            self._rewrite_distribution_files(conn, slug)
             return result
 
         if action == "conversation.thread.upsert":
@@ -7619,6 +7921,10 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
         "runtime_features": args.get("runtime_features"),
+        "app_mode": args.get("app_mode"),
+        "subscription_style": args.get("subscription_style"),
+        "api_mode": args.get("api_mode"),
+        "rail_state": args.get("rail_state"),
         "routes": args.get("routes") or [],
         "theme": args.get("theme") or {"source": "business design brief"},
         "constraints": args.get("constraints") or {},
@@ -7632,7 +7938,7 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
-def _finalize_product_surface_verification(
+def _finalize_product_surface_refresh(
     *,
     store: "TakyonStore",
     business: str,
@@ -7644,29 +7950,29 @@ def _finalize_product_surface_verification(
     install: bool,
     timeout_seconds: int,
     receipt_path: str,
-    verification_source: str,
+    refresh_source: str,
 ) -> dict[str, Any]:
-    verification = _verify_product_surface_path(
+    refresh = _refresh_product_surface_path(
         store._business_root(business),
         source_path,
         surface=surface,
         install=install,
         timeout_seconds=timeout_seconds,
     )
-    if verification.get("status") == "passed":
-        inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
+    if refresh.get("status") == "passed":
+        inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
         valid_surface, surface_error = _validate_product_surface_contract(inventory, surface)
         if not valid_surface:
-            verification = {
-                **verification,
+            refresh = {
+                **refresh,
                 "status": "blocked",
                 "error": surface_error,
             }
     if requested_publish_policy and _is_shared_renderer_publish_policy(requested_publish_policy):
-        warnings = list(verification.get("warnings") or [])
+        warnings = list(refresh.get("warnings") or [])
         warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
-        verification = {
-            **verification,
+        refresh = {
+            **refresh,
             "requested_publish_policy": requested_publish_policy,
             "effective_publish_policy": publish_policy,
             "warnings": warnings,
@@ -7674,73 +7980,69 @@ def _finalize_product_surface_verification(
     publish = _publish_product_surface_path(
         business_root=store._business_root(business),
         slug=business,
-        source_path=str(verification.get("source_path") or source_path),
+        source_path=str(refresh.get("source_path") or source_path),
         publish_target=publish_target,
     )
-    done_gate_status = "passed" if verification.get("status") == "passed" and publish.get("status") == "published" else "blocked"
-    inventory = verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {}
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
     if not inventory:
-        inventory = _product_inventory(store._business_root(business), str(verification.get("source_path") or source_path), surface=surface)
+        inventory = _product_inventory(store._business_root(business), str(refresh.get("source_path") or source_path), surface=surface)
     inventory = {
         **inventory,
         "public_url": publish.get("public_url") or inventory.get("public_url") or "",
         "publish_receipt_path": receipt_path,
     }
     return {
-        **verification,
+        **refresh,
         "business": business,
         "receipt_path": receipt_path,
         "publish": publish,
         "inventory": inventory,
-        "done_gate": _DEFAULT_PRODUCT_DONE_GATE,
-        "done_gate_status": done_gate_status,
-        "blocker": "" if done_gate_status == "passed" else (publish.get("blocker") or verification.get("error") or "product surface is not published"),
-        "source": verification_source,
+        "blocker": "" if publish.get("status") == "published" and refresh.get("status") == "passed" else (publish.get("blocker") or refresh.get("error") or "product surface is not published"),
+        "source": refresh_source,
     }
 
 
-def _product_surface_verification_operations(
+def _product_surface_refresh_operations(
     *,
     business: str,
-    verification: dict[str, Any],
+    surface_refresh: dict[str, Any],
     surface: dict[str, Any],
     publish_target: str,
     publish_policy: str,
     requested_publish_policy: str,
     activate_on_success: bool,
 ) -> list[dict[str, Any]]:
-    publish = verification.get("publish") if isinstance(verification.get("publish"), dict) else {}
+    publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
     operations: list[dict[str, Any]] = [
         {
             "action": "artifact.write",
             "business": business,
-            "path": str(verification["receipt_path"]),
-            "content": json.dumps(verification, indent=2, ensure_ascii=False) + "\n",
+            "path": str(surface_refresh["receipt_path"]),
+            "content": json.dumps(surface_refresh, indent=2, ensure_ascii=False) + "\n",
         },
         {
             "action": "event.record",
             "business": business,
-            "event_type": "product.surface.verify",
+            "event_type": "product.surface.refresh",
             "payload": {
-                "source_path": verification.get("source_path"),
-                "status": verification.get("status"),
-                "kind": verification.get("kind"),
+                "source_path": surface_refresh.get("source_path"),
+                "status": surface_refresh.get("status"),
+                "kind": surface_refresh.get("kind"),
                 "publish_policy": publish_policy,
                 "requested_publish_policy": requested_publish_policy,
-                "error": verification.get("error"),
-                "warnings": verification.get("warnings") or [],
-                "inventory": verification.get("inventory") if isinstance(verification.get("inventory"), dict) else {},
-                "receipt_path": verification.get("receipt_path"),
+                "error": surface_refresh.get("error"),
+                "warnings": surface_refresh.get("warnings") or [],
+                "inventory": surface_refresh.get("inventory") if isinstance(surface_refresh.get("inventory"), dict) else {},
+                "receipt_path": surface_refresh.get("receipt_path"),
                 "publish": publish,
-                "done_gate_status": verification.get("done_gate_status"),
-                "blocker": verification.get("blocker") or "",
+                "blocker": surface_refresh.get("blocker") or "",
             },
         },
     ]
-    publish_blocker = publish.get("blocker") or verification.get("blocker") or verification.get("error") or ""
+    publish_blocker = publish.get("blocker") or surface_refresh.get("blocker") or surface_refresh.get("error") or ""
     publish_succeeded = publish.get("status") == "published"
-    verification_passed = verification.get("status") == "passed"
-    if activate_on_success and (verification_passed or publish_succeeded):
+    refresh_passed = surface_refresh.get("status") == "passed"
+    if activate_on_success and (refresh_passed or publish_succeeded):
         next_status = "active" if publish.get("status") == "published" else "publish_blocked"
         operations.append(
             {
@@ -7749,7 +8051,7 @@ def _product_surface_verification_operations(
                 "_skip_auto_verify": True,
                 "status": next_status,
                 "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
-                "source_path": verification.get("source_path"),
+                "source_path": surface_refresh.get("source_path"),
                 "runtime_api_base": surface.get("runtime_api_base"),
                 "routes": surface.get("routes") or [],
                 "theme": surface.get("theme") or {"source": "business design brief"},
@@ -7759,9 +8061,10 @@ def _product_surface_verification_operations(
                 "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
                 "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
                 "notes": surface.get("notes") or "",
-                "metadata": {**(surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}), "verification_receipt": verification.get("receipt_path")},
+                "metadata": surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {},
             }
         )
+    if activate_on_success:
         operations.append(
             {
                 "action": "app.surface.publish_result",
@@ -7770,19 +8073,19 @@ def _product_surface_verification_operations(
                 "publish_target": publish_target,
                 "public_url": publish.get("public_url") or "",
                 "published_at": publish.get("published_at") or "",
-                "receipt_path": verification.get("receipt_path"),
-                "publish_source_path": publish.get("publish_source_path") or verification.get("source_path") or "",
+                "receipt_path": surface_refresh.get("receipt_path"),
+                "publish_source_path": publish.get("publish_source_path") or surface_refresh.get("source_path") or "",
                 "blocker": publish_blocker,
             }
         )
     return operations
 
 
-def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
+def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
         if _session_business_slug():
-            raise TakyonError("trusted product surface verification is available only on the authority tool surface")
+            raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
         business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -7798,11 +8101,11 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
         publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
         requested_publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
         legacy_shared_renderer = _is_shared_renderer_publish_policy(requested_publish_policy)
-        publish_policy = "publish_after_verify" if legacy_shared_renderer else requested_publish_policy
+        publish_policy = "publish_after_refresh" if legacy_shared_renderer else requested_publish_policy
         install = _boolish(args.get("install"), default=True)
         timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=300, minimum=15, maximum=900)
         receipt_path = f"metrics/receipts/product-surface/{uuid.uuid4().hex}.json"
-        verification = _finalize_product_surface_verification(
+        surface_refresh = _finalize_product_surface_refresh(
             store=store,
             business=business,
             surface=surface,
@@ -7813,13 +8116,13 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
             install=install,
             timeout_seconds=timeout_seconds,
             receipt_path=receipt_path,
-            verification_source="business_verify_product_surface",
+            refresh_source="business_refresh_product_surface",
         )
         result = store.commit(
             scope=f"business:{business}",
-            operations=_product_surface_verification_operations(
+            operations=_product_surface_refresh_operations(
                 business=business,
-                verification=verification,
+                surface_refresh=surface_refresh,
                 surface=surface,
                 publish_target=publish_target,
                 publish_policy=publish_policy,
@@ -7830,7 +8133,7 @@ def handle_business_verify_product_surface(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "product surface publication",
             actor=args.get("actor") or "agent",
         )
-        return tool_result({"success": True, "business": business, "verification": verification, "result": result})
+        return tool_result({"success": True, "business": business, "surface_refresh": surface_refresh, "result": result})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -7901,18 +8204,47 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
             )
             test_mode = str(business_row.get("mode") or "live") == "test"
             now = _now()
-            user_id = uuid.uuid4().hex
-            conn.execute(
-                "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'free', ?, ?, ?) "
-                "ON CONFLICT(business_slug, email) DO UPDATE SET "
-                "name = COALESCE(excluded.name, app_users.name), "
-                "updated_at = excluded.updated_at",
-                (user_id, business, email, args.get("name"), _json_dumps({"source": "magic_link"}), now, now),
-            )
-            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
-            if str(user.get("status") or "active") != "active":
-                raise TakyonError("app user is not active")
-            token = _random_token()
+            link_id = ""
+            expires_at = ""
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                with store._leaf_conn(conn) as leaf:
+                    link_record, token = leaves["identity"].create_magic_link(
+                        leaf,
+                        business,
+                        email,
+                        purpose=str(args.get("purpose") or "login"),
+                        name=args.get("name"),
+                    )
+                    app_user = leaves["identity"].get_app_user(
+                        leaf,
+                        business,
+                        app_user_id=link_record.app_user_id,
+                    )
+                if app_user is None:
+                    raise TakyonError("app user is not active")
+                if str(app_user.status or "active") != "active":
+                    raise TakyonError("app user is not active")
+                user = {
+                    "id": app_user.id,
+                    "email": app_user.email,
+                    "status": app_user.status,
+                }
+                link_id = link_record.id
+                expires_at = str(link_record.expires_at)
+            else:
+                user_id = uuid.uuid4().hex
+                conn.execute(
+                    "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'free', ?, ?, ?) "
+                    "ON CONFLICT(business_slug, email) DO UPDATE SET "
+                    "name = COALESCE(excluded.name, app_users.name), "
+                    "updated_at = excluded.updated_at",
+                    (user_id, business, email, args.get("name"), _json_dumps({"source": "magic_link"}), now, now),
+                )
+                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
+                if str(user.get("status") or "active") != "active":
+                    raise TakyonError("app user is not active")
+                token = _random_token()
             link = f"{origin}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if origin else ""
             provider_message_id = None
             email_sent = False
@@ -7923,12 +8255,25 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                     product_name = str(args.get("product_name") or business)
                     provider_message_id = _postmark_magic_link(email, product_name, link or token)
                     email_sent = True
-            link_id = uuid.uuid4().hex
-            expires_at = _future(minutes=15)
-            conn.execute(
-                "INSERT INTO app_magic_links (id, business_slug, app_user_id, email, token_hash, purpose, expires_at, provider_message_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (link_id, business, user["id"], email, _hash_token(token), str(args.get("purpose") or "login"), expires_at, provider_message_id, _json_dumps({"app_slug": app_slug, "email_requested": send_email, "email_sent": email_sent, "external_side_effects": "suppressed" if test_mode and send_email else "none" if not send_email else "sent"}), now),
-            )
+            link_metadata = {
+                "app_slug": app_slug,
+                "email_requested": send_email,
+                "email_sent": email_sent,
+                "external_side_effects": "suppressed" if test_mode and send_email else "none" if not send_email else "sent",
+            }
+            if isinstance(conn, _PGConn):
+                with store._leaf_conn(conn) as leaf:
+                    leaf.execute(
+                        "update app_magic_links set provider_message_id = %s, metadata = %s::jsonb where business_slug = %s and id = %s",
+                        (provider_message_id, _json_dumps(link_metadata), business, link_id),
+                    )
+            else:
+                link_id = uuid.uuid4().hex
+                expires_at = _future(minutes=15)
+                conn.execute(
+                    "INSERT INTO app_magic_links (id, business_slug, app_user_id, email, token_hash, purpose, expires_at, provider_message_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (link_id, business, user["id"], email, _hash_token(token), str(args.get("purpose") or "login"), expires_at, provider_message_id, _json_dumps(link_metadata), now),
+                )
             if test_mode and send_email:
                 receipt_rel = f"metrics/receipts/app-magic-link/{link_id}.json"
                 _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
@@ -7961,38 +8306,80 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                 {"action": "app.customer.upsert", "business": business},
                 str(business_row.get("work_focus") or "all"),
             )
-            link = store._row_to_dict(conn.execute(
-                "SELECT * FROM app_magic_links WHERE business_slug = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
-                (business, _hash_token(token), _now()),
-            ).fetchone())
-            if not link:
-                raise TakyonError("magic link is invalid, expired, or already used")
-            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, link["app_user_id"])).fetchone())
-            if not user:
-                raise TakyonError("magic link user is missing")
-            if str(user.get("status") or "active") != "active":
-                raise TakyonError("app user is not active")
-            now = _now()
-            conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
-            existing_free = conn.execute(
-                "SELECT 1 FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? AND source = 'manual' AND tier = 'free' LIMIT 1",
-                (business, user["id"]),
-            ).fetchone()
-            if not existing_free:
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                with store._leaf_conn(conn) as leaf:
+                    session, session_token = leaves["identity"].verify_magic_link(leaf, business, token)
+                    user_record = leaves["identity"].get_app_user(
+                        leaf,
+                        business,
+                        app_user_id=session.app_user_id,
+                    )
+                    if user_record is None:
+                        raise TakyonError("magic link user is missing")
+                    existing_free = any(
+                        ent.source == "manual" and ent.tier == "free"
+                        for ent in leaves["entitlements"].list_entitlements(leaf, business, user_record.id)
+                    )
+                    if not existing_free:
+                        leaves["entitlements"].grant_entitlement(
+                            leaf,
+                            business,
+                            app_user_id=user_record.id,
+                            tier="free",
+                            status="active",
+                            source="manual",
+                            metadata={"source": "magic_link"},
+                        )
+                    refreshed = leaves["identity"].get_app_user(
+                        leaf,
+                        business,
+                        app_user_id=user_record.id,
+                    )
+                if refreshed is None:
+                    raise TakyonError("magic link user is missing")
+                user = {
+                    "id": refreshed.id,
+                    "email": refreshed.email,
+                    "status": refreshed.status,
+                }
+                tier = refreshed.tier
+                session_id = session.id
+                expires_at = str(session.expires_at)
+            else:
+                link = store._row_to_dict(conn.execute(
+                    "SELECT * FROM app_magic_links WHERE business_slug = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
+                    (business, _hash_token(token), _now()),
+                ).fetchone())
+                if not link:
+                    raise TakyonError("magic link is invalid, expired, or already used")
+                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, link["app_user_id"])).fetchone())
+                if not user:
+                    raise TakyonError("magic link user is missing")
+                if str(user.get("status") or "active") != "active":
+                    raise TakyonError("app user is not active")
+                now = _now()
+                conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
+                existing_free = conn.execute(
+                    "SELECT 1 FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? AND source = 'manual' AND tier = 'free' LIMIT 1",
+                    (business, user["id"]),
+                ).fetchone()
+                if not existing_free:
+                    conn.execute(
+                        "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'free', 'active', 'manual', ?, ?, ?)",
+                        (uuid.uuid4().hex, business, user["id"], _json_dumps({"source": "magic_link"}), now, now),
+                    )
+                session_token = _random_token()
+                session_id = uuid.uuid4().hex
                 conn.execute(
-                    "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'free', 'active', 'manual', ?, ?, ?)",
-                    (uuid.uuid4().hex, business, user["id"], _json_dumps({"source": "magic_link"}), now, now),
+                    "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, business, user["id"], _hash_token(session_token), _future(days=30), now),
                 )
-            session_token = _random_token()
-            session_id = uuid.uuid4().hex
-            conn.execute(
-                "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, business, user["id"], _hash_token(session_token), _future(days=30), now),
-            )
-            tier = store._sync_user_tier(conn, business, user["id"])
+                tier = store._sync_user_tier(conn, business, user["id"])
+                expires_at = _future(days=30)
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.verify", payload={"app_user_id": user["id"], "session_id": session_id})
             store._rewrite_app_files(conn, business)
-        return tool_result({"success": True, "business": business, "app_user_id": user["id"], "email": user["email"], "tier": tier, "session_id": session_id, "session_token": session_token, "expires_at": _future(days=30)})
+        return tool_result({"success": True, "business": business, "app_user_id": user["id"], "email": user["email"], "tier": tier, "session_id": session_id, "session_token": session_token, "expires_at": expires_at})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -8617,6 +9004,18 @@ def _reserve_operator_task_budget(
 ) -> dict[str, Any]:
     user_id = str(operator_user_id or "").strip()
     amount = max(0, int(estimate_cents or 0))
+    session_business = _session_business_slug()
+    if session_business and _slugify(business) == session_business:
+        # CEO/chat/worker turns already reserve operator budget at the enclosing session/job layer.
+        # Nested Claude Agent SDK tasks should spend inside that envelope instead of double-reserving
+        # and deadlocking the first-company bootstrap on a second budget gate.
+        return {
+            "source": "operator_billing",
+            "operator_user_id": user_id,
+            "reservation_key": "",
+            "reserved_cents": 0,
+            "status": "covered_by_session_budget",
+        }
     if not user_id or amount <= 0 or _db_backend() != "postgres":
         return {
             "source": "operator_billing",
@@ -10827,9 +11226,48 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
+    business = ""
+    workspace_rel = "."
+    instruction = ""
+    idempotency_key = ""
+    worker_instruction = ""
+    model = ""
+    resolved_guidance_skills: list[str] = []
     operator_user_id = ""
     operator_budget: dict[str, Any] = {}
     worker_invoked = False
+
+    def _record_worker_failure(error_text: str) -> dict[str, Any] | None:
+        if not business or not idempotency_key:
+            return None
+        try:
+            return store.commit(
+                scope=f"business:{business}",
+                operations=[
+                    {
+                        "action": "agent.record",
+                        "business": business,
+                        "scope": f"business:{business}/workspace:{workspace_rel}",
+                        "status": "failed",
+                        "prompt": worker_instruction or instruction,
+                        "result": {
+                            "source": "claude-agent-sdk",
+                            "workspace": workspace_rel,
+                            "model": model,
+                            "guidance_skills": resolved_guidance_skills,
+                            "summary": "",
+                            "error": error_text,
+                            "verification": None,
+                        },
+                    }
+                ],
+                idempotency_key=f"{idempotency_key}:claude-sdk-agent-record",
+                reason=args.get("reason") or "Claude Agent SDK task record",
+                actor=args.get("actor") or "agent",
+            )
+        except Exception:
+            return None
+
     try:
         business = _resolved_business_slug(args, required=True)
         worker_session_bound = bool(_session_business_slug())
@@ -10869,17 +11307,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if business_root not in (workspace_path, *workspace_path.parents):
             raise TakyonError("workspace escaped business root")
 
-        node = _resolve_runtime_executable("node")
-        if not node:
-            ensure_runtime = _ensure_javascript_runtime(package_manager=True)
-            node = _resolve_runtime_executable("node")
-        else:
-            ensure_runtime = {"success": True, "installed": False, "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun"))}
-        if not node:
-            raise TakyonError(
-                "javascript runtime unavailable for Claude Agent SDK tasks: "
-                f"{ensure_runtime.get('error') or 'node is missing'}"
-            )
         script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
         if not script.exists():
             raise TakyonError(f"Claude Agent SDK helper missing: {script}")
@@ -10890,9 +11317,22 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             raise TakyonError(
                 "Claude Agent SDK dependencies unavailable before worker launch: "
                 f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
-            )
+        )
 
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
+        docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
+        if not docker_isolated_worker:
+            node = _resolve_runtime_executable("node")
+            if not node:
+                ensure_runtime = _ensure_javascript_runtime(package_manager=True)
+                node = _resolve_runtime_executable("node")
+            else:
+                ensure_runtime = {"success": True, "installed": False, "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun"))}
+            if not node:
+                raise TakyonError(
+                    "javascript runtime unavailable for Claude Agent SDK tasks: "
+                    f"{ensure_runtime.get('error') or 'node is missing'}"
+                )
         budget_usd = _clamp_float(args.get("budget_usd"), default=2.0, minimum=0.05, maximum=25.0)
         operator_budget = _reserve_operator_task_budget(
             business=business,
@@ -10929,6 +11369,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
         resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
         workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_rel)
+        plans_configured = _app_summary_has_configured_plans(app) if _workspace_needs_runtime_ui_contract(workspace_rel) else False
+        if _workspace_needs_runtime_ui_contract(workspace_rel):
+            _materialize_subuser_app_kit(workspace_path, slug=business, surface=surface_for_worker)
         worker_instruction_parts = [instruction.rstrip()]
         if guidance_block:
             worker_instruction_parts.append(guidance_block)
@@ -10938,7 +11381,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
             if runtime_ui_contract:
                 worker_instruction_parts.append(runtime_ui_contract)
-        worker_instruction_parts.extend([workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
+            worker_instruction_parts.append(_subuser_app_worker_contract_block(surface_for_worker, plans_configured=plans_configured))
+            worker_instruction_parts.append(_subuser_app_kit_contract_block(surface_for_worker))
+        worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
         worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
         payload = {
             "business": business,
@@ -10951,18 +11396,26 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "maxTurns": max_turns,
             "timeoutMs": timeout_ms,
             "maxBudgetUsd": budget_usd,
+            "allowBash": bool(_workspace_needs_runtime_ui_contract(workspace_rel)),
         }
 
         worker_invoked = True
-        proc = subprocess.run(
-            [node, str(script)],
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            cwd=str(_repo_root()),
-            timeout=(timeout_ms / 1000.0) + 15,
-            env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
-        )
+        if docker_isolated_worker:
+            proc = _run_claude_agent_task_in_docker(
+                payload=payload,
+                workspace_path=workspace_path,
+                timeout_ms=timeout_ms,
+            )
+        else:
+            proc = subprocess.run(
+                [node, str(script)],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                cwd=str(_repo_root()),
+                timeout=(timeout_ms / 1000.0) + 15,
+                env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
+            )
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
         try:
@@ -10972,6 +11425,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if proc.returncode != 0:
             sdk_result.setdefault("success", False)
             sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+        if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+            sdk_result["blocked"] = True
         if sdk_result.get("success"):
             prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
             if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
@@ -10991,27 +11446,33 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "product source contains fake/demo auth, account, checkout, or integration state. "
                 "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
             )
+        if sdk_result.get("success"):
+            # Claude Agent SDK edits the isolated workspace tree directly, so persist those writes before
+            # any later refresh/publish/agent-record step can fail and let the scratch workspace be
+            # discarded. Without this sync, successful site work vanishes when the enclosing worker turn
+            # exits uncleanly.
+            store._sync_business_workspace_remote(business)
         operator_budget = _finalize_operator_task_budget(
             operator_user_id=operator_user_id,
             reservation_key=str(operator_budget.get("reservation_key") or ""),
             reserved_cents=int(operator_budget.get("reserved_cents") or 0),
             consume_reserved=worker_invoked,
         )
-        verification: dict[str, Any] | None = None
-        verify_surface = bool(args.get("verify_surface"))
-        if not worker_session_bound and not verify_surface:
+        surface_refresh: dict[str, Any] | None = None
+        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
+        if not worker_session_bound and not refresh_surface:
             normalized_workspace = workspace_rel.strip("/").lower()
-            verify_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
-        if sdk_result.get("success") and verify_surface:
+            refresh_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
+        if sdk_result.get("success") and refresh_surface:
             summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
             app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
             surface = app.get("surface") or app.get("surface_contract") or {}
             if not isinstance(surface, dict):
                 surface = {}
             requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-            publish_policy = "publish_after_verify" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
-            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-verification:{workspace_rel}".encode("utf-8")).hexdigest()[:32]
-            verification = _finalize_product_surface_verification(
+            publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-refresh:{workspace_rel}".encode("utf-8")).hexdigest()[:32]
+            surface_refresh = _finalize_product_surface_refresh(
                 store=store,
                 business=business,
                 surface=surface,
@@ -11021,24 +11482,26 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 publish_policy=publish_policy,
                 install=_boolish(args.get("install"), default=True),
                 timeout_seconds=_clamp_int(
-                    args.get("verification_timeout_seconds"),
+                    args.get("refresh_timeout_seconds"),
                     default=180 if customer_facing_product_workspace else 300,
                     minimum=15,
                     maximum=900,
                 ),
                 receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
-                verification_source="business_claude_agent_task",
+                refresh_source="business_claude_agent_task",
             )
         status = "completed" if sdk_result.get("success") else "failed"
-        if verification and verification.get("done_gate_status") != "passed":
+        if sdk_result.get("blocked"):
+            status = "blocked"
+        if surface_refresh and surface_refresh.get("blocker"):
             status = "blocked"
 
         record_operations: list[dict[str, Any]] = []
-        if verification:
+        if surface_refresh:
             record_operations.extend(
-                _product_surface_verification_operations(
+                _product_surface_refresh_operations(
                     business=business,
-                    verification=verification,
+                    surface_refresh=surface_refresh,
                     surface=surface,
                     publish_target=_product_publish_target(business, surface.get("publish_target")),
                     publish_policy=publish_policy,
@@ -11060,9 +11523,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "guidance_skills": resolved_guidance_skills,
                     "summary": sdk_result.get("summary") or "",
                     "error": sdk_result.get("error") or None,
+                    "blocked": bool(sdk_result.get("blocked")),
                     "pretend_product_findings": pretend_findings,
                     "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
-                    "verification": verification,
+                    "surface_refresh": surface_refresh,
                 },
             }
         )
@@ -11082,6 +11546,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "source": "claude-agent-sdk",
                 "model": model,
                 "guidance_skills": resolved_guidance_skills,
+                "blocked": bool(sdk_result.get("blocked")),
                 "budget": operator_budget,
                 "operator_budget": operator_budget,
                 "agent_record": agent_record,
@@ -11101,6 +11566,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             )
         except Exception:
             operator_budget = {}
+        _record_worker_failure(f"Claude Agent SDK task timed out: {exc}")
         return tool_error(f"Claude Agent SDK task timed out: {exc}", success=False)
     except Exception as exc:
         if operator_budget and operator_budget.get("reservation_key"):
@@ -11113,6 +11579,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 )
             except Exception:
                 pass
+        _record_worker_failure(str(exc))
         return tool_error(str(exc), success=False)
 
 
@@ -11336,11 +11803,15 @@ TAKYON_TOOL_DEFINITIONS = [
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, checkout, billing, usage, generate, or entitlements."},
+                "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
+                "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
+                "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
+                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unverified."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
                 "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
                 "done_gate": {"type": "string", "description": "Defaults to published, or exact blocker"},
                 "notes": {"type": "string"},
@@ -11353,17 +11824,17 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
-        "name": "business_verify_product_surface",
-        "description": "Publish a business product surface from real source files; missing source or publish blockers are reported as exact blockers.",
-        "handler": handle_business_verify_product_surface,
+        "name": "business_refresh_product_surface",
+        "description": "Refresh a business product surface from real source files, publish it, and write a receipt plus coarse inventory snapshot.",
+        "handler": handle_business_refresh_product_surface,
         "schema": _schema(
-            "business_verify_product_surface",
-            "Publish product surface source/build output to the shared slug host and write a receipt with nonfatal inventory evidence.",
+            "business_refresh_product_surface",
+            "Refresh product surface source/build output to the shared slug host and write a receipt with coarse inventory evidence.",
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_verify. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 300"},
                 "activate_on_success": {"type": "boolean", "description": "Update app surface status after publication; active only when publication succeeds; default true"},
@@ -11684,9 +12155,9 @@ TAKYON_TOOL_DEFINITIONS = [
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 8 for product/site work and 12 otherwise"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 180000 for product/site work and 300000 otherwise"},
-                "verify_surface": {"type": "boolean", "description": "Check product/website source after edits and write a receipt; product/* workspaces default to this source check"},
+                "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
-                "verification_timeout_seconds": {"type": "integer", "description": "Per source-check command timeout; default 180 for product/site work and 300 otherwise"},
+                "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 180 for product/site work and 300 otherwise"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

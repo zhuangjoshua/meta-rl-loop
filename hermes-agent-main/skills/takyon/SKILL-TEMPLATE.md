@@ -75,7 +75,7 @@ Use this skill for one bounded Takyon business method. Keep the intro short and 
 - Say which canonical business state or files must be read first, usually via `business_read_business`, `business_read_file`, or `business_list_files`.
 - If this skill changes real state, say which `business_*` tool makes that change real.
 - If this skill claims a durable change, require one last read-back of the exact file, artifact, or receipt before saying `done`, `wired`, `published`, or `completed`.
-- If this skill edits evidence that a cached projection summarizes, use the canonical `business_*` write/verify tools and let the core rails invalidate stale projections automatically; only call out extra handling when this skill introduces a new projection/evidence pair or bypasses canonical write tools.
+- If this skill edits evidence that a cached projection summarizes, use the canonical `business_*` write/commit tools and let the core rails rewrite the coarse surface files automatically; only call out extra handling when this skill introduces a new projection/evidence pair or bypasses canonical write tools.
 - Mention test/live only if it changes this skill's external-effect behavior.
 
 ## Procedure
@@ -86,7 +86,7 @@ Use this skill for one bounded Takyon business method. Keep the intro short and 
 4. If this skill changes canonical business or provider state, call an existing `business_*` tool or add a new one if none exists.
 5. If test mode changes the real side effect, leave a truthful local artifact, blocker, queued job, or receipt instead of a fake success claim.
 6. Before claiming success, re-read the exact durable file, artifact, or receipt you just changed and report from that read-back; if it does not match, say `attempted`, `blocked`, or `not verified` instead of `done`.
-7. Do not add skill-local freshness rules for cached status fields. If the work changes evidence behind a projection, rely on canonical write tools and receipts; only add new projection logic when the feature introduces a brand-new projection/evidence pair.
+7. Do not add skill-local freshness rules or verification choreography. If the work changes evidence behind a coarse surface file, rely on canonical write tools and receipts so the core rails rewrite that surface automatically; only add new projection logic when the feature introduces a brand-new projection/evidence pair.
 
 ## Output Format
 

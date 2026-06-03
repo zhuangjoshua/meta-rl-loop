@@ -186,9 +186,8 @@ def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40)
 
     candidates: set[Path] = set()
     exact_paths = {
-        "product/runtime.md",
         "product/surface.md",
-        "product/usage.md",
+        "distribution/surface.md",
         "research/index.md",
         "metrics/summary.md",
         "metrics/wake-history.md",

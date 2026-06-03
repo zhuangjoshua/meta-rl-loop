@@ -48,7 +48,7 @@ That routing metadata is the source of truth for the dynamic ownership summary i
 - Keep `metadata.hermes.routing` aligned with the body `## When to Use` section. If they disagree, fix the metadata in the same change.
 - If the skill only reads, drafts, or summarizes, it does not need a new tool.
 - If the skill changes canonical business or provider state, it must call an existing `business_*` tool or add a new one if none exists.
-- If the skill changes evidence behind a cached projection, the normal path is still "use the canonical write/verify tools and receipts." Future skills only need extra reconciliation logic when they introduce a new projection/evidence pair or bypass canonical write tools.
+- If the skill changes evidence behind a cached projection, the normal path is still "use the canonical write/commit tools and receipts, and let the core rails rewrite the coarse surface file." Future skills only need extra reconciliation logic when they introduce a new projection/evidence pair or bypass canonical write tools.
 - Only mention test mode when business mode changes a real external side effect.
 - Keep the durable outputs in the canonical business roots and prove success with a file, tool result, or receipt.
 

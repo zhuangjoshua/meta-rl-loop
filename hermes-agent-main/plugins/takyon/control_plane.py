@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 
 from . import safebox
-from .billing import open_billing_account
+from .billing import grant_allowance, open_billing_account
 from .custody import open_custody_account
 from .user_api_keys import (
     generate_api_key,
@@ -52,6 +52,55 @@ def _business_slugs_for_user(conn, user_id: str) -> tuple[str, ...]:
 
 def _user_api_key_mirror_hash(key_id: str) -> str:
     return f"safebox:{key_id}"
+
+
+def _starter_allowance_cents() -> int:
+    raw = str(os.environ.get("TAKYON_STARTER_ALLOWANCE_CENTS") or "").strip()
+    if not raw:
+        return 100
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 100
+
+
+def _ensure_starter_allowance(conn, user_id: str) -> int:
+    """Grant the landing-page starter allowance once to an otherwise-empty account.
+
+    This keeps "your first company is on the house" honest for both fresh Auth0
+    users and the local platform owner, without resetting any account that has
+    already received allowance, topups, or spend.
+    """
+    included_cents = _starter_allowance_cents()
+    if included_cents <= 0:
+        return 0
+    with conn.transaction():
+        acct = conn.execute(
+            "select allowance_included_cents, allowance_used_cents, topup_balance_cents "
+            "from billing_accounts where user_id = %s for update",
+            (user_id,),
+        ).fetchone()
+        if acct is None:
+            raise RuntimeError(f"billing account missing for user {user_id}")
+        included = int(acct[0] or 0)
+        used = int(acct[1] or 0)
+        topup = int(acct[2] or 0)
+        if included > 0 or used > 0 or topup > 0:
+            return included
+        existing_entry = conn.execute(
+            "select 1 from billing_entries where user_id = %s limit 1",
+            (user_id,),
+        ).fetchone()
+        if existing_entry is not None:
+            return included
+    return int(
+        grant_allowance(
+            conn,
+            user_id,
+            included_cents,
+            f"starter-allowance:{user_id}",
+        )
+    )
 
 
 def _mint_api_key_record(conn, user_id: str) -> tuple[str, str]:
@@ -127,6 +176,7 @@ def provision_user_on_first_login(
         if minted_key_id:
             safebox.delete_user_api_key(minted_key_id)
         raise
+    _ensure_starter_allowance(conn, user_id)
     return user_id, created, raw
 
 

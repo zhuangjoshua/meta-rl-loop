@@ -13,12 +13,15 @@ psycopg = pytest.importorskip("psycopg")
 from psycopg import errors as pg_errors  # noqa: E402
 
 from plugins.takyon import safebox  # noqa: E402
+from plugins.takyon.billing import get_billing_balances, open_billing_account  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
     get_or_create_user,
     mint_api_key,
+    provision_user_on_first_login,
     resolve_api_key,
     rotate_api_key,
 )
+from plugins.takyon.custody import open_custody_account  # noqa: E402
 from plugins.takyon.user_api_keys import generate_api_key, is_well_formed  # noqa: E402
 
 
@@ -33,6 +36,33 @@ def test_jit_provision_is_idempotent(pg_conn):
     assert created1 is True
     assert created2 is False
     assert uid1 == uid2
+
+
+def test_provision_grants_starter_allowance_to_existing_empty_account(pg_conn, monkeypatch):
+    sub = _sub()
+    monkeypatch.setenv("TAKYON_STARTER_ALLOWANCE_CENTS", "250")
+    uid, _ = get_or_create_user(pg_conn, sub, "starter@example.com")
+    mint_api_key(pg_conn, uid)
+    open_billing_account(pg_conn, uid)
+    open_custody_account(pg_conn, uid)
+
+    resolved_uid, created, raw_key = provision_user_on_first_login(
+        pg_conn,
+        sub,
+        "starter@example.com",
+    )
+
+    balances = get_billing_balances(pg_conn, uid)
+    grants = pg_conn.execute(
+        "select count(*) from billing_entries where user_id = %s and bucket = 'allowance' and kind = 'grant'",
+        (uid,),
+    ).fetchone()[0]
+    assert resolved_uid == uid
+    assert created is False
+    assert raw_key is None
+    assert balances.allowance_included_cents == 250
+    assert balances.allowance_remaining_cents == 250
+    assert grants == 1
 
 
 def test_mint_then_resolve_round_trip(pg_conn):

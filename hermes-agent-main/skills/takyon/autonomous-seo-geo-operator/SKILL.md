@@ -29,7 +29,7 @@ metadata:
         business_write_file,
         business_patch_file,
         business_claude_agent_task,
-        business_verify_product_surface,
+        business_refresh_product_surface,
       ]
     routing:
       owns: >-
@@ -107,7 +107,7 @@ clarity) sit on top.
 - **Publication paths:** `product/site/`, `metrics/seo/seo-geo-report-<YYYY-MM-DD>.md`
 - **Default data source:** the repo itself (always available). External SEO data is optional.
 - **Budget per run:** 1-5 meaningful changes. Keep the diff reviewable.
-- **Tool names used by this skill:** `business_read_business`, `business_read_file`, `business_list_files`, `business_write_file`, `business_patch_file`, `business_claude_agent_task`, `business_verify_product_surface`
+- **Tool names used by this skill:** `business_read_business`, `business_read_file`, `business_list_files`, `business_write_file`, `business_patch_file`, `business_claude_agent_task`, `business_refresh_product_surface`
 - **Bundled scripts** (zero deps, read-only, run against the target repo):
   - `scripts/extract-routes.ts` — detect framework + enumerate routes
   - `scripts/check-metadata.ts` — title/meta/H1/canonical/OG/schema/thinness lint
@@ -226,8 +226,8 @@ The common path:
    they surface.
 8. Write the report from `templates/seo-report.md` to
    `metrics/seo/seo-geo-report-<YYYY-MM-DD>.md`.
-9. If the operator asked for surface verification or publication, call
-   `business_verify_product_surface`. If the operator also explicitly wants git review,
+9. If the operator asked for surface publication or refresh, call
+   `business_refresh_product_surface`. If the operator also explicitly wants git review,
    a branch/PR can be prepared as an additional workflow, never as the source of truth.
 
 ## Procedure
@@ -335,7 +335,7 @@ optionality, not a promised ranking lever).
 
 Run the Quality Gates. Then write the report from `templates/seo-report.md` to
 `metrics/seo/seo-geo-report-<YYYY-MM-DD>.md`. If the changed source should be checked
-for honest publication state, call `business_verify_product_surface` and record any
+for honest publication state, call `business_refresh_product_surface` and record any
 blocker truthfully in the report or `product/surface.md`. Never claim a deploy,
 ranking win, merge, or publication state without receipts or evidence.
 
@@ -439,7 +439,7 @@ and secondary.
 - Publish the visibility report to `metrics/seo/seo-geo-report-<YYYY-MM-DD>.md`.
 - Publish any site edits under the canonical product source path, usually `product/site/`.
 - If a changed source surface needs verification or honest publication state, call
-  `business_verify_product_surface` and reflect the result or blocker truthfully.
+  `business_refresh_product_surface` and reflect the result or blocker truthfully.
 - If the operator explicitly asks for git review, a branch/PR may be created as a
   review artifact. It is never the canonical Takyon publication record.
 - Never claim deploy state, merged state, or ranking improvement without evidence.
@@ -453,7 +453,7 @@ and secondary.
   (≤5 changes.)
 - **"Optimize this site for AI search."** → ensure server-rendered content/schema →
   rewrite top pages answer-first with definitions + FAQ + question headings →
-  add/refresh llms.txt → entity schema with `sameAs` → report + verify if needed.
+  add/refresh llms.txt → entity schema with `sameAs` → report + refresh if needed.
   Label AI-visibility claims as probabilistic.
 - **"Find and fix simple SEO issues."** → run the three scripts → fix missing
   titles/meta/H1, a bad canonical, a broken internal link, and an absent sitemap

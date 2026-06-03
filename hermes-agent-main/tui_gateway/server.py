@@ -4058,7 +4058,8 @@ def _run_prompt_submit(
                 raw = str(result)
                 status = "complete"
 
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            usage_payload = worker_usage if isinstance(worker_usage, dict) else _get_usage(agent)
+            payload = {"text": raw, "usage": usage_payload, "status": status}
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
             if status_note:
@@ -4231,7 +4232,7 @@ def _run_prompt_submit(
                 int(
                     round(
                         (
-                            float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+                            float(turn_cost_after_usd or 0.0)
                             - float(turn_cost_before_usd or 0.0)
                         )
                         * 100
@@ -5774,21 +5775,7 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
     surface = as_dict(app.get("surface_contract") or app.get("surface"))
     product_surface_evidence = as_dict(app.get("product_surface"))
     product_inventory = as_dict(app.get("product_inventory"))
-    metadata = as_dict(surface.get("metadata"))
-    validation = as_dict(metadata.get("takyon_surface_validation"))
-    verification = as_dict(validation.get("latest_verification"))
     source_path = brief_text(surface.get("source_path"))
-
-    if not verification:
-        for event in as_list(summary.get("events")):
-            event_dict = as_dict(event)
-            if event_dict.get("event_type") != "product.surface.verify":
-                continue
-            payload = as_dict(event_dict.get("payload"))
-            if source_path and payload.get("source_path") != source_path:
-                continue
-            verification = {**payload, "event_created_at": event_dict.get("created_at")}
-            break
 
     try:
         pulse = as_dict(store.calculate_pulse(slug, limit=5))
@@ -5932,19 +5919,19 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             workspace = brief_text(result.get("workspace"))
             summary_text = brief_text(result.get("summary"))
             error_text = brief_text(result.get("error"))
-            verification = as_dict(result.get("verification"))
+            surface_refresh = as_dict(result.get("surface_refresh"))
             detail_parts = []
             if completed:
                 detail_parts.append(f"{completed} completed")
             if blockers:
                 detail_parts.append(f"{blockers} blocker{'s' if blockers != 1 else ''}")
-            if verification:
-                verify_status = brief_text(verification.get("status"))
-                verify_path = brief_text(verification.get("receipt_path"))
-                if verify_status:
-                    detail_parts.append(f"verification {verify_status}")
-                if verify_path:
-                    detail_parts.append(verify_path)
+            if surface_refresh:
+                refresh_status = brief_text(surface_refresh.get("status"))
+                refresh_path = brief_text(surface_refresh.get("receipt_path"))
+                if refresh_status:
+                    detail_parts.append(f"surface refresh {refresh_status}")
+                if refresh_path:
+                    detail_parts.append(refresh_path)
             agent_runs.append(
                 {
                     "id": brief_text(run.get("id")),
@@ -6036,8 +6023,8 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
                 label = "Tool started"
             elif label == "CEO live trace" and "tool completed ->" in lower_detail:
                 label = "Tool completed"
-            elif label == "CEO live trace" and lower_detail.startswith("product verification"):
-                label = "Product verification"
+            elif label == "CEO live trace" and lower_detail.startswith("product surface refresh"):
+                label = "Product surface refresh"
             runtime_events.append(
                 {
                     "id": event_id,
@@ -6356,14 +6343,14 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             "publish_receipt_path": brief_text(surface.get("publish_receipt_path")),
             "publish_blocker": brief_text(surface.get("publish_blocker")),
             "routes_count": len(routes),
-            "verification_status": brief_text(validation.get("status") or verification.get("status")),
-            "verification_receipt": brief_text(validation.get("receipt") or verification.get("receipt_path")),
+            "surface_status": brief_text(surface.get("status") or product_surface_evidence.get("surface_status") or "missing"),
+            "surface_receipt": brief_text(surface.get("publish_receipt_path") or product_surface_evidence.get("latest_receipt_path")),
             "inventory_status": brief_text(product_inventory.get("status")),
             "risk_marker_count": len(as_list(product_inventory.get("risk_markers"))),
             "claim_snippet_count": len(as_list(product_inventory.get("claim_snippets"))),
             "pretend_finding_count": len(as_list(product_inventory.get("pretend_findings"))),
             "local_continuable_work": as_list(product_surface_evidence.get("local_continuable_work"))[:8],
-            "filesystem_index": brief_text(app.get("filesystem_index") or "app/index.md"),
+            "filesystem_index": brief_text(app.get("filesystem_index") or "product/surface.md"),
             "notes": brief_text(surface.get("notes")),
         },
         "metrics": {
@@ -6555,9 +6542,8 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
 
     candidates: set[Path] = set()
     exact_paths = {
-        "product/runtime.md",
         "product/surface.md",
-        "product/usage.md",
+        "distribution/surface.md",
         "research/index.md",
         "metrics/summary.md",
         "metrics/wake-history.md",
@@ -6798,6 +6784,72 @@ def _takyon_get_background_run(business: str) -> dict[str, Any] | None:
         return dict(run)
 
 
+def _takyon_reconcile_background_run(
+    business: str,
+    run: dict[str, Any] | None,
+    overview: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    def _parse_ts(value: Any) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    def _job_matches(candidate: dict[str, Any], expected_kind: str, expected_job_id: str) -> bool:
+        if expected_job_id and str(candidate.get("id") or "").strip() == expected_job_id:
+            return True
+        candidate_kind = str(candidate.get("kind") or "").strip().lower()
+        if expected_kind == "create":
+            return candidate_kind == "ceo_bootstrap"
+        if expected_kind == "wake":
+            return candidate_kind == "ceo_wake"
+        return False
+
+    current = dict(run) if isinstance(run, dict) else None
+    jobs = (overview or {}).get("jobs") if isinstance(overview, dict) else None
+    if not isinstance(jobs, list) or not jobs:
+        return current
+
+    current_kind = str((current or {}).get("kind") or "").strip().lower()
+    current_job_id = str((current or {}).get("job_id") or "").strip()
+    matched: dict[str, Any] | None = None
+    matched_ts = 0.0
+    for item in jobs:
+        if not isinstance(item, dict):
+            continue
+        if current and not _job_matches(item, current_kind, current_job_id):
+            continue
+        item_ts = _parse_ts(item.get("updated_at") or item.get("created_at"))
+        if matched is None or item_ts >= matched_ts:
+            matched = item
+            matched_ts = item_ts
+
+    if matched is None:
+        return current
+
+    job_status = str(matched.get("status") or "").strip().lower()
+    if not job_status:
+        return current
+
+    matched_kind = str(matched.get("kind") or "").strip().lower()
+    reconciled = current or {
+        "kind": "create" if matched_kind == "ceo_bootstrap" else matched_kind,
+        "business": str(business or "").strip(),
+        "started_at": matched_ts or time.time(),
+    }
+    reconciled["job_id"] = str(matched.get("id") or reconciled.get("job_id") or "").strip()
+    reconciled["status"] = job_status
+    detail = str(matched.get("detail") or "").strip()
+    if detail:
+        reconciled["detail"] = detail
+    if job_status in {"blocked", "failed", "completed"} and matched_ts:
+        reconciled["finished_at"] = matched_ts
+    return reconciled
+
+
 def _takyon_operator_user_id(session: dict | None) -> str:
     return str((session or {}).get("takyon_operator_user_id") or "").strip()
 
@@ -6938,12 +6990,17 @@ def _takyon_workspace_payload(
         slug,
         limit=max(1, min(int(output_limit or 50), 100)),
     )
+    background_run = _takyon_reconcile_background_run(
+        slug,
+        _takyon_get_background_run(slug),
+        overview if isinstance(overview, dict) else {},
+    )
     return {
         "business_slug": slug,
         "current": current,
         "overview": overview if isinstance(overview, dict) else {},
         "outputs": outputs if isinstance(outputs, list) else [],
-        "background_run": _takyon_get_background_run(slug),
+        "background_run": background_run,
     }
 
 

@@ -47,7 +47,7 @@ def _seed_workspace(root: Path) -> None:
     (root / "research").mkdir(parents=True, exist_ok=True)
     (root / "research" / "strategy.md").write_text("# Acme\nGoal: win the market\n")
     (root / "product").mkdir(parents=True, exist_ok=True)
-    (root / "product" / "runtime.md").write_text("Rails By Owner\n")
+    (root / "product" / "surface.md").write_text("# App Surface Contract\n\n- Status: draft\n")
     (root / "metrics" / "receipts").mkdir(parents=True, exist_ok=True)
     (root / "metrics" / "receipts" / "r1.json").write_bytes(b"\x00\x01\x02 binary receipt")
 
@@ -177,15 +177,15 @@ def test_delete_remote_mirrors_local_deletions(tmp_path):
     storage.sync_up(backend, "biz-x", src)
 
     # Delete a file locally, then sync up WITH mirror deletion.
-    (src / "product" / "runtime.md").unlink()
+    (src / "product" / "surface.md").unlink()
     report = storage.sync_up(backend, "biz-x", src, delete_remote=True)
-    assert report.deleted == ("product/runtime.md",)
+    assert report.deleted == ("product/surface.md",)
 
     # A fresh resume no longer has the deleted file.
     dest = tmp_path / "dest"
     dest.mkdir()
     storage.sync_down(backend, "biz-x", dest)
-    assert "product/runtime.md" not in _tree(dest)
+    assert "product/surface.md" not in _tree(dest)
     assert "research/strategy.md" in _tree(dest)
 
 
@@ -195,10 +195,10 @@ def test_additive_sync_up_default_does_not_delete(tmp_path):
     src = tmp_path / "src"
     _seed_workspace(src)
     storage.sync_up(backend, "biz-x", src)
-    (src / "product" / "runtime.md").unlink()
+    (src / "product" / "surface.md").unlink()
     report = storage.sync_up(backend, "biz-x", src)  # default: additive
     assert report.deleted == ()
-    assert backend.get("biz-x/product/runtime.md") == b"Rails By Owner\n"  # still there
+    assert backend.get("biz-x/product/surface.md") == b"# App Surface Contract\n\n- Status: draft\n"  # still there
 
 
 # ── path containment ───────────────────────────────────────────────────────────────────────────

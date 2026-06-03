@@ -34,6 +34,11 @@ function normalizeRelative(value) {
     .replace(/\/+$/, "");
 }
 
+function sandboxedBashCommand(command) {
+  const script = String(command || "");
+  return `env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home bash -lc ${JSON.stringify(script)}`;
+}
+
 function rewriteWorkspacePrefixedPaths(input, workspace) {
   if (!input || typeof input !== "object") return input;
   const workspacePrefix = normalizeRelative(workspace);
@@ -78,15 +83,23 @@ function redact(text) {
 }
 
 function buildPrompt(input) {
+  const normalizedWorkspace = normalizeRelative(input.workspace || ".");
+  const bashRule = input.allowBash
+    ? "You may use Bash only for local build/test/install/cleanup inside the current workspace. Do not use it for provider calls, deployment, posting, payment changes, or filesystem access outside this workspace."
+    : "Do not attempt shell commands, network calls, vendor side effects, credential reads, deployment, posting, payment changes, or filesystem access outside this workspace.";
+  const noteRule = normalizedWorkspace === "product/site" || normalizedWorkspace.startsWith("product/site/")
+    ? "For product/site work, reflect durable truth in the source itself and your final summary. Do not create helper markdown, request files, verification notes, or scratch docs unless the instruction explicitly asks for them."
+    : "If durable business truth changes, write a concise note into an appropriate file in this workspace or a child path.";
   return [
     "You are a Claude Agent SDK worker called by Takyon for one bounded business-scoped task.",
     "",
-    "You may inspect and edit files only inside the provided current workspace. Do not attempt shell commands, network calls, vendor side effects, credential reads, deployment, posting, payment changes, or filesystem access outside this workspace.",
+    `You may inspect and edit files only inside the provided current workspace. ${bashRule}`,
     "The provided current workspace is already your working directory. Write paths relative to it; do not prefix paths with the workspace name again.",
     "",
-    "Make the smallest useful changes that satisfy the task. Preserve existing business files unless the instruction asks to update them. If durable business truth changes, write a concise note into an appropriate file in this workspace or a child path.",
+    `Make the smallest useful changes that satisfy the task. Preserve existing business files unless the instruction asks to update them. ${noteRule}`,
     "",
-    "Do not claim external execution happened. If the task needs a vendor/API/payment/deploy/posting action, write the request/spec/receipt expectation as a file for Takyon to review rather than pretending it ran.",
+    "Do not claim external execution happened. If the task needs a vendor/API/payment/deploy/posting action you cannot perform, report the blocker in the final summary instead of pretending it ran.",
+    "Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.",
     "",
     `Business: ${input.business}`,
     `Workspace: ${input.workspace || "."}`,
@@ -117,6 +130,7 @@ async function main() {
   const maxBudgetUsd = Number.parseFloat(String(input.maxBudgetUsd || "")) || 2;
   const model = String(input.model || process.env.TAKYON_CLAUDE_AGENT_MODEL || "claude-sonnet-4-6").trim();
   const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
+  const allowBash = Boolean(input.allowBash);
 
   let timeout = null;
   let text = "";
@@ -136,19 +150,30 @@ async function main() {
             model,
             thinking: { type: "adaptive", display: "omitted" },
             effort: ["low", "medium", "high"].includes(effort) ? effort : "high",
-            tools: ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob"],
-            disallowedTools: ["Bash"],
+            tools: allowBash
+              ? ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "Bash"]
+              : ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob"],
+            disallowedTools: allowBash ? [] : ["Bash"],
             permissionMode: "acceptEdits",
             persistSession: false,
             maxTurns,
             maxBudgetUsd,
             canUseTool: async (toolName, toolInput, options) => {
               if (toolName === "Bash") {
-                return {
-                  behavior: "deny",
-                  message: "Bash is disabled for Takyon Claude SDK business tasks.",
-                  toolUseID: options.toolUseID
-                };
+                if (!allowBash) {
+                  return {
+                    behavior: "deny",
+                    message: "Bash is disabled for Takyon Claude SDK business tasks.",
+                    toolUseID: options.toolUseID
+                  };
+                }
+                const updatedInput = { ...(toolInput || {}) };
+                if (typeof updatedInput.command === "string") {
+                  updatedInput.command = sandboxedBashCommand(updatedInput.command);
+                } else if (typeof updatedInput.cmd === "string") {
+                  updatedInput.cmd = sandboxedBashCommand(updatedInput.cmd);
+                }
+                return { behavior: "allow", updatedInput, toolUseID: options.toolUseID };
               }
               const updatedInput = rewriteWorkspacePrefixedPaths(toolInput, input.workspace || ".");
               const outside = pathValues(updatedInput).find((value) => !isSubpath(root, path.resolve(cwd, value)));

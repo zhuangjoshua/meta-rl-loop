@@ -103,8 +103,8 @@ interface BusinessOverviewProduct {
   publish_receipt_path?: string;
   publish_blocker?: string;
   routes_count?: number;
-  verification_status?: string;
-  verification_receipt?: string;
+  surface_status?: string;
+  surface_receipt?: string;
   inventory_status?: string;
   risk_marker_count?: number;
   claim_snippet_count?: number;

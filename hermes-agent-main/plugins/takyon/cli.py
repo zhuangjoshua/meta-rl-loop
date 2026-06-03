@@ -552,13 +552,13 @@ def _format_operation_result(item: Any) -> str:
     if action == "app.plan.upsert" and business:
         plan = str(item.get("plan_key") or "")
         suffix = f" ({plan})" if plan else ""
-        return f"product plans{suffix} -> {_business_artifact_path(business, 'product/plans.md')}"
+        return f"app plan policy updated for business:{business}{suffix}"
     if action == "app.budget.set" and business:
-        return f"product usage budget -> {_business_artifact_path(business, 'product/usage.md')}"
+        return f"app usage budget updated for business:{business}"
     if action in {"app.customer.upsert", "app.entitlement.upsert"} and business:
-        return f"product customers/entitlements -> {_business_artifact_path(business, 'product/customers.md')}"
+        return f"app customer/entitlement state updated for business:{business}"
     if action == "app.usage.record" and business:
-        return f"product usage -> {_business_artifact_path(business, 'product/usage.md')}"
+        return f"app usage recorded for business:{business}"
     if action in {"conversation.thread.upsert", "conversation.message.record"} and business:
         path = str(item.get("file") or "")
         where = f" -> {_business_artifact_path(business, path)}" if path else ""
@@ -926,8 +926,9 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "evidence explicitly calls for a validation/offer-page-first landing.",
         "For software businesses, product work is not meaningfully complete until product/site/ exists with real source and",
         "product/surface.md records that source_path truthfully.",
-        "Once product/site/ exists with real source, complete the same-turn build plus business_verify_product_surface",
-        "before drifting into later auth, customer, or runtime follow-on work. Treat the first honest public surface as the",
+        "Once product/site/ exists with real source, let the delegated product worker finish that first surface in one pass.",
+        "Do not default to CEO source inspection, local hand-patching, or a second worker pass in the same bootstrap turn.",
+        "Only follow with business_refresh_product_surface once the delegated source pass is done. Treat the first honest public surface as the",
         "primary completion threshold for an initial publish request.",
         "After that surface is live, record the next opening distribution move under distribution/campaign/.",
         "Only run immediate business_publish_outreach touches in the same bootstrap turn when the operator explicitly asked for launch/distribution,",
@@ -936,14 +937,13 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "If the operator's immediate ask was the first site/app publish and that surface is already live, report that result immediately,",
         "record the next distribution or runtime move, and let the rest continue in later CEO work instead of stretching the create turn.",
         "Treat later auth, account, generate, checkout, billing, and usage wiring as later product work, not as the first public surface.",
-        "Do not expand product/runtime.md, product/plans.md, product/customers.md, product/billing.md, or",
-        "product/usage.md ahead of that unless the operator explicitly asked for runtime-first work or the current evidence",
-        "shows that runtime wiring is the highest-impact move before more source work.",
+        "Do not create extra runtime notes or mirror markdown ahead of that unless the operator explicitly asked for",
+        "runtime-first work or the current evidence shows that runtime wiring is the highest-impact move before more source work.",
         "Skip product/source/publication only when current evidence, safety, scope, budget, credentials, or runtime gates make",
         "building the wrong move; record that exact reason as a blocker or research hypothesis.",
         "Use product offer/spec/design/pricing, app plans/surface/budget, website build/publication, chosen distribution files,",
         "guarded jobs or hidden suppressed audit receipts, and the next CEO wake when they are the justified move.",
-        "For a first site/app publish request, one verified surface plus the next recorded move is enough to complete the initial turn;",
+        "For a first site/app publish request, one refreshed surface plus the next recorded move is enough to complete the initial turn;",
         "do not force a full research-plus-distribution stack into the same create-time run.",
         "If a distribution campaign already exists, continue it instead of restarting it. If a public URL is blocked, record the exact",
         "product blocker, keep the source surface honest, and record the next distribution or runtime move instead of padding the turn with a campaign batch.",
@@ -1607,7 +1607,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         business = str(data.get("business") or args.get("business") or "").strip()
         lines = []
         if business:
-            lines.append(f"checkout intent -> {_business_artifact_path(business, 'product/billing.md')}")
+            lines.append(f"checkout intent created for business:{business}")
             if str(data.get("external_side_effects") or "") == "suppressed":
                 checkout_id = str(data.get("checkout_intent_id") or "")
                 if checkout_id:
@@ -1619,22 +1619,22 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
         lines = []
         if business:
             lines.append(f"agent workspace -> {_business_artifact_path(business, workspace)}")
-            verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
-            if verification:
-                status = verification.get("status") or "unverified"
-                receipt = verification.get("receipt_path") or ""
+            surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}
+            if surface_refresh:
+                status = surface_refresh.get("status") or "unrefreshed"
+                receipt = surface_refresh.get("receipt_path") or ""
                 suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
                 lines.append(f"product publish check {status}{suffix}")
             agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
             for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
                 lines.append(line)
         return lines
-    if not results and str(name or "") == "business_verify_product_surface":
+    if not results and str(name or "") == "business_refresh_product_surface":
         business = str(data.get("business") or args.get("business") or "").strip()
-        verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
-        if business and verification:
-            status = verification.get("status") or "unverified"
-            receipt = verification.get("receipt_path") or ""
+        surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}
+        if business and surface_refresh:
+            status = surface_refresh.get("status") or "unrefreshed"
+            receipt = surface_refresh.get("receipt_path") or ""
             suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
             return [f"product publish check {status}{suffix}"]
     lines: list[str] = []
@@ -1677,16 +1677,16 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
             if business:
                 plan = str(item.get("plan_key") or "")
                 suffix = f" ({plan})" if plan else ""
-                lines.append(f"product plans{suffix} -> {_business_artifact_path(business, 'product/plans.md')}")
+                lines.append(f"app plan policy updated for business:{business}{suffix}")
         elif action == "app.budget.set":
             if business:
-                lines.append(f"product usage budget -> {_business_artifact_path(business, 'product/usage.md')}")
+                lines.append(f"app usage budget updated for business:{business}")
         elif action in {"app.customer.upsert", "app.entitlement.upsert"}:
             if business:
-                lines.append(f"product customers/entitlements -> {_business_artifact_path(business, 'product/customers.md')}")
+                lines.append(f"app customer/entitlement state updated for business:{business}")
         elif action == "app.usage.record":
             if business:
-                lines.append(f"product usage -> {_business_artifact_path(business, 'product/usage.md')}")
+                lines.append(f"app usage recorded for business:{business}")
         elif action in {"conversation.thread.upsert", "conversation.message.record"}:
             path = str(item.get("file") or "")
             if business and path:

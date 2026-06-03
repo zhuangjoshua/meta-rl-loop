@@ -206,6 +206,14 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .board-star-k{font:700 9.5px 'Space Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--red)}
 .board-star-v{font-family:'Anton',Impact,sans-serif,sans-serif;font-size:clamp(30px,3.4vw,40px);line-height:.9;text-transform:uppercase;color:var(--ink)}
 .board-star-note{font-size:11px;color:var(--ink-2);line-height:1.45}
+.board-tabs{display:flex;gap:6px}
+.board-tab{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;align-items:flex-start;text-align:left;padding:7px 9px;border:1.5px solid rgba(0,0,0,.22);background:transparent;cursor:pointer;transition:border-color .12s,box-shadow .07s,background .12s}
+.board-tab:hover{border-color:var(--ink)}
+.board-tab:active{transform:translate(1px,1px)}
+.board-tab.on{background:var(--amber);border-color:var(--ink);box-shadow:2px 2px 0 var(--ink)}
+.board-tab-k{font:700 8px 'Space Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.board-tab.on .board-tab-k{color:var(--ink)}
+.board-tab-v{font:700 13px 'Space Mono',monospace;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .board-bars{display:flex;gap:8px;align-items:flex-end;min-height:118px}
 .board-bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
 .board-bar-v{font:700 10px 'Space Mono',monospace;letter-spacing:.04em}
@@ -214,11 +222,11 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .board-bar-l{font:700 8.5px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;text-align:center;line-height:1.25}
 .board-bar-l small{display:block;font-weight:400;color:var(--muted);letter-spacing:.04em}
 .board-cols{flex:1;min-height:0;min-width:0}
-.col{flex:0 0 120px;display:flex;flex-direction:column;height:100%}
+.col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;height:100%}
 .col-h{font:700 9.5px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;padding-bottom:6px;margin-bottom:7px;border-bottom:3px solid var(--ink);display:flex;justify-content:space-between;align-items:center}
 .col-h .ct{background:var(--ink);color:var(--paper);border-radius:9px;padding:0 6px;font-size:9px;line-height:15px}
 .col-list{overflow:auto;flex:1;padding-right:2px}
-.card{background:#fff;border:2px solid var(--ink);border-left-width:5px;box-shadow:3px 3px 0 var(--ink);padding:7px 8px;margin-bottom:8px;cursor:pointer}
+.card{background:#fff;border:2px solid var(--ink);border-left-width:5px;box-shadow:3px 3px 0 var(--ink);padding:6px 7px;margin-bottom:6px;cursor:pointer}
 .card:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--ink)}
 .card:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .card .ct{font-weight:700;font-size:11.5px;line-height:1.22}
@@ -231,6 +239,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 
 /* product mini-browser */
 .mini{border:2px solid var(--ink);background:#fff;height:100%;display:flex;flex-direction:column}
+.mini__frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
 .mini__bar{display:flex;align-items:center;gap:5px;background:var(--ink);padding:5px 7px;flex:0 0 auto}
 .mini__bar i{width:8px;height:8px;border-radius:50%;background:var(--paper);opacity:.7}
 .mini__bar span{margin-left:8px;color:var(--paper);font-size:10px;letter-spacing:.05em;opacity:.85}
@@ -788,23 +797,24 @@ const MAINW=['w-board','w-graph','w-ceo','w-product','w-status'];
 function geo(){
   const W=desk.clientWidth>60?desk.clientWidth:1024, H=desk.clientHeight>60?desk.clientHeight:640;
   const g=12, BAR=32;
-  const Rw=Math.max(248,Math.min(372,Math.round(W*0.33)));
-  const Rx=W-Rw-g, Lx=g, Lw=Math.max(320,Rx-2*g);
-  const Hh=H-2*g;
-  const Bslot=Math.round(Hh*0.62), Cslot=Hh-Bslot-g;
-  const Pslot=Math.round(Hh*0.46), Aslot=Hh-Pslot-g;
   const hb=v=>Math.max(70,v-BAR);
+  const Hh=H-2*g;
+  const topH=Math.round(Hh*0.60), botH=Math.max(110,Hh-topH-g);
+  const Lx=g;
   const hasGraph=!!document.getElementById('w-graph');
-  const Bw=hasGraph?Math.max(300,Math.round(Lw*0.56)):Lw;
-  const Gw=hasGraph?Math.max(244,Lw-Bw-g):0;
+  const Bw=Math.max(300,Math.min(360,Math.round(W*0.27)));
+  const Gw=hasGraph?Math.max(228,Math.min(288,Math.round(W*0.20))):0;
   const Gx=Lx+Bw+g;
+  const Px=hasGraph?Gx+Gw+g:Gx;
+  const Pw=Math.max(320,W-Px-g);
+  const leftW=hasGraph?Bw+g+Gw:Bw;
   const grid={
-    'w-board':{x:Lx,y:g,w:Bw,h:hb(Bslot)},
-    'w-ceo':{x:Lx,y:g+Bslot+g,w:Lw,h:hb(Cslot)},
-    'w-product':{x:Rx,y:g,w:Rw,h:hb(Pslot)},
-    'w-status':{x:Rx,y:g+Pslot+g,w:Rw,h:hb(Aslot)}
+    'w-board':{x:Lx,y:g,w:Bw,h:hb(topH)},
+    'w-product':{x:Px,y:g,w:Pw,h:hb(topH)},
+    'w-ceo':{x:Lx,y:g+topH+g,w:leftW,h:hb(botH)},
+    'w-status':{x:Px,y:g+topH+g,w:Pw,h:hb(botH)}
   };
-  if(hasGraph)grid['w-graph']={x:Gx,y:g,w:Gw,h:hb(Bslot)};
+  if(hasGraph)grid['w-graph']={x:Gx,y:g,w:Gw,h:hb(topH)};
   return grid;
 }
 function layoutMain(){

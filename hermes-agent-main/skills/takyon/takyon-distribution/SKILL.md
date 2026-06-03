@@ -25,6 +25,7 @@ metadata:
     allowed_roots: [distribution, metrics, research]
     output_root: distribution
     publication:
+      - distribution/surface.md
       - distribution/campaign
       - distribution/local-published
 required_environment_variables: []
@@ -48,9 +49,9 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 ## Quick Reference
 
 - Primary root: `distribution/`
-- Publication paths: `distribution/campaign/`, `distribution/local-published/`
+- Publication paths: `distribution/surface.md`, `distribution/campaign/`, `distribution/local-published/`
 - Best call points: campaign continuation, lane planning, broader demand-creation coordination
-- Publication lane: visible campaign artifacts live under `distribution/campaign/`; suppressed/local publication goes to `distribution/local-published/`; live sends/posts require tools and receipts
+- Publication lane: `distribution/surface.md` is the coarse snapshot; visible campaign artifacts live under `distribution/campaign/`; suppressed/local publication goes to `distribution/local-published/`; live sends/posts require tools and receipts
 - Tool names used by this skill: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_create_workspace`, `business_write_file`, `business_patch_file`, `business_publish_outreach`, `business_publish_test_outreach`, `business_enqueue_job`, `business_ugc_ad_write`
 
 ## Prerequisites
@@ -75,6 +76,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 ## How to Run
 
 - Call `business_read_business` first to inspect current campaign state, conversation state, and existing publication artifacts.
+- Read `distribution/surface.md` when it exists for the current high-level campaign snapshot, then fall back to direct campaign files or receipts when you need detail.
 - Call `business_calculate_pulse` when you need the latest unresolved inbound or recent activity before deciding whether the campaign should change.
 - If replies are the main issue, use `takyon-x` for X or `takyon-conversation-followup` when the inbox is too noisy to inspect directly before drafting a broad campaign memo.
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only the legacy `distribution/phase-1-outreach/` tree exists, migrate or merge that visible campaign state into `distribution/campaign/` before adding new work.
@@ -89,7 +91,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 1. Call `business_read_business` and, when appropriate, `business_calculate_pulse`. Determine whether the real need is a campaign update, a lane change, a broader distribution plan, a non-X discussion-thread move that should stay here, or a channel-native X move.
 2. If unresolved replies are the main issue, hand off X work to `takyon-x` or load `takyon-conversation-followup` before expanding the campaign.
-3. Inspect the current campaign workspace. `distribution/campaign/` is canonical. If only the legacy `distribution/phase-1-outreach/` tree exists, move or merge that visible campaign state into `distribution/campaign/` first. If `distribution/campaign/` is missing or too stale to trust after that check, create or refresh it with `business_create_workspace` and write the current campaign files there.
+3. Inspect the current campaign workspace. `distribution/campaign/` is canonical, and `distribution/surface.md` is the coarse summary. If only the legacy `distribution/phase-1-outreach/` tree exists, move or merge that visible campaign state into `distribution/campaign/` first. If `distribution/campaign/` is missing or too stale to trust after that check, create or refresh it with `business_create_workspace` and write the current campaign files there.
 4. Update the visible campaign artifacts: objective, audience, lanes, assets, current blockers, and next iteration. Keep them business-scoped and durable instead of burying them in chat output.
 5. If the campaign needs the copied UGC video ad path, run `ugc-video-ad`, then store the resulting `product/ugc-ads/<slug>/` publication path in the campaign workspace after `business_ugc_ad_write` records it.
 6. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
@@ -104,6 +106,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 
 ## Publication
 
+- Publish the coarse campaign snapshot to `distribution/surface.md`.
 - Publish campaign workspaces to `distribution/campaign/`.
 - Local suppressed publication belongs under `distribution/local-published/`.
 - Live external publication belongs to canonical business tools and their receipts, not hand-written success claims.

@@ -1,13 +1,17 @@
-# Product Surface
+# App Surface Contract
 
-## Source Path
+## Contract
 
-## Public URL
+## App Shape
 
 ## Routes
 
+## Runtime Rails
+
+## Theme Source
+
+## Constraints
+
 ## Live Now
 
-## Blocked
-
-## Next Repair
+## Current Blockers
