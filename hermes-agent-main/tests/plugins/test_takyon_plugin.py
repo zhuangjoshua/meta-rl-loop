@@ -1217,6 +1217,8 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Customer-facing AI product copy contract" in instruction
     assert "Claude Opus 4.7, Claude Sonnet 4.6, and Claude Haiku 4.5" in instruction
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
+    assert "Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app." in instruction
+    assert "If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`." in instruction
 
 
 def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
@@ -1991,6 +1993,123 @@ def test_refresh_next_product_with_static_export_still_runs_build(tmp_path, monk
         ["/usr/bin/npm", "install", "--ignore-scripts"],
         ["/usr/bin/npm", "run", "build"],
     ]
+
+
+def test_refresh_normalizes_supported_next_config_typescript(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "latexflow"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "latexflow-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (site / "next.config.ts").write_text(
+        'import type { NextConfig } from "next";\nconst nextConfig: NextConfig = { reactStrictMode: true };\nexport default nextConfig;\n',
+        encoding="utf-8",
+    )
+
+    def fake_run(command, **kwargs):
+        if command[:2] == ["/usr/bin/node", "--check"]:
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected subprocess.run command: {command}")
+
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_run_surface_command",
+        lambda command, **kwargs: {"command": command, "status": "passed"},
+    )
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    verification = _refresh_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    assert verification["repairs"]
+    assert verification["repairs"][0]["to"] == "next.config.mjs"
+    assert (site / "next.config.mjs").exists()
+    assert not (site / "next.config.ts").exists()
+    assert [check["command"] for check in verification["checks"]] == [
+        ["/usr/bin/npm", "install", "--ignore-scripts"],
+        ["/usr/bin/npm", "run", "build"],
+    ]
+
+
+def test_refresh_failure_surfaces_exact_build_blocker_without_publish_shadow(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-build-blocker",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "draft", "source_path": "product/site", "routes": ["/"]}],
+        "surface-build-blocker",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "next.config.js").write_text("module.exports = {};\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "latexflow-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_surface_command(command, **kwargs):
+        if command == ["/usr/bin/npm", "install", "--ignore-scripts"]:
+            return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
+        if command == ["/usr/bin/npm", "run", "build"]:
+            return {
+                "command": command,
+                "status": "failed",
+                "stdout": "",
+                "stderr": "Configuring Next.js via 'next.config.ts' is not supported.",
+            }
+        raise AssertionError(f"unexpected surface command: {command}")
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_surface_command", fake_run_surface_command)
+
+    verification = json.loads(
+        handle_business_refresh_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": True,
+                "idempotency_key": "verify-build-blocker",
+            }
+        )
+    )["surface_refresh"]
+
+    assert verification["status"] == "failed"
+    assert verification["publish"]["status"] == "blocked"
+    assert "npm run build failed: Configuring Next.js via 'next.config.ts' is not supported." in verification["blocker"]
+    assert "static publish directory" not in verification["blocker"]
 
 
 def test_path_escape_is_rejected(tmp_path):

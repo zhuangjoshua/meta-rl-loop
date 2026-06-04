@@ -131,6 +131,13 @@ SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - Only declared runtime-backed features may look live. Undeclared or unwired features must stay absent or visibly blocked.
 - Long-running or mutating customer actions are typed app jobs only when explicitly declared; never replace them with generic tool access.
 """
+SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
+- Keep product ambition high, but stay inside the small set of Takyon-supported app/build shapes.
+- Supported shapes today are: plain static source, Vite static app, Next static export, and Next service app.
+- Match your chosen build shape consistently across package.json scripts, source layout, and publishable output.
+- If you use Next config, emit `next.config.js` or `next.config.mjs`. Do not emit `next.config.ts`.
+- Runtime/publish facts come from the real refresh/build/publish rail, so keep the source truthful instead of inventing a novel build shape Takyon does not support.
+"""
 WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - You may edit files only inside the current workspace.
 - You may not call Takyon `business_*` tools, publish, deploy, verify, send, charge, post externally, or mutate operator/admin authority.
@@ -1033,7 +1040,7 @@ def _subuser_app_worker_contract_block(
         raw_routes = surface.get("routes") or []
         if isinstance(raw_routes, list):
             routes = [str(route).strip() for route in raw_routes if str(route).strip()]
-    lines = [SUBUSER_APP_WORKER_CONTRACT_INTRO.rstrip(), ""]
+    lines = [SUBUSER_APP_WORKER_CONTRACT_INTRO.rstrip(), "", SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT.rstrip(), ""]
     if routes:
         lines.append(f"- Current declared product routes: {', '.join(routes)}")
     lines.append(f"- App mode: {shape.get('app_mode') or 'not set'}")
@@ -1063,6 +1070,9 @@ def _subuser_app_worker_contract_block(
             lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'unknown'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
+    lines.append("- Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app.")
+    lines.append("- Keep product ambition/design high, but stay within those supported platform shapes.")
+    lines.append("- If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`.")
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
@@ -1097,6 +1107,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
+        "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Preserve runtime semantics, but redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
     ]
     return "\n".join(lines).strip()
@@ -2757,6 +2768,175 @@ def _node_modules_present(root: Path) -> bool:
     return (root / "node_modules").exists() and any((root / "node_modules").iterdir())
 
 
+def _check_node_syntax(path: Path) -> tuple[bool, str]:
+    node = _resolve_runtime_executable("node")
+    if not node:
+        return False, "node runtime unavailable for syntax check"
+    proc = subprocess.run(
+        [node, "--check", str(path)],
+        text=True,
+        capture_output=True,
+        cwd=str(path.parent),
+        env=_runtime_env(),
+    )
+    if proc.returncode == 0:
+        return True, ""
+    message = _truncate_text((proc.stderr or proc.stdout or "").strip(), 4000)
+    return False, message or f"node --check exited {proc.returncode}"
+
+
+def _candidate_disabled_path(path: Path) -> Path:
+    candidate = path.with_name(f"{path.name}.disabled")
+    if not candidate.exists():
+        return candidate
+    return path.with_name(f"{path.name}.disabled.{uuid.uuid4().hex[:8]}")
+
+
+def _rewrite_next_config_typescript_to_supported_module(source: str) -> tuple[str, str]:
+    uses_esm = bool(re.search(r"^\s*(?:import\b|export\s+default\b)", source, flags=re.MULTILINE))
+    target_name = "next.config.mjs" if uses_esm else "next.config.js"
+    converted = source.replace("\r\n", "\n")
+    converted = re.sub(r"^\s*import\s+type\s+[^;]+;\s*\n?", "", converted, flags=re.MULTILINE)
+    converted = re.sub(
+        r"^\s*import\s*\{\s*type\s+NextConfig\s*\}\s*from\s*([\"']next[\"']);?\s*\n?",
+        "",
+        converted,
+        flags=re.MULTILINE,
+    )
+    converted = re.sub(
+        r"\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$<>,\s\[\]\.|&?]+)\s*=",
+        r"\1 \2 =",
+        converted,
+    )
+    converted = re.sub(r"\s+satisfies\s+NextConfig\b", "", converted)
+    converted = re.sub(r"\s+as\s+NextConfig\b", "", converted)
+    converted = re.sub(r"\s+as\s+const\b", "", converted)
+    return target_name, converted
+
+
+def _normalize_next_config_typescript(root: Path) -> dict[str, Any]:
+    source_path = root / "next.config.ts"
+    if not source_path.exists():
+        return {"repairs": [], "warnings": []}
+
+    js_path = root / "next.config.js"
+    mjs_path = root / "next.config.mjs"
+    if js_path.exists() or mjs_path.exists():
+        disabled_path = _candidate_disabled_path(source_path)
+        shutil.move(str(source_path), str(disabled_path))
+        chosen = js_path.name if js_path.exists() else mjs_path.name
+        return {
+            "repairs": [
+                {
+                    "kind": "next_config_disable",
+                    "from": source_path.name,
+                    "to": disabled_path.name,
+                    "message": f"Disabled unsupported next.config.ts because {chosen} is the supported Next config entrypoint.",
+                }
+            ],
+            "warnings": [],
+        }
+
+    try:
+        source_text = source_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return {
+            "repairs": [],
+            "warnings": [],
+            "blocked": True,
+            "error": f"Next app detected, but next.config.ts could not be read for normalization: {exc}",
+        }
+
+    target_name, converted = _rewrite_next_config_typescript_to_supported_module(source_text)
+    target_path = root / target_name
+    temp_path = root / f".{target_name}.tmp"
+    temp_path.write_text(converted, encoding="utf-8")
+    ok, syntax_error = _check_node_syntax(temp_path)
+    if not ok:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        return {
+            "repairs": [],
+            "warnings": [],
+            "blocked": True,
+            "error": (
+                "Next app detected, but next.config.ts is unsupported and could not be safely normalized "
+                f"to {target_name}: {syntax_error}"
+            ),
+        }
+
+    temp_path.replace(target_path)
+    source_path.unlink()
+    return {
+        "repairs": [
+            {
+                "kind": "next_config_normalize",
+                "from": source_path.name,
+                "to": target_path.name,
+                "message": f"Normalized unsupported next.config.ts into supported {target_path.name}.",
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def _normalize_supported_product_build_shape(
+    root: Path,
+    *,
+    scripts: dict[str, Any],
+    deps: dict[str, Any],
+) -> dict[str, Any]:
+    looks_next = (
+        "next" in deps
+        or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
+        or (root / ".next").is_dir()
+        or "next build" in str(scripts.get("build") or "")
+        or "next start" in str(scripts.get("start") or "")
+    )
+    if looks_next:
+        return _normalize_next_config_typescript(root)
+    return {"repairs": [], "warnings": []}
+
+
+def _surface_refresh_exact_blocker(
+    refresh: dict[str, Any],
+    publish: dict[str, Any] | None = None,
+) -> str:
+    refresh_dict = refresh if isinstance(refresh, dict) else {}
+    publish_dict = publish if isinstance(publish, dict) else {}
+    checks = refresh_dict.get("checks") if isinstance(refresh_dict.get("checks"), list) else []
+    latest_problem = next(
+        (
+            item for item in reversed(checks)
+            if isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower() not in {"", "passed", "success", "completed"}
+        ),
+        {},
+    )
+    latest_error = str(
+        latest_problem.get("error")
+        or latest_problem.get("stderr")
+        or latest_problem.get("stdout")
+        or ""
+    ).strip()
+    latest_command = ""
+    if isinstance(latest_problem.get("command"), list):
+        parts = [str(part).strip() for part in latest_problem.get("command") if str(part).strip()]
+        latest_command = shlex.join(parts) if parts else ""
+    else:
+        latest_command = str(latest_problem.get("command") or "").strip()
+    if latest_error:
+        if latest_command:
+            return _truncate_text(f"{latest_command} failed: {latest_error}", 1000)
+        return _truncate_text(latest_error, 1000)
+    publish_blocker = str(publish_dict.get("blocker") or "").strip()
+    if publish_blocker:
+        return publish_blocker
+    return str(refresh_dict.get("error") or "").strip()
+
+
 def _javascript_package_manager_name(root: Path, package_data: dict[str, Any]) -> str:
     package_manager = str(package_data.get("packageManager") or "").strip().lower()
     if package_manager:
@@ -2848,6 +3028,7 @@ def _refresh_product_surface_path(
         "generated_at": _now(),
         "status": "unverified",
         "checks": [],
+        "repairs": [],
         "warnings": [],
         "inventory": _product_inventory(business_root, source_rel, surface=surface),
         "capabilities": _runtime_capabilities(("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv")),
@@ -2928,6 +3109,19 @@ def _refresh_product_surface_path(
             "error": "javascript package manager is unavailable for dependency installation",
             "missing_capabilities": [package_manager_name],
             "remediation": "Install or enable the declared package manager, or allow Takyon runtime installs so it can provision a local JavaScript runtime/package manager.",
+        })
+        return result
+    normalization = _normalize_supported_product_build_shape(
+        root,
+        scripts=scripts,
+        deps=deps,
+    )
+    result["repairs"] = list(normalization.get("repairs") or [])
+    result["warnings"].extend(str(item).strip() for item in (normalization.get("warnings") or []) if str(item).strip())
+    if normalization.get("blocked"):
+        result.update({
+            "status": "blocked",
+            "error": str(normalization.get("error") or "unsupported build shape requires manual repair"),
         })
         return result
     if install:
@@ -8722,12 +8916,21 @@ def _finalize_product_surface_refresh(
             "effective_publish_policy": publish_policy,
             "warnings": warnings,
         }
-    publish = _publish_product_surface_path(
-        business_root=store._business_root(business),
-        slug=business,
-        source_path=str(refresh.get("source_path") or source_path),
-        publish_target=publish_target,
-    )
+    if refresh.get("status") == "passed":
+        publish = _publish_product_surface_path(
+            business_root=store._business_root(business),
+            slug=business,
+            source_path=str(refresh.get("source_path") or source_path),
+            publish_target=publish_target,
+        )
+    else:
+        publish = {
+            "status": "blocked",
+            "public_url": "",
+            "publish_target": publish_target,
+            "publish_source_path": str(refresh.get("source_path") or source_path),
+            "blocker": _surface_refresh_exact_blocker(refresh),
+        }
     inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
     if not inventory:
         inventory = _product_inventory(store._business_root(business), str(refresh.get("source_path") or source_path), surface=surface)
@@ -8742,7 +8945,7 @@ def _finalize_product_surface_refresh(
         "receipt_path": receipt_path,
         "publish": publish,
         "inventory": inventory,
-        "blocker": "" if publish.get("status") == "published" and refresh.get("status") == "passed" else (publish.get("blocker") or refresh.get("error") or "product surface is not published"),
+        "blocker": "" if publish.get("status") == "published" and refresh.get("status") == "passed" else (_surface_refresh_exact_blocker(refresh, publish) or "product surface is not published"),
         "source": refresh_source,
     }
 
