@@ -1144,12 +1144,12 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
         "init",
     )
 
-    captured: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
 
     def fake_run(command, *, input=None, **kwargs):
+        calls.append({"command": list(command), "input": input})
         if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
             payload = json.loads(input or "{}")
-            captured["payload"] = payload
             Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
             return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
@@ -1172,7 +1172,14 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
         )
     )
 
-    instruction = captured["payload"]["instruction"]
+    payload = next(
+        json.loads(str(call.get("input") or "{}"))
+        for call in calls
+        if len(call.get("command") or []) > 1
+        and str((call.get("command") or [None, ""])[1]).endswith("takyon-claude-agent-task.mjs")
+        and call.get("input")
+    )
+    instruction = payload["instruction"]
     assert result["success"] is True
     assert "current working directory is already the requested business workspace: product/site" in instruction
     assert "not `product/site/index.html`" in instruction
@@ -1543,16 +1550,16 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Hermes runtime UI contract" in instruction
     assert "Hermes sub-user app plane contract" in instruction
     assert "Declared runtime-backed features: auth, account, checkout, generate" in instruction
-    assert "Runtime API base: /api/takyon/apps/latexflow" in instruction
+    assert "Runtime API base fallback: /api/takyon/apps/latexflow" in instruction
     assert "account (owner: takyon-app-runtime)" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
     assert "Canonical tools: business_read_app_account" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
-    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/auth/request, GET /api/takyon/apps/latexflow/auth/verify, GET /api/takyon/apps/latexflow/session" in instruction
-    assert "Exact runtime endpoints: GET /api/takyon/apps/latexflow/account" in instruction
-    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/checkout" in instruction
-    assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/generate" in instruction
-    assert "Treat POST <runtime_api_base>/generate as the public product contract for AI generation" in instruction
+    assert "Reachable runtime endpoints: POST /auth/request on product hosts or POST /api/takyon/apps/latexflow/auth/request off-host" in instruction
+    assert "Reachable runtime endpoints: GET /account on product hosts or GET /api/takyon/apps/latexflow/account off-host" in instruction
+    assert "Reachable runtime endpoints: POST /checkout on product hosts or POST /api/takyon/apps/latexflow/checkout off-host" in instruction
+    assert "Reachable runtime endpoints: POST /generate on product hosts or POST /api/takyon/apps/latexflow/generate off-host" in instruction
+    assert "Treat POST /generate on product hosts or POST <runtime_api_base>/generate off-host as the public product contract for AI generation" in instruction
     assert "product code should not call providers or internal authority endpoints directly" in instruction
     assert "`tk_` top-level operator tokens never belong in product code" in instruction
     assert "`tkg_` is the app/business AI mediation boundary, not a customer login or session token" in instruction
