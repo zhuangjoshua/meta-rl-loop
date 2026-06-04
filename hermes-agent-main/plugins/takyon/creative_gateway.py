@@ -780,4 +780,395 @@ def build_creative_gateway_router() -> APIRouter:
             "rows": rows,
         }
 
+    @router.post("/reddit-launch")
+    def reddit_launch(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        credits = core._creative_credit_backend()
+        business = core._resolved_business_slug(body, required=True)
+        mode = str(body.get("mode") or "launch").strip().lower()
+        cfg = core._reddit_ads_config(require_auth=True)
+
+        if mode == "preflight":
+            return core._reddit_ads_preflight(cfg)
+
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="idempotency_key is required")
+        plan = body.get("plan") if isinstance(body.get("plan"), dict) else core._reddit_launch_plan(body, cfg)
+        preflight = core._reddit_ads_preflight(cfg)
+        defaults = preflight.get("defaults") if isinstance(preflight.get("defaults"), dict) else {}
+
+        business_id = str(plan.get("business_id") or defaults.get("business_id") or cfg.get("business_id") or "").strip()
+        ad_account_id = str(plan.get("ad_account_id") or defaults.get("ad_account_id") or cfg.get("ad_account_id") or "").strip()
+        profile_id = str(plan.get("profile_id") or defaults.get("profile_id") or cfg.get("profile_id") or "").strip()
+        funding_instrument_id = str(
+            plan.get("funding_instrument_id")
+            or defaults.get("funding_instrument_id")
+            or cfg.get("funding_instrument_id")
+            or ""
+        ).strip()
+        pixel_id = str(plan.get("pixel_id") or defaults.get("pixel_id") or cfg.get("pixel_id") or "").strip()
+
+        if not business_id:
+            raise HTTPException(status_code=400, detail="Reddit Ads launch requires a business id")
+        if not ad_account_id:
+            raise HTTPException(status_code=400, detail="Reddit Ads launch requires an ad account id")
+        if not funding_instrument_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Reddit Ads launch requires a funding instrument id; add REDDIT_ADS_FUNDING_INSTRUMENT_ID or preflight an account with a funding instrument",
+            )
+        if not pixel_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Reddit Ads launch requires a conversion pixel id; add REDDIT_ADS_PIXEL_ID or preflight an account with a pixel",
+            )
+        if plan.get("asset_kind") != "existing_post" and not profile_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Reddit Ads launch requires a profile id when creating a new promoted post",
+            )
+
+        reservation_key = f"{idempotency_key}:creative-credits"
+        requested_credits = core._creative_credit_total_cost("reddit_ad_launch")
+        try:
+            credits.open_business_credit_account(conn, business)
+            credits.reserve_credits(
+                conn,
+                business,
+                requested_credits,
+                reservation_key,
+                metadata={
+                    "action": "reddit_ad_launch",
+                    "slug": plan.get("slug"),
+                    "asset_kind": plan.get("asset_kind"),
+                    "objective": plan.get("objective"),
+                    "ad_account_id": ad_account_id,
+                },
+            )
+        except credits.InsufficientCreativeCredits as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_insufficient_creative_credits",
+                "requested_credits": requested_credits,
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+
+        created: dict[str, Any] = {}
+        preview_url = None
+        preview_expiry = None
+        post_url = None
+        finalized = False
+        try:
+            campaign_payload = json.loads(json.dumps(plan.get("campaign_payload") or {}))
+            campaign_payload.setdefault("data", {})
+            campaign_payload["data"]["funding_instrument_id"] = funding_instrument_id
+            campaign_resp = core._reddit_ads_request(
+                "POST",
+                f"/ad_accounts/{ad_account_id}/campaigns",
+                cfg,
+                json_body=campaign_payload,
+            )
+            campaign_data = core._reddit_ads_data(campaign_resp["data"]) or {}
+            created["campaign_id"] = str(campaign_data.get("id") or "").strip()
+            if not created["campaign_id"]:
+                raise RuntimeError("Reddit Ads campaign creation returned no id")
+
+            ad_group_payload = json.loads(json.dumps(plan.get("ad_group_payload") or {}))
+            ad_group_payload.setdefault("data", {})
+            ad_group_payload["data"]["campaign_id"] = created["campaign_id"]
+            ad_group_payload["data"]["conversion_pixel_id"] = pixel_id
+            ad_group_resp = core._reddit_ads_request(
+                "POST",
+                f"/ad_accounts/{ad_account_id}/ad_groups",
+                cfg,
+                json_body=ad_group_payload,
+            )
+            ad_group_data = core._reddit_ads_data(ad_group_resp["data"]) or {}
+            created["ad_group_id"] = str(ad_group_data.get("id") or "").strip()
+            if not created["ad_group_id"]:
+                raise RuntimeError("Reddit Ads ad group creation returned no id")
+
+            post_id = str(plan.get("post_id") or "").strip()
+            if not post_id:
+                post_payload = plan.get("post_payload") or {}
+                post_resp = core._reddit_ads_request(
+                    "POST",
+                    f"/profiles/{profile_id}/posts",
+                    cfg,
+                    json_body=post_payload,
+                )
+                post_data = core._reddit_ads_data(post_resp["data"]) or {}
+                post_id = str(post_data.get("id") or "").strip()
+                post_url = str(post_data.get("post_url") or "").strip() or None
+                if not post_id:
+                    raise RuntimeError("Reddit Ads post creation returned no id")
+            created["post_id"] = post_id
+
+            ad_payload = json.loads(json.dumps(plan.get("ad_payload") or {}))
+            ad_payload.setdefault("data", {})
+            ad_payload["data"]["ad_group_id"] = created["ad_group_id"]
+            ad_payload["data"]["post_id"] = post_id
+            ad_resp = core._reddit_ads_request(
+                "POST",
+                f"/ad_accounts/{ad_account_id}/ads",
+                cfg,
+                json_body=ad_payload,
+            )
+            ad_data = core._reddit_ads_data(ad_resp["data"]) or {}
+            created["ad_id"] = str(ad_data.get("id") or "").strip()
+            if not created["ad_id"]:
+                raise RuntimeError("Reddit Ads ad creation returned no id")
+            preview_url = str(ad_data.get("preview_url") or "").strip() or None
+            preview_expiry = str(ad_data.get("preview_expiry") or "").strip() or None
+            post_url = post_url or (str(ad_data.get("post_url") or "").strip() or None)
+
+            balances = credits.commit_credits(
+                conn,
+                reservation_key,
+                metadata={
+                    "action": "reddit_ad_launch",
+                    "slug": plan.get("slug"),
+                    "asset_kind": plan.get("asset_kind"),
+                    "provider": "reddit",
+                    "ids": created,
+                },
+            )
+            finalized = True
+            return {
+                "success": True,
+                "status": "created_paused",
+                "paused": True,
+                "business_id": business_id,
+                "ad_account_id": ad_account_id,
+                "profile_id": profile_id or None,
+                "funding_instrument_id": funding_instrument_id,
+                "pixel_id": pixel_id,
+                "ids": created,
+                "preview_url": preview_url,
+                "preview_expiry": preview_expiry,
+                "post_url": post_url,
+                "credits_charged": requested_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+            }
+        except Exception as exc:
+            try:
+                if created:
+                    balances = credits.commit_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "reddit_ad_launch",
+                            "status": "partial_failed",
+                            "created": created,
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    balances = credits.release_credits(
+                        conn,
+                        reservation_key,
+                        metadata={
+                            "action": "reddit_ad_launch",
+                            "status": "failed",
+                            "error": str(exc),
+                        },
+                    )
+                finalized = True
+                return {
+                    "success": False,
+                    "status": "partial_failed" if created else "failed",
+                    "paused": True,
+                    "business_id": business_id or None,
+                    "ad_account_id": ad_account_id or None,
+                    "profile_id": profile_id or None,
+                    "funding_instrument_id": funding_instrument_id or None,
+                    "pixel_id": pixel_id or None,
+                    "ids": created or None,
+                    "preview_url": preview_url,
+                    "preview_expiry": preview_expiry,
+                    "post_url": post_url,
+                    "error": str(exc),
+                    "credits_charged": requested_credits if created else 0,
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
+                }
+            except Exception as release_exc:
+                if not finalized:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"{exc} (credit finalization also failed: {release_exc})",
+                    ) from exc
+                raise
+
+    @router.post("/reddit-control")
+    def reddit_control(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        cfg = core._reddit_ads_config(require_auth=True)
+        operation = str(body.get("operation") or "").strip().lower()
+        if operation not in {"activate", "pause", "set_budget"}:
+            raise HTTPException(status_code=400, detail="operation must be activate, pause, or set_budget")
+
+        ids = {
+            "campaign_id": str(body.get("campaign_id") or "").strip(),
+            "ad_group_id": str(body.get("ad_group_id") or "").strip(),
+            "ad_id": str(body.get("ad_id") or "").strip(),
+        }
+        if not ids["campaign_id"] or not ids["ad_group_id"] or not ids["ad_id"]:
+            raise HTTPException(status_code=400, detail="campaign_id, ad_group_id, and ad_id are required")
+
+        if operation == "set_budget":
+            try:
+                daily_budget_micros = int(body.get("daily_budget_micros"))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="daily_budget_micros is required for set_budget")
+            if daily_budget_micros <= 0:
+                raise HTTPException(status_code=400, detail="daily_budget_micros must be positive")
+            budget_scope = str(body.get("budget_scope") or "ad_group").strip().lower() or "ad_group"
+            target_path = f"/ad_groups/{ids['ad_group_id']}"
+            if budget_scope == "campaign":
+                target_path = f"/campaigns/{ids['campaign_id']}"
+            try:
+                core._reddit_ads_request(
+                    "PATCH",
+                    target_path,
+                    cfg,
+                    json_body={"data": {"goal_type": "DAILY_SPEND", "goal_value": daily_budget_micros}},
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "error": str(exc),
+                    "ids": ids,
+                }
+            return {
+                "success": True,
+                "status": "budget_updated",
+                "ids": ids,
+                "daily_budget_micros": daily_budget_micros,
+                "daily_budget_usd": body.get("daily_budget_usd"),
+                "applied": [
+                    {
+                        "object": budget_scope,
+                        "id": ids["campaign_id"] if budget_scope == "campaign" else ids["ad_group_id"],
+                        "daily_budget_micros": daily_budget_micros,
+                    }
+                ],
+            }
+
+        target_status = "ACTIVE" if operation == "activate" else "PAUSED"
+        ordered = [
+            ("campaign", ids["campaign_id"], f"/campaigns/{ids['campaign_id']}"),
+            ("ad_group", ids["ad_group_id"], f"/ad_groups/{ids['ad_group_id']}"),
+            ("ad", ids["ad_id"], f"/ads/{ids['ad_id']}"),
+        ]
+        if operation == "pause":
+            ordered = list(reversed(ordered))
+        applied: list[dict[str, Any]] = []
+        try:
+            for kind, object_id, path in ordered:
+                core._reddit_ads_request(
+                    "PATCH",
+                    path,
+                    cfg,
+                    json_body={"data": {"configured_status": target_status}},
+                )
+                applied.append({"object": kind, "id": object_id, "configured_status": target_status})
+            return {
+                "success": True,
+                "status": "activated" if operation == "activate" else "paused",
+                "ids": ids,
+                "applied": applied,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "partial_failed" if applied else "failed",
+                "ids": ids,
+                "applied": applied or None,
+                "error": str(exc),
+            }
+
+    @router.post("/reddit-insights")
+    def reddit_insights(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        cfg = core._reddit_ads_config(require_auth=True)
+        ad_account_id = str(body.get("ad_account_id") or cfg.get("ad_account_id") or "").strip()
+        if not ad_account_id:
+            raise HTTPException(status_code=400, detail="ad_account_id is required")
+        level = str(body.get("level") or "campaign").strip().lower()
+        if level not in {"campaign", "ad_group", "ad"}:
+            raise HTTPException(status_code=400, detail="level must be campaign, ad_group, or ad")
+
+        object_id_key = "ad_group_id" if level == "ad_group" else f"{level}_id"
+        object_id = str(body.get(object_id_key) or "").strip()
+        if not object_id:
+            raise HTTPException(status_code=400, detail=f"{object_id_key} is required")
+
+        starts_at, ends_at = core._reddit_report_window(body)
+        fields = body.get("fields") if isinstance(body.get("fields"), list) else [
+            "SPEND",
+            "IMPRESSIONS",
+            "CLICKS",
+            "CTR",
+            "CPC",
+            "CPM",
+        ]
+        breakdowns = body.get("breakdowns") if isinstance(body.get("breakdowns"), list) else ["DATE"]
+        filter_value = str(body.get("filter") or f"{level}:id=={object_id}").strip()
+        report_body = {
+            "data": {
+                "fields": fields,
+                "breakdowns": breakdowns,
+                "filter": filter_value,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "time_zone_id": str(body.get("time_zone_id") or "UTC").strip() or "UTC",
+            }
+        }
+
+        try:
+            report = core._reddit_ads_request(
+                "POST",
+                f"/ad_accounts/{ad_account_id}/reports",
+                cfg,
+                json_body=report_body,
+                timeout=120,
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "level": level,
+                "object_id": object_id,
+                "error": str(exc),
+            }
+
+        rows = core._reddit_ads_list(report["data"])
+        return {
+            "success": True,
+            "status": "synced",
+            "level": level,
+            "object_id": object_id,
+            "rows": rows,
+        }
+
     return router

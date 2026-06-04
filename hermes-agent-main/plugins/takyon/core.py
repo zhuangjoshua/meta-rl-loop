@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import hashlib
 import hmac
 import json
@@ -88,6 +89,9 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_meta_ad_launch",
         "business_meta_ad_control",
         "business_meta_ad_insights_sync",
+        "business_reddit_ad_launch",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
         "business_set_control",
         "business_schedule_ceo_wakeup",
         "business_gc",
@@ -155,6 +159,17 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+}
+_PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".m4v": "video/mp4",
 }
 PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "auth": {
@@ -3090,6 +3105,318 @@ def _product_local_public_url(slug: str) -> str:
     return f"{raw.rstrip('/')}/{_slugify(slug)}/"
 
 
+def _product_public_asset_url(slug: str, asset_rel: str, *, explicit_publish_target: Any = None) -> str:
+    publish_target = _product_publish_target(slug, explicit_publish_target)
+    parsed = urllib.parse.urlparse(publish_target)
+    asset_path = "/" + _safe_relpath(asset_rel, field="asset_rel").as_posix()
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, asset_path, "", "", ""))
+
+
+def _product_public_asset_site_root(slug: str) -> Path:
+    return (_product_publish_root() / _slugify(slug)).resolve()
+
+
+def _product_public_asset_site_relpath(asset_slug: str, filename: str) -> str:
+    safe_slug = _file_slug(asset_slug, "asset")
+    safe_name = _safe_relpath(filename, field="filename").name
+    return f"_takyon/assets/{safe_slug}/{safe_name}"
+
+
+def _copy_product_public_asset(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    try:
+        target.chmod(0o644)
+    except OSError:
+        pass
+
+
+def _probe_public_asset_url(url: str) -> tuple[bool, str]:
+    headers = {"User-Agent": "Takyon public asset verifier"}
+    head = urllib.request.Request(url, headers=headers, method="HEAD")
+    try:
+        with urllib.request.urlopen(head, timeout=12) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            if 200 <= status < 400:
+                return True, ""
+            return False, f"public asset returned HTTP {status}"
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {405, 501}:
+            detail = exc.read().decode("utf-8", errors="replace")
+            return False, f"public asset probe failed ({exc.code}): {detail or exc.reason}"
+    except Exception as exc:
+        return False, f"public asset probe failed: {exc}"
+
+    ranged = urllib.request.Request(
+        url,
+        headers={**headers, "Range": "bytes=0-0"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(ranged, timeout=12) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            if status in {200, 206}:
+                return True, ""
+            return False, f"public asset returned HTTP {status}"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return False, f"public asset probe failed ({exc.code}): {detail or exc.reason}"
+    except Exception as exc:
+        return False, f"public asset probe failed: {exc}"
+
+
+def _stage_business_public_asset(
+    store: "TakyonStore",
+    business: str,
+    *,
+    source_path: str,
+    asset_slug: str,
+    explicit_publish_target: Any = None,
+    verify_public_url: bool = True,
+) -> dict[str, Any]:
+    source_rel = _safe_relpath(source_path, field="source_path").as_posix()
+    source_abs = store._resolve_business_file(business, source_rel)
+    if not source_abs.is_file():
+        raise TakyonError(f"public asset source not found: {source_rel}")
+
+    suffix = source_abs.suffix.lower()
+    mime_type = _PUBLIC_ASSET_MEDIA_TYPES.get(suffix)
+    if not mime_type:
+        raise TakyonError(
+            "public asset source must be an image/video file with one of: "
+            + ", ".join(sorted(_PUBLIC_ASSET_MEDIA_TYPES))
+        )
+
+    staged_slug = _file_slug(asset_slug, source_abs.stem or "asset")
+    filename = source_abs.name
+    publication_rel = f"product/public-assets/{staged_slug}"
+    business_asset_rel = f"{publication_rel}/{filename}"
+    business_receipt_rel = f"{publication_rel}/receipt.json"
+    business_asset_abs = store._resolve_business_file(business, business_asset_rel)
+    _copy_product_public_asset(source_abs, business_asset_abs)
+
+    site_rel = _product_public_asset_site_relpath(staged_slug, filename)
+    site_root = _product_public_asset_site_root(business)
+    site_abs = (site_root / site_rel).resolve()
+    if site_root not in (site_abs, *site_abs.parents):
+        raise TakyonError("public asset target escaped product publish root")
+    _copy_product_public_asset(source_abs, site_abs)
+
+    public_url = _product_public_asset_url(
+        business,
+        site_rel,
+        explicit_publish_target=explicit_publish_target,
+    )
+    verified = False
+    blocker = ""
+    if verify_public_url:
+        verified, blocker = _probe_public_asset_url(public_url)
+
+    size_bytes = source_abs.stat().st_size
+    digest = hashlib.sha256(source_abs.read_bytes()).hexdigest() if size_bytes <= 32 * 1024 * 1024 else ""
+    receipt = {
+        "business": business,
+        "slug": staged_slug,
+        "source_path": source_rel,
+        "business_asset_path": business_asset_rel,
+        "site_asset_path": site_rel,
+        "public_url": public_url,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "sha256": digest or None,
+        "status": (
+            "blocked_public_url_unreachable"
+            if verify_public_url and not verified
+            else ("staged_public" if verified else "staged_unverified")
+        ),
+        "public_url_verified": verified,
+        "verified_at": _now() if verified else "",
+        "blocker": blocker,
+        "created_at": _now(),
+    }
+    _atomic_write_text(
+        store._resolve_business_file(business, business_receipt_rel),
+        json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+    )
+    if verify_public_url and not verified:
+        raise TakyonError(
+            "staged public asset is not reachable yet at "
+            f"{public_url}: {blocker}"
+        )
+    return {
+        **receipt,
+        "publication_dir": publication_rel,
+        "receipt_path": business_receipt_rel,
+    }
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _reddit_requested_asset_kind(args: Mapping[str, Any]) -> str:
+    ad = args.get("ad") if isinstance(args.get("ad"), dict) else {}
+    asset_kind = str(args.get("asset_kind") or "").strip().lower()
+    if not asset_kind:
+        asset_kind = "existing_post" if str(args.get("post_id") or ad.get("post_id") or "").strip() else "image"
+    return asset_kind
+
+
+def _reddit_local_reference_thumbnail(
+    store: "TakyonStore",
+    business: str,
+    *,
+    video_path: str,
+) -> str | None:
+    business_root = store._business_root(business).resolve()
+    video_abs = store._resolve_business_file(business, video_path)
+    candidates = (
+        "reference.png",
+        "reference.jpg",
+        "reference.jpeg",
+        "reference.webp",
+        "thumbnail.png",
+        "thumbnail.jpg",
+        "thumbnail.jpeg",
+        "thumbnail.webp",
+    )
+    for filename in candidates:
+        candidate = video_abs.parent / filename
+        if candidate.is_file():
+            return candidate.resolve().relative_to(business_root).as_posix()
+    return None
+
+
+def _reddit_stage_launch_args(
+    store: "TakyonStore",
+    business: str,
+    args: Mapping[str, Any],
+    *,
+    publish_target: str,
+    verify_public_url: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    canonical_args = dict(args)
+    campaign = dict(args.get("campaign") or {}) if isinstance(args.get("campaign"), dict) else {}
+    ad_group = dict(args.get("ad_group") or {}) if isinstance(args.get("ad_group"), dict) else {}
+    post = dict(args.get("post") or {}) if isinstance(args.get("post"), dict) else {}
+    ad = dict(args.get("ad") or {}) if isinstance(args.get("ad"), dict) else {}
+    canonical_args["campaign"] = campaign
+    canonical_args["ad_group"] = ad_group
+    canonical_args["post"] = post
+    canonical_args["ad"] = ad
+
+    asset_kind = _reddit_requested_asset_kind(args)
+    slug = _file_slug(
+        str(args.get("slug") or campaign.get("name") or ad.get("name") or post.get("headline") or "reddit-ad"),
+        "reddit-ad",
+    )
+    staged_assets: list[dict[str, Any]] = []
+    staged_by_source: dict[str, dict[str, Any]] = {}
+
+    def _first_mapping_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[str, str]:
+        for key in keys:
+            raw = str(mapping.get(key) or "").strip()
+            if raw:
+                return key, raw
+        return "", ""
+
+    def _stage_reference(raw_value: str, *, field_name: str, asset_role: str) -> tuple[str, str | None]:
+        raw = str(raw_value or "").strip()
+        if not raw:
+            return "", None
+        if _is_http_url(raw):
+            return raw, None
+        source_rel = _safe_relpath(raw, field=field_name).as_posix()
+        source_abs = store._resolve_business_file(business, source_rel)
+        if not source_abs.is_file():
+            raise TakyonError(
+                f"{field_name} must be a public http(s) URL or business-relative file path; not found: {source_rel}"
+            )
+        staged = staged_by_source.get(source_rel)
+        if staged is None:
+            staged = _stage_business_public_asset(
+                store,
+                business,
+                source_path=source_rel,
+                asset_slug=f"{slug}-{asset_role}",
+                explicit_publish_target=publish_target,
+                verify_public_url=verify_public_url,
+            )
+            staged_by_source[source_rel] = staged
+            staged_assets.append(staged)
+        return str(staged.get("public_url") or "").strip(), source_rel
+
+    if asset_kind == "image":
+        media_key, media_raw = _first_mapping_value(post, ("media_url", "image_url", "media_path", "image_path"))
+        if media_raw:
+            media_url, _media_source = _stage_reference(
+                media_raw,
+                field_name=f"post.{media_key}",
+                asset_role="image",
+            )
+            post["media_url"] = media_url
+            post["image_url"] = media_url
+            if not str(post.get("thumbnail_url") or post.get("thumbnail_path") or "").strip():
+                post["thumbnail_url"] = media_url
+    elif asset_kind == "video":
+        media_key, media_raw = _first_mapping_value(post, ("media_url", "video_url", "media_path", "video_path"))
+        media_source = None
+        if media_raw:
+            media_url, media_source = _stage_reference(
+                media_raw,
+                field_name=f"post.{media_key}",
+                asset_role="video",
+            )
+            post["media_url"] = media_url
+            post["video_url"] = media_url
+        thumbnail_key, thumbnail_raw = _first_mapping_value(post, ("thumbnail_url", "thumbnail_path"))
+        if not thumbnail_raw and media_source:
+            thumbnail_raw = _reddit_local_reference_thumbnail(store, business, video_path=media_source) or ""
+            if thumbnail_raw:
+                thumbnail_key = "thumbnail_path"
+        if thumbnail_raw:
+            thumbnail_url, _thumb_source = _stage_reference(
+                thumbnail_raw,
+                field_name=f"post.{thumbnail_key}",
+                asset_role="thumbnail",
+            )
+            post["thumbnail_url"] = thumbnail_url
+    elif asset_kind == "carousel":
+        raw_cards = post.get("carousel") if isinstance(post.get("carousel"), list) else []
+        cards: list[dict[str, Any]] = []
+        first_card_url = ""
+        for index, raw_card in enumerate(raw_cards, start=1):
+            if not isinstance(raw_card, dict):
+                raise TakyonError(f"post.carousel[{index}] must be an object")
+            card = dict(raw_card)
+            media_key, media_raw = _first_mapping_value(card, ("media_url", "image_url", "media_path", "image_path"))
+            if media_raw:
+                card_url, _card_source = _stage_reference(
+                    media_raw,
+                    field_name=f"post.carousel[{index}].{media_key}",
+                    asset_role=f"carousel-card-{index}",
+                )
+                card["media_url"] = card_url
+                card["image_url"] = card_url
+                if not first_card_url:
+                    first_card_url = card_url
+            cards.append(card)
+        post["carousel"] = cards
+        thumbnail_key, thumbnail_raw = _first_mapping_value(post, ("thumbnail_url", "thumbnail_path"))
+        if thumbnail_raw:
+            thumbnail_url, _thumb_source = _stage_reference(
+                thumbnail_raw,
+                field_name=f"post.{thumbnail_key}",
+                asset_role="carousel-thumbnail",
+            )
+            post["thumbnail_url"] = thumbnail_url
+        elif first_card_url:
+            post["thumbnail_url"] = first_card_url
+
+    return canonical_args, staged_assets
+
+
 def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
     candidates = [
         ("source", source_root),
@@ -3329,6 +3656,7 @@ def _write_product_service_file(*, slug: str, source_root: Path, port: int, meta
 def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) -> tuple[Path | None, str]:
     caddyfile = _product_service_caddyfile()
     host = urllib.parse.urlparse(publish_target).netloc
+    asset_root = (_product_public_asset_site_root(slug) / "_takyon" / "assets").resolve()
     if not host:
         return None, "publish target has no host"
     if not _product_deploy_dry_run():
@@ -3347,6 +3675,11 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
     # static product export never serves real pages under /api/.
     block = (
         f"{host} {{\n"
+        f"    @takyon_public_assets path /_takyon/assets/*\n"
+        f"    handle @takyon_public_assets {{\n"
+        f"        root * {asset_root}\n"
+        "        file_server\n"
+        "    }\n"
         "    @takyon_app_runtime path /api/*\n"
         "    handle @takyon_app_runtime {\n"
         "        reverse_proxy 127.0.0.1:9119 {\n"
@@ -3611,7 +3944,12 @@ def _publish_product_surface_path(
         result["blocker"] = "publish target escaped TAKYON_PRODUCT_SITE_ROOT"
         return result
     target_dir.parent.mkdir(parents=True, exist_ok=True)
+    preserved_runtime_dir = None
     if target_dir.exists():
+        runtime_dir = target_dir / "_takyon"
+        if runtime_dir.exists():
+            preserved_runtime_dir = Path(tempfile.mkdtemp(prefix=f"takyon-product-runtime-{_slugify(slug)}-"))
+            shutil.copytree(runtime_dir, preserved_runtime_dir / "_takyon")
         shutil.rmtree(target_dir)
 
     def ignore(_directory: str, names: list[str]) -> set[str]:
@@ -3623,6 +3961,11 @@ def _publish_product_surface_path(
         }
 
     shutil.copytree(publish_source, target_dir, ignore=ignore)
+    if preserved_runtime_dir is not None:
+        restored_runtime_dir = preserved_runtime_dir / "_takyon"
+        if restored_runtime_dir.exists():
+            shutil.copytree(restored_runtime_dir, target_dir / "_takyon", dirs_exist_ok=True)
+        shutil.rmtree(preserved_runtime_dir, ignore_errors=True)
     _make_static_publish_tree_readable(target_dir)
     caddyfile, blocker = _ensure_product_static_caddy_route(slug=slug, publish_target=publish_target, static_root=target_dir)
     result["caddyfile"] = str(caddyfile or "")
@@ -9972,6 +10315,9 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
 
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
+_REDDIT_ADS_API_BASE = "https://ads-api.reddit.com/api/v3"
+_REDDIT_ADS_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+_REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_VALID_CTA = {
     "LEARN_MORE", "SHOP_NOW", "SIGN_UP", "DOWNLOAD", "GET_OFFER", "SUBSCRIBE",
     "BOOK_TRAVEL", "CONTACT_US", "APPLY_NOW", "GET_QUOTE", "WATCH_MORE",
@@ -9981,11 +10327,13 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
     "meta_ad_launch": 1,
+    "reddit_ad_launch": 1,
 }
 _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
+    "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
 }
 
 
@@ -10965,6 +11313,1382 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         return tool_result({
             "success": True,
             "action": "business_meta_ad_insights_sync",
+            "business": business,
+            "slug": launch["slug"],
+            "mode": "live",
+            "level": level,
+            "status": "synced",
+            "receipt": sync_rel,
+            "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+            "totals": totals,
+            "value": sync_receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def _reddit_daily_budget_cap() -> float:
+    raw = os.getenv("TAKYON_REDDIT_MAX_DAILY_BUDGET_USD")
+    try:
+        return float(raw) if raw else _REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT
+    except (TypeError, ValueError):
+        return _REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT
+
+
+def _reddit_ads_state_path() -> Path:
+    return Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser() / "secrets" / "reddit_ads.json"
+
+
+def _reddit_ads_load_state(path: Path | None = None) -> dict[str, Any]:
+    state_path = path or _reddit_ads_state_path()
+    if not state_path.is_file():
+        return {}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _reddit_ads_save_state(state: Mapping[str, Any], path: Path | None = None) -> None:
+    state_path = path or _reddit_ads_state_path()
+    _atomic_write_text(state_path, json.dumps(dict(state), ensure_ascii=False, indent=2) + "\n")
+
+
+def _reddit_ads_state_or_env(state: Mapping[str, Any], env_key: str, state_key: str | None = None) -> str:
+    value = safebox.read_env_backed_value(env_key) or ""
+    if value:
+        return str(value).strip()
+    return str(state.get(state_key or env_key.lower()) or "").strip()
+
+
+def _reddit_ads_user_agent(cfg: Mapping[str, Any]) -> str:
+    explicit = str(cfg.get("user_agent") or "").strip()
+    if explicit:
+        return explicit
+    username = str(cfg.get("username") or "takyon").strip() or "takyon"
+    client_id = str(cfg.get("client_id") or "redditads").strip() or "redditads"
+    return f"desktop:{client_id}:v1 (by /u/{username})"
+
+
+def _reddit_ads_token_request(
+    *,
+    client_id: str,
+    client_secret: str,
+    form_data: Mapping[str, Any],
+    user_agent: str,
+) -> dict[str, Any]:
+    auth = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+    body = urllib.parse.urlencode({k: v for k, v in form_data.items() if v is not None}).encode("utf-8")
+    request = urllib.request.Request(
+        _REDDIT_ADS_TOKEN_URL,
+        data=body,
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": user_agent,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise TakyonError(f"Reddit Ads token exchange failed ({exc.code}): {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise TakyonError(f"Reddit Ads token exchange connection error: {exc.reason}") from exc
+
+
+def _reddit_ads_config(*, require_auth: bool = True) -> dict[str, Any]:
+    load_takyon_env()
+    state_path = _reddit_ads_state_path()
+    state = _reddit_ads_load_state(state_path)
+    cfg = {
+        "client_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_CLIENT_ID", "client_id"),
+        "client_secret": _reddit_ads_state_or_env(state, "REDDIT_ADS_CLIENT_SECRET", "client_secret"),
+        "redirect_uri": _reddit_ads_state_or_env(state, "REDDIT_ADS_REDIRECT_URI", "redirect_uri"),
+        "business_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_BUSINESS_ID", "business_id"),
+        "ad_account_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_ACCOUNT_ID", "ad_account_id"),
+        "profile_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_PROFILE_ID", "profile_id"),
+        "funding_instrument_id": _reddit_ads_state_or_env(
+            state, "REDDIT_ADS_FUNDING_INSTRUMENT_ID", "funding_instrument_id"
+        ),
+        "pixel_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_PIXEL_ID", "pixel_id"),
+        "username": _reddit_ads_state_or_env(state, "REDDIT_ADS_USERNAME", "username"),
+        "user_agent": _reddit_ads_state_or_env(state, "REDDIT_ADS_USER_AGENT", "user_agent"),
+        "access_token": _reddit_ads_state_or_env(state, "REDDIT_ADS_ACCESS_TOKEN", "access_token"),
+        "refresh_token": _reddit_ads_state_or_env(state, "REDDIT_ADS_REFRESH_TOKEN", "refresh_token"),
+        "scope": _reddit_ads_state_or_env(state, "REDDIT_ADS_SCOPE", "scope"),
+        "api_base": _REDDIT_ADS_API_BASE,
+        "state_path": state_path if state_path.exists() else None,
+        "state": dict(state),
+    }
+    raw_expires = _reddit_ads_state_or_env(state, "REDDIT_ADS_TOKEN_EXPIRES_AT", "expires_at")
+    try:
+        cfg["expires_at"] = int(raw_expires) if raw_expires else 0
+    except (TypeError, ValueError):
+        cfg["expires_at"] = 0
+    if require_auth and (not cfg["client_id"] or not cfg["client_secret"]):
+        raise TakyonError(
+            "Reddit Ads action requires REDDIT_ADS_CLIENT_ID and REDDIT_ADS_CLIENT_SECRET "
+            "or a saved $TAKYON_HOME/secrets/reddit_ads.json auth state"
+        )
+    if require_auth and not (cfg["refresh_token"] or cfg["access_token"]):
+        raise TakyonError(
+            "Reddit Ads action requires REDDIT_ADS_REFRESH_TOKEN or REDDIT_ADS_ACCESS_TOKEN "
+            "or a saved $TAKYON_HOME/secrets/reddit_ads.json auth state"
+        )
+    if not cfg["user_agent"]:
+        cfg["user_agent"] = _reddit_ads_user_agent(cfg)
+    return cfg
+
+
+def _reddit_ads_ensure_access_token(cfg: dict[str, Any]) -> str:
+    access_token = str(cfg.get("access_token") or "").strip()
+    expires_at = int(cfg.get("expires_at") or 0)
+    if access_token and (not expires_at or expires_at > int(time.time()) + 120):
+        return access_token
+
+    refresh_token = str(cfg.get("refresh_token") or "").strip()
+    if not refresh_token:
+        if access_token:
+            return access_token
+        raise TakyonError("Reddit Ads auth state does not include an access token or refresh token")
+
+    payload = _reddit_ads_token_request(
+        client_id=str(cfg.get("client_id") or ""),
+        client_secret=str(cfg.get("client_secret") or ""),
+        form_data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        user_agent=_reddit_ads_user_agent(cfg),
+    )
+    cfg["access_token"] = str(payload.get("access_token") or "").strip()
+    cfg["refresh_token"] = str(payload.get("refresh_token") or refresh_token).strip()
+    cfg["scope"] = str(payload.get("scope") or cfg.get("scope") or "").strip()
+    try:
+        expires_in = int(payload.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0
+    cfg["expires_at"] = int(time.time()) + expires_in if expires_in > 0 else 0
+    state = dict(cfg.get("state") or {})
+    state.update(
+        {
+            "client_id": cfg.get("client_id"),
+            "client_secret": cfg.get("client_secret"),
+            "redirect_uri": cfg.get("redirect_uri"),
+            "business_id": cfg.get("business_id"),
+            "ad_account_id": cfg.get("ad_account_id"),
+            "profile_id": cfg.get("profile_id"),
+            "funding_instrument_id": cfg.get("funding_instrument_id"),
+            "pixel_id": cfg.get("pixel_id"),
+            "username": cfg.get("username"),
+            "user_agent": cfg.get("user_agent"),
+            "access_token": cfg.get("access_token"),
+            "refresh_token": cfg.get("refresh_token"),
+            "scope": cfg.get("scope"),
+            "expires_at": cfg.get("expires_at"),
+        }
+    )
+    cfg["state"] = state
+    state_path = cfg.get("state_path")
+    if isinstance(state_path, Path):
+        _reddit_ads_save_state(state, state_path)
+    return str(cfg.get("access_token") or "").strip()
+
+
+def _reddit_ads_request(
+    method: str,
+    path: str,
+    cfg: dict[str, Any],
+    *,
+    json_body: Mapping[str, Any] | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    token = _reddit_ads_ensure_access_token(cfg)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": _reddit_ads_user_agent(cfg),
+        "Accept": "application/json",
+    }
+    body: bytes | None = None
+    if json_body is not None:
+        body = json.dumps(dict(json_body)).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    url = path if path.startswith("http://") or path.startswith("https://") else f"{cfg['api_base']}{path}"
+    request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+            content_type = response.headers.get("Content-Type", "")
+            data: Any
+            if "json" in content_type:
+                data = json.loads(raw)
+            else:
+                data = raw
+            return {"status": response.getcode(), "headers": dict(response.headers.items()), "data": data}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise TakyonError(f"Reddit Ads {method.upper()} {path} failed: {exc.code} {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise TakyonError(f"Reddit Ads {method.upper()} {path} connection error: {exc.reason}") from exc
+
+
+def _reddit_ads_data(payload: Any) -> Any:
+    if isinstance(payload, dict) and "data" in payload:
+        return payload.get("data")
+    return payload
+
+
+def _reddit_ads_list(payload: Any) -> list[dict[str, Any]]:
+    inner = _reddit_ads_data(payload)
+    if isinstance(inner, dict):
+        data = inner.get("data")
+        if isinstance(data, list):
+            return [dict(item) for item in data if isinstance(item, dict)]
+    if isinstance(inner, list):
+        return [dict(item) for item in inner if isinstance(item, dict)]
+    return []
+
+
+def _reddit_ads_default_id(items: list[dict[str, Any]]) -> str:
+    if len(items) != 1:
+        return ""
+    return str(items[0].get("id") or "").strip()
+
+
+def _reddit_ads_preflight(cfg: dict[str, Any]) -> dict[str, Any]:
+    me = _reddit_ads_request("GET", "/me", cfg)
+    businesses_resp = _reddit_ads_request("GET", "/me/businesses", cfg)
+    businesses = _reddit_ads_list(businesses_resp["data"])
+    business_id = str(cfg.get("business_id") or "").strip() or _reddit_ads_default_id(businesses)
+
+    business = None
+    ad_accounts: list[dict[str, Any]] = []
+    profiles: list[dict[str, Any]] = []
+    funding_instruments: list[dict[str, Any]] = []
+    pixels: list[dict[str, Any]] = []
+
+    if business_id:
+        business_resp = _reddit_ads_request("GET", f"/businesses/{business_id}", cfg)
+        business = _reddit_ads_data(business_resp["data"])
+        ad_accounts_resp = _reddit_ads_request("GET", f"/businesses/{business_id}/ad_accounts", cfg)
+        ad_accounts = _reddit_ads_list(ad_accounts_resp["data"])
+
+    ad_account_id = str(cfg.get("ad_account_id") or "").strip() or _reddit_ads_default_id(ad_accounts)
+    if ad_account_id:
+        profiles_resp = _reddit_ads_request("GET", f"/ad_accounts/{ad_account_id}/profiles", cfg)
+        funding_resp = _reddit_ads_request("GET", f"/ad_accounts/{ad_account_id}/funding_instruments", cfg)
+        pixels_resp = _reddit_ads_request("GET", f"/ad_accounts/{ad_account_id}/pixels", cfg)
+        profiles = _reddit_ads_list(profiles_resp["data"])
+        funding_instruments = _reddit_ads_list(funding_resp["data"])
+        pixels = _reddit_ads_list(pixels_resp["data"])
+
+    defaults = {
+        "business_id": business_id,
+        "ad_account_id": ad_account_id,
+        "profile_id": str(cfg.get("profile_id") or "").strip() or _reddit_ads_default_id(profiles),
+        "funding_instrument_id": str(cfg.get("funding_instrument_id") or "").strip() or _reddit_ads_default_id(funding_instruments),
+        "pixel_id": str(cfg.get("pixel_id") or "").strip() or _reddit_ads_default_id(pixels),
+    }
+    cfg.update(defaults)
+    state = dict(cfg.get("state") or {})
+    changed = False
+    for key, value in defaults.items():
+        if value and str(state.get(key) or "").strip() != value:
+            state[key] = value
+            changed = True
+    if changed:
+        cfg["state"] = state
+        state_path = cfg.get("state_path")
+        if isinstance(state_path, Path):
+            _reddit_ads_save_state(state, state_path)
+
+    return {
+        "success": True,
+        "mode": "preflight",
+        "read_only": True,
+        "identity": _reddit_ads_data(me["data"]),
+        "businesses": businesses,
+        "business": business,
+        "ad_accounts": ad_accounts,
+        "profiles": profiles,
+        "funding_instruments": funding_instruments,
+        "pixels": pixels,
+        "defaults": defaults,
+    }
+
+
+def _reddit_ads_objective_defaults(objective: str) -> dict[str, str]:
+    normalized = str(objective or "CLICKS").strip().upper() or "CLICKS"
+    if normalized == "VIDEO_VIEWABLE_IMPRESSIONS":
+        return {"bid_type": "CPV6", "optimization_goal": "VIDEO_VIEW_6S"}
+    if normalized == "IMPRESSIONS":
+        return {"bid_type": "CPM", "optimization_goal": "CLICKS"}
+    return {"bid_type": "CPC", "optimization_goal": "CLICKS"}
+
+
+def _reddit_ads_micros_from_usd(value: Any, *, field: str) -> int:
+    try:
+        usd = Decimal(str(value))
+    except Exception as exc:
+        raise TakyonError(f"{field} must be a number (USD)") from exc
+    if usd <= 0:
+        raise TakyonError(f"{field} must be positive")
+    return int((usd * Decimal("1000000")).quantize(Decimal("1")))
+
+
+def _reddit_ads_usd_from_micros(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        micros = Decimal(raw)
+    except Exception:
+        return 0.0
+    return float((micros / Decimal("1000000")).quantize(Decimal("0.01")))
+
+
+def _reddit_ads_hour_iso(value: Any, *, field: str, default: datetime | None = None) -> str | None:
+    if value in (None, ""):
+        if default is None:
+            return None
+        parsed = default.astimezone(timezone.utc)
+    else:
+        parsed = _parse_iso_datetime(value)
+        if parsed is None:
+            raise TakyonError(f"{field} must be an ISO 8601 timestamp")
+    rounded = parsed.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return rounded.isoformat().replace("+00:00", "Z")
+
+
+def _reddit_clean_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            child = _reddit_clean_payload(item)
+            if child in (None, "", [], {}):
+                continue
+            cleaned[key] = child
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = [_reddit_clean_payload(item) for item in value]
+        return [item for item in cleaned_list if item not in (None, "", [], {})]
+    return value
+
+
+def _reddit_plan_payload(
+    args: Mapping[str, Any],
+    *,
+    slug: str,
+    asset_kind: str,
+    staged_assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    campaign = args.get("campaign") if isinstance(args.get("campaign"), dict) else {}
+    ad_group = args.get("ad_group") if isinstance(args.get("ad_group"), dict) else {}
+    post = args.get("post") if isinstance(args.get("post"), dict) else {}
+    ad = args.get("ad") if isinstance(args.get("ad"), dict) else {}
+    payload: dict[str, Any] = {
+        "mode": "launch",
+        "asset_kind": asset_kind,
+        "slug": slug,
+        "post_id": str(args.get("post_id") or ad.get("post_id") or "").strip() or None,
+        "campaign": campaign,
+        "ad_group": ad_group,
+        "post": post,
+        "ad": ad,
+    }
+    if staged_assets:
+        payload["public_assets"] = [
+            {
+                "slug": item.get("slug"),
+                "source_path": item.get("source_path"),
+                "public_url": item.get("public_url"),
+                "receipt_path": item.get("receipt_path"),
+                "mime_type": item.get("mime_type"),
+            }
+            for item in staged_assets
+        ]
+    return payload
+
+
+def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[str, Any]:
+    if _boolish(args.get("activate"), default=False) or str(args.get("status") or "").strip().upper() == "ACTIVE":
+        raise TakyonError(
+            "business_reddit_ad_launch only creates PAUSED objects; activation is intentionally not supported by this tool"
+        )
+
+    campaign = args.get("campaign") if isinstance(args.get("campaign"), dict) else {}
+    ad_group = args.get("ad_group") if isinstance(args.get("ad_group"), dict) else {}
+    post = args.get("post") if isinstance(args.get("post"), dict) else {}
+    ad = args.get("ad") if isinstance(args.get("ad"), dict) else {}
+
+    asset_kind = _reddit_requested_asset_kind(args)
+    if asset_kind not in {"existing_post", "image", "video", "carousel"}:
+        raise TakyonError("asset_kind must be one of: existing_post, image, video, carousel")
+
+    objective = str(campaign.get("objective") or "CLICKS").strip().upper() or "CLICKS"
+    defaults = _reddit_ads_objective_defaults(objective)
+    slug = _file_slug(
+        str(args.get("slug") or campaign.get("name") or ad.get("name") or post.get("headline") or "reddit-ad"),
+        "reddit-ad",
+    )
+
+    raw_budget = ad_group.get("daily_budget_usd", ad_group.get("daily_budget"))
+    if raw_budget in (None, ""):
+        raw_budget = 5.0
+    daily_budget_micros = _reddit_ads_micros_from_usd(raw_budget, field="ad_group.daily_budget_usd")
+    daily_budget_usd = _reddit_ads_usd_from_micros(daily_budget_micros)
+    cap = _reddit_daily_budget_cap()
+    if daily_budget_usd > cap:
+        raise TakyonError(
+            f"ad_group.daily_budget_usd {daily_budget_usd} exceeds the safety cap of {cap} USD/day "
+            "(set TAKYON_REDDIT_MAX_DAILY_BUDGET_USD to change)"
+        )
+
+    targeting = ad_group.get("targeting") if isinstance(ad_group.get("targeting"), dict) else {
+        "geolocations": ["US"],
+        "locations": ["FEED"],
+        "platforms": ["DESKTOP", "MOBILE_NATIVE", "MOBILE_WEB"],
+    }
+    if asset_kind == "video" and objective != "VIDEO_VIEWABLE_IMPRESSIONS":
+        objective = "VIDEO_VIEWABLE_IMPRESSIONS"
+        defaults = _reddit_ads_objective_defaults(objective)
+
+    bid_type = str(ad_group.get("bid_type") or defaults["bid_type"]).strip().upper()
+    bid_strategy = str(ad_group.get("bid_strategy") or "MAXIMIZE_VOLUME").strip().upper()
+    optimization_goal = str(ad_group.get("optimization_goal") or defaults["optimization_goal"]).strip().upper()
+    bid_value_micros = None
+    if ad_group.get("bid_value_usd") not in (None, ""):
+        bid_value_micros = _reddit_ads_micros_from_usd(
+            ad_group.get("bid_value_usd"), field="ad_group.bid_value_usd"
+        )
+    elif ad_group.get("bid_value") not in (None, ""):
+        try:
+            bid_value_micros = int(ad_group.get("bid_value"))
+        except (TypeError, ValueError) as exc:
+            raise TakyonError("ad_group.bid_value must be an integer microcurrency amount") from exc
+
+    profile_id = str(args.get("profile_id") or post.get("profile_id") or cfg.get("profile_id") or "").strip()
+    funding_instrument_id = str(
+        campaign.get("funding_instrument_id") or args.get("funding_instrument_id") or cfg.get("funding_instrument_id") or ""
+    ).strip()
+    pixel_id = str(
+        ad_group.get("conversion_pixel_id")
+        or campaign.get("conversion_pixel_id")
+        or args.get("pixel_id")
+        or cfg.get("pixel_id")
+        or ""
+    ).strip()
+    click_url = str(ad.get("click_url") or post.get("destination_url") or "").strip()
+
+    post_id = str(args.get("post_id") or ad.get("post_id") or "").strip()
+    post_payload = None
+    thumbnail_url = None
+    if asset_kind == "existing_post":
+        if not post_id:
+            raise TakyonError("post_id is required when asset_kind='existing_post'")
+        if not click_url:
+            raise TakyonError("ad.click_url is required when asset_kind='existing_post'")
+    else:
+        headline = str(post.get("headline") or "").strip()
+        destination_url = str(post.get("destination_url") or click_url or "").strip()
+        if not headline:
+            raise TakyonError("post.headline is required when creating a Reddit ad post")
+        if not destination_url:
+            raise TakyonError("post.destination_url or ad.click_url is required when creating a Reddit ad post")
+        allow_comments = _boolish(post.get("allow_comments"), default=False)
+        creative: dict[str, Any] = {
+            "type": asset_kind.upper(),
+            "headline": headline,
+            "destination": {"url": destination_url, "type": "URL"},
+        }
+        if asset_kind == "image":
+            media_url = str(post.get("media_url") or post.get("image_url") or "").strip()
+            thumbnail_url = str(post.get("thumbnail_url") or media_url or "").strip()
+            if not media_url:
+                raise TakyonError("post.media_url is required when asset_kind='image'")
+            creative["image"] = {"media": {"url": media_url, "type": "URL"}}
+            creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
+        elif asset_kind == "video":
+            media_url = str(post.get("media_url") or post.get("video_url") or "").strip()
+            thumbnail_url = str(post.get("thumbnail_url") or "").strip()
+            if not media_url:
+                raise TakyonError("post.media_url is required when asset_kind='video'")
+            if not thumbnail_url:
+                raise TakyonError("post.thumbnail_url is required when asset_kind='video'")
+            creative["video"] = {"media": {"url": media_url, "type": "URL"}}
+            creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
+        else:
+            carousel = post.get("carousel") if isinstance(post.get("carousel"), list) else []
+            if len(carousel) < 2:
+                raise TakyonError("post.carousel must include at least two cards when asset_kind='carousel'")
+            thumbnail_url = str(post.get("thumbnail_url") or "").strip()
+            if not thumbnail_url:
+                raise TakyonError("post.thumbnail_url is required when asset_kind='carousel'")
+            creative["carousel"] = []
+            for index, card in enumerate(carousel, start=1):
+                if not isinstance(card, dict):
+                    raise TakyonError(f"post.carousel[{index}] must be an object")
+                card_url = str(card.get("media_url") or card.get("image_url") or "").strip()
+                card_destination = str(card.get("destination_url") or destination_url).strip()
+                if not card_url:
+                    raise TakyonError(f"post.carousel[{index}].media_url is required")
+                if not card_destination:
+                    raise TakyonError(f"post.carousel[{index}].destination_url is required")
+                item: dict[str, Any] = {
+                    "destination": {"url": card_destination, "type": "URL"},
+                    "image": {"media": {"url": card_url, "type": "URL"}},
+                }
+                caption = str(card.get("caption") or "").strip()
+                if caption:
+                    item["caption"] = caption
+                creative["carousel"].append(item)
+            creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
+        post_payload = {"data": {"allow_comments": allow_comments, "creative": creative}}
+        click_url = click_url or destination_url
+
+    campaign_payload = {
+        "data": {
+            "name": str(campaign.get("name") or f"{slug} campaign").strip(),
+            "configured_status": "PAUSED",
+            "objective": objective,
+            "funding_instrument_id": funding_instrument_id,
+            "is_campaign_budget_optimization": False,
+            "invoice_label": str(campaign.get("invoice_label") or "").strip() or None,
+        }
+    }
+    campaign_start = _reddit_ads_hour_iso(campaign.get("start_time"), field="campaign.start_time")
+    campaign_end = _reddit_ads_hour_iso(campaign.get("end_time"), field="campaign.end_time")
+    if campaign_start:
+        campaign_payload["data"]["start_time"] = campaign_start
+    if campaign_end:
+        campaign_payload["data"]["end_time"] = campaign_end
+
+    ad_group_payload = {
+        "data": {
+            "campaign_id": None,
+            "name": str(ad_group.get("name") or f"{slug} ad group").strip(),
+            "configured_status": "PAUSED",
+            "goal_type": "DAILY_SPEND",
+            "goal_value": daily_budget_micros,
+            "bid_type": bid_type,
+            "bid_strategy": bid_strategy,
+            "bid_value": bid_value_micros,
+            "optimization_goal": optimization_goal,
+            "targeting": targeting,
+            "conversion_pixel_id": pixel_id,
+        }
+    }
+    ad_group_start = _reddit_ads_hour_iso(ad_group.get("start_time"), field="ad_group.start_time")
+    ad_group_end = _reddit_ads_hour_iso(ad_group.get("end_time"), field="ad_group.end_time")
+    if ad_group_start:
+        ad_group_payload["data"]["start_time"] = ad_group_start
+    if ad_group_end:
+        ad_group_payload["data"]["end_time"] = ad_group_end
+
+    ad_payload = {
+        "data": {
+            "ad_group_id": None,
+            "name": str(ad.get("name") or f"{slug} ad").strip(),
+            "post_id": post_id or None,
+            "click_url": click_url,
+            "configured_status": "PAUSED",
+            "click_url_query_parameters": ad.get("click_url_query_parameters")
+            if isinstance(ad.get("click_url_query_parameters"), list)
+            else None,
+        }
+    }
+
+    return {
+        "slug": slug,
+        "asset_kind": asset_kind,
+        "objective": objective,
+        "daily_budget_usd": daily_budget_usd,
+        "daily_budget_micros": daily_budget_micros,
+        "ad_account_id": str(args.get("ad_account_id") or cfg.get("ad_account_id") or "").strip(),
+        "business_id": str(args.get("reddit_business_id") or args.get("business_id") or cfg.get("business_id") or "").strip(),
+        "profile_id": profile_id,
+        "funding_instrument_id": funding_instrument_id,
+        "pixel_id": pixel_id,
+        "post_id": post_id or None,
+        "thumbnail_url": thumbnail_url,
+        "campaign_payload": _reddit_clean_payload(campaign_payload),
+        "ad_group_payload": _reddit_clean_payload(ad_group_payload),
+        "post_payload": _reddit_clean_payload(post_payload) if post_payload else None,
+        "ad_payload": _reddit_clean_payload(ad_payload),
+        "targeting": targeting,
+    }
+
+
+def _reddit_publication_paths(
+    store: "TakyonStore",
+    business: str,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt_raw = str(args.get("receipt_path") or "").strip()
+    if receipt_raw:
+        receipt_rel = _safe_relpath(receipt_raw, field="receipt_path").as_posix()
+        if not receipt_rel.startswith("distribution/reddit-ads/") or not receipt_rel.endswith("/receipt.json"):
+            raise TakyonError("receipt_path must point to distribution/reddit-ads/<slug>/receipt.json")
+        slug = Path(receipt_rel).parent.name
+    else:
+        slug_raw = str(args.get("slug") or "").strip()
+        if not slug_raw:
+            raise TakyonError("slug or receipt_path is required")
+        slug = _file_slug(slug_raw, "reddit-ad")
+        receipt_rel = f"distribution/reddit-ads/{slug}/receipt.json"
+    receipt_abs = store._resolve_business_file(business, receipt_rel)
+    publication_rel = str(Path(receipt_rel).parent).replace("\\", "/")
+    return {
+        "slug": slug,
+        "publication_rel": publication_rel,
+        "publication_abs": receipt_abs.parent,
+        "receipt_rel": receipt_rel,
+        "receipt_abs": receipt_abs,
+    }
+
+
+def _reddit_load_launch_receipt(
+    store: "TakyonStore",
+    business: str,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    paths = _reddit_publication_paths(store, business, args)
+    receipt_abs = paths["receipt_abs"]
+    if not receipt_abs.is_file():
+        raise TakyonError(
+            f"Reddit launch receipt not found at {paths['receipt_rel']}; launch the paused Reddit ad first"
+        )
+    try:
+        receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise TakyonError(f"Reddit launch receipt is unreadable at {paths['receipt_rel']}: {exc}") from exc
+    if not isinstance(receipt, dict):
+        raise TakyonError(f"Reddit launch receipt at {paths['receipt_rel']} is not a JSON object")
+    return {**paths, "receipt": receipt}
+
+
+def _reddit_receipt_ids(receipt: Mapping[str, Any]) -> dict[str, str]:
+    ids = receipt.get("ids") if isinstance(receipt.get("ids"), dict) else {}
+    return {
+        "campaign_id": str(ids.get("campaign_id") or "").strip(),
+        "ad_group_id": str(ids.get("ad_group_id") or "").strip(),
+        "ad_id": str(ids.get("ad_id") or "").strip(),
+        "post_id": str(ids.get("post_id") or "").strip(),
+    }
+
+
+def _reddit_control_event_type(operation: str) -> str:
+    op = str(operation or "").strip().lower()
+    if op == "activate":
+        return "reddit_ad.activate"
+    if op == "pause":
+        return "reddit_ad.pause"
+    if op == "set_budget":
+        return "reddit_ad.budget_update"
+    return "reddit_ad.control"
+
+
+def _reddit_float_metric(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _reddit_int_metric(value: Any) -> int:
+    return int(round(_reddit_float_metric(value)))
+
+
+def _reddit_aggregate_report_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "rows": len(rows),
+        "spend_micros": 0,
+        "spend_usd": 0.0,
+        "impressions": 0,
+        "clicks": 0,
+        "cpc": None,
+        "cpm": None,
+        "ctr": None,
+        "date_start": None,
+        "date_stop": None,
+    }
+    for row in rows:
+        date_value = str(row.get("date") or row.get("DATE") or "").strip() or None
+        if date_value and (totals["date_start"] is None or date_value < totals["date_start"]):
+            totals["date_start"] = date_value
+        if date_value and (totals["date_stop"] is None or date_value > totals["date_stop"]):
+            totals["date_stop"] = date_value
+        totals["spend_micros"] += int(round(_reddit_float_metric(row.get("spend") or row.get("SPEND"))))
+        totals["impressions"] += _reddit_int_metric(row.get("impressions") or row.get("IMPRESSIONS"))
+        totals["clicks"] += _reddit_int_metric(row.get("clicks") or row.get("CLICKS"))
+    totals["spend_usd"] = round(totals["spend_micros"] / 1_000_000.0, 2)
+    if totals["clicks"] > 0:
+        totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
+    if totals["impressions"] > 0:
+        totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
+        totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
+    return totals
+
+
+def _reddit_report_window(args: Mapping[str, Any]) -> tuple[str, str]:
+    now_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    ends_at = _reddit_ads_hour_iso(args.get("ends_at"), field="ends_at", default=now_hour)
+    starts_at = _reddit_ads_hour_iso(
+        args.get("starts_at"),
+        field="starts_at",
+        default=now_hour - timedelta(days=7),
+    )
+    start_dt = _parse_iso_datetime(starts_at)
+    end_dt = _parse_iso_datetime(ends_at)
+    if not start_dt or not end_dt or end_dt <= start_dt:
+        raise TakyonError("ends_at must be later than starts_at")
+    return starts_at, ends_at
+
+
+def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
+    """Preflight or launch a PAUSED Reddit ad from an existing post or a public hosted creative."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        mode = str(args.get("mode") or "launch").strip().lower()
+
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            business_mode = str(business_row.get("mode") or "live")
+            canonical_product_url = _canonical_product_url(store, conn, business)
+
+        if mode == "preflight":
+            try:
+                result = _call_creative_runtime_gateway(
+                    "reddit-launch",
+                    {"business": business, "mode": "preflight", "idempotency_key": idempotency_key},
+                )
+            except Exception as exc:
+                return tool_error(str(exc), success=False)
+            result["action"] = "business_reddit_ad_launch"
+            result["business_mode"] = business_mode
+            return tool_result(result)
+
+        staged_args, staged_assets = _reddit_stage_launch_args(
+            store,
+            business,
+            args,
+            publish_target=canonical_product_url,
+            verify_public_url=(business_mode != "test"),
+        )
+        cfg = _reddit_ads_config(require_auth=(business_mode != "test"))
+        plan = _reddit_launch_plan(staged_args, cfg)
+        slug = plan["slug"]
+        pub_rel = f"distribution/reddit-ads/{slug}"
+        plan_rel = f"{pub_rel}/plan.json"
+        plan_abs = store._resolve_business_file(business, plan_rel)
+        receipt_rel = f"{pub_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_reddit_ad_launch",
+                "business": business,
+                "slug": slug,
+                "idempotent": True,
+                "status": prior.get("status"),
+                "paused": True,
+                "plan_path": prior.get("plan_path") or plan_rel,
+                "receipt": receipt_rel,
+                "value": prior,
+            })
+
+        plan_payload = _reddit_plan_payload(
+            staged_args,
+            slug=slug,
+            asset_kind=plan["asset_kind"],
+            staged_assets=staged_assets,
+        )
+        _atomic_write_text(plan_abs, json.dumps(plan_payload, ensure_ascii=False, indent=2) + "\n")
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "paused": True,
+            "asset_kind": plan["asset_kind"],
+            "objective": plan["objective"],
+            "daily_budget_usd": plan["daily_budget_usd"],
+            "ad_account_id": plan["ad_account_id"] or None,
+            "reddit_business_id": plan["business_id"] or None,
+            "profile_id": plan["profile_id"] or None,
+            "funding_instrument_id": plan["funding_instrument_id"] or None,
+            "conversion_pixel_id": plan["pixel_id"] or None,
+            "post_id": plan["post_id"] or None,
+            "thumbnail_url": plan["thumbnail_url"] or None,
+            "plan_path": plan_rel,
+            "campaign_name": str(plan_payload.get("campaign", {}).get("name") or "").strip(),
+            "ad_group_name": str(plan_payload.get("ad_group", {}).get("name") or "").strip(),
+            "ad_name": str(plan_payload.get("ad", {}).get("name") or "").strip(),
+            "headline": str(plan_payload.get("post", {}).get("headline") or "").strip(),
+            "click_url": str(plan_payload.get("ad", {}).get("click_url") or "").strip(),
+            "public_assets": plan_payload.get("public_assets") or [],
+            "created_at": _now(),
+        }
+
+        if business_mode == "test":
+            receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "note": "Test mode recorded the Reddit ad launch locally; no Reddit API call was made.",
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            store.commit(
+                scope=f"business:{business}/distribution:reddit-ads/{slug}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "reddit_ad.launch",
+                    "payload": {**receipt, "publication_dir": pub_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record suppressed reddit ad launch (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_reddit_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "paused": True,
+                "plan_path": plan_rel,
+                "receipt": receipt_rel,
+                "value": receipt,
+            })
+
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "reddit-launch",
+                {
+                    "business": business,
+                    "idempotency_key": idempotency_key,
+                    "slug": slug,
+                    "plan": plan,
+                },
+            )
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "status": receipt["status"],
+                "paused": True,
+                "plan_path": plan_rel,
+                "receipt": receipt_rel,
+                "error": str(exc),
+                "value": receipt,
+            })
+
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "ids": gateway_result.get("ids") or None,
+                "error": gateway_result.get("error") or "reddit launch failed",
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "credits_charged": gateway_result.get("credits_charged"),
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "status": receipt["status"],
+                "paused": True,
+                "plan_path": plan_rel,
+                "receipt": receipt_rel,
+                "balance_credits": receipt.get("balance_credits"),
+                "reserved_credits": receipt.get("reserved_credits"),
+                "error": receipt["error"],
+                "value": receipt,
+            })
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "mode": "live",
+            "status": gateway_result.get("status") or "created_paused",
+            "external_side_effects": "created_paused_no_spend",
+            "ad_account_id": gateway_result.get("ad_account_id"),
+            "reddit_business_id": gateway_result.get("business_id"),
+            "profile_id": gateway_result.get("profile_id"),
+            "funding_instrument_id": gateway_result.get("funding_instrument_id"),
+            "conversion_pixel_id": gateway_result.get("pixel_id"),
+            "ids": gateway_result.get("ids") or {},
+            "preview_url": gateway_result.get("preview_url"),
+            "preview_expiry": gateway_result.get("preview_expiry"),
+            "post_url": gateway_result.get("post_url"),
+            "credits_charged": gateway_result.get("credits_charged"),
+            "note": "All objects created PAUSED; nothing serves or spends until explicitly activated.",
+        }
+        receipt["balance_credits"] = gateway_result.get("balance_credits")
+        receipt["reserved_credits"] = gateway_result.get("reserved_credits")
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/distribution:reddit-ads/{slug}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": "reddit_ad.launch",
+                "payload": {**receipt, "publication_dir": pub_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record reddit ad launch (paused)",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_reddit_ad_launch",
+            "business": business,
+            "slug": slug,
+            "mode": "live",
+            "status": "created_paused",
+            "paused": True,
+            "ids": receipt["ids"],
+            "plan_path": plan_rel,
+            "receipt": receipt_rel,
+            "balance_credits": receipt.get("balance_credits"),
+            "reserved_credits": receipt.get("reserved_credits"),
+            "value": receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_reddit_ad_control(args: dict, **_: Any) -> str:
+    """Activate, pause, or update the daily budget for a previously launched Reddit ad."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        operation = str(args.get("operation") or "").strip().lower()
+        if operation not in {"activate", "pause", "set_budget"}:
+            raise TakyonError("operation must be one of: activate, pause, set_budget")
+
+        launch = _reddit_load_launch_receipt(store, business, args)
+        receipt = launch["receipt"]
+        ids = _reddit_receipt_ids(receipt)
+        if not ids["campaign_id"] or not ids["ad_group_id"] or not ids["ad_id"]:
+            raise TakyonError(
+                f"Reddit launch receipt at {launch['receipt_rel']} does not contain campaign/ad_group/ad ids"
+            )
+        business_mode = _business_mode(store, business)
+        action_key = _file_slug(f"{operation}-{idempotency_key}", operation)
+        action_rel = f"{launch['publication_rel']}/actions/{action_key}.json"
+        action_abs = store._resolve_business_file(business, action_rel)
+        prior = _read_existing_receipt(action_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_reddit_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "idempotent": True,
+                "operation": operation,
+                "status": prior.get("status"),
+                "receipt": action_rel,
+                "value": prior,
+            })
+
+        budget_micros = None
+        budget_usd = None
+        budget_scope = str(receipt.get("budget_scope") or "ad_group").strip() or "ad_group"
+        if operation == "set_budget":
+            raw_budget = args.get("daily_budget_usd", args.get("daily_budget"))
+            budget_micros = _reddit_ads_micros_from_usd(raw_budget, field="daily_budget_usd")
+            budget_usd = _reddit_ads_usd_from_micros(budget_micros)
+            cap = _reddit_daily_budget_cap()
+            if budget_usd > cap:
+                raise TakyonError(
+                    f"daily_budget_usd {budget_usd} exceeds the safety cap of {cap} USD/day "
+                    "(set TAKYON_REDDIT_MAX_DAILY_BUDGET_USD to change)"
+                )
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": launch["slug"],
+            "operation": operation,
+            "launch_receipt": launch["receipt_rel"],
+            "ids": ids,
+            "budget_scope": budget_scope,
+            "created_at": _now(),
+        }
+        if budget_usd is not None:
+            base_receipt["daily_budget_usd"] = budget_usd
+            base_receipt["daily_budget_micros"] = budget_micros
+
+        if business_mode == "test":
+            control_receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "note": "Test mode recorded the Reddit control action locally; no Reddit objects were mutated.",
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            store.commit(
+                scope=f"business:{business}/distribution:reddit-ads/{launch['slug']}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": _reddit_control_event_type(operation),
+                    "payload": {**control_receipt, "publication_dir": launch["publication_rel"], "receipt": action_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or f"record suppressed reddit ad {operation} (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_reddit_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "test",
+                "operation": operation,
+                "status": "suppressed_test_mode",
+                "receipt": action_rel,
+                "value": control_receipt,
+            })
+
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "reddit-control",
+                {
+                    "business": business,
+                    "operation": operation,
+                    "campaign_id": ids["campaign_id"],
+                    "ad_group_id": ids["ad_group_id"],
+                    "ad_id": ids["ad_id"],
+                    "budget_scope": budget_scope,
+                    "daily_budget_micros": budget_micros,
+                    "daily_budget_usd": budget_usd,
+                },
+            )
+        except Exception as exc:
+            control_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "operation": operation,
+                "status": control_receipt["status"],
+                "receipt": action_rel,
+                "error": str(exc),
+                "value": control_receipt,
+            })
+
+        if not gateway_result.get("success"):
+            control_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "applied": gateway_result.get("applied"),
+                "error": gateway_result.get("error") or "reddit control failed",
+            }
+            _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_control",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "operation": operation,
+                "status": control_receipt["status"],
+                "receipt": action_rel,
+                "error": control_receipt["error"],
+                "value": control_receipt,
+            })
+
+        control_receipt = {
+            **base_receipt,
+            "success": True,
+            "mode": "live",
+            "status": gateway_result.get("status") or operation,
+            "applied": gateway_result.get("applied"),
+            "note": "Reddit control action applied through the guarded authority runtime.",
+        }
+        _atomic_write_text(action_abs, json.dumps(control_receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/distribution:reddit-ads/{launch['slug']}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": _reddit_control_event_type(operation),
+                "payload": {**control_receipt, "publication_dir": launch["publication_rel"], "receipt": action_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or f"record reddit ad {operation}",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_reddit_ad_control",
+            "business": business,
+            "slug": launch["slug"],
+            "mode": "live",
+            "operation": operation,
+            "status": control_receipt["status"],
+            "receipt": action_rel,
+            "value": control_receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
+    """Sync Reddit ad-platform delivery metrics for a previously launched campaign, ad group, or ad."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        level = str(args.get("level") or "campaign").strip().lower()
+        if level not in {"campaign", "ad_group", "ad"}:
+            raise TakyonError("level must be one of: campaign, ad_group, ad")
+
+        launch = _reddit_load_launch_receipt(store, business, args)
+        receipt = launch["receipt"]
+        ids = _reddit_receipt_ids(receipt)
+        object_id = ids[f"{level}_id"]
+        if not object_id:
+            raise TakyonError(
+                f"Reddit launch receipt at {launch['receipt_rel']} does not contain a {level}_id"
+            )
+        business_mode = _business_mode(store, business)
+        sync_key = _file_slug(f"{level}-insights-{idempotency_key}", "reddit-insights")
+        metrics_dir_rel = f"metrics/reddit-ads/{launch['slug']}"
+        sync_rel = f"{metrics_dir_rel}/syncs/{sync_key}.json"
+        sync_abs = store._resolve_business_file(business, sync_rel)
+        prior = _read_existing_receipt(sync_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_reddit_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "idempotent": True,
+                "level": level,
+                "status": prior.get("status"),
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "value": prior,
+            })
+
+        starts_at, ends_at = _reddit_report_window(args)
+        fields = args.get("fields") if isinstance(args.get("fields"), list) else [
+            "SPEND",
+            "IMPRESSIONS",
+            "CLICKS",
+            "CTR",
+            "CPC",
+            "CPM",
+        ]
+        breakdowns = args.get("breakdowns") if isinstance(args.get("breakdowns"), list) else ["DATE"]
+        filter_value = str(args.get("filter") or f"{level}:id=={object_id}").strip()
+        time_zone_id = str(args.get("time_zone_id") or "UTC").strip() or "UTC"
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": launch["slug"],
+            "launch_receipt": launch["receipt_rel"],
+            "level": level,
+            "object_id": object_id,
+            "ids": ids,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "time_zone_id": time_zone_id,
+            "fields": fields,
+            "breakdowns": breakdowns,
+            "filter": filter_value,
+            "created_at": _now(),
+        }
+
+        if business_mode == "test":
+            sync_receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "test",
+                "status": "suppressed_test_mode",
+                "external_side_effects": "suppressed",
+                "rows": [],
+                "totals": _reddit_aggregate_report_rows([]),
+                "note": "Test mode recorded a local Reddit insights sync receipt; no Reddit API call was made.",
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            _append_jsonl(
+                store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+                {**sync_receipt, "receipt": sync_rel},
+            )
+            store.commit(
+                scope=f"business:{business}/metrics:reddit-ads/{launch['slug']}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "reddit_ad.insights_sync",
+                    "payload": {**sync_receipt, "metrics_dir": metrics_dir_rel, "receipt": sync_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record suppressed reddit insights sync (test mode)",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_reddit_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "test",
+                "level": level,
+                "status": "suppressed_test_mode",
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "value": sync_receipt,
+            })
+
+        try:
+            gateway_result = _call_creative_runtime_gateway(
+                "reddit-insights",
+                {
+                    "business": business,
+                    "ad_account_id": receipt.get("ad_account_id"),
+                    "level": level,
+                    "campaign_id": ids["campaign_id"],
+                    "ad_group_id": ids["ad_group_id"],
+                    "ad_id": ids["ad_id"],
+                    "starts_at": starts_at,
+                    "ends_at": ends_at,
+                    "time_zone_id": time_zone_id,
+                    "fields": fields,
+                    "breakdowns": breakdowns,
+                    "filter": filter_value,
+                },
+            )
+        except Exception as exc:
+            sync_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "level": level,
+                "status": sync_receipt["status"],
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "error": str(exc),
+                "value": sync_receipt,
+            })
+
+        if not gateway_result.get("success"):
+            sync_receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": gateway_result.get("status") or "failed",
+                "error": gateway_result.get("error") or "reddit insights sync failed",
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_reddit_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": "live",
+                "level": level,
+                "status": sync_receipt["status"],
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "error": sync_receipt["error"],
+                "value": sync_receipt,
+            })
+
+        rows = gateway_result.get("rows") if isinstance(gateway_result.get("rows"), list) else []
+        normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        totals = _reddit_aggregate_report_rows(normalized_rows)
+        sync_receipt = {
+            **base_receipt,
+            "success": True,
+            "mode": "live",
+            "status": "synced",
+            "rows": normalized_rows,
+            "totals": totals,
+        }
+        _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+        _append_jsonl(
+            store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+            {**sync_receipt, "receipt": sync_rel},
+        )
+        store.commit(
+            scope=f"business:{business}/metrics:reddit-ads/{launch['slug']}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": "reddit_ad.insights_sync",
+                "payload": {**sync_receipt, "metrics_dir": metrics_dir_rel, "receipt": sync_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record reddit insights sync",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_reddit_ad_insights_sync",
             "business": business,
             "slug": launch["slug"],
             "mode": "live",
@@ -12352,6 +14076,176 @@ TAKYON_TOOL_DEFINITIONS = [
                 "time_range": {
                     "type": "object",
                     "description": "Optional explicit Meta time range object like {since: YYYY-MM-DD, until: YYYY-MM-DD}.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_reddit_ad_launch",
+        "description": (
+            "Launch or preflight a Reddit ad from an existing promoted post or a public hosted image/video/carousel. "
+            "When a launch uses business-relative local media files, Takyon stages them onto the business publish target "
+            "first and then uses those public asset URLs for Reddit. "
+            "mode=preflight verifies auth, businesses, ad accounts, profiles, funding instruments, and pixels "
+            "(read-only, creates nothing). mode=launch creates a Campaign + Ad Group + Post + Ad, ALWAYS PAUSED; "
+            "test-mode businesses suppress everything to a local receipt with no Reddit calls. "
+            "Activation is intentionally not supported by this tool."
+        ),
+        "handler": handle_business_reddit_ad_launch,
+        "schema": _schema(
+            "business_reddit_ad_launch",
+            "Preflight or create a PAUSED Reddit ad from an existing post or public creative URL.",
+            {
+                "business": _BUSINESS_PROP,
+                "mode": {
+                    "type": "string",
+                    "enum": ["preflight", "launch"],
+                    "description": "preflight = read-only account/default discovery; launch = create PAUSED objects. Default launch.",
+                },
+                "asset_kind": {
+                    "type": "string",
+                    "enum": ["existing_post", "image", "video", "carousel"],
+                    "description": "existing_post reuses post_id; image/video/carousel create a promoted post from public media URLs.",
+                },
+                "post_id": {
+                    "type": "string",
+                    "description": "Existing Reddit post id like t3_xxxxxx. Required when asset_kind=existing_post.",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "Publication slug under distribution/reddit-ads/<slug>/; defaults from campaign/ad names.",
+                },
+                "ad_account_id": {
+                    "type": "string",
+                    "description": "Override the default Reddit ad account id, e.g. a2_xxxxx.",
+                },
+                "profile_id": {
+                    "type": "string",
+                    "description": "Override the Reddit profile id used to create a promoted post when asset_kind is not existing_post.",
+                },
+                "funding_instrument_id": {
+                    "type": "string",
+                    "description": "Override the campaign funding instrument id. If omitted, launch uses the single discovered/default funding instrument when available.",
+                },
+                "pixel_id": {
+                    "type": "string",
+                    "description": "Override the conversion pixel id. If omitted, launch uses the single discovered/default pixel when available.",
+                },
+                "campaign": {
+                    "type": "object",
+                    "description": "{name, objective, start_time, end_time, invoice_label, funding_instrument_id}. v1 launch stages a non-CBO campaign and always pauses it.",
+                },
+                "ad_group": {
+                    "type": "object",
+                    "description": "{name, daily_budget_usd, bid_type, bid_strategy, bid_value_usd, optimization_goal, start_time, end_time, targeting, conversion_pixel_id}; daily_budget_usd is capped by TAKYON_REDDIT_MAX_DAILY_BUDGET_USD.",
+                },
+                "post": {
+                    "type": "object",
+                    "description": "{headline, destination_url, allow_comments, media_url|image_url|video_url|thumbnail_url, media_path|image_path|video_path|thumbnail_path, carousel}. image/video/carousel launches need either public creative URLs or business-relative local files that Takyon can stage onto the business publish target first.",
+                },
+                "ad": {
+                    "type": "object",
+                    "description": "{name, click_url, post_id, click_url_query_parameters}. click_url is required when reusing an existing post.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_reddit_ad_control",
+        "description": (
+            "Control a previously launched Reddit ad using the canonical distribution/reddit-ads/<slug>/receipt.json. "
+            "Supports activate, pause, and set_budget through the guarded authority runtime; "
+            "test-mode businesses suppress to local receipts."
+        ),
+        "handler": handle_business_reddit_ad_control,
+        "schema": _schema(
+            "business_reddit_ad_control",
+            "Activate, pause, or update the daily budget of a launched Reddit ad.",
+            {
+                "business": _BUSINESS_PROP,
+                "operation": {
+                    "type": "string",
+                    "enum": ["activate", "pause", "set_budget"],
+                    "description": "activate and pause update campaign/ad_group/ad status together; set_budget updates the ad group daily budget for the staged Reddit launch shape.",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "Reddit publication slug under distribution/reddit-ads/<slug>/; use this or receipt_path.",
+                },
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to distribution/reddit-ads/<slug>/receipt.json.",
+                },
+                "daily_budget_usd": {
+                    "type": "number",
+                    "description": "Required when operation=set_budget. Subject to TAKYON_REDDIT_MAX_DAILY_BUDGET_USD.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "operation", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_reddit_ad_insights_sync",
+        "description": (
+            "Read Reddit ad-platform delivery metrics for a previously launched campaign/ad_group/ad and "
+            "persist truthful local snapshots under metrics/reddit-ads/<slug>/. "
+            "This records ad-platform metrics only; it does not invent business attribution."
+        ),
+        "handler": handle_business_reddit_ad_insights_sync,
+        "schema": _schema(
+            "business_reddit_ad_insights_sync",
+            "Sync delivery metrics from Reddit for a launched campaign, ad group, or ad.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {
+                    "type": "string",
+                    "description": "Reddit publication slug under distribution/reddit-ads/<slug>/; use this or receipt_path.",
+                },
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to distribution/reddit-ads/<slug>/receipt.json.",
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["campaign", "ad_group", "ad"],
+                    "description": "Which launched object to report on. Default campaign.",
+                },
+                "starts_at": {
+                    "type": "string",
+                    "description": "UTC ISO timestamp rounded to the hour, e.g. 2026-06-01T00:00:00Z. Defaults to 7 days before ends_at.",
+                },
+                "ends_at": {
+                    "type": "string",
+                    "description": "UTC ISO timestamp rounded to the hour, e.g. 2026-06-08T00:00:00Z. Defaults to the current UTC hour.",
+                },
+                "time_zone_id": {
+                    "type": "string",
+                    "description": "Optional Reddit report time zone id. Defaults to UTC.",
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional Reddit report fields; defaults to spend, impressions, clicks, CTR, CPC, and CPM.",
+                },
+                "breakdowns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional Reddit report breakdowns; defaults to DATE.",
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "Optional Reddit report filter string like campaign:id==123456. Defaults to the launched object id.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,

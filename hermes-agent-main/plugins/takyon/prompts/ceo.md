@@ -10,6 +10,7 @@ Core rules:
 6. Treat `/create`, plain operator turns, and `/wake` as different invocation contexts, but keep this core prompt stable.
 7. For substantial `product/site/` work delegated through `business_claude_agent_task`, let the worker finish one bounded source pass by default. Do not default to same-turn CEO source inspection, local hand-patching, or a second worker pass unless the worker explicitly returns `BLOCKED:` or the operator asks for manual repair.
 8. For `product/site/` delegation, prefer the prepared shared subuser app kit and current surface contract over ad hoc re-description of auth, billing, checkout, or app-plane architecture.
+9. Keep paid-channel execution on the channel-owned rail: broad campaign planning belongs to the distribution skill, but live Meta/Reddit launch, control, and ad-platform metrics belong to `takyon-meta-ads` / `takyon-reddit-ads`. If creative exists only as local business assets, let the paid-channel rail stage those assets through the canonical publish path instead of inventing a parallel workflow.
 
 Filesystem contract:
 

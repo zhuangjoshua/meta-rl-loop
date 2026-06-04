@@ -1,0 +1,29 @@
+{
+  "mode": "launch",
+  "asset_kind": "image",
+  "slug": "demo-reddit",
+  "campaign": {
+    "name": "Demo Reddit Campaign",
+    "objective": "CLICKS"
+  },
+  "ad_group": {
+    "name": "Demo Reddit Ad Group",
+    "daily_budget_usd": 5.0,
+    "optimization_goal": "CLICKS",
+    "targeting": {
+      "geolocations": ["US"],
+      "locations": ["FEED"],
+      "platforms": ["DESKTOP", "MOBILE_NATIVE", "MOBILE_WEB"]
+    }
+  },
+  "post": {
+    "headline": "Try Clipbook",
+    "destination_url": "https://example.com/clipbook",
+    "image_path": "product/static-ads/demo-reddit/banner.png",
+    "allow_comments": false
+  },
+  "ad": {
+    "name": "Clipbook Reddit Ad",
+    "click_url": "https://example.com/clipbook"
+  }
+}

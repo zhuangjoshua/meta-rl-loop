@@ -37,6 +37,9 @@ provides_tools:
   - business_ugc_ad_generate
   - business_static_ad_generate
   - business_meta_ad_launch
+  - business_reddit_ad_launch
+  - business_reddit_ad_control
+  - business_reddit_ad_insights_sync
   - business_claude_agent_task
   - business_upsert_conversation_thread
   - business_record_conversation_message
