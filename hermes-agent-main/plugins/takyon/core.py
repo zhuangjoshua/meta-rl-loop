@@ -238,6 +238,7 @@ SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
 SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
 SUBUSER_KIT_DIRNAME = "_takyon"
+DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES = ("research/strategy.md",)
 
 _POSTGRES_POOL_MAX_SIZE = max(
     1,
@@ -651,8 +652,122 @@ def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]
     }
 
 
+def _normalize_surface_string_list(raw: Any) -> list[str]:
+    values = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if isinstance(item, dict):
+            text = str(
+                item.get("path")
+                or item.get("route")
+                or item.get("name")
+                or item.get("label")
+                or item.get("value")
+                or ""
+            ).strip()
+        else:
+            text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _surface_customer_experience_metadata(surface: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(surface, dict):
+        return {}
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    payload = metadata.get("customer_experience") if isinstance(metadata.get("customer_experience"), dict) else {}
+    return dict(payload)
+
+
+def _surface_customer_experience_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _surface_customer_experience_metadata(surface)
+    research_sources = _normalize_surface_string_list(
+        payload.get("research_sources")
+        if payload.get("research_sources") is not None
+        else payload.get("research")
+    )
+    if not research_sources:
+        research_sources = list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
+    return {
+        "surface_goal": str(payload.get("surface_goal") or "").strip(),
+        "conversion_model": str(payload.get("conversion_model") or "").strip(),
+        "required_routes": _normalize_surface_string_list(
+            payload.get("required_routes") if payload.get("required_routes") is not None else payload.get("routes")
+        ),
+        "required_sections": _normalize_surface_string_list(
+            payload.get("required_sections") if payload.get("required_sections") is not None else payload.get("sections")
+        ),
+        "required_app_tabs": _normalize_surface_string_list(
+            payload.get("required_app_tabs") if payload.get("required_app_tabs") is not None else payload.get("tabs")
+        ),
+        "research_sources": research_sources,
+        "experience_notes": str(
+            payload.get("experience_notes")
+            if payload.get("experience_notes") is not None
+            else payload.get("notes")
+            or ""
+        ).strip(),
+    }
+
+
+def _merge_customer_experience_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    surface_goal: Any = None,
+    conversion_model: Any = None,
+    required_routes: Any = None,
+    required_sections: Any = None,
+    required_app_tabs: Any = None,
+    research_sources: Any = None,
+    experience_notes: Any = None,
+) -> dict[str, Any]:
+    merged = dict(metadata if isinstance(metadata, dict) else {})
+    existing = merged.get("customer_experience") if isinstance(merged.get("customer_experience"), dict) else {}
+    next_payload = dict(existing)
+
+    def _merge_text_field(key: str, raw: Any) -> None:
+        if raw is None:
+            return
+        text = str(raw or "").strip()
+        if text:
+            next_payload[key] = text
+        else:
+            next_payload.pop(key, None)
+
+    def _merge_list_field(key: str, raw: Any, *, fallback: tuple[str, ...] | None = None) -> None:
+        if raw is None:
+            if key not in next_payload and fallback:
+                next_payload[key] = list(fallback)
+            return
+        normalized = _normalize_surface_string_list(raw)
+        if normalized:
+            next_payload[key] = normalized
+        else:
+            next_payload.pop(key, None)
+            if fallback:
+                next_payload[key] = list(fallback)
+
+    _merge_text_field("surface_goal", surface_goal)
+    _merge_text_field("conversion_model", conversion_model)
+    _merge_list_field("required_routes", required_routes)
+    _merge_list_field("required_sections", required_sections)
+    _merge_list_field("required_app_tabs", required_app_tabs)
+    _merge_list_field("research_sources", research_sources, fallback=DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
+    _merge_text_field("experience_notes", experience_notes)
+
+    if not next_payload.get("research_sources"):
+        next_payload["research_sources"] = list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
+    merged["customer_experience"] = next_payload
+    return merged
+
+
 def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
     shape = _surface_subuser_app_shape(surface)
+    customer_experience = _surface_customer_experience_shape(surface)
     routes = _surface_routes(surface)
     return {
         "business": slug,
@@ -665,6 +780,15 @@ def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: st
         "runtimeFeatures": _surface_runtime_features(surface),
         "railState": shape.get("rail_state") or {},
         "routes": routes,
+        "customerExperience": {
+            "surfaceGoal": customer_experience.get("surface_goal") or "",
+            "conversionModel": customer_experience.get("conversion_model") or "",
+            "requiredRoutes": customer_experience.get("required_routes") or [],
+            "requiredSections": customer_experience.get("required_sections") or [],
+            "requiredAppTabs": customer_experience.get("required_app_tabs") or [],
+            "researchSources": customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES),
+            "experienceNotes": customer_experience.get("experience_notes") or "",
+        },
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
         "notes": str((surface or {}).get("notes") or ""),
@@ -759,6 +883,7 @@ def _render_runtime_endpoint_hints(
 def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: str) -> str:
     context = _subuser_surface_context_payload(surface, slug=slug)
     rail_state = context.get("railState") if isinstance(context.get("railState"), dict) else {}
+    customer_experience = context.get("customerExperience") if isinstance(context.get("customerExperience"), dict) else {}
     lines = [
         "# Subuser App Context",
         "",
@@ -785,6 +910,18 @@ def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: s
         lines.extend(f"- {route}" for route in routes)
     else:
         lines.append("- none recorded")
+    lines.extend(["", "## Customer Experience Shape", ""])
+    lines.append(f"- Surface goal: {customer_experience.get('surfaceGoal') or 'not set'}")
+    lines.append(f"- Conversion model: {customer_experience.get('conversionModel') or 'not set'}")
+    required_routes = customer_experience.get("requiredRoutes") if isinstance(customer_experience.get("requiredRoutes"), list) else []
+    lines.append(f"- Required routes: {', '.join(required_routes) or 'not set'}")
+    required_sections = customer_experience.get("requiredSections") if isinstance(customer_experience.get("requiredSections"), list) else []
+    lines.append(f"- Required sections: {', '.join(required_sections) or 'not set'}")
+    required_tabs = customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else []
+    lines.append(f"- Required app tabs: {', '.join(required_tabs) or 'not set'}")
+    research_sources = customer_experience.get("researchSources") if isinstance(customer_experience.get("researchSources"), list) else []
+    lines.append(f"- Research sources: {', '.join(research_sources) or ', '.join(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)}")
+    lines.append(f"- Experience notes: {customer_experience.get('experienceNotes') or 'not set'}")
     lines.extend([
         "",
         "## Freedom Boundary",
@@ -873,6 +1010,7 @@ def _subuser_app_worker_contract_block(
 ) -> str:
     runtime_features = _surface_runtime_features(surface)
     shape = _surface_subuser_app_shape(surface)
+    customer_experience = _surface_customer_experience_shape(surface)
     runtime_api_base = ""
     routes = []
     if isinstance(surface, dict):
@@ -887,6 +1025,22 @@ def _subuser_app_worker_contract_block(
     lines.append(f"- Subscription style: {shape.get('subscription_style') or 'not set'}")
     lines.append(f"- API mode: {shape.get('api_mode') or 'not set'}")
     lines.append(f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}")
+    lines.append(f"- Surface goal chosen by the CEO from research/: {customer_experience.get('surface_goal') or 'not set'}")
+    lines.append(f"- Conversion model chosen by the CEO: {customer_experience.get('conversion_model') or 'not set'}")
+    required_routes = customer_experience.get("required_routes") or []
+    if required_routes:
+        lines.append(f"- Required routes for this surface: {', '.join(required_routes)}")
+    required_sections = customer_experience.get("required_sections") or []
+    if required_sections:
+        lines.append(f"- Required sections for this surface: {', '.join(required_sections)}")
+    required_tabs = customer_experience.get("required_app_tabs") or []
+    if required_tabs:
+        lines.append(f"- Required app tabs for this surface: {', '.join(required_tabs)}")
+    research_sources = customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
+    if research_sources:
+        lines.append(f"- The recorded customer shape was grounded in research/, especially: {', '.join(research_sources)}")
+    if customer_experience.get("experience_notes"):
+        lines.append(f"- Additional customer-shape notes: {customer_experience.get('experience_notes')}")
     if runtime_features:
         lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
@@ -923,7 +1077,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
     lines = [
         "Prepared subuser app kit:",
         "- Managed kit files are available under `./_takyon/` in this workspace.",
-        "- `./_takyon/surface-context.js` exports the current app truth for this business.",
+        "- `./_takyon/surface-context.js` exports the current app truth for this business, including the CEO-chosen customer experience shape.",
         "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
@@ -4754,6 +4908,7 @@ class TakyonStore:
         root = self._business_root(slug) / "product"
         surface = self._app_surface_contract(conn, slug)
         shape = _surface_subuser_app_shape(surface)
+        customer_experience = _surface_customer_experience_shape(surface)
         surface_evidence = self._product_surface_evidence(conn, slug, surface)
         inventory = surface_evidence.get("inventory") if isinstance(surface_evidence.get("inventory"), dict) else {}
 
@@ -4791,6 +4946,16 @@ class TakyonStore:
             f"- API mode: {shape.get('api_mode') or 'not set'}",
             f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}",
             f"- Managed kit path: {shape.get('kit_path') or SUBUSER_KIT_DIRNAME}",
+            "",
+            "## Customer Experience Shape",
+            "",
+            f"- Surface goal: {customer_experience.get('surface_goal') or 'not set'}",
+            f"- Conversion model: {customer_experience.get('conversion_model') or 'not set'}",
+            f"- Required routes: {', '.join(customer_experience.get('required_routes') or []) or 'not set'}",
+            f"- Required sections: {', '.join(customer_experience.get('required_sections') or []) or 'not set'}",
+            f"- Required app tabs: {', '.join(customer_experience.get('required_app_tabs') or []) or 'not set'}",
+            f"- Research sources: {', '.join(customer_experience.get('research_sources') or []) or ', '.join(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)}",
+            f"- Experience notes: {customer_experience.get('experience_notes') or 'not set'}",
             "",
             "## Routes",
             "",
@@ -6290,6 +6455,16 @@ class TakyonStore:
                 api_mode=op.get("api_mode"),
                 rail_state=op.get("rail_state"),
             )
+            metadata = _merge_customer_experience_metadata(
+                metadata,
+                surface_goal=op.get("surface_goal"),
+                conversion_model=op.get("conversion_model"),
+                required_routes=op.get("required_routes"),
+                required_sections=op.get("required_sections"),
+                required_app_tabs=op.get("required_app_tabs"),
+                research_sources=op.get("research_sources"),
+                experience_notes=op.get("experience_notes"),
+            )
             status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
             now = _now()
             conn.execute(
@@ -6339,7 +6514,28 @@ class TakyonStore:
             )
             self._rewrite_app_files(conn, slug)
             self._sync_business_workspace_remote(slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"status": status, "design_brief_path": design_brief_path, "source_path": source_path, "runtime_features": runtime_features, "publish_target": publish_target, "publish_policy": publish_policy, "done_gate": done_gate, "app_mode": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("app_mode") or ""), "subscription_style": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("subscription_style") or ""), "api_mode": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("api_mode") or ""), "rail_state": (_surface_subuser_app_shape({"metadata": metadata, "runtime_features": runtime_features}).get("rail_state") or {}), "metadata": metadata})
+            event_surface = {"metadata": metadata, "runtime_features": runtime_features}
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "status": status,
+                    "design_brief_path": design_brief_path,
+                    "source_path": source_path,
+                    "runtime_features": runtime_features,
+                    "publish_target": publish_target,
+                    "publish_policy": publish_policy,
+                    "done_gate": done_gate,
+                    "app_mode": (_surface_subuser_app_shape(event_surface).get("app_mode") or ""),
+                    "subscription_style": (_surface_subuser_app_shape(event_surface).get("subscription_style") or ""),
+                    "api_mode": (_surface_subuser_app_shape(event_surface).get("api_mode") or ""),
+                    "rail_state": (_surface_subuser_app_shape(event_surface).get("rail_state") or {}),
+                    "customer_experience": _surface_customer_experience_shape(event_surface),
+                    "metadata": metadata,
+                },
+            )
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
         if action == "app.surface.publish_result":
@@ -7927,6 +8123,13 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "subscription_style": args.get("subscription_style"),
         "api_mode": args.get("api_mode"),
         "rail_state": args.get("rail_state"),
+        "surface_goal": args.get("surface_goal"),
+        "conversion_model": args.get("conversion_model"),
+        "required_routes": args.get("required_routes"),
+        "required_sections": args.get("required_sections"),
+        "required_app_tabs": args.get("required_app_tabs"),
+        "research_sources": args.get("research_sources"),
+        "experience_notes": args.get("experience_notes"),
         "routes": args.get("routes") or [],
         "theme": args.get("theme") or {"source": "business design brief"},
         "constraints": args.get("constraints") or {},
@@ -11793,7 +11996,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_app_surface_contract",
-        "description": "Record the business-owned product surface contract: source/design/routes plus publish target, policy, and done gate.",
+        "description": "Record the business-owned product surface contract: source/design/routes, customer experience shape, plus publish target, policy, and done gate.",
         "handler": handle_business_upsert_app_surface_contract,
         "schema": _schema(
             "business_upsert_app_surface_contract",
@@ -11809,6 +12012,13 @@ TAKYON_TOOL_DEFINITIONS = [
                 "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
+                "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
+                "conversion_model": {"type": "string", "description": "CEO-chosen conversion model for the product surface, such as self-serve signup, demo request, trial, or paid plan purchase."},
+                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and product/design-brief.md."},
+                "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
+                "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
+                "research_sources": {"type": "array", "items": {"type": "string"}, "description": "Research files that grounded the CEO's customer-shape decision. Default and canonical first source is research/strategy.md, but the whole research/ tree may contribute."},
+                "experience_notes": {"type": "string", "description": "Additional CEO guidance about the customer-facing experience shape, distilled from research/ and product/design-brief.md."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
