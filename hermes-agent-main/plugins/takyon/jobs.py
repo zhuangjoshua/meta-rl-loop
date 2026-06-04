@@ -193,10 +193,12 @@ def list_jobs(conn, business_slug: str, *, limit: int = 50) -> list[Job]:
 
 
 def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None = None) -> Job | None:
-    """Atomically claim the oldest queued job (optionally restricted to ``kinds``): lock one row with
-    ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to 'running', stamp
-    locked_by/locked_at, and increment attempts. Returns the claimed job, or None if the queue is
-    empty. The whole claim is one transaction; the row is committed 'running' before this returns."""
+    """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
+    ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
+    Lock one row with ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to
+    'running', stamp locked_by/locked_at, and increment attempts. Returns the claimed job, or None
+    if the queue is empty. The whole claim is one transaction; the row is committed 'running'
+    before this returns."""
     with conn.transaction():
         if kinds:
             picked = conn.execute(
@@ -206,7 +208,8 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
                 "  select 1 from jobs r "
                 "  where r.business_slug = j.business_slug and r.status = 'running'"
                 ") "
-                "order by j.created_at for update skip locked limit 1",
+                "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                "for update skip locked limit 1",
                 (list(kinds),),
             ).fetchone()
         else:
@@ -217,7 +220,8 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
                 "  select 1 from jobs r "
                 "  where r.business_slug = j.business_slug and r.status = 'running'"
                 ") "
-                "order by j.created_at for update skip locked limit 1"
+                "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                "for update skip locked limit 1"
             ).fetchone()
         if picked is None:
             return None

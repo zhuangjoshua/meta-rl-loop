@@ -285,15 +285,26 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
 )
 
 SUBUSER_APP_MODE_CHOICES = frozenset({"standard_saas", "ai_tool", "api_product"})
-SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset(
-    {"free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"}
-)
+DEFAULT_SUBUSER_SUBSCRIPTION_STYLE = "monthly"
+SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset({DEFAULT_SUBUSER_SUBSCRIPTION_STYLE})
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
 SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
 SUBUSER_KIT_DIRNAME = "_takyon"
 DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES = ("research/strategy.md",)
+_APP_MODE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
+    "standard_saas": ("auth", "account"),
+    "ai_tool": ("auth", "account", "generate"),
+    "api_product": ("auth", "account"),
+}
+_SUBSCRIPTION_STYLE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
+    DEFAULT_SUBUSER_SUBSCRIPTION_STYLE: ("auth", "account", "checkout"),
+}
+_API_MODE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
+    "docs_playground": ("auth", "account"),
+    "external_api": ("auth", "account"),
+}
 
 _POSTGRES_POOL_MAX_SIZE = max(
     1,
@@ -654,7 +665,7 @@ def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
     return ordered + trailing
 
 
-def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
+def _surface_declared_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     if not isinstance(surface, dict):
         return []
     direct = _normalize_runtime_features(surface.get("runtime_features"))
@@ -662,6 +673,28 @@ def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
         return direct
     metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
     return _normalize_runtime_features(metadata.get("runtime_features"))
+
+
+def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
+    declared = _surface_declared_runtime_features(surface)
+    if not isinstance(surface, dict):
+        return declared
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    payload = metadata.get("subuser_app") if isinstance(metadata.get("subuser_app"), dict) else {}
+    return _canonical_runtime_features_for_surface_shape(
+        declared,
+        app_mode=payload.get("app_mode"),
+        subscription_style=payload.get("subscription_style"),
+        api_mode=payload.get("api_mode"),
+    )
+
+
+def _normalize_subscription_style(value: Any) -> str:
+    normalized = _normalize_subuser_surface_choice(
+        value,
+        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
+    )
+    return normalized or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE
 
 
 def _normalize_subuser_surface_choice(
@@ -673,6 +706,32 @@ def _normalize_subuser_surface_choice(
     if not text or text not in allowed:
         return ""
     return text
+
+
+def _canonical_runtime_features_for_surface_shape(
+    runtime_features: list[str] | None,
+    *,
+    app_mode: str = "",
+    subscription_style: str = "",
+    api_mode: str = "",
+) -> list[str]:
+    declared = list(runtime_features or [])
+
+    def include(values: tuple[str, ...]) -> None:
+        for rail in values:
+            if rail not in declared:
+                declared.append(rail)
+
+    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
+    normalized_subscription = _normalize_subscription_style(subscription_style)
+    normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
+
+    if "generate" in declared:
+        include(("auth", "account"))
+    include(_APP_MODE_REQUIRED_RUNTIME_FEATURES.get(normalized_app_mode, ()))
+    include(_SUBSCRIPTION_STYLE_REQUIRED_RUNTIME_FEATURES.get(normalized_subscription, ()))
+    include(_API_MODE_REQUIRED_RUNTIME_FEATURES.get(normalized_api_mode, ()))
+    return _normalize_runtime_features(declared, strict=True)
 
 
 def _normalize_subuser_rail_state(
@@ -714,10 +773,7 @@ def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]
         payload.get("app_mode"),
         allowed=SUBUSER_APP_MODE_CHOICES,
     )
-    subscription_style = _normalize_subuser_surface_choice(
-        payload.get("subscription_style"),
-        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
-    )
+    subscription_style = _normalize_subscription_style(payload.get("subscription_style"))
     api_mode = _normalize_subuser_surface_choice(
         payload.get("api_mode"),
         allowed=SUBUSER_API_MODE_CHOICES,
@@ -771,20 +827,76 @@ def _surface_customer_experience_metadata(surface: dict[str, Any] | None) -> dic
     return dict(payload)
 
 
-def _surface_requires_app_shell(
-    surface: dict[str, Any] | None,
+def _is_shared_runtime_route_path(path: str) -> bool:
+    route = str(path or "").strip()
+    if not route:
+        return False
+    route = route.rstrip("/") or "/"
+    if not route.startswith("/"):
+        route = "/" + route
+    route = route.lower()
+    for rail in PRODUCT_RUNTIME_RAILS.values():
+        endpoints = rail.get("endpoints") if isinstance(rail, dict) else ()
+        for _method, endpoint in endpoints or ():
+            candidate = "/" + str(endpoint or "").strip().lstrip("/")
+            candidate = candidate.rstrip("/") or "/"
+            if route == candidate.lower():
+                return True
+    return False
+
+
+def _surface_has_explicit_workflow_route(routes: list[str] | None) -> bool:
+    for route in routes or []:
+        route_value = str(route or "").strip()
+        if not route_value or route_value == "/" or _is_shared_runtime_route_path(route_value):
+            continue
+        if _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route_value):
+            return True
+    return False
+
+
+def _surface_shape_requires_app_shell(
     *,
     app_mode: str = "",
+    subscription_style: str = "",
+    runtime_features: list[str] | None = None,
     required_app_tabs: list[str] | None = None,
+    required_routes: list[str] | None = None,
 ) -> bool:
-    if _surface_allows_landing_only(surface):
-        return False
-    mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    if mode in {"standard_saas", "ai_tool", "api_product"}:
+    if _surface_has_explicit_workflow_route(required_routes):
+        return True
+    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
+    if normalized_app_mode in {"standard_saas", "ai_tool", "api_product"}:
+        return True
+    normalized_subscription = _normalize_subscription_style(subscription_style)
+    if normalized_subscription == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+        return True
+    runtime_feature_set = set(runtime_features or [])
+    if {"auth", "account", "checkout", "generate"} & runtime_feature_set:
         return True
     if required_app_tabs:
         return True
     return False
+
+
+def _surface_requires_app_shell(
+    surface: dict[str, Any] | None,
+    *,
+    app_mode: str = "",
+    subscription_style: str = "",
+    runtime_features: list[str] | None = None,
+    required_app_tabs: list[str] | None = None,
+    required_routes: list[str] | None = None,
+) -> bool:
+    if _surface_allows_landing_only(surface):
+        return False
+    return _surface_shape_requires_app_shell(
+        app_mode=app_mode,
+        subscription_style=subscription_style,
+        runtime_features=runtime_features,
+        required_app_tabs=required_app_tabs,
+        required_routes=required_routes,
+    )
 
 
 def _normalize_required_routes_for_surface(
@@ -808,7 +920,12 @@ def _normalize_required_routes_for_surface(
     if not _surface_requires_app_shell(
         surface,
         app_mode=app_mode,
+        subscription_style=_normalize_subscription_style(
+            _surface_subuser_app_metadata(surface).get("subscription_style")
+        ),
+        runtime_features=_surface_runtime_features(surface),
         required_app_tabs=required_app_tabs,
+        required_routes=required_routes,
     ):
         return normalized
     for required in ("/", "/app"):
@@ -951,19 +1068,15 @@ def _merge_subuser_app_metadata(
     existing = merged.get("subuser_app") if isinstance(merged.get("subuser_app"), dict) else {}
     next_payload = dict(existing)
     normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    normalized_subscription = _normalize_subuser_surface_choice(
-        subscription_style,
-        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
+    normalized_subscription = _normalize_subscription_style(
+        subscription_style if subscription_style is not None else existing.get("subscription_style")
     )
     normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
     if normalized_app_mode:
         next_payload["app_mode"] = normalized_app_mode
     elif "app_mode" not in next_payload and existing.get("app_mode"):
         next_payload["app_mode"] = existing.get("app_mode")
-    if normalized_subscription:
-        next_payload["subscription_style"] = normalized_subscription
-    elif "subscription_style" not in next_payload and existing.get("subscription_style"):
-        next_payload["subscription_style"] = existing.get("subscription_style")
+    next_payload["subscription_style"] = normalized_subscription
     if normalized_api_mode:
         next_payload["api_mode"] = normalized_api_mode
     elif "api_mode" not in next_payload and existing.get("api_mode"):
@@ -1061,9 +1174,12 @@ def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: s
     if _surface_requires_app_shell(
         surface,
         app_mode=context.get("appMode") or "",
+        subscription_style=context.get("subscriptionStyle") or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
+        runtime_features=context.get("runtimeFeatures") if isinstance(context.get("runtimeFeatures"), list) else [],
         required_app_tabs=customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else [],
+        required_routes=required_routes,
     ):
-        lines.append("- App-like route substrate: keep both `/` and `/app` unless the owning surface is intentionally landing_page_only.")
+        lines.append("- App-like route contract: ship both `/` and `/app` unless the owning surface is intentionally landing_page_only.")
     required_sections = customer_experience.get("requiredSections") if isinstance(customer_experience.get("requiredSections"), list) else []
     lines.append(f"- Required sections: {', '.join(required_sections) or 'not set'}")
     required_tabs = customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else []
@@ -1203,10 +1319,16 @@ def _subuser_app_worker_contract_block(
     if _surface_requires_app_shell(
         surface,
         app_mode=shape.get("app_mode") or "",
+        subscription_style=shape.get("subscription_style") or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
+        runtime_features=runtime_features,
         required_app_tabs=required_tabs,
+        required_routes=required_routes,
     ):
-        lines.append("- This surface is app-like. The default route shape is `/, /app`, even when the landing page carries most conversion work.")
-        lines.append("- Keep a real `/app` route in the generated source. If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
+        lines.append(
+            "- This surface is app-like and must ship a real `/app` route in source. "
+            f"Required routes for this contract are `{', '.join(required_routes or ['/', '/app'])}`."
+        )
+        lines.append("- If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
@@ -2962,6 +3084,7 @@ def _validate_product_surface_contract(
     source_routes = set(str(route) for route in inventory.get("routes") or [])
     declared_routes = set(str(route) for route in inventory.get("declared_routes") or [])
     contract_routes = set(_surface_routes(surface))
+    declared_runtime_features = set(_surface_runtime_features(surface))
     source_app_routes = {
         route
         for route in source_routes
@@ -2970,7 +3093,7 @@ def _validate_product_surface_contract(
     declared_app_routes = {
         route
         for route in (declared_routes | contract_routes)
-        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route)
+        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) and not _is_shared_runtime_route_path(route)
     }
     if "/" not in source_routes:
         return False, "app-like product surface must include a homepage route at /"
@@ -2986,10 +3109,15 @@ def _validate_product_surface_contract(
 
     integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
     base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
+    session_backed_surface = bool(
+        kind["auth"]
+        or kind["checkout"]
+        or {"auth", "account", "profile", "checkout", "billing", "entitlements", "usage"} & declared_runtime_features
+    )
     if kind["ai"]:
         if "generate" not in integrations:
             return False, f"AI-backed product surface must call the shared runtime generate rail on product hosts (`/generate`) or via the fallback runtime base ({base_hint}/generate)"
-        if not ({"auth", "session", "account"} & integrations):
+        if session_backed_surface and not ({"auth", "session", "account"} & integrations):
             return False, f"AI-backed product surface must use the shared app-session rails (`/session`, `/account`, `/auth/request` on product hosts, or the fallback base {base_hint}/...)"
     if kind["auth"] and not ({"auth", "session", "account"} & integrations):
         return False, f"auth/session product surface must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
@@ -5623,6 +5751,33 @@ class TakyonStore:
         for key in sorted(backend.list_digests(prefix)):
             backend.delete(key)
 
+    def _business_delete_direct_fk_tables(self, conn: sqlite3.Connection) -> list[str]:
+        """Return current business-owned Postgres tables keyed directly to ``businesses.slug``.
+
+        This intentionally follows the live schema instead of a handwritten list so business delete
+        previews/results stay truthful as new Takyon-owned tables are added. Legacy/public leftovers
+        are excluded naturally because they do not hold a direct FK to the current ``businesses``
+        table (for example old ``business_id`` UUID columns with no FK).
+        """
+        rows = conn.execute(
+            """
+            SELECT DISTINCT tc.table_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name
+             AND ccu.table_schema = tc.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = 'public'
+              AND ccu.table_name = 'businesses'
+              AND ccu.column_name = 'slug'
+            ORDER BY tc.table_name
+            """
+        ).fetchall()
+        return [str(row["table_name"]) for row in rows]
+
     def _business_root(self, slug: str, *, sync: bool = True) -> Path:
         base = self._workspace_root_override or self.root
         root = base / "businesses" / _slugify(slug)
@@ -6836,30 +6991,17 @@ class TakyonStore:
         scope = f"business:{business}"
         scope_like = f"{scope}/%"
         counts: dict[str, int] = {}
-        by_business = [
-            "businesses",
-            "workspaces",
-            self._work_requests_table(),
-            "ledger_entries",
-            "events",
-            "conversation_threads",
-            "conversation_messages",
-            "app_budgets",
-            "app_plan_policies",
-            "app_surface_contracts",
-            "app_users",
-            "app_magic_links",
-            "app_sessions",
-            "app_entitlements",
-            "app_checkout_intents",
-            "app_checkout_sessions",
-            "app_revenue_events",
-            "app_usage_events",
-        ]
-        for table in by_business:
+        for table in self._business_delete_direct_fk_tables(conn):
             key = "slug" if table == "businesses" else "business_slug"
             counts[table] = int(
                 conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {key} = ?", (business,)).fetchone()["count"]
+            )
+        for table in ("billing_entries", "custody_entries"):
+            counts[table] = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE business_slug = ?",
+                    (business,),
+                ).fetchone()["count"]
             )
         for table in (self._work_requests_table(), "ledger_entries", "events"):
             counts[table] = int(
@@ -6882,10 +7024,17 @@ class TakyonStore:
         )
         return counts
 
-    def _delete_business_db_rows(self, conn: sqlite3.Connection, slug: str) -> dict[str, int]:
+    def _delete_business_db_rows(
+        self,
+        conn: sqlite3.Connection,
+        slug: str,
+        *,
+        db_counts: dict[str, int] | None = None,
+    ) -> dict[str, int]:
         business = _slugify(slug)
         scope = f"business:{business}"
         scope_like = f"{scope}/%"
+        counts = db_counts or self._business_delete_db_counts(conn, business)
         deleted: dict[str, int] = {}
 
         # Preserve historical money-ledger rows, but detach them from the business before the
@@ -6910,6 +7059,20 @@ class TakyonStore:
             deleted[table] = int(cursor.rowcount or 0)
         cursor = conn.execute("DELETE FROM businesses WHERE slug = ?", (business,))
         deleted["businesses"] = int(cursor.rowcount or 0)
+        accounted = {
+            "businesses",
+            "billing_entries",
+            "custody_entries",
+            "agent_runs",
+            "control_states",
+            self._work_requests_table(),
+            "ledger_entries",
+            "events",
+        }
+        for table, count in counts.items():
+            if table in accounted:
+                continue
+            deleted[table] = int(count or 0)
         return deleted
 
     def _delete_business(self, conn: sqlite3.Connection, op: dict[str, Any], *, reason: str, actor: str) -> dict[str, Any]:
@@ -6982,7 +7145,7 @@ class TakyonStore:
         if delete_files:
             self._delete_business_workspace_remote(slug)
 
-        deleted = self._delete_business_db_rows(conn, slug)
+        deleted = self._delete_business_db_rows(conn, slug, db_counts=db_counts)
         result["database"] = {"candidates": db_counts, "deleted": deleted}
         self._record_event(
             conn,
@@ -7527,6 +7690,7 @@ class TakyonStore:
             if not status:
                 raise TakyonError("surface status is required")
             existing = self._stored_app_surface_contract(conn, slug)
+            existing_shape = _surface_subuser_app_shape(existing)
             design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
             if op.get("source_path"):
@@ -7537,6 +7701,23 @@ class TakyonStore:
                 _normalize_runtime_features(runtime_features_raw, strict=True)
                 if runtime_features_raw is not None
                 else _surface_runtime_features(existing)
+            )
+            app_mode = _normalize_subuser_surface_choice(
+                op.get("app_mode") if op.get("app_mode") is not None else existing_shape.get("app_mode"),
+                allowed=SUBUSER_APP_MODE_CHOICES,
+            )
+            subscription_style = _normalize_subscription_style(
+                op.get("subscription_style") if op.get("subscription_style") is not None else existing_shape.get("subscription_style")
+            )
+            api_mode = _normalize_subuser_surface_choice(
+                op.get("api_mode") if op.get("api_mode") is not None else existing_shape.get("api_mode"),
+                allowed=SUBUSER_API_MODE_CHOICES,
+            )
+            runtime_features = _canonical_runtime_features_for_surface_shape(
+                runtime_features,
+                app_mode=app_mode,
+                subscription_style=subscription_style,
+                api_mode=api_mode,
             )
             routes = op.get("routes") if op.get("routes") is not None else []
             theme = op.get("theme") if op.get("theme") is not None else {"source": "business design brief"}
@@ -7563,9 +7744,9 @@ class TakyonStore:
             metadata = _merge_subuser_app_metadata(
                 {**existing_metadata, **metadata},
                 runtime_features=runtime_features,
-                app_mode=op.get("app_mode"),
-                subscription_style=op.get("subscription_style"),
-                api_mode=op.get("api_mode"),
+                app_mode=app_mode,
+                subscription_style=subscription_style,
+                api_mode=api_mode,
                 rail_state=op.get("rail_state"),
             )
             metadata = _merge_customer_experience_metadata(
@@ -7578,6 +7759,34 @@ class TakyonStore:
                 research_sources=op.get("research_sources"),
                 experience_notes=op.get("experience_notes"),
             )
+            customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
+            surface_preview = {
+                "metadata": metadata,
+                "constraints": constraints,
+                "runtime_features": runtime_features,
+            }
+            if _surface_allows_landing_only(surface_preview) and _surface_shape_requires_app_shell(
+                app_mode=app_mode,
+                subscription_style=subscription_style,
+                runtime_features=runtime_features,
+                required_app_tabs=customer_experience.get("required_app_tabs") or [],
+                required_routes=customer_experience.get("required_routes") or [],
+            ):
+                raise TakyonError(
+                    "app-like product surfaces must ship a real /app route and cannot be landing_page_only under the current runtime contract"
+                )
+            customer_experience_metadata = (
+                metadata.get("customer_experience") if isinstance(metadata.get("customer_experience"), dict) else {}
+            )
+            metadata["customer_experience"] = {
+                **customer_experience_metadata,
+                "required_routes": customer_experience.get("required_routes") or [],
+            }
+            if not routes:
+                routes = [
+                    {"path": route}
+                    for route in (customer_experience.get("required_routes") or [])
+                ]
             status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
             now = _now()
             conn.execute(
@@ -11858,9 +12067,49 @@ def _meta_load_launch_receipt(
     paths = _meta_publication_paths(store, business, args)
     receipt_abs = paths["receipt_abs"]
     if not receipt_abs.is_file():
-        raise TakyonError(
-            f"Meta launch receipt not found at {paths['receipt_rel']}; launch the paused Meta ad first"
-        )
+        recovered = None
+        with store._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM events
+                WHERE business_slug = ?
+                  AND event_type = 'meta_ad.launch'
+                ORDER BY created_at DESC
+                LIMIT 25
+                """,
+                (business,),
+            ).fetchall()
+        for row in rows:
+            raw_payload = row["payload_json"] if isinstance(row, dict) or hasattr(row, "__getitem__") else None
+            if isinstance(raw_payload, dict):
+                payload = dict(raw_payload)
+            else:
+                try:
+                    payload = json.loads(str(raw_payload or ""))
+                except Exception:
+                    continue
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("slug") or "").strip() != paths["slug"]:
+                continue
+            recovered = payload
+            break
+        if recovered is None:
+            raise TakyonError(
+                f"Meta launch receipt not found at {paths['receipt_rel']}; launch the paused Meta ad first"
+            )
+        receipt_payload = dict(recovered)
+        receipt_payload.pop("publication_dir", None)
+        receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(receipt_abs, json.dumps(receipt_payload, ensure_ascii=False, indent=2) + "\n")
+        campaign_plan = recovered.get("campaign_plan") if isinstance(recovered.get("campaign_plan"), dict) else None
+        if campaign_plan:
+            plan_rel = str(recovered.get("plan_path") or f"{paths['publication_rel']}/plan.json").strip()
+            plan_abs = store._resolve_business_file(business, plan_rel, sync=False)
+            plan_abs.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(plan_abs, json.dumps(campaign_plan, ensure_ascii=False, indent=2) + "\n")
+        store._sync_business_workspace_remote(business)
     try:
         receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -12104,6 +12353,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 reason=args.get("reason") or "record suppressed meta ad launch (test mode)",
                 actor=args.get("actor") or "agent",
             )
+            store._sync_business_workspace_remote(business)
             return tool_result({
                 "success": True,
                 "action": "business_meta_ad_launch",
@@ -12139,6 +12389,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 reason=args.get("reason") or "record meta ad manual handoff packet",
                 actor=args.get("actor") or "agent",
             )
+            store._sync_business_workspace_remote(business)
             return tool_result({
                 "success": True,
                 "action": "business_meta_ad_launch",
@@ -12241,6 +12492,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record meta ad launch (paused)",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_meta_ad_launch",
@@ -12358,6 +12610,7 @@ def handle_business_meta_ad_bind_manual_launch(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record manual meta launch binding",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_meta_ad_bind_manual_launch",
@@ -12558,6 +12811,7 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
             reason=args.get("reason") or f"record meta ad {operation}",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_meta_ad_control",
@@ -15358,7 +15612,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
-                "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
+                "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},

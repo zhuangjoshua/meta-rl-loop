@@ -10,6 +10,8 @@ function uniq(values) {
   return out;
 }
 
+const DEFAULT_SUBSCRIPTION_STYLE = "monthly";
+
 export const APP_MODE_PACKS = {
   standard_saas: {
     label: "Standard SaaS",
@@ -35,30 +37,10 @@ export const APP_MODE_PACKS = {
 };
 
 export const SUBSCRIPTION_PACKS = {
-  free_only: {
-    label: "Free Only",
-    recommendedModules: ["auth_gate", "account_panel"],
-    requiredRails: ["auth", "account"],
-  },
-  one_time: {
-    label: "One Time",
-    recommendedModules: ["pricing", "upgrade_cta", "account_panel"],
-    requiredRails: ["auth", "account", "checkout"],
-  },
   monthly: {
     label: "Monthly",
     recommendedModules: ["pricing", "upgrade_cta", "account_panel"],
     requiredRails: ["auth", "account", "checkout"],
-  },
-  monthly_yearly: {
-    label: "Monthly + Yearly",
-    recommendedModules: ["pricing_toggle", "upgrade_cta", "account_panel"],
-    requiredRails: ["auth", "account", "checkout"],
-  },
-  hybrid_usage: {
-    label: "Subscription + Usage",
-    recommendedModules: ["pricing_toggle", "usage_pill", "account_panel"],
-    requiredRails: ["auth", "account", "checkout", "usage"],
   },
 };
 
@@ -86,11 +68,12 @@ export const API_MODE_PACKS = {
 
 export function planSubuserSurface(context = {}) {
   const appMode = APP_MODE_PACKS[context.appMode] || {};
-  const subscription = SUBSCRIPTION_PACKS[context.subscriptionStyle] || {};
+  const subscriptionStyle = context.subscriptionStyle || DEFAULT_SUBSCRIPTION_STYLE;
+  const subscription = SUBSCRIPTION_PACKS[subscriptionStyle] || SUBSCRIPTION_PACKS[DEFAULT_SUBSCRIPTION_STYLE] || {};
   const apiMode = API_MODE_PACKS[context.apiMode] || {};
   return {
     appMode: context.appMode || "",
-    subscriptionStyle: context.subscriptionStyle || "",
+    subscriptionStyle,
     apiMode: context.apiMode || "",
     recommendedRoutes: uniq([
       ...(appMode.recommendedRoutes || []),

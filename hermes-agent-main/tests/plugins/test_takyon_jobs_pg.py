@@ -3,7 +3,8 @@ at-least-once job queue and the ONE budget-gated execution contract every job ru
 
 Proves the contract end-to-end on real Postgres (mediationplan.md > Worker Plane):
   * enqueue is idempotent on ``idempotency_key`` (a replay is one row, one effect);
-  * ``claim_one`` is FIFO, flips a job to 'running', and never hands the same row to two workers —
+  * ``claim_one`` prioritizes ``ceo_bootstrap`` ahead of ordinary queued work, is FIFO within a
+    priority class, flips a job to 'running', and never hands the same row to two workers —
     including the real ``FOR UPDATE SKIP LOCKED`` proof: a row locked by another live transaction is
     skipped, then claimable once that transaction releases;
   * ``run_one`` reserves the estimate on the OWNER's flow-A billing account, runs the handler behind a
@@ -108,17 +109,30 @@ def test_claim_one_filters_by_kind(pg_conn):
     assert claimed is not None and claimed.id == wake.id
 
 
+def test_claim_one_prioritizes_bootstrap_over_older_wake(pg_conn):
+    first_slug, _uid = _provision_business(pg_conn)
+    second_slug, _uid2 = _provision_business(pg_conn)
+    wake = jobs.enqueue(pg_conn, first_slug, "ceo_wake", idempotency_key="wake")
+    bootstrap = jobs.enqueue(pg_conn, second_slug, "ceo_bootstrap", idempotency_key="bootstrap")
+
+    claimed = jobs.claim_one(pg_conn, worker_id="w1")
+
+    assert claimed is not None
+    assert claimed.id == bootstrap.id
+    assert claimed.id != wake.id
+
+
 def test_claim_one_serializes_jobs_per_business(pg_conn):
     slug, _uid = _provision_business(pg_conn)
     first = jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="a")
     second = jobs.enqueue(pg_conn, slug, "ceo_bootstrap", idempotency_key="b")
     claimed = jobs.claim_one(pg_conn, worker_id="w1")
-    assert claimed is not None and claimed.id == first.id
+    assert claimed is not None and claimed.id == second.id
     # A second queued job for the same business must wait until the running one finishes.
     assert jobs.claim_one(pg_conn, worker_id="w2") is None
     jobs.complete(pg_conn, claimed.id, result={"ok": True})
     next_job = jobs.claim_one(pg_conn, worker_id="w2")
-    assert next_job is not None and next_job.id == second.id
+    assert next_job is not None and next_job.id == first.id
 
 
 def test_claim_one_skips_rows_locked_by_another_worker(pg_conn):

@@ -20,12 +20,16 @@ from plugins.takyon.core import (
     TakyonError,
     TakyonStore,
     _API_ENV_ALIASES,
+    _bounded_product_inventory,
+    _canonical_runtime_features_for_surface_shape,
     _canonicalize_business_product_links,
     _product_publish_target,
     _scan_for_pretend_product_state,
     _refresh_product_surface_path,
     _surface_subuser_app_shape,
     _surface_customer_experience_shape,
+    _meta_load_launch_receipt,
+    _validate_product_surface_contract,
     handle_business_check_runtime_capabilities,
     handle_business_create_app_checkout,
     handle_business_delete_business,
@@ -1238,7 +1242,7 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
     assert "Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app." in instruction
     assert "If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`." in instruction
-    assert "The default route shape is `/, /app`" in instruction
+    assert "This surface is app-like and must ship a real `/app` route in source." in instruction
 
 
 def test_app_like_surface_defaults_required_routes_to_root_and_app():
@@ -1258,6 +1262,30 @@ def test_app_like_surface_defaults_required_routes_to_root_and_app():
     assert shape["required_app_tabs"] == ["Translate", "History"]
 
 
+def test_surface_subuser_app_shape_defaults_subscription_style_to_monthly():
+    surface = {
+        "runtime_features": ["generate"],
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool"},
+        },
+    }
+
+    shape = _surface_subuser_app_shape(surface)
+
+    assert shape["subscription_style"] == "monthly"
+
+
+def test_monthly_ai_tool_shape_canonicalizes_required_runtime_features():
+    runtime_features = _canonical_runtime_features_for_surface_shape(
+        ["generate"],
+        app_mode="ai_tool",
+        subscription_style="free_only",
+        api_mode="none",
+    )
+
+    assert runtime_features == ["auth", "account", "checkout", "generate"]
+
+
 def test_landing_only_surface_does_not_force_app_route():
     surface = {
         "landing_page_only": True,
@@ -1273,6 +1301,89 @@ def test_landing_only_surface_does_not_force_app_route():
     shape = _surface_customer_experience_shape(surface)
 
     assert shape["required_routes"] == ["/"]
+
+
+def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):
+    site = tmp_path / "product" / "site"
+    app = site / "app"
+    app.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<main><a href=\"/app\">Open app</a></main>\n",
+        encoding="utf-8",
+    )
+    (app / "index.html").write_text(
+        """
+        <form id="translate-form">
+          <textarea name="prompt"></textarea>
+          <button type="submit">Translate</button>
+        </form>
+        <script>
+          async function run(prompt) {
+            return fetch('/generate', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ prompt })
+            });
+          }
+        </script>
+        """,
+        encoding="utf-8",
+    )
+    surface = {
+        "runtime_features": ["generate"],
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool"},
+            "customer_experience": {
+                "required_routes": ["/", "/app"],
+                "required_app_tabs": ["Translate", "Preview"],
+            },
+        },
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "notes": "AI writing workspace with no saved accounts yet.",
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is True
+    assert blocker == ""
+
+
+def test_runtime_generate_route_does_not_count_as_working_app_subroute(tmp_path):
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        """
+        <main>
+          <form>
+            <textarea></textarea>
+            <button>Generate</button>
+          </form>
+        </main>
+        <script>
+          fetch('/generate', { method: 'POST' });
+        </script>
+        """,
+        encoding="utf-8",
+    )
+    surface = {
+        "runtime_features": ["generate"],
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool"},
+            "customer_experience": {
+                "required_routes": ["/", "/app"],
+            },
+        },
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "notes": "AI workspace.",
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is False
+    assert "/app" in blocker
+    assert "/generate" not in blocker
 
 
 def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
@@ -3813,6 +3924,63 @@ def _write_meta_launch_receipt(tmp_path, *, business="clipbook", slug="demo-meta
     }
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     return receipt_path
+
+
+def test_meta_load_launch_receipt_recovers_from_event_payload_when_file_missing(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    publication_dir = (
+        tmp_path
+        / "businesses"
+        / "clipbook"
+        / "distribution"
+        / "meta-ads"
+        / "demo-meta"
+    )
+    publication_dir.mkdir(parents=True, exist_ok=True)
+    receipt_abs = publication_dir / "receipt.json"
+    plan_abs = publication_dir / "plan.json"
+    assert not receipt_abs.exists()
+    recovered_receipt = {
+        "idempotency_key": "clipbook-meta-demo-v1",
+        "business": "clipbook",
+        "slug": "demo-meta",
+        "success": True,
+        "mode": "live",
+        "status": "created_paused",
+        "paused": True,
+        "ad_image_path": "product/static-ads/demo-image/creative.png",
+        "plan_path": "distribution/meta-ads/demo-meta/plan.json",
+        "ids": {
+            "creative_id": "creative-1",
+            "campaign_id": "campaign-1",
+            "adset_id": "adset-1",
+            "ad_id": "ad-1",
+        },
+        "campaign_plan": {
+            "slug": "demo-meta",
+            "campaign": {"name": "Demo Campaign", "objective": "OUTCOME_TRAFFIC"},
+            "adset": {"daily_budget_usd": 1.0},
+            "ad": {"link": "https://example.com/clipbook"},
+        },
+    }
+    _commit(
+        store,
+        "business:clipbook/distribution:meta-ads/demo-meta",
+        [{
+            "action": "event.record",
+            "business": "clipbook",
+            "event_type": "meta_ad.launch",
+            "payload": {**recovered_receipt, "publication_dir": "distribution/meta-ads/demo-meta"},
+        }],
+        "clipbook-meta-recover-v1",
+    )
+
+    loaded = _meta_load_launch_receipt(store, "clipbook", {"slug": "demo-meta"})
+
+    assert loaded["receipt"]["status"] == "created_paused"
+    assert loaded["receipt"]["ids"]["campaign_id"] == "campaign-1"
+    assert receipt_abs.is_file()
+    assert plan_abs.is_file()
 
 
 def test_business_meta_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
