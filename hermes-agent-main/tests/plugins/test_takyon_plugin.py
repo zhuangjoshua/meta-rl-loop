@@ -4095,6 +4095,29 @@ def _reddit_launch_args(**overrides):
     return args
 
 
+def _stub_reddit_ads_config(monkeypatch):
+    monkeypatch.setattr(
+        takyon_core,
+        "_reddit_ads_config",
+        lambda require_auth=True: {
+            "client_id": "reddit-client",
+            "client_secret": "reddit-secret",
+            "access_token": "reddit-access-token",
+            "refresh_token": "reddit-refresh-token",
+            "user_agent": "takyon-tests/1.0",
+            "business_id": "business-1",
+            "ad_account_id": "a2_demo",
+            "profile_id": "t2_profile",
+            "funding_instrument_id": "fi_1",
+            "pixel_id": "pixel_1",
+            "api_base": "https://ads-api.reddit.com/api/v3",
+            "state": {},
+            "state_path": None,
+            "expires_at": 0,
+        },
+    )
+
+
 def _write_reddit_launch_receipt(tmp_path, *, business="clipbook", slug="demo-reddit", mode="live"):
     receipt_path = (
         tmp_path
@@ -4131,6 +4154,7 @@ def _write_reddit_launch_receipt(tmp_path, *, business="clipbook", slug="demo-re
 
 
 def test_business_reddit_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch)
 
     result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args()))
@@ -4173,7 +4197,75 @@ def test_business_reddit_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_pa
     assert repeat["status"] == "suppressed_test_mode"
 
 
+def test_business_reddit_ad_launch_defaults_destination_to_canonical_product_url(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
+    _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                post={
+                    "headline": "Try Clipbook",
+                    "media_url": "https://cdn.example.com/clipbook.png",
+                    "allow_comments": False,
+                },
+                ad={"name": "Clipbook Reddit Ad"},
+            )
+        )
+    )
+
+    assert result["success"] is True
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["post"]["destination_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["ad"]["click_url"] == "https://clipbook.fourmanifold.com/"
+
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["destination_url"] == "https://clipbook.fourmanifold.com/"
+    assert receipt["click_url"] == "https://clipbook.fourmanifold.com/"
+
+
+def test_business_reddit_ad_launch_preserves_copy_fields_in_plan_and_receipt(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
+    _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                post={
+                    "headline": "Try Clipbook",
+                    "destination_url": "https://clipbook.fourmanifold.com/",
+                    "media_url": "https://cdn.example.com/clipbook.png",
+                    "allow_comments": False,
+                    "display_url": "https://clipbook.fourmanifold.com/",
+                    "call_to_action": "Learn More",
+                    "supplementary_text": "No ticket queue. No templated sludge.",
+                    "body": "Optional long-form copy for Reddit post flows.",
+                },
+                ad={"name": "Clipbook Reddit Ad"},
+            )
+        )
+    )
+
+    assert result["success"] is True
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["post"]["display_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["post"]["call_to_action"] == "Learn More"
+    assert plan["post"]["supplementary_text"] == "No ticket queue. No templated sludge."
+    assert plan["post"]["body"] == "Optional long-form copy for Reddit post flows."
+
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["display_url"] == "https://clipbook.fourmanifold.com/"
+    assert receipt["call_to_action"] == "Learn More"
+    assert receipt["supplementary_text"] == "No ticket queue. No templated sludge."
+    assert receipt["body"] == "Optional long-form copy for Reddit post flows."
+
+
 def test_business_reddit_ad_launch_test_mode_stages_local_image_asset(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch)
     image_rel = "product/static-ads/demo-reddit/banner.png"
     image_abs = tmp_path / "businesses" / "clipbook" / image_rel
@@ -4210,6 +4302,7 @@ def test_business_reddit_ad_launch_test_mode_stages_local_image_asset(tmp_path, 
 
 
 def test_business_reddit_ad_launch_test_mode_stages_local_video_and_reference_thumbnail(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch)
     publication_rel = "product/ugc-ads/demo-reddit-video"
     publication_dir = tmp_path / "businesses" / "clipbook" / publication_rel
@@ -4240,6 +4333,7 @@ def test_business_reddit_ad_launch_test_mode_stages_local_video_and_reference_th
 
 
 def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_public_asset_receipt(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
     image_rel = "product/static-ads/demo-reddit/banner.png"
     image_abs = tmp_path / "businesses" / "clipbook" / image_rel
@@ -4278,6 +4372,7 @@ def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_publi
 
 
 def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch)
 
     result = json.loads(
@@ -4290,6 +4385,7 @@ def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch
 
 
 def test_business_reddit_ad_launch_refuses_activation(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch)
 
     result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args(activate=True)))
@@ -4300,9 +4396,7 @@ def test_business_reddit_ad_launch_refuses_activation(tmp_path, monkeypatch):
 
 
 def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeypatch):
-    monkeypatch.setenv("REDDIT_ADS_CLIENT_ID", "reddit-client")
-    monkeypatch.setenv("REDDIT_ADS_CLIENT_SECRET", "reddit-secret")
-    monkeypatch.setenv("REDDIT_ADS_ACCESS_TOKEN", "reddit-access-token")
+    _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
     monkeypatch.setattr(
         takyon_core,
@@ -4336,9 +4430,7 @@ def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeyp
 
 
 def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
-    monkeypatch.setenv("REDDIT_ADS_CLIENT_ID", "reddit-client")
-    monkeypatch.setenv("REDDIT_ADS_CLIENT_SECRET", "reddit-secret")
-    monkeypatch.setenv("REDDIT_ADS_ACCESS_TOKEN", "reddit-access-token")
+    _stub_reddit_ads_config(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _grant_creative_credits(store, "clipbook", 5, "clipbook-reddit-grant")
     monkeypatch.setattr(
@@ -4382,6 +4474,62 @@ def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["status"] == "created_paused"
     assert result["balance_credits"] == 4
+
+
+def test_reddit_launch_plan_passes_structured_post_payload(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    staged_args, staged_assets = takyon_core._reddit_stage_launch_args(
+        store,
+        "clipbook",
+        _reddit_launch_args(
+            post={
+                "headline": "Try Clipbook",
+                "media_url": "https://cdn.example.com/clipbook.png",
+                "allow_comments": False,
+                "call_to_action": "Learn More",
+                "supplementary_text": "No ticket queue. No templated sludge.",
+            },
+            ad={"name": "Clipbook Reddit Ad"},
+            slug="demo-reddit-structured",
+            idempotency_key="clipbook-reddit-structured-v1",
+        ),
+        publish_target=_product_publish_target("clipbook"),
+        verify_public_url=False,
+    )
+
+    assert staged_assets == []
+    plan = takyon_core._reddit_launch_plan(staged_args, {})
+    assert plan["structured_post_payload"]["data"]["creative"]["destination"]["url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["structured_post_payload"]["data"]["creative"]["destination"]["call_to_action"] == "Learn More"
+    assert plan["structured_post_payload"]["data"]["creative"]["supplementary_text"] == "No ticket queue. No templated sludge."
+    assert plan["legacy_post_payload"]["data"]["content"][0]["destination_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["legacy_post_payload"]["data"]["content"][0]["call_to_action"] == "Learn More"
+
+
+def test_reddit_launch_plan_uses_body_as_structured_copy_fallback(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    staged_args, staged_assets = takyon_core._reddit_stage_launch_args(
+        store,
+        "clipbook",
+        _reddit_launch_args(
+            post={
+                "headline": "Try Clipbook",
+                "media_url": "https://cdn.example.com/clipbook.png",
+                "body": "Optional long-form copy for Reddit post flows.",
+                "allow_comments": False,
+            },
+            ad={"name": "Clipbook Reddit Ad"},
+            slug="demo-reddit-body-copy",
+            idempotency_key="clipbook-reddit-body-copy-v1",
+        ),
+        publish_target=_product_publish_target("clipbook"),
+        verify_public_url=False,
+    )
+
+    assert staged_assets == []
+    plan = takyon_core._reddit_launch_plan(staged_args, {})
+    assert plan["structured_post_payload"]["data"]["creative"]["supplementary_text"] == "Optional long-form copy for Reddit post flows."
+    assert plan["legacy_post_payload"]["data"]["body"] == "Optional long-form copy for Reddit post flows."
 
 
 def test_business_reddit_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):

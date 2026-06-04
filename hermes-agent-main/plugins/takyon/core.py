@@ -3836,6 +3836,16 @@ def _reddit_stage_launch_args(
     canonical_args["ad"] = ad
 
     asset_kind = _reddit_requested_asset_kind(args)
+    canonical_destination_url = str(post.get("destination_url") or ad.get("click_url") or publish_target or "").strip()
+    if asset_kind == "existing_post":
+        if canonical_destination_url and not str(ad.get("click_url") or "").strip():
+            ad["click_url"] = canonical_destination_url
+    else:
+        if canonical_destination_url and not str(post.get("destination_url") or "").strip():
+            post["destination_url"] = canonical_destination_url
+        resolved_click_url = str(ad.get("click_url") or post.get("destination_url") or canonical_destination_url or "").strip()
+        if resolved_click_url and not str(ad.get("click_url") or "").strip():
+            ad["click_url"] = resolved_click_url
     slug = _file_slug(
         str(args.get("slug") or campaign.get("name") or ad.get("name") or post.get("headline") or "reddit-ad"),
         "reddit-ad",
@@ -13103,7 +13113,8 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
     click_url = str(ad.get("click_url") or post.get("destination_url") or "").strip()
 
     post_id = str(args.get("post_id") or ad.get("post_id") or "").strip()
-    post_payload = None
+    structured_post_payload = None
+    legacy_post_payload = None
     thumbnail_url = None
     if asset_kind == "existing_post":
         if not post_id:
@@ -13118,18 +13129,35 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
         if not destination_url:
             raise TakyonError("post.destination_url or ad.click_url is required when creating a Reddit ad post")
         allow_comments = _boolish(post.get("allow_comments"), default=False)
+        display_url = str(post.get("display_url") or ad.get("display_url") or "").strip()
+        call_to_action = str(post.get("call_to_action") or ad.get("call_to_action") or "").strip() or None
+        raw_body = str(post.get("body") or "").strip() or None
+        supplementary_text = (
+            str(post.get("supplementary_text") or ad.get("supplementary_text") or raw_body or "").strip() or None
+        )
+        body = raw_body or supplementary_text
+        is_richtext = post.get("is_richtext")
+        destination: dict[str, Any] = {"url": destination_url, "type": "URL"}
+        if display_url:
+            destination["display_url"] = display_url
+        if call_to_action:
+            destination["call_to_action"] = call_to_action
         creative: dict[str, Any] = {
             "type": asset_kind.upper(),
             "headline": headline,
-            "destination": {"url": destination_url, "type": "URL"},
         }
+        if asset_kind != "carousel":
+            creative["destination"] = destination
+        if supplementary_text:
+            creative["supplementary_text"] = supplementary_text
         if asset_kind == "image":
             media_url = str(post.get("media_url") or post.get("image_url") or "").strip()
             thumbnail_url = str(post.get("thumbnail_url") or media_url or "").strip()
             if not media_url:
                 raise TakyonError("post.media_url is required when asset_kind='image'")
             creative["image"] = {"media": {"url": media_url, "type": "URL"}}
-            creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
+            if thumbnail_url:
+                creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
         elif asset_kind == "video":
             media_url = str(post.get("media_url") or post.get("video_url") or "").strip()
             thumbnail_url = str(post.get("thumbnail_url") or "").strip()
@@ -13143,9 +13171,6 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
             carousel = post.get("carousel") if isinstance(post.get("carousel"), list) else []
             if len(carousel) < 2:
                 raise TakyonError("post.carousel must include at least two cards when asset_kind='carousel'")
-            thumbnail_url = str(post.get("thumbnail_url") or "").strip()
-            if not thumbnail_url:
-                raise TakyonError("post.thumbnail_url is required when asset_kind='carousel'")
             creative["carousel"] = []
             for index, card in enumerate(carousel, start=1):
                 if not isinstance(card, dict):
@@ -13157,15 +13182,69 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
                 if not card_destination:
                     raise TakyonError(f"post.carousel[{index}].destination_url is required")
                 item: dict[str, Any] = {
-                    "destination": {"url": card_destination, "type": "URL"},
+                    "destination": {
+                        "url": card_destination,
+                        "type": "URL",
+                    },
                     "image": {"media": {"url": card_url, "type": "URL"}},
                 }
+                card_display_url = str(card.get("display_url") or display_url or "").strip()
+                card_cta = str(card.get("call_to_action") or call_to_action or "").strip() or None
+                if card_display_url:
+                    item["destination"]["display_url"] = card_display_url
+                if card_cta:
+                    item["destination"]["call_to_action"] = card_cta
                 caption = str(card.get("caption") or "").strip()
                 if caption:
                     item["caption"] = caption
                 creative["carousel"].append(item)
-            creative["thumbnail"] = {"media": {"url": thumbnail_url, "type": "URL"}}
-        post_payload = {"data": {"allow_comments": allow_comments, "creative": creative}}
+        structured_post_payload = {"data": {"allow_comments": allow_comments, "creative": creative}}
+        legacy_post_payload_data: dict[str, Any] = {
+            "allow_comments": allow_comments,
+            "headline": headline,
+            "type": asset_kind.upper(),
+        }
+        if body:
+            legacy_post_payload_data["body"] = body
+        if is_richtext is not None:
+            legacy_post_payload_data["is_richtext"] = _boolish(is_richtext, default=False)
+        content_items: list[dict[str, Any]] = []
+        if asset_kind == "image":
+            item = {"media_url": media_url, "destination_url": destination_url}
+            if display_url:
+                item["display_url"] = display_url
+            if call_to_action:
+                item["call_to_action"] = call_to_action
+            content_items.append(item)
+        elif asset_kind == "video":
+            item = {"media_url": media_url}
+            if destination_url:
+                item["destination_url"] = destination_url
+            if display_url:
+                item["display_url"] = display_url
+            if call_to_action:
+                item["call_to_action"] = call_to_action
+            content_items.append(item)
+            legacy_post_payload_data["thumbnail_url"] = thumbnail_url
+        else:
+            for card in creative["carousel"]:
+                content_item = {
+                    "media_url": str(((card.get("image") or {}).get("media") or {}).get("url") or "").strip(),
+                    "destination_url": str((card.get("destination") or {}).get("url") or "").strip(),
+                }
+                card_caption = str(card.get("caption") or "").strip()
+                card_display_url = str((card.get("destination") or {}).get("display_url") or "").strip()
+                card_cta = str((card.get("destination") or {}).get("call_to_action") or "").strip()
+                if card_caption:
+                    content_item["caption"] = card_caption
+                if card_display_url:
+                    content_item["display_url"] = card_display_url
+                if card_cta:
+                    content_item["call_to_action"] = card_cta
+                content_items.append(content_item)
+        if content_items:
+            legacy_post_payload_data["content"] = content_items
+        legacy_post_payload = {"data": legacy_post_payload_data}
         click_url = click_url or destination_url
 
     campaign_payload = {
@@ -13233,9 +13312,10 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
         "pixel_id": pixel_id,
         "post_id": post_id or None,
         "thumbnail_url": thumbnail_url,
+        "structured_post_payload": _reddit_clean_payload(structured_post_payload) if structured_post_payload else None,
+        "legacy_post_payload": _reddit_clean_payload(legacy_post_payload) if legacy_post_payload else None,
         "campaign_payload": _reddit_clean_payload(campaign_payload),
         "ad_group_payload": _reddit_clean_payload(ad_group_payload),
-        "post_payload": _reddit_clean_payload(post_payload) if post_payload else None,
         "ad_payload": _reddit_clean_payload(ad_payload),
         "targeting": targeting,
     }
@@ -13456,6 +13536,11 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
             "ad_group_name": str(plan_payload.get("ad_group", {}).get("name") or "").strip(),
             "ad_name": str(plan_payload.get("ad", {}).get("name") or "").strip(),
             "headline": str(plan_payload.get("post", {}).get("headline") or "").strip(),
+            "body": str(plan_payload.get("post", {}).get("body") or "").strip(),
+            "supplementary_text": str(plan_payload.get("post", {}).get("supplementary_text") or "").strip(),
+            "call_to_action": str(plan_payload.get("post", {}).get("call_to_action") or plan_payload.get("ad", {}).get("call_to_action") or "").strip(),
+            "display_url": str(plan_payload.get("post", {}).get("display_url") or plan_payload.get("ad", {}).get("display_url") or "").strip(),
+            "destination_url": str(plan_payload.get("post", {}).get("destination_url") or "").strip(),
             "click_url": str(plan_payload.get("ad", {}).get("click_url") or "").strip(),
             "public_assets": plan_payload.get("public_assets") or [],
             "created_at": _now(),
@@ -13570,6 +13655,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
             "funding_instrument_id": gateway_result.get("funding_instrument_id"),
             "conversion_pixel_id": gateway_result.get("pixel_id"),
             "ids": gateway_result.get("ids") or {},
+            "post_creation_mode": gateway_result.get("post_creation_mode") or ("existing_post" if plan["post_id"] else "structured_post_job"),
             "preview_url": gateway_result.get("preview_url"),
             "preview_expiry": gateway_result.get("preview_expiry"),
             "post_url": gateway_result.get("post_url"),
@@ -15557,11 +15643,11 @@ TAKYON_TOOL_DEFINITIONS = [
                 },
                 "post": {
                     "type": "object",
-                    "description": "{headline, destination_url, allow_comments, media_url|image_url|video_url|thumbnail_url, media_path|image_path|video_path|thumbnail_path, carousel}. image/video/carousel launches need either public creative URLs or business-relative local files that Takyon can stage onto the business publish target first.",
+                    "description": "{headline, destination_url, display_url, call_to_action, supplementary_text, body, allow_comments, media_url|image_url|video_url|thumbnail_url, media_path|image_path|video_path|thumbnail_path, carousel}. If destination_url is omitted, Takyon defaults it to the business canonical product URL. image/video/carousel launches need either public creative URLs or business-relative local files that Takyon can stage onto the business publish target first.",
                 },
                 "ad": {
                     "type": "object",
-                    "description": "{name, click_url, post_id, click_url_query_parameters}. click_url is required when reusing an existing post.",
+                    "description": "{name, click_url, display_url, call_to_action, post_id, click_url_query_parameters}. click_url defaults to the post destination for new promoted posts and is required when reusing an existing post.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,

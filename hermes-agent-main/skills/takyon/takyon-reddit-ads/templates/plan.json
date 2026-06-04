@@ -19,6 +19,9 @@
   "post": {
     "headline": "Try Clipbook",
     "destination_url": "https://example.com/clipbook",
+    "display_url": "https://example.com/clipbook",
+    "call_to_action": "Learn More",
+    "supplementary_text": "Optional short extra text for supported Reddit creative surfaces.",
     "image_path": "product/static-ads/demo-reddit/banner.png",
     "allow_comments": false
   },

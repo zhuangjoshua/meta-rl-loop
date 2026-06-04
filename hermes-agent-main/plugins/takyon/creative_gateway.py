@@ -17,6 +17,7 @@ import mimetypes
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,80 @@ def _require_internal_session(
 
 def build_creative_gateway_router() -> APIRouter:
     router = APIRouter(prefix="/internal/creative-gateway")
+
+    def _create_reddit_structured_post(
+        core: Any,
+        cfg: dict[str, Any],
+        *,
+        profile_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        create_resp = core._reddit_ads_request(
+            "POST",
+            f"/profiles/{profile_id}/structured_posts/jobs",
+            cfg,
+            json_body=payload,
+        )
+        create_data = core._reddit_ads_data(create_resp["data"]) or {}
+        job_id = str(create_data.get("id") or "").strip()
+        if not job_id:
+            raise RuntimeError("Reddit structured post creation returned no job id")
+
+        deadline = time.time() + 120.0
+        last_status = ""
+        last_error = ""
+        post_id = ""
+        while time.time() < deadline:
+            job_resp = core._reddit_ads_request("GET", f"/structured_posts/jobs/{job_id}", cfg)
+            job_data = core._reddit_ads_data(job_resp["data"]) or {}
+            last_status = str(job_data.get("status") or "").strip().upper()
+            last_error = str(job_data.get("error_message") or "").strip()
+            post_id = str(job_data.get("post_id") or "").strip()
+            if last_status == "SUCCESS":
+                break
+            if last_status in {"CLIENT_ERROR", "SERVER_ERROR"}:
+                raise RuntimeError(
+                    "Reddit structured post creation failed"
+                    + (f": {last_error}" if last_error else "")
+                )
+            time.sleep(1.0)
+        else:
+            raise RuntimeError(
+                "Reddit structured post creation timed out"
+                + (f" after last status {last_status}" if last_status else "")
+            )
+
+        if not post_id:
+            raise RuntimeError("Reddit structured post creation succeeded but returned no post id")
+
+        post_url = None
+        try:
+            post_resp = core._reddit_ads_request("GET", f"/structured_posts/{post_id}", cfg)
+            post_data = core._reddit_ads_data(post_resp["data"]) or {}
+            post_url = str(post_data.get("url") or "").strip() or None
+        except Exception:
+            post_url = None
+        return post_id, post_url
+
+    def _create_reddit_legacy_post(
+        core: Any,
+        cfg: dict[str, Any],
+        *,
+        profile_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str | None]:
+        post_resp = core._reddit_ads_request(
+            "POST",
+            f"/profiles/{profile_id}/posts",
+            cfg,
+            json_body=payload,
+        )
+        post_data = core._reddit_ads_data(post_resp["data"]) or {}
+        post_id = str(post_data.get("id") or "").strip()
+        post_url = str(post_data.get("post_url") or post_data.get("url") or "").strip() or None
+        if not post_id:
+            raise RuntimeError("Reddit Ads post creation returned no id")
+        return post_id, post_url
 
     @router.post("/ugc-render")
     def ugc_render(
@@ -898,19 +973,39 @@ def build_creative_gateway_router() -> APIRouter:
                 raise RuntimeError("Reddit Ads ad group creation returned no id")
 
             post_id = str(plan.get("post_id") or "").strip()
+            post_creation_mode = "existing_post" if post_id else ""
             if not post_id:
-                post_payload = plan.get("post_payload") or {}
-                post_resp = core._reddit_ads_request(
-                    "POST",
-                    f"/profiles/{profile_id}/posts",
-                    cfg,
-                    json_body=post_payload,
-                )
-                post_data = core._reddit_ads_data(post_resp["data"]) or {}
-                post_id = str(post_data.get("id") or "").strip()
-                post_url = str(post_data.get("post_url") or "").strip() or None
-                if not post_id:
-                    raise RuntimeError("Reddit Ads post creation returned no id")
+                structured_payload = plan.get("structured_post_payload") if isinstance(plan.get("structured_post_payload"), dict) else None
+                legacy_payload = plan.get("legacy_post_payload") if isinstance(plan.get("legacy_post_payload"), dict) else None
+                if structured_payload:
+                    try:
+                        post_id, post_url = _create_reddit_structured_post(
+                            core,
+                            cfg,
+                            profile_id=profile_id,
+                            payload=structured_payload,
+                        )
+                        post_creation_mode = "structured_post_job"
+                    except Exception:
+                        if not legacy_payload:
+                            raise
+                        post_id, post_url = _create_reddit_legacy_post(
+                            core,
+                            cfg,
+                            profile_id=profile_id,
+                            payload=legacy_payload,
+                        )
+                        post_creation_mode = "legacy_post_fallback"
+                else:
+                    if not legacy_payload:
+                        raise RuntimeError("Reddit launch plan did not include a post creation payload")
+                    post_id, post_url = _create_reddit_legacy_post(
+                        core,
+                        cfg,
+                        profile_id=profile_id,
+                        payload=legacy_payload,
+                    )
+                    post_creation_mode = "legacy_post"
             created["post_id"] = post_id
 
             ad_payload = json.loads(json.dumps(plan.get("ad_payload") or {}))
@@ -953,6 +1048,7 @@ def build_creative_gateway_router() -> APIRouter:
                 "funding_instrument_id": funding_instrument_id,
                 "pixel_id": pixel_id,
                 "ids": created,
+                "post_creation_mode": post_creation_mode or ("existing_post" if post_id else None),
                 "preview_url": preview_url,
                 "preview_expiry": preview_expiry,
                 "post_url": post_url,
@@ -994,6 +1090,7 @@ def build_creative_gateway_router() -> APIRouter:
                     "funding_instrument_id": funding_instrument_id or None,
                     "pixel_id": pixel_id or None,
                     "ids": created or None,
+                    "post_creation_mode": post_creation_mode or None,
                     "preview_url": preview_url,
                     "preview_expiry": preview_expiry,
                     "post_url": post_url,

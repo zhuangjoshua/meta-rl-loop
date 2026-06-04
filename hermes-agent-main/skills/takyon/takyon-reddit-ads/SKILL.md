@@ -172,6 +172,9 @@ The smallest truthful end-to-end Reddit path is:
   [templates/plan.json](templates/plan.json) with the campaign/ad-group/ad blocks and either:
   - `asset_kind: "existing_post"` plus `post_id`, or
   - `asset_kind: "image" | "video" | "carousel"` plus either public URLs under the `post` block or local business file paths (`image_path`, `video_path`, `media_path`, `thumbnail_path`) that Takyon can stage first.
+  For new promoted posts, the plan can also carry copy fields such as `headline`, `display_url`,
+  `call_to_action`, and `supplementary_text`. If `post.destination_url` / `ad.click_url` is omitted,
+  Takyon defaults the click destination to the business's canonical product URL.
   The launch tool itself already handles the normal Reddit object sequence:
   Campaign → Ad Group → optional Post → Ad.
 - **Launch (always PAUSED first):** call `business_reddit_ad_launch` with `mode: "launch"` and a stable `idempotency_key`.
@@ -246,4 +249,3 @@ The smallest truthful end-to-end Reddit path is:
 3. Launch always stages `PAUSED`; activation is a separate explicit move.
 4. Treat publish-target reachability as a real blocker when staging local files for live use.
 5. Ad-platform metrics are not the same as business attribution.
-
