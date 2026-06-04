@@ -25,12 +25,15 @@
       "where is all my money going",
       "I forgot I was even paying for that",
       "nickel-and-dimed by subscriptions"
-    ]
+    ],
+    "default_behavior_or_belief_to_interrupt": "They assume budgeting harder or checking statements manually is the responsible way to solve the problem.",
+    "skepticism": "They suspect any finance app will add work, feel risky, or just tell them what they already know."
   },
   "proof": {
     "available_proof_types": ["demo", "stat", "social_proof"],
     "testimonials": "[FICTIONAL PLACEHOLDER] No real testimonials supplied for this example.",
     "hard_metrics": "[ILLUSTRATIVE] sample dashboards show totals like $312/mo; not a real user result.",
+    "strongest_proof_that_can_live_in_the_ad": "A clean product screenshot showing recurring subscriptions and a representative highlighted monthly total.",
     "brand_assets": {
       "logo": "assets/tally-logo.png (not included in this example)",
       "brand_colors": ["#0FB5A3 (teal)", "#0B1F2A (ink)"],
@@ -49,7 +52,16 @@
   "constraints": {
     "brand_voice": ["plain-spoken", "reassuring", "a little wry"],
     "regulated_claims": "Finance category — avoid guaranteed savings; keep figures illustrative and typical.",
+    "category_myths_to_attack": [
+      "You need to budget harder to catch subscription waste.",
+      "Checking your statement manually is good enough."
+    ],
     "competitor_references": "Position against manual spreadsheets and 'just check your statements', not a named competitor.",
+    "successful_patterns_to_borrow": [
+      "Contrarian old-way-vs-new-way statics",
+      "Product UI proof with one highlighted result",
+      "Listicle or warning-led problem-solution statics"
+    ],
     "performance_data": "none yet (first launch)"
   },
   "angle_shortlist": [

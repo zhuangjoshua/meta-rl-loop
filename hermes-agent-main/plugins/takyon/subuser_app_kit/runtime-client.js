@@ -171,6 +171,17 @@ export function createSubuserRuntimeClient(context = {}) {
       ensureRail("account");
       return jsonRequest(routeUrl("account"), { method: "GET" });
     },
+    async profile() {
+      ensureRail("profile");
+      return jsonRequest(routeUrl("profile"), { method: "GET" });
+    },
+    async updateProfile(payload = {}) {
+      ensureRail("profile");
+      return jsonRequest(routeUrl("profile"), {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
     async checkout(payload = {}) {
       ensureRail("checkout");
       return jsonRequest(routeUrl("checkout"), {

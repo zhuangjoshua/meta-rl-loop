@@ -22,6 +22,7 @@ Normal pattern:
 2. Create one runtime client with `createSubuserRuntimeClient(...)`.
 3. Treat only `rail_state=live` as callable; `unknown`, `blocked`, and `broken` stay visibly non-live.
 4. Use `packs.js` to choose a shell direction.
-5. Build the actual product UI around that truth.
+5. If the surface is app-like, keep a real `/app` route. Landing-heavy app surfaces still default to `/, /app`; only drop `/app` when the owning surface is intentionally `landing_page_only`.
+6. Build the actual product UI around that truth.
 
 The kit is intentionally framework-agnostic so static HTML, vanilla JS, React, or Next source can all use the same runtime boundary.

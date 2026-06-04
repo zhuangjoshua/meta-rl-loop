@@ -1,7 +1,7 @@
 ---
 name: takyon-meta-ads
 description: Launch and operate a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the token, create a PAUSED Campaign/AdSet/Ad, then explicitly activate/pause/update budget and sync ad-platform metrics through guarded tools. Test-mode businesses suppress to local receipts.
-version: 1.1.0
+version: 1.2.0
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -16,16 +16,19 @@ metadata:
       [
         business_read_business,
         business_meta_ad_launch,
+        business_meta_ad_bind_manual_launch,
         business_meta_ad_control,
         business_meta_ad_insights_sync,
       ]
     routing:
-      owns: Meta ad launch staging, explicit control, and ad-platform metrics sync from a finished UGC or static-image asset
+      owns: Meta ad launch staging or manual-handoff packaging, explicit control, external launch binding, and ad-platform metrics sync from a finished UGC or static-image asset
       when_to_use:
         - a finished UGC or static ad asset needs to be staged as a paused Meta campaign
+        - Meta should stop at a manual handoff packet because the business cannot auto-post yet
+        - a manually launched Meta campaign needs its real campaign/adset/ad ids bound back into Takyon
         - Meta token or ad-account preflight is needed before launch work
         - a launched Meta ad needs to be activated, paused, or have its daily budget updated
-        - ad-platform delivery metrics need to be synced into Takyon for later tracking
+        - ad-platform delivery metrics need to be synced into Takyon for later tracking, whether they came from the Meta API or a manual operator entry
       do_not_use_for:
         - building the video asset itself
         - inventing conversion attribution, CAC, or ROAS when Takyon has not recorded join keys
@@ -95,9 +98,10 @@ attribution or CAC when the join keys have not been recorded.
   `metrics/meta-ads/<slug>/insights.jsonl`,
   `metrics/meta-ads/<slug>/syncs/<idempotency>.json`
 - Tools used by this skill:
-  **`business_meta_ad_launch`** (preflight + PAUSED launch),
+  **`business_meta_ad_launch`** (preflight + PAUSED launch or manual handoff),
+  **`business_meta_ad_bind_manual_launch`** (bind real Meta ids after manual launch),
   **`business_meta_ad_control`** (activate, pause, set_budget),
-  **`business_meta_ad_insights_sync`** (delivery metrics sync)
+  **`business_meta_ad_insights_sync`** (delivery metrics sync, including manual metrics import)
 - Upstream assets: `product/ugc-ads/<slug>/ad.mp4` from `ugc-video-ad` or a local image from `product/static-ads/<slug>/`
 - Safety: launch always creates `PAUSED`; `daily_budget_usd` is capped by
   `TAKYON_META_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Meta; metrics sync is ad-platform only and does not imply business attribution.
@@ -105,8 +109,9 @@ attribution or CAC when the join keys have not been recorded.
 ## Prerequisites
 
 - The Takyon toolset must be available; **`business_meta_ad_launch`**,
-  **`business_meta_ad_control`**, and **`business_meta_ad_insights_sync`** must be registered
-  (gated in frontmatter `metadata.hermes.requires_tools`).
+  **`business_meta_ad_bind_manual_launch`**, **`business_meta_ad_control`**, and
+  **`business_meta_ad_insights_sync`** must be registered (gated in frontmatter
+  `metadata.hermes.requires_tools`).
 - **A finished UGC video** at `product/ugc-ads/<slug>/ad.mp4` (build it first with
   `ugc-video-ad`).
 - **Live launch / preflight credentials** (env or local `.env`; never hardcode):
@@ -148,12 +153,20 @@ attribution or CAC when the join keys have not been recorded.
   the tool writes a suppressed `receipt.json` and calls Meta **not at all**. In **live mode**
   it uploads the asset, builds the creative, and creates Campaign/AdSet/Ad **PAUSED**, then
   writes `receipt.json` with the real object IDs.
+- **Manual handoff:** call `business_meta_ad_launch` with `mode: "manual_handoff"` when Meta
+  cannot auto-post yet. The tool writes `plan.json` + `receipt.json` with `status:
+  "ready_for_manual_launch"` and stops before calling Meta.
+- **Bind external launch:** after a human creates the campaign in Ads Manager, call
+  `business_meta_ad_bind_manual_launch` with the real `campaign_id`, `adset_id`, and `ad_id`
+  so Takyon's canonical receipt becomes `externally_launched`.
 - **Control (explicit):** when the operator wants to serve or stop serving, call
   `business_meta_ad_control` using the launch slug/receipt. `activate` flips the campaign live,
   `pause` stops it again, and `set_budget` updates the ad set daily budget under the same
   safety cap.
 - **Metrics sync:** call `business_meta_ad_insights_sync` on the launch slug/receipt to write
-  a durable delivery snapshot under `metrics/meta-ads/<slug>/`.
+  a durable delivery snapshot under `metrics/meta-ads/<slug>/`. For alpha manual launch flows,
+  this same tool can accept raw `spend_usd`, `impressions`, and `clicks` with `source:
+  "manual"` and compute CTR/CPC/CPM inside Takyon.
 - The tool is **idempotent** on `idempotency_key`: a retry with the same key returns the
   existing receipt instead of creating duplicate Meta objects.
 - Each tool records its own durable truth (event + receipt/snapshot). Do not hand-write success.
@@ -169,19 +182,28 @@ attribution or CAC when the join keys have not been recorded.
 3. **Draft `plan.json`** under `distribution/meta-ads/<slug>/` from the template: pick the
    Outcome objective, a `daily_budget_usd` within the cap, targeting, the ad `message` +
    `link` + `call_to_action`, and set `ad_video_path` to the UGC mp4.
-4. **Launch PAUSED** — call `business_meta_ad_launch` `mode: "launch"` with the plan fields
-   and a stable `idempotency_key`.
+4. **Choose the launch path** — call `business_meta_ad_launch` with the plan fields and a
+   stable `idempotency_key`.
    - **Test mode** → expect `status: "suppressed_test_mode"` and a local `receipt.json`; no
      Meta objects exist.
-   - **Live mode** → expect `status: "created_paused"` with `ids` for video/creative/
-     campaign/adset/ad, and a `receipt.json` with those IDs.
-5. **Control if needed** — if the operator wants the ad live, call
+   - **Live auto-post** (`mode: "launch"`) → expect `status: "created_paused"` with `ids` for
+     video/creative/campaign/adset/ad, and a `receipt.json` with those IDs.
+   - **Manual handoff** (`mode: "manual_handoff"`) → expect `status:
+     "ready_for_manual_launch"` plus `distribution/meta-ads/<slug>/plan.json`. Hand this packet
+     to the human operator.
+5. **Bind manual launch if needed** — when a human launches the campaign in Ads Manager, call
+   `business_meta_ad_bind_manual_launch` with the real Meta ids. Expect
+   `status: "bound_manual_launch"` and the canonical receipt to change to
+   `status: "externally_launched"`.
+6. **Control if needed** — if the operator wants the ad live and the campaign was auto-posted, call
    `business_meta_ad_control` with `operation: "activate"` and the same slug. To stop it, use
    `operation: "pause"`. To change pace, use `operation: "set_budget"` with
    `daily_budget_usd`.
-6. **Sync metrics** — call `business_meta_ad_insights_sync` with `level: "campaign"` (or
-   `adset` / `ad`) to persist Meta delivery metrics under `metrics/meta-ads/<slug>/`.
-7. **Keep state truthful** — if a live step fails after some objects were created, the tool
+7. **Sync metrics** — call `business_meta_ad_insights_sync` with `level: "campaign"` (or
+   `adset` / `ad`) to persist Meta delivery metrics under `metrics/meta-ads/<slug>/`. In
+   manual-launch alpha, use `source: "manual"` with raw `spend_usd`, `impressions`, and
+   `clicks`.
+8. **Keep state truthful** — if a live step fails after some objects were created, the tool
    writes a `partial_failed` receipt with the IDs that exist. Surface that blocker; do not
    claim success.
 
@@ -189,10 +211,11 @@ attribution or CAC when the join keys have not been recorded.
 
 - `distribution/meta-ads/<slug>/plan.json` — the structured launch input (human-readable).
 - `distribution/meta-ads/<slug>/receipt.json` — the tool-written truth of the launch:
-  `status` (`suppressed_test_mode` | `created_paused` | `partial_failed`), `paused`, the
-  Meta object `ids` (live), the budget, and the source `ad_video_path`.
+  `status` (`suppressed_test_mode` | `ready_for_manual_launch` | `created_paused` |
+  `externally_launched` | `partial_failed`), `paused`, the Meta object `ids` when known, the
+  budget, and the source asset path.
 - `distribution/meta-ads/<slug>/actions/<idempotency>.json` — the tool-written truth of each
-  control action (`activate`, `pause`, `set_budget`).
+  control or manual-bind action (`activate`, `pause`, `set_budget`, `manual_bind`).
 - `metrics/meta-ads/<slug>/syncs/<idempotency>.json` and `metrics/meta-ads/<slug>/insights.jsonl`
   — the tool-written truth of each metrics sync.
 
@@ -203,6 +226,9 @@ attribution or CAC when the join keys have not been recorded.
   `slug`).
 - The durable truth of a launch is the **`receipt.json`** written by
   `business_meta_ad_launch`, plus the `meta_ad.launch` event it commits.
+- The durable truth of a manual external launch bind is the updated `receipt.json`, the
+  action receipt written by `business_meta_ad_bind_manual_launch`, and the
+  `meta_ad.manual_bind` event it commits.
 - The durable truth of control actions is the action receipt written by
   `business_meta_ad_control`, plus the matching `meta_ad.activate`, `meta_ad.pause`, or
   `meta_ad.budget_update` event.

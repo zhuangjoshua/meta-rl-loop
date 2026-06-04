@@ -10,7 +10,7 @@
 <style>
 :root{
   --paper:#E7DEC9; --paper-2:#F1E9D6; --ink:#1C1813; --ink-2:#4A4034; --muted:#857862;
-  --line:#2A231B; --red:#F1330B; --blue:#143CDB; --pink:#FF4D7D; --amber:#FFB000; --crt:#13100B;
+  --line:#2A231B; --red:#6D28D9; --alert:#F1330B; --blue:#143CDB; --pink:#FF4D7D; --amber:#FFB000; --crt:#13100B;
   --teal:#0E9C8E; --purple:#8A2BD9; --gold:#C8870F; --green:#2E9E4F;
 }
 *{box-sizing:border-box}
@@ -81,7 +81,7 @@ button{font-family:inherit}
 section.hero{text-align:center;padding:58px 0 44px}
 .eyebrow{font:700 12px 'Space Mono',monospace;letter-spacing:.26em;text-transform:uppercase;color:var(--red);margin-bottom:20px}
 h1.hero{font-family:'Anton',Impact,sans-serif;font-weight:400;font-size:clamp(44px,7.6vw,100px);line-height:.92;margin:0 auto;text-transform:uppercase;letter-spacing:-.01em;max-width:13ch}
-h1.hero .pop{color:var(--red);text-shadow:5px 5px 0 var(--blue)}
+h1.hero .pop{color:var(--red);text-shadow:5px 5px 0 var(--ink)}
 .lede{font-family:'Bitter',Georgia,serif;font-size:clamp(15px,1.7vw,19px);line-height:1.5;max-width:600px;margin:22px auto 34px;color:var(--ink-2)}
 .lede em{font-style:italic;color:var(--ink)}
 
@@ -221,6 +221,11 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .board-bar-fill{width:100%;border-top:1.5px solid var(--ink)}
 .board-bar-l{font:700 8.5px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;text-align:center;line-height:1.25}
 .board-bar-l small{display:block;font-weight:400;color:var(--muted);letter-spacing:.04em}
+.board-prog{display:flex;flex-direction:column;gap:11px;justify-content:center;flex:1;min-height:118px}
+.board-prog-track{height:32px;border:2px solid var(--ink);background:var(--paper);box-shadow:3px 3px 0 var(--ink);overflow:hidden}
+.board-prog-fill{height:100%;background:var(--green);border-right:2px solid var(--ink)}
+.board-prog-stages{display:flex;justify-content:space-between;font:700 9px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.board-prog-stages span.on{color:var(--ink)}
 .board-cols{flex:1;min-height:0;min-width:0}
 .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;height:100%}
 .col-h{font:700 9.5px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;padding-bottom:6px;margin-bottom:7px;border-bottom:3px solid var(--ink);display:flex;justify-content:space-between;align-items:center}
@@ -267,6 +272,8 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .chan-nm{font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .chan-st{font:700 8.5px 'Space Mono',monospace;letter-spacing:.1em;text-transform:uppercase;padding:1px 6px;border:1.5px solid var(--muted);color:var(--muted)}
 .chan-st.live{border-color:var(--green);color:var(--green)}
+.chan-st.alert{border-color:var(--alert);color:var(--alert)}
+.chan.paused{box-shadow:3px 3px 0 var(--alert)}
 .chan-meta{font-size:10px;color:var(--muted);letter-spacing:.03em}
 .chan-ctl{display:flex;gap:5px;margin-top:7px}
 .cbtn{flex:0 0 auto;background:var(--paper);border:1.5px solid var(--ink);font:700 10px 'Space Mono',monospace;padding:4px 7px;cursor:pointer;text-transform:uppercase;letter-spacing:.04em}
@@ -346,8 +353,6 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 <div id="stage">
   <!-- IDEA INTAKE -->
   <div id="launcher">
-    <div class="promo">litebulb day · <b>your first company is on the house</b> — no card, no meetings</div>
-
     <section class="hero land">
       <div class="eyebrow">autonomous company builder</div>
       <h1 class="hero">Turn an idea<br>into a <span class="pop">company.</span></h1>
@@ -362,36 +367,8 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
         </div>
       </div>
 
-      <div class="chips" id="chips">
-        <button class="chip2" data-idea="a tool that books dog-grooming appointments">Dog-grooming booking</button>
-        <button class="chip2" data-idea="an app that finds cheap padel courts near you">Cheap padel finder</button>
-        <button class="chip2" data-idea="a niche paid newsletter for indie game devs">Niche newsletter</button>
-        <button class="chip2" data-idea="a local marketplace for vetted handymen">Handyman marketplace</button>
-        <button class="chip2" data-idea="an AI study buddy for law students">AI study buddy</button>
-        <button class="chip2" data-idea="a monthly snack box for remote teams">Snack subscription</button>
-      </div>
       <div class="hint">enter to build · shift+enter for a new line</div>
     </section>
-
-    <section class="sec"><div class="land">
-      <div class="sec-h">what litebulb actually does</div>
-      <div class="features">
-        <div class="feat"><div class="feat-n">01</div><div class="feat-t">Build at the speed of an idea</div><div class="feat-b">Describe it once. litebulb ships the product in minutes — a real site with test-mode auth, on its own domain.</div></div>
-        <div class="feat"><div class="feat-n">02</div><div class="feat-t">A company that runs itself</div><div class="feat-b">An autonomous CEO works a wake loop — research, site, content, customers — without waiting on you.</div></div>
-        <div class="feat"><div class="feat-n">03</div><div class="feat-t">Customers, not just code</div><div class="feat-b">Put budget behind X, ads, and cold outreach. litebulb runs the channels and reports the receipts.</div></div>
-        <div class="feat"><div class="feat-n">04</div><div class="feat-t">You stay the operator</div><div class="feat-b">Chat to steer, rename, pause, or re-prioritize. It re-plans around you, live.</div></div>
-      </div>
-    </div></section>
-
-    <section class="sec"><div class="land">
-      <div class="sec-h">spun up with litebulb</div>
-      <div class="cards">
-        <div class="scard"><div class="mb"><i></i><i></i><i></i><span>padelpal.com</span></div><div class="bd"><div class="nm">PadelPal</div><div class="ds">finds cheap padel courts near you</div></div></div>
-        <div class="scard"><div class="mb"><i></i><i></i><i></i><span>groomly.com</span></div><div class="bd"><div class="nm">Groomly</div><div class="ds">books dog-grooming in two taps</div></div></div>
-        <div class="scard"><div class="mb"><i></i><i></i><i></i><span>cram.so</span></div><div class="bd"><div class="nm">Cram</div><div class="ds">an AI study buddy for finals week</div></div></div>
-        <div class="scard"><div class="mb"><i></i><i></i><i></i><span>deskcrate.com</span></div><div class="bd"><div class="nm">Crate</div><div class="ds">a snack box for remote teams</div></div></div>
-      </div>
-    </div></section>
 
     <section class="sec"><div class="land">
       <div class="sec-h">questions</div>
@@ -493,7 +470,7 @@ function makeWin({id,title,x,y,w,h,html,crt=false}){
   win.className='win'+(crt?' win--crt':''); if(id)win.id=id;
   win.style.cssText=`left:${x}px;top:${y}px;width:${w}px`;
   win.innerHTML=`<div class="win__bar"><span class="win__dots">
-      <button class="win__dotbtn win__close" type="button" title="close" aria-label="close window"><i class="win__dot win__dot--close" style="background:var(--red)"></i></button><i class="win__dot" style="background:var(--amber)"></i><i class="win__dot" style="background:var(--blue)"></i>
+      <button class="win__dotbtn win__close" type="button" title="close" aria-label="close window"><i class="win__dot win__dot--close" style="background:var(--alert)"></i></button><i class="win__dot" style="background:var(--amber)"></i><i class="win__dot" style="background:var(--blue)"></i>
     </span><span class="win__title">${title}</span></div>
     <div class="win__body"${h?` style="height:${h}px"`:''}>${html}</div>`;
   desk.appendChild(win); focusWin(win);
@@ -518,8 +495,8 @@ function deriveBrand(idea){
 
 /* ---------- runtime state ---------- */
 const STATUSES=['todo','scheduled','running','review','done'];
-const STATUS_C={triage:'var(--muted)',todo:'var(--ink)',scheduled:'var(--blue)',ready:'var(--teal)',running:'var(--amber)',blocked:'var(--red)',review:'var(--purple)',done:'var(--green)'};
-const LANES={research:{c:'var(--blue)'},product:{c:'var(--teal)'},growth:{c:'var(--red)'},creative:{c:'var(--purple)'},ops:{c:'var(--gold)'}};
+const STATUS_C={triage:'var(--muted)',todo:'var(--ink)',scheduled:'var(--blue)',ready:'var(--teal)',running:'var(--amber)',blocked:'var(--alert)',review:'var(--purple)',done:'var(--green)'};
+const LANES={research:{c:'var(--blue)'},product:{c:'var(--teal)'},growth:{c:'var(--alert)'},creative:{c:'var(--purple)'},ops:{c:'var(--gold)'}};
 const SKILLS=[
   {k:'market-research',lane:'research',t:'Market research — who actually pays',b:'Validate the reachable customer, the pain, alternatives, and a revenue path.',tool:{kind:'fetch',nm:'web_search',ttl:i=>`"${i.root} pricing, competitors"`},receipt:'research/market.md'},
   {k:'business-plan',lane:'research',t:'Refine idea into a build spec',b:'Turn the one-liner into the smallest real micro-SaaS spec.',tool:{kind:'edit',nm:'write_file',ttl:()=>'research/spec.md'},receipt:'research/spec.md'},
@@ -549,7 +526,7 @@ function addCeo(html){const d=document.createElement('div');d.className='m m-ceo
 function addYou(t){const d=document.createElement('div');d.className='m m-you';d.innerHTML=`<div class="who">you</div><div class="bubble">${esc(t)}</div>`;msgs().appendChild(d);scrollChat();}
 function addThink(t){const d=document.createElement('div');d.className='m';d.innerHTML=`<div class="think">${esc(t)}</div>`;msgs().appendChild(d);scrollChat();}
 const ICON={read:'⌕',edit:'✎',execute:'⚡',fetch:'↯',search:'⌗',other:'◆',think:'…'};
-const ICON_C={read:'var(--blue)',edit:'var(--red)',execute:'var(--gold)',fetch:'var(--teal)',search:'var(--ink)',other:'var(--purple)',think:'var(--muted)'};
+const ICON_C={read:'var(--blue)',edit:'var(--alert)',execute:'var(--gold)',fetch:'var(--teal)',search:'var(--ink)',other:'var(--purple)',think:'var(--muted)'};
 function addTool({kind,nm,ttl,done=false}){
   const d=document.createElement('div');d.className='m';
   d.innerHTML=`<div class="tool${done?' done':''}"><span class="ic" style="color:${ICON_C[kind]}">${ICON[kind]}</span><span class="nm">${esc(nm)}</span><span class="ttl">${esc(ttl)}</span><span class="st"></span></div>`;
@@ -688,7 +665,7 @@ function taskHTML(t){
     <h3 style="font-family:'Anton',Impact,sans-serif;text-transform:uppercase;font-size:18px;margin:9px 0 4px;line-height:1">${esc(t.title)}</h3>
     <p style="font-family:'Bitter',Georgia,serif;font-size:12.5px;color:var(--ink-2);margin:0 0 8px">${esc(t.body)}</p>
     <div class="lab">progress</div><div class="bar" style="margin-bottom:10px"><i style="width:${Math.round(t.progress.done/t.progress.total*100)}%;background:${STATUS_C[t.status]}"></i></div>
-    ${t.block_reason&&t.status==='blocked'?`<div class="lab">blocked</div><div class="cmt" style="color:var(--red)">${esc(t.block_reason)}</div>`:''}
+    ${t.block_reason&&t.status==='blocked'?`<div class="lab">blocked</div><div class="cmt" style="color:var(--alert)">${esc(t.block_reason)}</div>`:''}
     ${t.result?`<div class="lab">result</div><div class="cmt" style="font-family:'Space Mono',monospace;font-size:11px">${esc(t.result)}</div>`:''}
     ${t.runs.length?`<div class="lab" style="margin-top:8px">runs</div>${t.runs.map(r=>`<div class="cmt" style="font-family:'Space Mono',monospace;font-size:10.5px"><span class="a">${r.profile} · ${r.status}</span>${esc(r.summary||'…')}</div>`).join('')}`:''}
     <div class="lab" style="margin-top:8px">events</div><ul class="tl">${t.events.map(e=>`<li>${e.kind}${e.note?' — '+esc(e.note):''}</li>`).join('')}</ul>
@@ -709,7 +686,7 @@ function startTask(t){
 }
 function blockTask(t,reason){
   t.status='blocked'; t.block_reason=reason; t.events.push({kind:'blocked',note:reason});
-  if(t._chip){const tl=t._chip.querySelector('.tool');if(tl){tl.classList.add('done');tl.style.borderColor='var(--red)';}}
+  if(t._chip){const tl=t._chip.querySelector('.tool');if(tl){tl.classList.add('done');tl.style.borderColor='var(--alert)';}}
   ceolog(`<span class="l-red">[blocked]</span> ${esc(t.key)} — ${esc(reason)}`,true);
   if(!RT.blockedNote){RT.blockedNote=true;addCeo(`Hit a wall: <b>${esc(reason)}</b>. I won't fake progress — say <b>“top up”</b> and I'll resume.`);}
   refreshTask(t);

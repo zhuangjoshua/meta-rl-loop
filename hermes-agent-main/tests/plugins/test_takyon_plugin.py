@@ -23,13 +23,18 @@ from plugins.takyon.core import (
     _product_publish_target,
     _scan_for_pretend_product_state,
     _refresh_product_surface_path,
+    _surface_customer_experience_shape,
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
     handle_business_list_businesses,
     handle_business_meta_ad_control,
     handle_business_meta_ad_insights_sync,
+    handle_business_meta_ad_bind_manual_launch,
     handle_business_write_file,
     handle_business_meta_ad_launch,
+    handle_business_reddit_ad_control,
+    handle_business_reddit_ad_insights_sync,
+    handle_business_reddit_ad_launch,
     handle_business_publish_outreach,
     handle_business_request_app_magic_link,
     handle_business_static_ad_generate,
@@ -116,8 +121,12 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
     assert toolsets["business_static_ad_generate"] == "takyon-authority"
     assert toolsets["business_meta_ad_launch"] == "takyon-authority"
+    assert toolsets["business_meta_ad_bind_manual_launch"] == "takyon-authority"
     assert toolsets["business_meta_ad_control"] == "takyon-authority"
     assert toolsets["business_meta_ad_insights_sync"] == "takyon-authority"
+    assert toolsets["business_reddit_ad_launch"] == "takyon-authority"
+    assert toolsets["business_reddit_ad_control"] == "takyon-authority"
+    assert toolsets["business_reddit_ad_insights_sync"] == "takyon-authority"
     assert toolsets["business_refresh_product_surface"] == "takyon-authority"
     assert toolsets["business_check_runtime_capabilities"] == "takyon-authority"
     assert takyon_toolset_name("business_gc") == "takyon-authority"
@@ -139,6 +148,7 @@ def test_bundled_takyon_skills_exist():
         "takyon-distribution",
         "takyon-market-research",
         "takyon-meta-ads",
+        "takyon-reddit-ads",
         "takyon-x",
     }
     for path in skill_files.values():
@@ -146,28 +156,25 @@ def test_bundled_takyon_skills_exist():
         assert text.startswith("---\nname:")
 
 
-def test_bootstrap_prompt_deprioritizes_full_distribution_batch_for_first_publish():
+def test_bootstrap_prompt_expands_strategy_then_builds_then_posts_on_x():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    assert "distribution/campaign/" in prompt
-    assert "business_publish_outreach" in prompt
-    assert "Do not treat a full multi-lane opening campaign batch as part of the first-site critical path." in prompt
-    assert "one refreshed surface plus the next recorded move is enough to complete the initial turn" in prompt
+    assert "Read research/strategy.md and add to it" in prompt
+    assert "Build the first real product/site page or app page people can actually see or use." in prompt
+    assert "Draft or publish one top-level X post." in prompt
+
+
+def test_bootstrap_prompt_uses_business_publish_outreach_for_the_x_move_in_test_mode():
+    from plugins.takyon.cli import _business_bootstrap_instruction
+
+    prompt = _business_bootstrap_instruction("demo", "find users", "test")
+
+    assert "For the X move, call business_publish_outreach." in prompt
+    assert "distribution/local-published/" in prompt
     assert "3 evidence-backed lanes" not in prompt
     assert "6 total" not in prompt
-
-
-def test_bootstrap_prompt_requires_real_product_source_before_runtime_mirrors():
-    from plugins.takyon.cli import _business_bootstrap_instruction
-
-    prompt = _business_bootstrap_instruction("demo", "find users", "test")
-
-    assert "product/site/" in prompt
-    assert "default bootstrap surface mode is app_shell" in prompt
-    assert "product/surface.md records that source_path truthfully" in prompt
-    assert "Do not create extra runtime notes or mirror markdown ahead of that" in prompt
 
 
 def test_bootstrap_prompt_treats_fresh_create_as_greenfield_and_research_bounded():
@@ -176,32 +183,29 @@ def test_bootstrap_prompt_treats_fresh_create_as_greenfield_and_research_bounded
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
     assert "assume metrics and most business workspaces may be empty" in prompt
-    assert "Do a minimal existence check for current product/source/publish state" in prompt
-    assert "Do bounded market research first" in prompt
+    assert "If relevant durable assets already exist, advance them instead of recreating them." in prompt
+    assert "Do only enough research to keep strategy, product, and X claims truthful." in prompt
 
 
-def test_bootstrap_prompt_orders_surface_before_distribution_before_runtime():
+def test_bootstrap_prompt_orders_strategy_before_build_before_x():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    surface_index = prompt.index("Then use takyon-build-product")
-    distribution_index = prompt.index("After that surface is live, record the next opening distribution move under distribution/campaign/.")
-    runtime_index = prompt.index("Do not create extra runtime notes or mirror markdown ahead of that")
+    strategy_index = prompt.index("1. Read research/strategy.md and add to it so it becomes a short working strategy, not just the seeded goal.")
+    build_index = prompt.index("2. Build the first real product/site page or app page people can actually see or use.")
+    x_index = prompt.index("3. Draft or publish one top-level X post.")
 
-    assert surface_index < distribution_index < runtime_index
+    assert strategy_index < build_index < x_index
 
 
-def test_bootstrap_prompt_orders_research_before_surface_before_verify():
+def test_bootstrap_prompt_keeps_truth_and_blocker_language():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    research_index = prompt.index("Do bounded market research first")
-    surface_index = prompt.index("Then use takyon-build-product")
-    verify_index = prompt.index("Only follow with business_refresh_product_surface once the delegated source pass is done.")
-
-    assert research_index < surface_index < verify_index
+    assert "Keep work business-scoped and truthful." in prompt
+    assert "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider." in prompt
 
 
 def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch):
@@ -1219,6 +1223,41 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
     assert "Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app." in instruction
     assert "If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`." in instruction
+    assert "The default route shape is `/, /app`" in instruction
+
+
+def test_app_like_surface_defaults_required_routes_to_root_and_app():
+    surface = {
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool"},
+            "customer_experience": {
+                "required_sections": ["hero", "pricing"],
+                "required_app_tabs": ["Translate", "History"],
+            },
+        }
+    }
+
+    shape = _surface_customer_experience_shape(surface)
+
+    assert shape["required_routes"] == ["/", "/app"]
+    assert shape["required_app_tabs"] == ["Translate", "History"]
+
+
+def test_landing_only_surface_does_not_force_app_route():
+    surface = {
+        "landing_page_only": True,
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool"},
+            "customer_experience": {
+                "required_routes": ["/"],
+                "required_app_tabs": ["Translate"],
+            },
+        },
+    }
+
+    shape = _surface_customer_experience_shape(surface)
+
+    assert shape["required_routes"] == ["/"]
 
 
 def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
@@ -2767,6 +2806,38 @@ def test_tool_handlers_return_json(tmp_path, monkeypatch):
     assert preview["results"][0]["dry_run"] is True
 
 
+def test_business_upsert_respects_configured_reserved_public_subdomains(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "dashboard:\n  reserved_public_subdomains:\n    - sai\n",
+        encoding="utf-8",
+    )
+
+    blocked = json.loads(
+        handle_business_upsert_business(
+            {
+                "business": "sai",
+                "name": "SAI",
+                "idempotency_key": "handler-reserved-sai",
+            }
+        )
+    )
+    assert blocked["success"] is False
+    assert "reserved for Four Manifold infrastructure" in blocked["error"]
+
+    allowed = json.loads(
+        handle_business_upsert_business(
+            {
+                "business": "sai-lab",
+                "name": "SAI",
+                "idempotency_key": "handler-allowed-sai-name",
+            }
+        )
+    )
+    assert allowed["success"] is True
+    assert allowed["slug"] == "sai-lab"
+
+
 def test_business_session_binding_scopes_file_writes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -3573,6 +3644,43 @@ def test_business_meta_ad_launch_test_mode_supports_image_asset(tmp_path, monkey
     assert receipt["ad_image_path"] == "product/static-ads/demo-image/creative.png"
 
 
+def test_business_meta_ad_launch_manual_handoff_writes_packet_without_meta_call(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(mode="manual_handoff", idempotency_key="clipbook-meta-manual-v1")
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "ready_for_manual_launch"
+    assert result["launch_mode"] == "manual_handoff"
+    assert result["plan_path"] == "distribution/meta-ads/demo-meta/plan.json"
+
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert plan_abs.is_file()
+    assert receipt_abs.is_file()
+
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert plan["launch_mode"] == "manual_handoff"
+    assert "utm_campaign=demo-meta" in plan["ad"]["tracked_link"]
+    assert receipt["status"] == "ready_for_manual_launch"
+    assert receipt["launch_mode"] == "manual_handoff"
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "meta_ad.launch"
+
+
 def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, monkeypatch):
     monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
@@ -3656,6 +3764,49 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
     assert result["success"] is True
     assert result["status"] == "created_paused"
     assert result["balance_credits"] == 4
+
+
+def test_business_meta_ad_bind_manual_launch_updates_receipt_and_records_event(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+    json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(mode="manual_handoff", idempotency_key="clipbook-meta-manual-bind-launch")
+        )
+    )
+
+    result = json.loads(
+        handle_business_meta_ad_bind_manual_launch(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "campaign_id": "campaign-manual-1",
+                "adset_id": "adset-manual-1",
+                "ad_id": "ad-manual-1",
+                "creative_id": "creative-manual-1",
+                "launched_at": "2026-06-03T12:00:00Z",
+                "actual_daily_budget_usd": 7.5,
+                "idempotency_key": "clipbook-meta-manual-bind-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "bound_manual_launch"
+    receipt_abs = tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads" / "demo-meta" / "receipt.json"
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["status"] == "externally_launched"
+    assert receipt["ids"]["campaign_id"] == "campaign-manual-1"
+    assert receipt["actual_daily_budget_usd"] == 7.5
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "meta_ad.manual_bind"
 
 
 def test_business_meta_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
@@ -3831,6 +3982,524 @@ def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypat
     assert row["event_type"] == "meta_ad.insights_sync"
     payload = json.loads(row["payload_json"])
     assert payload["receipt"].startswith("metrics/meta-ads/demo-meta/syncs/")
+
+
+def test_business_meta_ad_insights_sync_manual_writes_snapshot(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_meta_launch_receipt(tmp_path)
+
+    result = json.loads(
+        handle_business_meta_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "source": "manual",
+                "level": "campaign",
+                "time_range": {"since": "2026-06-01", "until": "2026-06-01"},
+                "spend_usd": 12.34,
+                "impressions": 1000,
+                "clicks": 25,
+                "idempotency_key": "clipbook-meta-manual-insights-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "synced_manual"
+    assert result["totals"]["spend_cents"] == 1234
+    assert result["totals"]["ctr"] == 2.5
+    assert result["totals"]["cpc"] == 0.4936
+    assert result["totals"]["cpm"] == 12.34
+
+    metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
+    assert metrics_abs.is_file()
+    lines = [json.loads(line) for line in metrics_abs.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[-1]["source"] == "manual"
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "meta_ad.insights_sync"
+
+
+def _reddit_launch_args(**overrides):
+    args = {
+        "business": "clipbook",
+        "mode": "launch",
+        "asset_kind": "image",
+        "slug": "demo-reddit",
+        "campaign": {"objective": "CLICKS"},
+        "ad_group": {"daily_budget_usd": 5.0, "optimization_goal": "CLICKS"},
+        "post": {
+            "headline": "Try Clipbook",
+            "destination_url": "https://example.com/clipbook",
+            "media_url": "https://cdn.example.com/clipbook.png",
+            "thumbnail_url": "https://cdn.example.com/clipbook-thumb.png",
+            "allow_comments": False,
+        },
+        "ad": {"name": "Clipbook Reddit Ad", "click_url": "https://example.com/clipbook"},
+        "idempotency_key": "clipbook-reddit-demo-v1",
+    }
+    args.update(overrides)
+    return args
+
+
+def _write_reddit_launch_receipt(tmp_path, *, business="clipbook", slug="demo-reddit", mode="live"):
+    receipt_path = (
+        tmp_path
+        / "businesses"
+        / business
+        / "distribution"
+        / "reddit-ads"
+        / slug
+        / "receipt.json"
+    )
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "idempotency_key": f"{slug}-launch-v1",
+        "business": business,
+        "slug": slug,
+        "success": True,
+        "mode": mode,
+        "status": "created_paused" if mode == "live" else "suppressed_test_mode",
+        "paused": True,
+        "asset_kind": "existing_post",
+        "objective": "CLICKS",
+        "daily_budget_usd": 5.0,
+        "budget_scope": "ad_group",
+        "ad_account_id": "a2_demo",
+        "ids": {
+            "campaign_id": "campaign-1",
+            "ad_group_id": "adgroup-1",
+            "ad_id": "ad-1",
+            "post_id": "t3_demo123",
+        },
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    return receipt_path
+
+
+def test_business_reddit_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args()))
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    assert result["external_side_effects"] == "suppressed"
+    assert result["paused"] is True
+    assert result["slug"] == "demo-reddit"
+    assert result["plan_path"] == "distribution/reddit-ads/demo-reddit/plan.json"
+    assert result["receipt"] == "distribution/reddit-ads/demo-reddit/receipt.json"
+    assert "ids" not in result
+
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    assert plan_abs.is_file()
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["asset_kind"] == "image"
+    assert plan["post"]["media_url"] == "https://cdn.example.com/clipbook.png"
+
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert receipt_abs.is_file()
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["status"] == "suppressed_test_mode"
+    assert receipt["mode"] == "test"
+    assert receipt["paused"] is True
+    assert receipt["idempotency_key"] == "clipbook-reddit-demo-v1"
+    assert receipt["asset_kind"] == "image"
+    assert receipt["plan_path"] == result["plan_path"]
+
+    with store._connect() as conn:
+        event = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert event["event_type"] == "reddit_ad.launch"
+
+    repeat = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args()))
+    assert repeat["success"] is True
+    assert repeat["idempotent"] is True
+    assert repeat["status"] == "suppressed_test_mode"
+
+
+def test_business_reddit_ad_launch_test_mode_stages_local_image_asset(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+    image_rel = "product/static-ads/demo-reddit/banner.png"
+    image_abs = tmp_path / "businesses" / "clipbook" / image_rel
+    image_abs.parent.mkdir(parents=True, exist_ok=True)
+    image_abs.write_bytes(b"fake png bytes")
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                post={
+                    "headline": "Try Clipbook",
+                    "destination_url": "https://example.com/clipbook",
+                    "image_path": image_rel,
+                    "allow_comments": False,
+                }
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["post"]["media_url"].endswith("/_takyon/assets/demo-reddit-image/banner.png")
+    assert plan["post"]["thumbnail_url"] == plan["post"]["media_url"]
+    assert len(plan["public_assets"]) == 1
+    asset_receipt_rel = plan["public_assets"][0]["receipt_path"]
+    asset_receipt_abs = tmp_path / "businesses" / "clipbook" / asset_receipt_rel
+    assert asset_receipt_abs.is_file()
+    asset_receipt = json.loads(asset_receipt_abs.read_text(encoding="utf-8"))
+    assert asset_receipt["source_path"] == image_rel
+    assert asset_receipt["status"] == "staged_unverified"
+    assert asset_receipt["public_url_verified"] is False
+
+
+def test_business_reddit_ad_launch_test_mode_stages_local_video_and_reference_thumbnail(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+    publication_rel = "product/ugc-ads/demo-reddit-video"
+    publication_dir = tmp_path / "businesses" / "clipbook" / publication_rel
+    publication_dir.mkdir(parents=True, exist_ok=True)
+    (publication_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
+    (publication_dir / "reference.png").write_bytes(b"fake png bytes")
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                asset_kind="video",
+                post={
+                    "headline": "Watch Clipbook",
+                    "destination_url": "https://example.com/clipbook",
+                    "video_path": f"{publication_rel}/ad.mp4",
+                    "allow_comments": False,
+                },
+            )
+        )
+    )
+
+    assert result["success"] is True
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["post"]["media_url"].endswith("/_takyon/assets/demo-reddit-video/ad.mp4")
+    assert plan["post"]["thumbnail_url"].endswith("/_takyon/assets/demo-reddit-thumbnail/reference.png")
+    assert len(plan["public_assets"]) == 2
+
+
+def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_public_asset_receipt(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    image_rel = "product/static-ads/demo-reddit/banner.png"
+    image_abs = tmp_path / "businesses" / "clipbook" / image_rel
+    image_abs.parent.mkdir(parents=True, exist_ok=True)
+    image_abs.write_bytes(b"fake png bytes")
+    monkeypatch.setattr(takyon_core, "_probe_public_asset_url", lambda url: (False, "dns-miss"))
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                post={
+                    "headline": "Try Clipbook",
+                    "destination_url": "https://example.com/clipbook",
+                    "image_path": image_rel,
+                    "allow_comments": False,
+                }
+            )
+        )
+    )
+
+    assert result["success"] is False
+    assert "staged public asset is not reachable yet" in result["error"]
+    asset_receipt_abs = (
+        tmp_path
+        / "businesses"
+        / "clipbook"
+        / "product"
+        / "public-assets"
+        / "demo-reddit-image"
+        / "receipt.json"
+    )
+    assert asset_receipt_abs.is_file()
+    asset_receipt = json.loads(asset_receipt_abs.read_text(encoding="utf-8"))
+    assert asset_receipt["status"] == "blocked_public_url_unreachable"
+    assert asset_receipt["blocker"] == "dns-miss"
+
+
+def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(_reddit_launch_args(ad_group={"daily_budget_usd": 999.0}))
+    )
+
+    assert result["success"] is False
+    assert "exceeds the safety cap" in result["error"]
+    assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "reddit-ads").exists()
+
+
+def test_business_reddit_ad_launch_refuses_activation(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch)
+
+    result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args(activate=True)))
+
+    assert result["success"] is False
+    assert "PAUSED" in result["error"]
+    assert "activation" in result["error"].lower()
+
+
+def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("REDDIT_ADS_CLIENT_ID", "reddit-client")
+    monkeypatch.setenv("REDDIT_ADS_CLIENT_SECRET", "reddit-secret")
+    monkeypatch.setenv("REDDIT_ADS_ACCESS_TOKEN", "reddit-access-token")
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": False,
+            "status": "blocked_insufficient_creative_credits",
+            "requested_credits": 1,
+            "available_credits": 0,
+            "balance_credits": 0,
+            "reserved_credits": 0,
+            "error": "insufficient_creative_credits",
+        },
+    )
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                asset_kind="existing_post",
+                post_id="t3_demo123",
+                post={},
+                ad={"name": "Clipbook Reddit Ad", "click_url": "https://example.com/clipbook"},
+                slug="demo-reddit-live",
+            )
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert "insufficient_creative_credits" in result["error"]
+
+
+def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("REDDIT_ADS_CLIENT_ID", "reddit-client")
+    monkeypatch.setenv("REDDIT_ADS_CLIENT_SECRET", "reddit-secret")
+    monkeypatch.setenv("REDDIT_ADS_ACCESS_TOKEN", "reddit-access-token")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 5, "clipbook-reddit-grant")
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "created_paused",
+            "business_id": "business-1",
+            "ad_account_id": "a2_demo",
+            "profile_id": "t2_profile",
+            "funding_instrument_id": "fi_1",
+            "pixel_id": "pixel_1",
+            "ids": {
+                "campaign_id": "campaign-1",
+                "ad_group_id": "adgroup-1",
+                "ad_id": "ad-1",
+                "post_id": "t3_demo123",
+            },
+            "preview_url": "https://www.reddit.com/?ad=preview",
+            "preview_expiry": "2026-06-04T00:00:00Z",
+            "post_url": "https://www.reddit.com/comments/demo",
+            "credits_charged": 1,
+            "balance_credits": 4,
+            "reserved_credits": 0,
+        },
+    )
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                asset_kind="existing_post",
+                post_id="t3_demo123",
+                post={},
+                ad={"name": "Clipbook Reddit Ad", "click_url": "https://example.com/clipbook"},
+                slug="demo-reddit-live",
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created_paused"
+    assert result["balance_credits"] == 4
+
+
+def test_business_reddit_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="test")
+    _write_reddit_launch_receipt(tmp_path, mode="test")
+
+    result = json.loads(
+        handle_business_reddit_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-reddit",
+                "operation": "activate",
+                "idempotency_key": "clipbook-reddit-activate-test-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "suppressed_test_mode"
+    assert result["operation"] == "activate"
+    receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
+    assert receipt_abs.is_file()
+    receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    assert receipt["mode"] == "test"
+
+    with store._connect() as conn:
+        event = conn.execute(
+            "SELECT event_type FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert event["event_type"] == "reddit_ad.activate"
+
+    repeat = json.loads(
+        handle_business_reddit_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-reddit",
+                "operation": "activate",
+                "idempotency_key": "clipbook-reddit-activate-test-v1",
+            }
+        )
+    )
+    assert repeat["success"] is True
+    assert repeat["idempotent"] is True
+
+
+def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_reddit_launch_receipt(tmp_path)
+    calls: list[tuple[str, dict]] = []
+
+    def fake_gateway(endpoint, payload):
+        calls.append((endpoint, payload))
+        return {
+            "success": True,
+            "status": "activated",
+            "applied": [
+                {"object": "campaign", "id": "campaign-1", "configured_status": "ACTIVE"},
+                {"object": "ad_group", "id": "adgroup-1", "configured_status": "ACTIVE"},
+                {"object": "ad", "id": "ad-1", "configured_status": "ACTIVE"},
+            ],
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(
+        handle_business_reddit_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-reddit",
+                "operation": "activate",
+                "idempotency_key": "clipbook-reddit-activate-live-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "activated"
+    assert calls[0][0] == "reddit-control"
+    assert calls[0][1]["campaign_id"] == "campaign-1"
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "reddit_ad.activate"
+    payload = json.loads(row["payload_json"])
+    assert payload["receipt"].startswith("distribution/reddit-ads/demo-reddit/actions/")
+
+
+def test_business_reddit_ad_control_rejects_over_cap_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_REDDIT_MAX_DAILY_BUDGET_USD", "10")
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_reddit_launch_receipt(tmp_path)
+
+    result = json.loads(
+        handle_business_reddit_ad_control(
+            {
+                "business": "clipbook",
+                "slug": "demo-reddit",
+                "operation": "set_budget",
+                "daily_budget_usd": 999,
+                "idempotency_key": "clipbook-reddit-budget-cap-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "exceeds the safety cap" in result["error"]
+
+
+def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_reddit_launch_receipt(tmp_path)
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "synced",
+            "rows": [
+                {
+                    "date": "2026-06-01",
+                    "impressions": 1000,
+                    "clicks": 25,
+                    "spend": 12340000,
+                    "ctr": 2.5,
+                    "cpc": 493600,
+                    "cpm": 12340000,
+                }
+            ],
+        },
+    )
+
+    result = json.loads(
+        handle_business_reddit_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-reddit",
+                "level": "campaign",
+                "starts_at": "2026-06-01T00:00:00Z",
+                "ends_at": "2026-06-02T00:00:00Z",
+                "idempotency_key": "clipbook-reddit-insights-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "synced"
+    assert result["totals"]["spend_micros"] == 12340000
+    assert result["totals"]["clicks"] == 25
+
+    metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
+    assert metrics_abs.is_file()
+    lines = [json.loads(line) for line in metrics_abs.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[-1]["totals"]["spend_micros"] == 12340000
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "reddit_ad.insights_sync"
+    payload = json.loads(row["payload_json"])
+    assert payload["receipt"].startswith("metrics/reddit-ads/demo-reddit/syncs/")
 
 
 def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):

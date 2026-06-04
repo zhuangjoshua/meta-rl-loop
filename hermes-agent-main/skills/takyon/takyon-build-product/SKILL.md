@@ -81,7 +81,7 @@ Use this skill to create or materially improve the business-owned product surfac
 
 1. Call `business_read_business` and identify the current offer, source path, publish target, and blocker state. If `product/design-brief.md` or `product/surface.md` exist, load them with `business_read_file`.
 2. If there is no canonical surface contract or the source path is wrong, call `business_upsert_app_surface_contract` first. Default to a real source path under `product/site/`; do not invent a publish target without recording it.
-3. If the product will claim runtime-backed behavior such as auth, checkout, billing, usage, entitlements, account, or generate, record those as `runtime_features` on the surface contract before delegating source work.
+3. If the product will claim runtime-backed behavior such as auth, account, profile, checkout, billing, usage, entitlements, or generate, record those as `runtime_features` on the surface contract before delegating source work.
 4. Read `research/` broadly before deciding the customer surface, and explicitly inspect `research/strategy.md` by name plus any other relevant files in `research/`. Use that evidence to choose the customer-maximizing surface shape.
 5. Record that customer experience shape on the surface contract before delegation: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, `research_sources`, and any `experience_notes`. This is the CEO-owned product decision that Claude should implement rather than rediscovering from scratch.
 6. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `live`, `blocked`, `broken`, or `unknown`.

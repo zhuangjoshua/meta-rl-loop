@@ -12,7 +12,13 @@
   },
   "strategy": {
     "angle": "pain_agitation",
+    "boldness": "<soft | medium | hard>",
+    "disruption_target": "<the belief, behavior, old way, or hidden cost this ad attacks>",
+    "hook_tactic": "<contrarian | warning | confession | curiosity | shocking_statement | statistic | reasons_why | price_anchor | offer_only | listicle>",
+    "psychological_trigger": "<pattern_interrupt | curiosity_gap | myth_busting | pain_agitation | social_proof_credibility | urgency_stakes>",
+    "creative_mechanic": "<reframe | contrast_without_comment | implied_answer | social_witness | overheard_conversation | trojan_horse>",
     "hook": "<one scroll-stopping idea in their language>",
+    "claim_support": "<the concrete proof that makes the hook fair: demo, stat, screenshot, comparison, sourced quote, price math>",
     "promise": "<the payoff>",
     "objection_addressed": "<the doubt this defuses>",
     "proof_type": "demo"
@@ -34,7 +40,7 @@
     "must_not_show": ["fabricated third-party logos", "invented endorsements"]
   },
   "copy": {
-    "overlay_text": "<short text baked into the image>",
+    "overlay_text": "<short text baked into the image; usually the sharpest part of the hook>",
     "headline": "<platform headline, outside the image>",
     "primary_text": "<platform body text>",
     "cta": "<call to action>"

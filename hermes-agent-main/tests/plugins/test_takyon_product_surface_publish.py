@@ -94,4 +94,4 @@ def test_product_surface_operational_facts_surface_real_build_and_publish_receip
     assert facts["latest_check_command"] == "npm run build"
     assert facts["latest_failed_command"] == "npm run build"
     assert facts["latest_check_error"] == "Missing CSS asset manifest"
-    assert facts["blocker"] == "Missing CSS asset manifest"
+    assert facts["blocker"] == "npm run build failed: Missing CSS asset manifest"

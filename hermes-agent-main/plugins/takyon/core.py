@@ -77,16 +77,19 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_refresh_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
+        "business_upsert_app_profile",
         "business_grant_app_entitlement",
         "business_request_app_magic_link",
         "business_verify_app_magic_link",
         "business_read_app_account",
+        "business_read_app_profile",
         "business_create_app_checkout",
         "business_record_stripe_webhook",
         "business_record_app_usage",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
         "business_meta_ad_launch",
+        "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
         "business_meta_ad_insights_sync",
         "business_reddit_ad_launch",
@@ -199,6 +202,15 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Read account/session state from the shared Takyon account runtime route.",
             "Do not invent a local current-user object.",
+        ],
+    },
+    "profile": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_upsert_app_profile", "business_read_app_profile"],
+        "endpoints": [("GET", "profile"), ("POST", "profile")],
+        "worker_contract": [
+            "Read and write mutable customer profile fields through the shared Takyon profile runtime route.",
+            "Do not persist profile edits only in browser state or local files.",
         ],
     },
     "checkout": {
@@ -374,6 +386,15 @@ _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live", "test"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
+_RESERVED_PUBLIC_SUBDOMAINS = frozenset(
+    {
+        "app",
+        "www",
+        "admin",
+        "dashboard",
+        "research-composer",
+    }
+)
 _DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_refresh"
 _DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
 _DEFAULT_PRODUCT_DONE_GATE = "business_refresh_product_surface:published_or_exact_blocker"
@@ -705,8 +726,67 @@ def _surface_customer_experience_metadata(surface: dict[str, Any] | None) -> dic
     return dict(payload)
 
 
+def _surface_requires_app_shell(
+    surface: dict[str, Any] | None,
+    *,
+    app_mode: str = "",
+    required_app_tabs: list[str] | None = None,
+) -> bool:
+    if _surface_allows_landing_only(surface):
+        return False
+    mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
+    if mode in {"standard_saas", "ai_tool", "api_product"}:
+        return True
+    if required_app_tabs:
+        return True
+    return False
+
+
+def _normalize_required_routes_for_surface(
+    surface: dict[str, Any] | None,
+    *,
+    app_mode: str = "",
+    required_routes: list[str],
+    required_app_tabs: list[str] | None = None,
+) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for route in required_routes:
+        text = str(route or "").strip()
+        if not text:
+            continue
+        route_value = text.rstrip("/") or "/"
+        if route_value in seen:
+            continue
+        seen.add(route_value)
+        normalized.append(route_value)
+    if not _surface_requires_app_shell(
+        surface,
+        app_mode=app_mode,
+        required_app_tabs=required_app_tabs,
+    ):
+        return normalized
+    for required in ("/", "/app"):
+        if required not in seen:
+            normalized.append(required)
+            seen.add(required)
+    return normalized
+
+
 def _surface_customer_experience_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
     payload = _surface_customer_experience_metadata(surface)
+    app_mode = _surface_subuser_app_shape(surface).get("app_mode") or ""
+    required_app_tabs = _normalize_surface_string_list(
+        payload.get("required_app_tabs") if payload.get("required_app_tabs") is not None else payload.get("tabs")
+    )
+    required_routes = _normalize_required_routes_for_surface(
+        surface,
+        app_mode=app_mode,
+        required_routes=_normalize_surface_string_list(
+            payload.get("required_routes") if payload.get("required_routes") is not None else payload.get("routes")
+        ),
+        required_app_tabs=required_app_tabs,
+    )
     research_sources = _normalize_surface_string_list(
         payload.get("research_sources")
         if payload.get("research_sources") is not None
@@ -717,15 +797,11 @@ def _surface_customer_experience_shape(surface: dict[str, Any] | None) -> dict[s
     return {
         "surface_goal": str(payload.get("surface_goal") or "").strip(),
         "conversion_model": str(payload.get("conversion_model") or "").strip(),
-        "required_routes": _normalize_surface_string_list(
-            payload.get("required_routes") if payload.get("required_routes") is not None else payload.get("routes")
-        ),
+        "required_routes": required_routes,
         "required_sections": _normalize_surface_string_list(
             payload.get("required_sections") if payload.get("required_sections") is not None else payload.get("sections")
         ),
-        "required_app_tabs": _normalize_surface_string_list(
-            payload.get("required_app_tabs") if payload.get("required_app_tabs") is not None else payload.get("tabs")
-        ),
+        "required_app_tabs": required_app_tabs,
         "research_sources": research_sources,
         "experience_notes": str(
             payload.get("experience_notes")
@@ -937,6 +1013,12 @@ def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: s
     lines.append(f"- Conversion model: {customer_experience.get('conversionModel') or 'not set'}")
     required_routes = customer_experience.get("requiredRoutes") if isinstance(customer_experience.get("requiredRoutes"), list) else []
     lines.append(f"- Required routes: {', '.join(required_routes) or 'not set'}")
+    if _surface_requires_app_shell(
+        surface,
+        app_mode=context.get("appMode") or "",
+        required_app_tabs=customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else [],
+    ):
+        lines.append("- App-like route substrate: keep both `/` and `/app` unless the owning surface is intentionally landing_page_only.")
     required_sections = customer_experience.get("requiredSections") if isinstance(customer_experience.get("requiredSections"), list) else []
     lines.append(f"- Required sections: {', '.join(required_sections) or 'not set'}")
     required_tabs = customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else []
@@ -1073,11 +1155,21 @@ def _subuser_app_worker_contract_block(
     lines.append("- Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app.")
     lines.append("- Keep product ambition/design high, but stay within those supported platform shapes.")
     lines.append("- If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`.")
+    if _surface_requires_app_shell(
+        surface,
+        app_mode=shape.get("app_mode") or "",
+        required_app_tabs=required_tabs,
+    ):
+        lines.append("- This surface is app-like. The default route shape is `/, /app`, even when the landing page carries most conversion work.")
+        lines.append("- Keep a real `/app` route in the generated source. If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
     else:
         lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
+
+    if "profile" in runtime_features:
+        lines.append("- Profile reads and edits must go through GET/POST /profile on product hosts (or the prefixed fallback off-host), not browser-only draft state.")
 
     if "generate" in runtime_features:
         generate_target = f"{runtime_api_base.rstrip('/')}/generate" if runtime_api_base else "<runtime_api_base>/generate"
@@ -1486,6 +1578,33 @@ def _slugify(value: str) -> str:
             "business slug must start with a lowercase letter/number and contain only a-z, 0-9, '_' or '-'"
         )
     return raw
+
+
+def _is_reserved_public_subdomain(slug: str) -> bool:
+    normalized = _slugify(slug)
+    if not normalized:
+        return False
+    return normalized in _reserved_public_subdomains()
+
+
+def _reserved_public_subdomains() -> frozenset[str]:
+    configured: set[str] = set(_RESERVED_PUBLIC_SUBDOMAINS)
+    path = get_takyon_home() / "config.yaml"
+    try:
+        import yaml
+
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        dashboard = data.get("dashboard") if isinstance(data.get("dashboard"), dict) else {}
+        extras = dashboard.get("reserved_public_subdomains")
+        if isinstance(extras, list):
+            for value in extras:
+                normalized = _slugify(str(value or ""))
+                if normalized:
+                    configured.add(normalized)
+    except Exception:
+        pass
+    return frozenset(configured)
 
 
 def takyon_toolset_name(name: str) -> str:
@@ -2110,6 +2229,7 @@ _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] =
     ("auth", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"auth/(?:request|verify)\b|\.\s*requestAuth\s*\(", re.IGNORECASE)),
     ("session", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
     ("account", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
+    ("profile", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"profile\b|\.\s*profile\s*\(|\.\s*updateProfile\s*\(", re.IGNORECASE)),
     ("checkout", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"checkout\b|\.\s*checkout\s*\(", re.IGNORECASE)),
     ("usage", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"usage\b|\.\s*recordUsage\s*\(", re.IGNORECASE)),
     ("generate", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"generate\b|\.\s*generate\s*\(", re.IGNORECASE)),
@@ -2482,10 +2602,6 @@ def _product_surface_operational_facts(
         for item in (effective_inventory.get("routes") or [])
         if str(item).strip()
     ]
-    blocker = (
-        str(receipt_dict.get("blocker") or publish.get("blocker") or receipt_dict.get("error") or "").strip()
-        or str(surface_dict.get("publish_blocker") or "").strip()
-    )
     latest_check_error = str(
         latest_problem_check.get("error")
         or latest_problem_check.get("stderr")
@@ -2499,6 +2615,18 @@ def _product_surface_operational_facts(
     latest_failed_command = ""
     if latest_check_status.lower() not in {"", "passed", "success", "completed"}:
         latest_failed_command = latest_check_command
+    repairs = []
+    for item in receipt_dict.get("repairs") or []:
+        if isinstance(item, dict):
+            message = str(item.get("message") or "").strip()
+            if message:
+                repairs.append(message)
+    blocker = _surface_refresh_exact_blocker(receipt_dict, publish)
+    if not blocker:
+        blocker = (
+            str(receipt_dict.get("blocker") or publish.get("blocker") or receipt_dict.get("error") or "").strip()
+            or str(surface_dict.get("publish_blocker") or "").strip()
+        )
     return {
         "detected_frameworks": frameworks,
         "detected_package_manager": str(package.get("package_manager") or "").strip(),
@@ -2516,6 +2644,7 @@ def _product_surface_operational_facts(
         "publish_root": str(publish.get("publish_root") or "").strip(),
         "publish_status": str(publish.get("status") or surface_dict.get("publish_status") or "").strip(),
         "public_url": str(publish.get("public_url") or surface_dict.get("public_url") or "").strip(),
+        "repairs": repairs[:6],
         "blocker": blocker,
     }
 
@@ -4468,6 +4597,7 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "app.customer.upsert",
         "app.entitlement.upsert",
         "app.plan.upsert",
+        "app.profile.upsert",
         "app.surface.publish_result",
         "app.surface.upsert",
         "app.usage.record",
@@ -4765,14 +4895,15 @@ class TakyonStore:
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
         """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
-        store delegates to on the Postgres backend (identity/entitlements/payments/usage/funding). Imported lazily and only
+        store delegates to on the Postgres backend (identity/profiles/entitlements/payments/usage/funding). Imported lazily and only
         on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
         try:
-            from . import app_entitlements, app_funding, app_identity, app_payments, app_usage
+            from . import app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_usage
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-            from plugins.takyon import app_entitlements, app_funding, app_identity, app_payments, app_usage
+            from plugins.takyon import app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_usage
         return {
             "identity": app_identity,
+            "profiles": app_profiles,
             "entitlements": app_entitlements,
             "funding": app_funding,
             "payments": app_payments,
@@ -4957,8 +5088,22 @@ class TakyonStore:
               metadata_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
+              UNIQUE (business_slug, id),
               UNIQUE (business_slug, email),
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS app_user_profiles (
+              id TEXT PRIMARY KEY,
+              business_slug TEXT NOT NULL,
+              display_name TEXT,
+              headline TEXT,
+              bio TEXT NOT NULL DEFAULT '',
+              attributes_json TEXT,
+              metadata_json TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE (business_slug, id),
+              FOREIGN KEY (business_slug, id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS app_magic_links (
               id TEXT PRIMARY KEY,
@@ -5737,6 +5882,7 @@ class TakyonStore:
                     f"- Latest check status: {operational_facts.get('latest_check_status') or 'unknown'}",
                     f"- Latest check command: {operational_facts.get('latest_check_command') or 'none recorded'}",
                     f"- Latest check error: {operational_facts.get('latest_check_error') or 'none'}",
+                    f"- Repairs applied: {', '.join(operational_facts.get('repairs') or []) or 'none'}",
                     f"- Exact blocker: {operational_facts.get('blocker') or 'none'}",
                 ])
             local_work = surface_evidence.get("local_continuable_work") or []
@@ -6918,6 +7064,7 @@ class TakyonStore:
             "app.customer.upsert",
             "app.entitlement.upsert",
             "app.plan.upsert",
+            "app.profile.upsert",
             "app.surface.publish_result",
             "app.surface.upsert",
             "app.usage.record",
@@ -7003,6 +7150,10 @@ class TakyonStore:
             work_focus = _normalize_work_focus(op.get("work_focus"), default=None)
             now = _now()
             existing = self._business(conn, slug)
+            if existing is None and _is_reserved_public_subdomain(slug):
+                raise TakyonError(
+                    f"business slug '{slug}' is reserved for Four Manifold infrastructure and cannot be created as a product host"
+                )
             if existing:
                 conn.execute(
                     "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
@@ -7461,7 +7612,13 @@ class TakyonStore:
                             name=op.get("name"),
                             status=op.get("status"),
                         )
-                except leaves["identity"].AppIdentityError as exc:
+                        leaves["profiles"].ensure_profile(
+                            raw,
+                            slug,
+                            app_user_id=user.id,
+                            display_name=user.name,
+                        )
+                except (leaves["identity"].AppIdentityError, leaves["profiles"].AppProfileError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = user.id
             else:
@@ -7490,10 +7647,180 @@ class TakyonStore:
                 )
                 row = self._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (slug, email)).fetchone())
                 app_user_id = row["id"]
+                _ensure_sqlite_app_profile(
+                    conn,
+                    slug,
+                    app_user_id,
+                    display_name=row.get("name"),
+                )
             self._rewrite_app_files(conn, slug)
             self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": app_user_id, "email": email})
             return {"action": action, "business": slug, "app_user_id": app_user_id, "email": email}
+
+        if action == "app.profile.upsert":
+            if _db_backend() == "postgres":
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        resolved = leaves["profiles"].upsert_profile(
+                            raw,
+                            slug,
+                            app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                            email=(str(op.get("email")) if op.get("email") else None),
+                            session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            display_name=op.get("display_name"),
+                            headline=op.get("headline"),
+                            bio=op.get("bio"),
+                            attributes=op.get("attributes"),
+                            metadata=op.get("metadata"),
+                        )
+                except (leaves["profiles"].AppProfileError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                user = resolved.user
+                profile = resolved.profile
+                if profile is None:
+                    raise TakyonError("app profile write did not return a profile row")
+                app_user_id = user.id
+                profile_payload = {
+                    "id": profile.id,
+                    "business_slug": slug,
+                    "app_user_id": app_user_id,
+                    "display_name": profile.display_name,
+                    "headline": profile.headline,
+                    "bio": profile.bio,
+                    "attributes": profile.attributes,
+                    "metadata": profile.metadata,
+                    "created_at": str(profile.created_at),
+                    "updated_at": str(profile.updated_at),
+                }
+            else:
+                user = None
+                if op.get("session_token"):
+                    user = self._row_to_dict(conn.execute(
+                        "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id "
+                        "WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL "
+                        "AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+                        (slug, _hash_token(str(op.get("session_token"))), _now()),
+                    ).fetchone())
+                elif op.get("app_user_id"):
+                    user = self._row_to_dict(conn.execute(
+                        "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+                        (slug, str(op.get("app_user_id"))),
+                    ).fetchone())
+                elif op.get("email"):
+                    email = _normalize_email(str(op.get("email")))
+                    user_result = self._apply_operation(
+                        conn,
+                        parsed_scope,
+                        {
+                            "action": "app.customer.upsert",
+                            "business_slug": slug,
+                            "target_scope": target_scope,
+                            "email": email,
+                            "metadata": {"source": "profile_upsert"},
+                        },
+                        reason=reason,
+                        actor=actor,
+                    )
+                    user = self._row_to_dict(conn.execute(
+                        "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+                        (slug, str(user_result["app_user_id"])),
+                    ).fetchone())
+                if not user:
+                    raise TakyonError("app user not found")
+                app_user_id = str(user["id"])
+                existing = _ensure_sqlite_app_profile(
+                    conn,
+                    slug,
+                    app_user_id,
+                    display_name=user.get("name"),
+                )
+                now = _now()
+                normalized_attributes = op.get("attributes")
+                if normalized_attributes is not None and not isinstance(normalized_attributes, dict):
+                    normalized_attributes = {"value": normalized_attributes}
+                normalized_metadata = op.get("metadata")
+                if normalized_metadata is not None and not isinstance(normalized_metadata, dict):
+                    normalized_metadata = {"value": normalized_metadata}
+                display_name = op.get("display_name") if op.get("display_name") is not None else (existing.get("display_name") if existing else None)
+                headline = op.get("headline") if op.get("headline") is not None else (existing.get("headline") if existing else None)
+                bio = op.get("bio") if op.get("bio") is not None else (existing.get("bio") if existing else "")
+                attributes_json = _json_dumps(
+                    normalized_attributes
+                    if normalized_attributes is not None
+                    else _json_loads(existing.get("attributes_json"), {}) if existing else {}
+                )
+                metadata_json = _json_dumps(
+                    normalized_metadata
+                    if normalized_metadata is not None
+                    else _json_loads(existing.get("metadata_json"), {}) if existing else {}
+                )
+                if existing:
+                    profile_id = str(existing["id"])
+                    created_at = str(existing.get("created_at") or now)
+                    conn.execute(
+                        "UPDATE app_user_profiles SET display_name = ?, headline = ?, bio = ?, "
+                        "attributes_json = ?, metadata_json = ?, updated_at = ? "
+                        "WHERE business_slug = ? AND id = ?",
+                        (
+                            display_name,
+                            headline,
+                            bio,
+                            attributes_json,
+                            metadata_json,
+                            now,
+                            slug,
+                            app_user_id,
+                        ),
+                    )
+                else:
+                    profile_id = app_user_id
+                    created_at = now
+                    conn.execute(
+                        "INSERT INTO app_user_profiles ("
+                        "id, business_slug, display_name, headline, bio, "
+                        "attributes_json, metadata_json, created_at, updated_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            profile_id,
+                            slug,
+                            display_name,
+                            headline,
+                            bio,
+                            attributes_json,
+                            metadata_json,
+                            now,
+                            now,
+                        ),
+                    )
+                profile_payload = {
+                    "id": profile_id,
+                    "business_slug": slug,
+                    "app_user_id": app_user_id,
+                    "display_name": display_name,
+                    "headline": headline,
+                    "bio": bio,
+                    "attributes": _json_loads(attributes_json, {}),
+                    "metadata": _json_loads(metadata_json, {}),
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
+            self._rewrite_app_files(conn, slug)
+            self._sync_business_workspace_remote(slug)
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={"app_user_id": app_user_id, "profile_id": profile_payload["id"]},
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "app_user_id": app_user_id,
+                "profile": profile_payload,
+            }
 
         if action == "app.entitlement.upsert":
             if _db_backend() == "postgres":
@@ -7553,6 +7880,7 @@ class TakyonStore:
                     raise TakyonError("app entitlement requires app_user_id or email")
                 if not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, user_id)).fetchone():
                     raise TakyonError(f"app user not found: {user_id}")
+                _ensure_sqlite_app_profile(conn, slug, user_id)
                 now = _now()
                 entitlement_id = op.get("id") or uuid.uuid4().hex
                 tier_value = str(op.get("tier") or "free")
@@ -8113,8 +8441,9 @@ class TakyonStore:
         return (
             f"CEO wakeup for business:{slug}.\n"
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
-            "Start with business_calculate_pulse, then use takyon-business-metrics to write metrics/summary.md and record "
-            "a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
+            "Start with business_calculate_pulse to see what changed: usage, revenue, unresolved inbound, queued jobs, blockers, and recent activity. "
+            "Then read research/strategy.md before choosing the next move. If new evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, update research/strategy.md before continuing. "
+            "Use takyon-business-metrics to write metrics/summary.md and record a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
             "create workspaces, enqueue jobs, and adjust the next wakeup if useful. Decide the highest "
             "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
             "memory inside this business scope. Read prior wake notes from metrics/wake-history.md and compare "
@@ -8125,7 +8454,9 @@ class TakyonStore:
             "product means choose only product, offer, app runtime, checkout, surface, build, publication, or product-support work; "
             "all means no focus restriction. Safety/control reads, pulse, blocker recording, and changing the focus are always allowed. "
             "Use first-class business tools for requested videos/images, local outreach publication, websites, deploys, checkout, provider calls, and other concrete artifacts; if a gate is missing, report the gate instead of substituting a Markdown brief. "
+            "If unresolved inbound exists, inspect the actual conversation threads before deciding whether to reply or post. "
             "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle broader non-X discussion-thread work in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
+            "If the next move is X-native, use takyon-x; for a top-level X post, read current research/ state and use it to choose the audience, promise, objection, and hook. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -9120,6 +9451,107 @@ def handle_business_upsert_app_customer(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+def _app_user_runtime_payload(user: Any) -> dict[str, Any] | None:
+    if user is None:
+        return None
+    if isinstance(user, dict):
+        return dict(user)
+    return {
+        "id": str(getattr(user, "id")),
+        "business_slug": str(getattr(user, "business_slug")),
+        "email": str(getattr(user, "email")),
+        "name": getattr(user, "name"),
+        "status": str(getattr(user, "status")),
+        "tier": str(getattr(user, "tier")),
+    }
+
+
+def _app_profile_runtime_payload(profile: Any) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    if isinstance(profile, dict):
+        return dict(profile)
+    return {
+        "id": str(getattr(profile, "id")),
+        "business_slug": str(getattr(profile, "business_slug")),
+        "app_user_id": str(getattr(profile, "app_user_id")),
+        "display_name": getattr(profile, "display_name"),
+        "headline": getattr(profile, "headline"),
+        "bio": str(getattr(profile, "bio") or ""),
+        "attributes": dict(getattr(profile, "attributes") or {}),
+        "metadata": dict(getattr(profile, "metadata") or {}),
+        "created_at": str(getattr(profile, "created_at")),
+        "updated_at": str(getattr(profile, "updated_at")),
+    }
+
+
+def _ensure_sqlite_app_profile(
+    conn: sqlite3.Connection,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    existing = conn.execute(
+        "SELECT * FROM app_user_profiles WHERE business_slug = ? AND id = ?",
+        (business_slug, app_user_id),
+    ).fetchone()
+    if existing is not None:
+        return dict(existing)
+    user = conn.execute(
+        "SELECT name FROM app_users WHERE business_slug = ? AND id = ?",
+        (business_slug, app_user_id),
+    ).fetchone()
+    now = _now()
+    resolved_display_name = display_name if display_name is not None else (
+        str(user["name"]) if user is not None and user["name"] is not None else None
+    )
+    conn.execute(
+        "INSERT INTO app_user_profiles ("
+        "id, business_slug, display_name, headline, bio, attributes_json, metadata_json, created_at, updated_at"
+        ") VALUES (?, ?, ?, NULL, '', ?, ?, ?, ?)",
+        (
+            app_user_id,
+            business_slug,
+            resolved_display_name,
+            _json_dumps({}),
+            _json_dumps({}),
+            now,
+            now,
+        ),
+    )
+    created = conn.execute(
+        "SELECT * FROM app_user_profiles WHERE business_slug = ? AND id = ?",
+        (business_slug, app_user_id),
+    ).fetchone()
+    return {} if created is None else dict(created)
+
+
+def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "app.profile.upsert",
+        "business": args.get("business"),
+        "app_user_id": args.get("app_user_id"),
+        "email": args.get("email"),
+        "session_token": args.get("session_token"),
+        "display_name": args.get("display_name"),
+        "headline": args.get("headline"),
+        "bio": args.get("bio"),
+        "attributes": args.get("attributes"),
+        "metadata": args.get("metadata"),
+    }
+    try:
+        result = _commit_tool_data(args, operation)
+        payload = (
+            result.get("results")[0]
+            if isinstance(result.get("results"), list) and result.get("results")
+            else {}
+        )
+        return tool_result({"success": True, **payload})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_grant_app_entitlement(args: dict, **_: Any) -> str:
     operation = {
         "action": "app.entitlement.upsert",
@@ -9169,6 +9601,12 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                         business,
                         app_user_id=link_record.app_user_id,
                     )
+                    leaves["profiles"].ensure_profile(
+                        leaf,
+                        business,
+                        app_user_id=link_record.app_user_id,
+                        display_name=None if app_user is None else app_user.name,
+                    )
                 if app_user is None:
                     raise TakyonError("app user is not active")
                 if str(app_user.status or "active") != "active":
@@ -9192,6 +9630,12 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                 user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
                 if str(user.get("status") or "active") != "active":
                     raise TakyonError("app user is not active")
+                _ensure_sqlite_app_profile(
+                    conn,
+                    business,
+                    str(user["id"]),
+                    display_name=user.get("name"),
+                )
                 token = _random_token()
             link = f"{origin}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if origin else ""
             provider_message_id = None
@@ -9284,6 +9728,12 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                         business,
                         app_user_id=user_record.id,
                     )
+                    leaves["profiles"].ensure_profile(
+                        leaf,
+                        business,
+                        app_user_id=user_record.id,
+                        display_name=user_record.name,
+                    )
                 if refreshed is None:
                     raise TakyonError("magic link user is missing")
                 user = {
@@ -9324,6 +9774,12 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                     (session_id, business, user["id"], _hash_token(session_token), _future(days=30), now),
                 )
                 tier = store._sync_user_tier(conn, business, user["id"])
+                _ensure_sqlite_app_profile(
+                    conn,
+                    business,
+                    str(user["id"]),
+                    display_name=user.get("name"),
+                )
                 expires_at = _future(days=30)
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.verify", payload={"app_user_id": user["id"], "session_id": session_id})
             store._rewrite_app_files(conn, business)
@@ -9358,6 +9814,95 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             ).fetchone()
             revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
         return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_read_app_profile(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        resolved = leaves["profiles"].get_profile(
+                            leaf,
+                            business,
+                            app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                            email=(str(args.get("email")) if args.get("email") else None),
+                            session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                        )
+                except (leaves["profiles"].AppProfileError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if resolved is None:
+                    raise TakyonError("app profile not found")
+                if resolved.profile is None:
+                    with store._leaf_conn(conn) as leaf:
+                        resolved = leaves["profiles"].ensure_profile(
+                            leaf,
+                            business,
+                            app_user_id=resolved.user.id,
+                            display_name=resolved.user.name,
+                        )
+                user_payload = _app_user_runtime_payload(resolved.user)
+                profile_payload = _app_profile_runtime_payload(resolved.profile)
+                exists = profile_payload is not None
+            else:
+                user = None
+                if args.get("session_token"):
+                    user = store._row_to_dict(conn.execute(
+                        "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id "
+                        "WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL "
+                        "AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+                        (business, _hash_token(str(args.get("session_token"))), _now()),
+                    ).fetchone())
+                elif args.get("app_user_id"):
+                    user = store._row_to_dict(conn.execute(
+                        "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+                        (business, str(args.get("app_user_id"))),
+                    ).fetchone())
+                elif args.get("email"):
+                    user = store._row_to_dict(conn.execute(
+                        "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
+                        (business, _normalize_email(str(args.get("email")))),
+                    ).fetchone())
+                else:
+                    raise TakyonError("app profile read requires session_token, app_user_id, or email")
+                if not user:
+                    raise TakyonError("app profile not found")
+                profile = _ensure_sqlite_app_profile(
+                    conn,
+                    business,
+                    str(user["id"]),
+                    display_name=user.get("name"),
+                )
+                user_payload = _app_user_runtime_payload(user)
+                if profile:
+                    profile_payload = {
+                        "id": str(profile["id"]),
+                        "business_slug": business,
+                        "app_user_id": str(profile["id"]),
+                        "display_name": profile.get("display_name"),
+                        "headline": profile.get("headline"),
+                        "bio": str(profile.get("bio") or ""),
+                        "attributes": _json_loads(profile.get("attributes_json"), {}),
+                        "metadata": _json_loads(profile.get("metadata_json"), {}),
+                        "created_at": str(profile.get("created_at") or ""),
+                        "updated_at": str(profile.get("updated_at") or ""),
+                    }
+                else:
+                    profile_payload = None
+                exists = profile_payload is not None
+        return tool_result({
+            "success": True,
+            "business": business,
+            "exists": exists,
+            "user": user_payload,
+            "profile": profile_payload,
+        })
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -9526,6 +10071,12 @@ def _process_checkout_completed(conn: sqlite3.Connection, store: TakyonStore, ev
         if not user:
             return {"recorded": False, "reason": "missing_checkout_user"}
         app_user_id = user["id"]
+        _ensure_sqlite_app_profile(
+            conn,
+            business,
+            str(app_user_id),
+            display_name=user.get("name"),
+        )
         conn.execute(
             "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id, plan_key, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'paid', 'active', 'stripe', ?, ?, ?, ?, ?, ?, ?)",
             (uuid.uuid4().hex, business, app_user_id, customer_id, subscription_id, session["id"], intent["plan_key"], _json_dumps({"raw_event_id": event.get("id")}), _now(), _now()),
@@ -9690,6 +10241,7 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
             business_mode = str(business_row.get("mode") or "live")
+            canonical_product_url = _canonical_product_url(store, conn, business)
             canonical_product_url = _canonical_product_url(store, conn, business)
 
         body, canonical_replacements = _canonicalize_business_product_links(
@@ -10987,6 +11539,84 @@ def _meta_publication_paths(
     }
 
 
+def _meta_tracked_link(link: str, *, campaign_key: str, creative_key: str | None = None) -> str:
+    parsed = urllib.parse.urlsplit(str(link or "").strip())
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    existing_keys = {key for key, _value in query}
+    additions = [
+        ("utm_source", "meta"),
+        ("utm_medium", "paid_social"),
+        ("utm_campaign", campaign_key),
+    ]
+    if creative_key:
+        additions.append(("utm_content", creative_key))
+    for key, value in additions:
+        if key not in existing_keys and value:
+            query.append((key, value))
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib.parse.urlencode(query),
+            parsed.fragment,
+        )
+    )
+
+
+def _meta_plan_payload(plan: Mapping[str, Any], *, launch_mode: str) -> dict[str, Any]:
+    tracked_link = _meta_tracked_link(
+        str(plan.get("link") or ""),
+        campaign_key=str(plan.get("slug") or "meta-ad"),
+        creative_key=str(plan.get("slug") or "meta-ad"),
+    )
+    return {
+        "slug": plan.get("slug"),
+        "launch_mode": launch_mode,
+        "asset_kind": plan.get("asset_kind"),
+        "ad_video_path": plan.get("ad_video_path"),
+        "ad_image_path": plan.get("ad_image_path"),
+        "campaign": {
+            "name": plan.get("campaign_name"),
+            "objective": plan.get("objective"),
+        },
+        "adset": {
+            "name": plan.get("adset_name"),
+            "daily_budget_usd": plan.get("daily_budget_usd"),
+            "daily_budget_cents": plan.get("daily_budget_cents"),
+            "optimization_goal": plan.get("optimization_goal"),
+            "billing_event": plan.get("billing_event"),
+            "targeting": plan.get("targeting"),
+        },
+        "ad": {
+            "name": plan.get("ad_name"),
+            "message": plan.get("message"),
+            "link": plan.get("link"),
+            "tracked_link": tracked_link,
+            "call_to_action": plan.get("call_to_action"),
+            "page_id": plan.get("page_id"),
+            "image_url": plan.get("image_url"),
+        },
+    }
+
+
+def _meta_plan_receipt_fields(plan_payload: Mapping[str, Any]) -> dict[str, Any]:
+    campaign = plan_payload.get("campaign") if isinstance(plan_payload.get("campaign"), dict) else {}
+    adset = plan_payload.get("adset") if isinstance(plan_payload.get("adset"), dict) else {}
+    ad = plan_payload.get("ad") if isinstance(plan_payload.get("ad"), dict) else {}
+    return {
+        "launch_mode": str(plan_payload.get("launch_mode") or "auto_post"),
+        "campaign_name": str(campaign.get("name") or "").strip(),
+        "adset_name": str(adset.get("name") or "").strip(),
+        "ad_name": str(ad.get("name") or "").strip(),
+        "message": str(ad.get("message") or "").strip(),
+        "link": str(ad.get("link") or "").strip(),
+        "tracked_link": str(ad.get("tracked_link") or "").strip(),
+        "targeting": adset.get("targeting") if isinstance(adset.get("targeting"), dict) else {},
+        "campaign_plan": plan_payload,
+    }
+
+
 def _meta_load_launch_receipt(
     store: "TakyonStore",
     business: str,
@@ -11048,6 +11678,42 @@ def _meta_int_metric(value: Any) -> int:
         return int(float(raw))
     except (TypeError, ValueError):
         return 0
+
+
+def _meta_manual_insights_rows(
+    *,
+    spend_usd: Any,
+    impressions: Any,
+    clicks: Any,
+    time_range: Mapping[str, Any] | None,
+    date_preset: str | None,
+) -> list[dict[str, Any]]:
+    spend_decimal = Decimal(str(spend_usd or "0").strip() or "0")
+    if spend_decimal < 0:
+        raise TakyonError("spend_usd must be >= 0")
+    impressions_int = _meta_int_metric(impressions)
+    clicks_int = _meta_int_metric(clicks)
+    if impressions_int < 0 or clicks_int < 0:
+        raise TakyonError("impressions and clicks must be >= 0")
+    if clicks_int > impressions_int and impressions_int > 0:
+        raise TakyonError("clicks cannot exceed impressions")
+    since = str((time_range or {}).get("since") or "").strip() or None
+    until = str((time_range or {}).get("until") or "").strip() or None
+    row: dict[str, Any] = {
+        "account_currency": "USD",
+        "spend": str(spend_decimal.quantize(Decimal("0.01"))),
+        "impressions": impressions_int,
+        "reach": 0,
+        "clicks": clicks_int,
+        "source": "manual",
+    }
+    if since:
+        row["date_start"] = since
+    if until:
+        row["date_stop"] = until
+    if date_preset:
+        row["date_preset"] = date_preset
+    return [row]
 
 
 def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -11118,11 +11784,16 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             result["business_mode"] = business_mode
             return tool_result(result)
 
-        cfg = _meta_config(require_token=(mode == "preflight" or business_mode != "test"))
+        if mode not in {"launch", "manual_handoff"}:
+            raise TakyonError("mode must be one of: preflight, launch, manual_handoff")
+
+        launch_mode = "manual_handoff" if mode == "manual_handoff" else "auto_post"
+        cfg = _meta_config(require_token=(mode == "preflight" or (mode == "launch" and business_mode != "test")))
 
         # ── launch (always PAUSED) ──
         plan = _meta_launch_plan(args, cfg)
         slug = plan["slug"]
+        plan_payload = _meta_plan_payload(plan, launch_mode=launch_mode)
         video_abs: Path | None = None
         image_abs: Path | None = None
         if plan["asset_kind"] == "video":
@@ -11139,6 +11810,8 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 )
 
         pub_rel = f"distribution/meta-ads/{slug}"
+        plan_rel = f"{pub_rel}/plan.json"
+        plan_abs = store._resolve_business_file(business, plan_rel)
         receipt_rel = f"{pub_rel}/receipt.json"
         receipt_abs = store._resolve_business_file(business, receipt_rel)
 
@@ -11151,10 +11824,12 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "slug": slug,
                 "idempotent": True,
                 "status": prior.get("status"),
-                "paused": True,
+                "paused": bool(prior.get("paused", True)),
                 "receipt": receipt_rel,
                 "value": prior,
             })
+
+        _atomic_write_text(plan_abs, json.dumps(plan_payload, ensure_ascii=False, indent=2) + "\n")
 
         base_receipt = {
             "idempotency_key": idempotency_key,
@@ -11168,8 +11843,10 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "daily_budget_usd": plan["daily_budget_usd"],
             "link": plan["link"],
             "call_to_action": plan["call_to_action"],
+            "plan_path": plan_rel,
             "created_at": _now(),
         }
+        base_receipt.update(_meta_plan_receipt_fields(plan_payload))
 
         # ── test mode: suppress all external calls, write a local receipt ──
         if business_mode == "test":
@@ -11204,6 +11881,42 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "external_side_effects": "suppressed",
                 "paused": True,
                 "receipt": receipt_rel,
+                "value": receipt,
+            })
+
+        if mode == "manual_handoff":
+            receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": "live",
+                "status": "ready_for_manual_launch",
+                "external_side_effects": "manual_handoff_prepared",
+                "note": "Takyon prepared a manual launch packet; a human must create the Meta campaign in Ads Manager and bind the real IDs back into Takyon.",
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            store.commit(
+                scope=f"business:{business}/distribution:meta-ads/{slug}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "meta_ad.launch",
+                    "payload": {**receipt, "publication_dir": pub_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record meta ad manual handoff packet",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "launch_mode": "manual_handoff",
+                "status": "ready_for_manual_launch",
+                "paused": True,
+                "receipt": receipt_rel,
+                "plan_path": plan_rel,
                 "value": receipt,
             })
 
@@ -11270,6 +11983,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "success": True,
             "mode": "live",
             "status": "created_paused",
+            "launch_mode": "auto_post",
             "external_side_effects": "created_paused_no_spend",
             "ad_account_id": gateway_result.get("ad_account_id"),
             "page_id": plan["page_id"],
@@ -11307,6 +12021,120 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "balance_credits": receipt.get("balance_credits"),
             "reserved_credits": receipt.get("reserved_credits"),
             "value": receipt,
+        })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_meta_ad_bind_manual_launch(args: dict, **_: Any) -> str:
+    """Bind externally created Meta ids back onto a manual-handoff campaign receipt."""
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        launch = _meta_load_launch_receipt(store, business, args)
+        receipt = launch["receipt"]
+        launch_mode = str(receipt.get("launch_mode") or "").strip().lower()
+        if launch_mode and launch_mode != "manual_handoff":
+            raise TakyonError("manual launch binding is only supported for launch_mode='manual_handoff'")
+
+        campaign_id = str(args.get("campaign_id") or args.get("meta_campaign_id") or "").strip()
+        adset_id = str(args.get("adset_id") or args.get("meta_adset_id") or "").strip()
+        ad_id = str(args.get("ad_id") or args.get("meta_ad_id") or "").strip()
+        if not campaign_id or not adset_id or not ad_id:
+            raise TakyonError("campaign_id, adset_id, and ad_id are required")
+        creative_id = str(args.get("creative_id") or args.get("meta_creative_id") or "").strip()
+        launched_at = str(args.get("launched_at") or args.get("launch_timestamp") or _now()).strip()
+        actual_daily_budget_usd = args.get("actual_daily_budget_usd", args.get("daily_budget_usd"))
+
+        action_key = _file_slug(f"manual-bind-{idempotency_key}", "manual-bind")
+        action_rel = f"{launch['publication_rel']}/actions/{action_key}.json"
+        action_abs = store._resolve_business_file(business, action_rel)
+        prior = _read_existing_receipt(action_abs, idempotency_key)
+        if prior is not None:
+            return tool_result({
+                "success": bool(prior.get("success", True)),
+                "action": "business_meta_ad_bind_manual_launch",
+                "business": business,
+                "slug": launch["slug"],
+                "idempotent": True,
+                "status": prior.get("status"),
+                "receipt": action_rel,
+                "value": prior,
+            })
+
+        updated_receipt = dict(receipt)
+        ids = updated_receipt.get("ids") if isinstance(updated_receipt.get("ids"), dict) else {}
+        ids = dict(ids)
+        ids.update(
+            {
+                "campaign_id": campaign_id,
+                "adset_id": adset_id,
+                "ad_id": ad_id,
+            }
+        )
+        if creative_id:
+            ids["creative_id"] = creative_id
+        updated_receipt["ids"] = ids
+        updated_receipt["launch_mode"] = "manual_handoff"
+        updated_receipt["status"] = "externally_launched"
+        updated_receipt["externally_launched_at"] = launched_at
+        updated_receipt["manual_launch"] = {
+            "campaign_id": campaign_id,
+            "adset_id": adset_id,
+            "ad_id": ad_id,
+            "creative_id": creative_id or None,
+            "launched_at": launched_at,
+            "actual_daily_budget_usd": actual_daily_budget_usd,
+        }
+        updated_receipt["updated_at"] = _now()
+        if actual_daily_budget_usd not in (None, ""):
+            try:
+                updated_receipt["actual_daily_budget_usd"] = round(float(actual_daily_budget_usd), 2)
+            except (TypeError, ValueError):
+                raise TakyonError("actual_daily_budget_usd must be numeric when supplied")
+
+        action_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": launch["slug"],
+            "success": True,
+            "status": "bound_manual_launch",
+            "mode": "manual",
+            "launch_receipt": launch["receipt_rel"],
+            "receipt_updated": launch["receipt_rel"],
+            "ids": ids,
+            "launched_at": launched_at,
+            "actual_daily_budget_usd": updated_receipt.get("actual_daily_budget_usd"),
+            "created_at": _now(),
+        }
+        _atomic_write_text(launch["receipt_abs"], json.dumps(updated_receipt, ensure_ascii=False, indent=2) + "\n")
+        _atomic_write_text(action_abs, json.dumps(action_receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/distribution:meta-ads/{launch['slug']}",
+            operations=[{
+                "action": "event.record",
+                "business": business,
+                "event_type": "meta_ad.manual_bind",
+                "payload": {**action_receipt, "publication_dir": launch["publication_rel"], "receipt": action_rel},
+            }],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record manual meta launch binding",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result({
+            "success": True,
+            "action": "business_meta_ad_bind_manual_launch",
+            "business": business,
+            "slug": launch["slug"],
+            "status": "bound_manual_launch",
+            "receipt": action_rel,
+            "launch_receipt": launch["receipt_rel"],
+            "ids": ids,
+            "value": action_receipt,
         })
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -11523,12 +12351,15 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         level = str(args.get("level") or "campaign").strip().lower()
         if level not in {"campaign", "adset", "ad"}:
             raise TakyonError("level must be one of: campaign, adset, ad")
+        source = str(args.get("source") or "meta_api").strip().lower()
+        if source not in {"meta_api", "manual"}:
+            raise TakyonError("source must be one of: meta_api, manual")
 
         launch = _meta_load_launch_receipt(store, business, args)
         receipt = launch["receipt"]
         ids = _meta_receipt_ids(receipt)
         object_id = ids[f"{level}_id"]
-        if not object_id:
+        if source == "meta_api" and not object_id:
             raise TakyonError(
                 f"Meta launch receipt at {launch['receipt_rel']} does not contain a {level}_id"
             )
@@ -11563,12 +12394,61 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             "slug": launch["slug"],
             "launch_receipt": launch["receipt_rel"],
             "level": level,
-            "object_id": object_id,
+            "object_id": object_id or None,
             "ids": ids,
+            "source": source,
             "date_preset": date_preset if not time_range else None,
             "time_range": time_range,
             "created_at": _now(),
         }
+
+        if source == "manual":
+            manual_rows = _meta_manual_insights_rows(
+                spend_usd=args.get("spend_usd"),
+                impressions=args.get("impressions"),
+                clicks=args.get("clicks"),
+                time_range=time_range,
+                date_preset=date_preset if not time_range else None,
+            )
+            sync_receipt = {
+                **base_receipt,
+                "success": True,
+                "mode": business_mode,
+                "status": "synced_manual",
+                "rows": manual_rows,
+                "totals": _meta_aggregate_insights_rows(manual_rows),
+                "note": "Manual Meta campaign metrics were recorded locally from operator input.",
+            }
+            _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+            _append_jsonl(
+                store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+                {**sync_receipt, "receipt": sync_rel},
+            )
+            store.commit(
+                scope=f"business:{business}/metrics:meta-ads/{launch['slug']}",
+                operations=[{
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "meta_ad.insights_sync",
+                    "payload": {**sync_receipt, "metrics_dir": metrics_dir_rel, "receipt": sync_rel},
+                }],
+                idempotency_key=idempotency_key,
+                reason=args.get("reason") or "record manual meta insights sync",
+                actor=args.get("actor") or "agent",
+            )
+            return tool_result({
+                "success": True,
+                "action": "business_meta_ad_insights_sync",
+                "business": business,
+                "slug": launch["slug"],
+                "mode": business_mode,
+                "level": level,
+                "status": "synced_manual",
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "totals": sync_receipt["totals"],
+                "value": sync_receipt,
+            })
 
         if business_mode == "test":
             sync_receipt = {
@@ -14131,7 +15011,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "design_brief_path": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, checkout, billing, usage, generate, or entitlements."},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, billing, entitlements, usage, or generate."},
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
                 "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
@@ -14194,6 +15074,30 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_upsert_app_customer", "Create/update product app customer.", {"business": _BUSINESS_PROP, "email": {"type": "string"}, "name": {"type": "string"}, "status": {"type": "string"}, "tier": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "email", "idempotency_key"]),
     },
     {
+        "name": "business_upsert_app_profile",
+        "description": "Create or update one business-scoped product customer profile row without creating a second identity system.",
+        "handler": handle_business_upsert_app_profile,
+        "schema": _schema(
+            "business_upsert_app_profile",
+            "Create/update product app profile.",
+            {
+                "business": _BUSINESS_PROP,
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+                "session_token": {"type": "string"},
+                "display_name": {"type": "string"},
+                "headline": {"type": "string"},
+                "bio": {"type": "string"},
+                "attributes": {"type": "object"},
+                "metadata": {"type": "object"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_grant_app_entitlement",
         "description": "Grant a product customer a free or explicit non-billing entitlement. Paid billing entitlements require Stripe/webhook evidence.",
         "handler": handle_business_grant_app_entitlement,
@@ -14216,6 +15120,22 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read a product customer account, entitlements, revenue, and usage by session token, app user id, or email.",
         "handler": handle_business_read_app_account,
         "schema": _schema("business_read_app_account", "Read product app account.", {"business": _BUSINESS_PROP, "session_token": {"type": "string"}, "app_user_id": {"type": "string"}, "email": {"type": "string"}}, ["business"]),
+    },
+    {
+        "name": "business_read_app_profile",
+        "description": "Read one product customer and their optional business-scoped profile by session token, app user id, or email.",
+        "handler": handle_business_read_app_profile,
+        "schema": _schema(
+            "business_read_app_profile",
+            "Read product app profile.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+            },
+            ["business"],
+        ),
     },
     {
         "name": "business_create_app_checkout",
@@ -14342,6 +15262,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video or static image. "
             "mode=preflight verifies the access token and lists ad accounts (read-only, creates nothing). "
             "mode=launch creates an AdCreative + Campaign + AdSet + Ad, ALWAYS PAUSED (it never serves or spends); "
+            "mode=manual_handoff writes the full launch packet locally and stops before any Meta API post; "
             "test-mode businesses suppress everything to a local receipt with no Meta calls. "
             "Activation is intentionally not supported by this tool."
         ),
@@ -14353,8 +15274,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "mode": {
                     "type": "string",
-                    "enum": ["preflight", "launch"],
-                    "description": "preflight = read-only token/account check; launch = create PAUSED objects. Default launch.",
+                    "enum": ["preflight", "launch", "manual_handoff"],
+                    "description": "preflight = read-only token/account check; launch = create PAUSED objects; manual_handoff = write the launch packet locally and stop before posting. Default launch.",
                 },
                 "asset_kind": {
                     "type": "string",
@@ -14394,6 +15315,39 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_ad_bind_manual_launch",
+        "description": (
+            "Bind the real Meta campaign/adset/ad ids from a manually launched campaign back into "
+            "the canonical distribution/meta-ads/<slug>/receipt.json so later metrics and tracking use the same campaign record."
+        ),
+        "handler": handle_business_meta_ad_bind_manual_launch,
+        "schema": _schema(
+            "business_meta_ad_bind_manual_launch",
+            "Bind manually launched Meta ids back onto a manual-handoff campaign.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {
+                    "type": "string",
+                    "description": "Meta publication slug under distribution/meta-ads/<slug>/; use this or receipt_path.",
+                },
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to distribution/meta-ads/<slug>/receipt.json.",
+                },
+                "campaign_id": {"type": "string", "description": "Real Meta campaign id from Ads Manager."},
+                "adset_id": {"type": "string", "description": "Real Meta ad set id from Ads Manager."},
+                "ad_id": {"type": "string", "description": "Real Meta ad id from Ads Manager."},
+                "creative_id": {"type": "string", "description": "Optional Meta creative id from Ads Manager."},
+                "launched_at": {"type": "string", "description": "Launch timestamp to record, defaults to now if omitted."},
+                "actual_daily_budget_usd": {"type": "number", "description": "Optional actual daily budget used in Meta if it differed from the recommended budget."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "campaign_id", "adset_id", "ad_id", "idempotency_key"],
         ),
     },
     {
@@ -14459,6 +15413,11 @@ TAKYON_TOOL_DEFINITIONS = [
                     "enum": ["campaign", "adset", "ad"],
                     "description": "Which launched object to query. Default campaign.",
                 },
+                "source": {
+                    "type": "string",
+                    "enum": ["meta_api", "manual"],
+                    "description": "meta_api = read metrics from Meta through the authority runtime; manual = record operator-entered spend/impressions/clicks locally.",
+                },
                 "date_preset": {
                     "type": "string",
                     "description": "Meta date preset like today, yesterday, last_7d, this_month; ignored when time_range is supplied.",
@@ -14466,6 +15425,18 @@ TAKYON_TOOL_DEFINITIONS = [
                 "time_range": {
                     "type": "object",
                     "description": "Optional explicit Meta time range object like {since: YYYY-MM-DD, until: YYYY-MM-DD}.",
+                },
+                "spend_usd": {
+                    "type": "number",
+                    "description": "Required for source=manual. Raw spend value; the tool computes CPC/CTR/CPM itself.",
+                },
+                "impressions": {
+                    "type": "integer",
+                    "description": "Required for source=manual.",
+                },
+                "clicks": {
+                    "type": "integer",
+                    "description": "Required for source=manual.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,

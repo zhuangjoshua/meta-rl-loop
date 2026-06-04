@@ -71,7 +71,30 @@
           "minLength": 3,
           "description": "One of the angles in references/angle-taxonomy.md (e.g. pain_agitation, before_after, fake_ui, founder_confession, community_native, imessage, product_proof, social_proof, comparison, contrarian, meme_native, objection_handling, urgency_offer, transformation)."
         },
+        "boldness": {
+          "type": "string",
+          "enum": ["soft", "medium", "hard"],
+          "description": "Recommended but optional. How forcefully the ad should interrupt: soft = safer and more measured, medium = opinionated, hard = intentionally punchy and provocative while still evidence-backed."
+        },
+        "disruption_target": {
+          "type": "string",
+          "description": "Recommended but optional. The belief, behavior, old way, or hidden cost this ad attacks."
+        },
+        "hook_tactic": {
+          "type": "string",
+          "enum": ["contrarian", "warning", "confession", "curiosity", "shocking_statement", "social_proof", "statistic", "how_to", "listicle", "comparison", "price_anchor", "offer_only", "reasons_why", "question", "direct_address", "relatability", "urgency"],
+          "description": "Recommended but optional. The scroll-stopping frame chosen from references/hook-strategy.md. This is narrower than angle: e.g. angle=product_proof, hook_tactic=contrarian."
+        },
+        "psychological_trigger": {
+          "type": "string",
+          "description": "Recommended but optional. The emotional mechanism inside the hook, such as pattern_interrupt, curiosity_gap, myth_busting, pain_agitation, social_proof_credibility, urgency_stakes, or identity_callout."
+        },
+        "creative_mechanic": {
+          "type": "string",
+          "description": "Recommended but optional. How the viewer arrives at the truth, such as reframe, contrast_without_comment, implied_answer, social_witness, overheard_conversation, or trojan_horse."
+        },
         "hook": { "type": "string", "minLength": 3, "description": "The single scroll-stopping idea, in the audience's language." },
+        "claim_support": { "type": "string", "description": "Recommended but optional. The concrete proof that makes the hook fair: demo, stat, screenshot, sourced quote, price math, comparison, objection reply, or real offer." },
         "promise": { "type": "string", "minLength": 3, "description": "The payoff if they engage." },
         "objection_addressed": { "type": "string", "description": "The specific doubt this creative defuses." },
         "proof_type": {
@@ -112,8 +135,8 @@
       "additionalProperties": false,
       "required": ["overlay_text", "headline", "primary_text", "cta"],
       "properties": {
-        "overlay_text": { "type": "string", "description": "Text BAKED INTO the image. Keep it short enough to read at thumb-stopping speed (see platform-specs.md)." },
-        "headline": { "type": "string", "description": "Platform headline field (outside the image)." },
+        "overlay_text": { "type": "string", "description": "Text BAKED INTO the image. Keep it short enough to read at thumb-stopping speed (see platform-specs.md). Usually this should carry the sharpest, most interruptive expression of the hook." },
+        "headline": { "type": "string", "description": "Platform headline field (outside the image). This can be slightly fuller than overlay_text, but should still feel specific and clickable, not generic category copy." },
         "primary_text": { "type": "string", "description": "Platform primary/body text (outside the image)." },
         "cta": { "type": "string", "description": "Call to action (button label or in-copy)." }
       }

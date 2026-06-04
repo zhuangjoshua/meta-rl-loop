@@ -83,6 +83,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Call `business_read_business` first to inspect current campaign state, conversation state, and existing publication artifacts.
 - Read `distribution/surface.md` when it exists for the current high-level campaign snapshot, then fall back to direct campaign files or receipts when you need detail.
 - Call `business_calculate_pulse` when you need the latest unresolved inbound or recent activity before deciding whether the campaign should change.
+- Read current `research/` state when choosing the audience, promise, objection, or campaign angle.
 - If replies are the main issue, use `takyon-x` for X or `takyon-conversation-followup` when the inbox is too noisy to inspect directly before drafting a broad campaign memo.
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only the legacy `distribution/phase-1-outreach/` tree exists, migrate or merge that visible campaign state into `distribution/campaign/` before adding new work.
 - Use `templates/campaign.md` for the visible campaign workspace and `templates/reply-draft.md` only for generic, non-channel-specific draft notes.
@@ -103,7 +104,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 6. If the next move is a live paid Meta or Reddit campaign, keep the strategy and asset decisions here, but hand the execution to `takyon-meta-ads` or `takyon-reddit-ads` instead of stretching this skill into channel-owned launch/control work.
 7. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
 8. If the business is in live mode and the publish path is provider-backed, call `business_publish_outreach` and inspect the resulting job, receipt, or blocker. If the channel requires deferred external work rather than immediate publication, record it with `business_enqueue_job`.
-9. If the campaign update changes the business's broader assumptions, make sure the updated distribution direction stays consistent with the current `research/strategy.md` rather than drifting into a shadow strategy.
+9. Before choosing or changing a campaign angle, read current `research/` state and keep the audience, promise, objection, and angle aligned so the updated distribution direction stays consistent with `research/strategy.md` rather than drifting into a shadow strategy.
 
 ## Output Format
 
@@ -140,6 +141,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 3. Prefer reply handling before more outward distribution when people are waiting.
 4. Keep visible campaign artifacts in `distribution/campaign/`.
 5. Use `takyon-x` for channel-native X post and reply work.
+6. Use the channel-owned paid-ad skill for live Meta/Reddit execution.
 
 ## Troubleshooting
 

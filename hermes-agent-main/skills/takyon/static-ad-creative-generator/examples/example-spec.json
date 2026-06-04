@@ -12,8 +12,14 @@
   },
   "strategy": {
     "angle": "product_proof",
-    "hook": "See exactly where your money leaks.",
-    "promise": "Find the subscriptions you forgot in about a minute.",
+    "boldness": "medium",
+    "disruption_target": "the belief that checking statements manually or budgeting harder is enough to catch subscription waste",
+    "hook_tactic": "contrarian",
+    "psychological_trigger": "pattern_interrupt",
+    "creative_mechanic": "reframe",
+    "hook": "Budgeting apps don't catch this leak.",
+    "claim_support": "The ad can prove the point with a real product-style dashboard that surfaces recurring charges and a representative monthly total at a glance.",
+    "promise": "See every recurring charge in about a minute.",
     "objection_addressed": "Another finance app I'll download and never open?",
     "proof_type": "demo"
   },
@@ -34,7 +40,7 @@
     "must_not_show": ["fabricated third-party brand logos", "invented endorsements", "real bank names or card numbers"]
   },
   "copy": {
-    "overlay_text": "Find the subscriptions you forgot about",
+    "overlay_text": "Budgeting apps won't catch this",
     "headline": "Stop paying for subscriptions you forgot",
     "primary_text": "Tally finds recurring charges quietly draining your account, then helps you cancel what you don't use.",
     "cta": "Try Tally Free"

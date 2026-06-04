@@ -10,7 +10,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, instagram, facebook, gpt-image]
-    related_skills: [takyon-meta-ads, takyon-distribution, ugc-video-ad]
+    related_skills: [takyon-meta-ads, takyon-reddit-ads, takyon-distribution, ugc-video-ad]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_static_ad_generate]
     routing:
@@ -81,7 +81,7 @@ a *static performance-ad creative spec generator*.
 - **Primary root:** `product/`
 - **Publication path:** `product/static-ads/<slug>/`
 - **Schema (source of truth):** `templates/ad-spec.schema.json`
-- **Angles:** `references/angle-taxonomy.md` · **Visuals:** `references/visual-templates.md`
+- **Angles:** `references/angle-taxonomy.md` · **Hooks:** `references/hook-strategy.md` · **Visuals:** `references/visual-templates.md`
 - **Platform limits:** `references/platform-specs.md` · **Policy:** `references/policy-checks.md`
 - **Prompt rules:** `references/prompt-compiler-rules.md` · **QA:** `references/qa-rubric.md`
 - **Tool names used by this skill:** `business_read_business`, `business_read_file`, `business_list_files`, `business_static_ad_generate`
@@ -115,6 +115,7 @@ a *static performance-ad creative spec generator*.
 ## References
 
 - `references/angle-taxonomy.md` — the 14 ad angles, how to pick by awareness + proof, variant waves.
+- `references/hook-strategy.md` — hook tactics, provocative-but-defensible patterns, the creative stack, and hook QA.
 - `references/visual-templates.md` — composition templates, the SSCLP art-direction framework, anti-artifact rules.
 - `references/platform-specs.md` — Meta placements, safe zones, copy limits, the `aspect_ratio → model size` map.
 - `references/policy-checks.md` — advertising-policy red flags and the machine-checkable lint signals.
@@ -139,8 +140,9 @@ a *static performance-ad creative spec generator*.
 ## How to Run
 
 **Read first:** the product input / creative brief, then the relevant references
-(`angle-taxonomy.md` for angle choice, `platform-specs.md` for placement + size, `policy-checks.md`
-before writing copy). Specs are authored from `templates/ad-spec.template.json`.
+(`angle-taxonomy.md` for angle choice, `hook-strategy.md` for the scroll-stopping frame,
+`platform-specs.md` for placement + size, `policy-checks.md` before writing copy). Specs are
+authored from `templates/ad-spec.template.json`.
 
 Choose a canonical publication directory first, for example:
 
@@ -194,10 +196,17 @@ python ${HERMES_SKILL_DIR}/scripts/batch_generate.py examples/example-batch.json
    invent facts, metrics, testimonials, or endorsements.** Mark anything fictional
    `[FICTIONAL PLACEHOLDER]`.
 4. **Strategy / angles.** From `references/angle-taxonomy.md`, choose 3–5 angles by
-   audience **awareness level** and **strongest *real* proof**. One angle per creative.
+   audience **awareness level** and **strongest *real* proof**. Then use
+   `references/hook-strategy.md` to choose the **hook tactic**, **creative mechanic**,
+   **boldness level**, and **claim support** that make each angle worth clicking. One angle
+   per creative. For first-pass cold traffic, include at least one **medium** and one **hard**
+   boldness concept instead of producing only tasteful "safe" ads.
 5. **Write the ad spec(s).** For each creative, author JSON conforming to
-   `templates/ad-spec.schema.json`. Decide all strategy in `strategy`/`audience`; pick a
-   `visual.template`; keep `copy.overlay_text` short; set `layout` safe zones per
+   `templates/ad-spec.schema.json`. Decide all strategy in `strategy`/`audience`; this
+   includes the **boldness level**, **disruption target**, **hook tactic**,
+   **psychological trigger**, **creative mechanic**, and the concrete **claim support** that
+   makes the hook fair. Pick a `visual.template` that reinforces the same idea; keep
+   `copy.overlay_text` short and sharp; set `layout` safe zones per
    `references/platform-specs.md`; fill `product.must_not_show`; pre-fill `qa` honestly.
 6. **Validate.** `python ${HERMES_SKILL_DIR}/scripts/validate_spec.py <spec|batch|dir>`.
    Fix every ERROR; resolve each WARN.
@@ -247,6 +256,15 @@ directory plus a batch `manifest.json`.
 
 - **Letting the image model decide strategy.** Decide angle/hook/audience/proof in the spec;
   the prompt compiler only translates.
+- **Writing category copy instead of a hook.** "Better workflow", "all-in-one platform", and
+  other generic category lines do not earn the click. Pick a real hook tactic and back it with
+  claim support in `strategy.*`.
+- **Being too polite.** If the first concept sounds useful but not urgent, interruptive, or
+  opinionated, turn up `strategy.boldness`, choose a higher-voltage hook tactic, and name the
+  exact old way or belief the ad is attacking.
+- **Provocative with no proof.** Contrarian, warning, confession, and shocking-statement
+  hooks only work when the ad quickly pays them off with a demo, stat, comparison, offer, or
+  other real evidence.
 - **Truth gap: a placeholder is not a render.** A `--dry-run` PNG is a gray mock, not a real
   ad. Confirm `backend: openai` / `dry_run: false` (and a realistic file size) before calling a
   creative "generated."

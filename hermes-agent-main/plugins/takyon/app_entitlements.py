@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from plugins.takyon import app_identity
+from plugins.takyon import app_identity, app_profiles
 
 # tier → rank for resolving the effective tier; LOWER wins. Verbatim from core.py:2742.
 _TIER_RANK = {"owner": 0, "paid": 1, "pro": 1, "free": 2}
@@ -434,6 +434,12 @@ def grant_entitlement(
     with conn.transaction():
         resolved_id = _resolve_app_user_id(
             conn, business_slug, app_user_id=app_user_id, email=email, name=name
+        )
+        app_profiles.ensure_profile(
+            conn,
+            business_slug,
+            app_user_id=resolved_id,
+            display_name=name,
         )
         row = conn.execute(
             "insert into app_entitlements "

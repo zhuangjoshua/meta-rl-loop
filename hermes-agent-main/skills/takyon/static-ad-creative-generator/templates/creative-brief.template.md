@@ -20,14 +20,19 @@ do not invent facts, testimonials, or metrics. Mark anything fictional as
 - **Primary persona (their self-image, not a demographic row):**
 - **Top pain (the felt problem):**
 - **Desire / end state they want:**
+- **Desired visible after-state / transformation:** what should the viewer *see* improved in the ad?
 - **Awareness level:** unaware | problem_aware | solution_aware | product_aware | most_aware
 - **Top 3 objections / doubts:**
 - **Words they actually use (voice-of-customer phrases):**
+- **Default behavior or belief to interrupt:** what are they doing now that your ad should challenge?
+- **What would make them skeptical of this claim?**
 
 ## 3. Proof & Assets
 - **Real proof available:** demo / stat / testimonial / case study / rating / founder story
 - **Reviews / testimonials (verbatim, with source):**
 - **Hard metrics (only if real and defensible):**
+- **Strongest proof that can live directly in the ad:** screenshot, before/after, price math, quote, review, comparison, objection reply
+- **Can the proof be shown without the interface?** yes | no | partially
 - **Brand assets:** logo files, brand colors (hex), fonts, product photos, UI screenshots
 - **Mandatory elements (legal, logo, disclaimers):**
 - **Things that must never appear:**
@@ -41,7 +46,9 @@ do not invent facts, testimonials, or metrics. Mark anything fictional as
 ## 5. Constraints & Context
 - **Brand voice (3 adjectives):**
 - **Compliance / regulated claims (health, finance, etc.):**
+- **Category myths / conventional advice worth attacking:**
 - **Competitor references / example ads (for contrast, not copying):**
+- **Successful ad patterns worth borrowing (hook or format, not visuals):**
 - **Performance data (if iterating):** what won, what lost, current CTR/CVR/ROAS
 
 ## 6. Angle Shortlist

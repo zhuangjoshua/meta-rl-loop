@@ -134,6 +134,13 @@ export const api = {
       undefined,
       "operator businesses",
     ),
+  getTakyonOperatorMetaCampaigns: () =>
+    fetchJSONWithTimeout<TakyonOperatorMetaCampaignsResponse>(
+      "/api/takyon/operator/meta-campaigns",
+      15_000,
+      undefined,
+      "operator meta campaigns",
+    ),
   getTakyonBusinessCreativeCredits: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits`,
@@ -183,6 +190,47 @@ export const api = {
       15_000,
       undefined,
       "takyon.dashboard.workspace",
+    ),
+  bindTakyonBusinessMetaManualLaunch: (
+    slug: string,
+    campaignSlug: string,
+    body: {
+      campaign_id: string;
+      adset_id: string;
+      ad_id: string;
+      creative_id?: string;
+      launched_at?: string;
+      actual_daily_budget_usd?: number | string;
+      idempotency_key?: string;
+    },
+  ) =>
+    fetchJSON<MetaActionResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/meta-campaigns/${encodeURIComponent(campaignSlug)}/bind-manual-launch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  syncTakyonBusinessMetaManualMetrics: (
+    slug: string,
+    campaignSlug: string,
+    body: {
+      spend_usd: number | string;
+      impressions: number | string;
+      clicks: number | string;
+      time_range?: { since?: string; until?: string };
+      date_preset?: string;
+      idempotency_key?: string;
+    },
+  ) =>
+    fetchJSON<MetaActionResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/meta-campaigns/${encodeURIComponent(campaignSlug)}/manual-metrics`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
     ),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
@@ -551,6 +599,42 @@ export interface TakyonOperatorBusinessesResponse {
   user_id?: string;
 }
 
+export interface TakyonMetaCampaignSnapshot {
+  business_slug: string;
+  slug: string;
+  status?: string;
+  launch_mode?: string;
+  asset_kind?: string;
+  asset_path?: string | null;
+  asset_download_url?: string | null;
+  plan_path?: string | null;
+  receipt_path?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  externally_launched_at?: string;
+  objective?: string;
+  campaign_name?: string;
+  adset_name?: string;
+  ad_name?: string;
+  daily_budget_usd?: number;
+  actual_daily_budget_usd?: number;
+  message?: string;
+  link?: string;
+  tracked_link?: string;
+  call_to_action?: string;
+  targeting?: Record<string, unknown>;
+  manual_launch?: Record<string, unknown> | null;
+  ids?: Record<string, unknown>;
+  latest_metrics?: Record<string, unknown> | null;
+}
+
+export interface TakyonOperatorMetaCampaignsResponse {
+  available: boolean;
+  campaigns: TakyonMetaCampaignSnapshot[];
+  owned_business_count?: number;
+  reason?: string;
+}
+
 export interface TakyonBusinessCreativeCreditsResponse {
   available: boolean;
   business_slug: string;
@@ -587,6 +671,16 @@ export interface TakyonBusinessWorkspaceResponse {
   overview?: Record<string, unknown>;
   outputs?: unknown[];
   background_run?: Record<string, unknown> | null;
+}
+
+export interface MetaActionResponse {
+  success?: boolean;
+  status?: string;
+  error?: string;
+  receipt?: string;
+  value?: Record<string, unknown>;
+  totals?: Record<string, unknown>;
+  metrics_path?: string;
 }
 
 export interface SessionInfo {

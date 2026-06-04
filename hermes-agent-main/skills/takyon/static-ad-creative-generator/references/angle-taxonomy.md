@@ -8,18 +8,51 @@ level** and **strongest available proof**, then choose a visual template to expr
 > spec** (`strategy` block). The visual template and the image prompt only *express* an
 > angle that has already been chosen. The image model never selects the angle.
 
+> Angle is not enough. After picking an angle, pick a **hook tactic**, **creative mechanic**,
+> and **claim support** from `hook-strategy.md`. The angle says *what lane you're in*; the
+> hook tactic says *why someone stops*.
+
 ## How to choose an angle
 
 1. **Match awareness.** Unaware/problem-aware audiences need the *problem* dramatized
-   (pain agitation, before/after, contrarian). Product-aware/most-aware audiences need
-   *proof and offer* (product proof, social proof, comparison, urgency).
+   (pain agitation, before/after, contrarian) and usually respond best to visible
+   *outcomes* or *transformations*. Product-aware/most-aware audiences need *proof and
+   offer* (product proof, social proof, comparison, urgency).
 2. **Lead with your strongest real proof.** If you have a demo → product proof / fake-UI.
    Real reviews → social proof / testimonial. A founder story → founder confession. A hard
-   number → stat. No proof yet → visual metaphor or pain agitation.
+   number → stat. No proof yet → visual metaphor or pain agitation. But on cold traffic,
+   prefer proof of the **after-state** over a pure feature walkthrough when possible.
 3. **Be native to the surface.** Meta feed rewards UGC, before/after, product proof, and
    community-style social cards; Story/Reels reward full-bleed vertical with one big idea.
 4. **One angle per creative.** Mixing angles dilutes the hook. Produce *variants* across
    angles instead of stacking them.
+
+## Outcome-first by awareness
+
+- **Unaware / problem-aware:** lead with pain, contrast, relief, transformation, identity, or
+  status change. UI is rarely the first thing that earns the click.
+- **Solution-aware:** outcome-first still works, but you can start mixing in more explicit
+  proof, comparison, or mechanism.
+- **Product-aware / most-aware:** this is where feature-proof, offer, UI, objection handling,
+  and detailed comparisons become much more appropriate.
+
+## Angle -> hook tactic fit
+
+Common pairings that keep statics clicky instead of generic:
+
+- **pain_agitation:** warning, relatability, shocking_statement
+- **before_after / transformation:** contrast, curiosity, statistic
+- **fake_ui / product_proof:** contrarian, comparison, reasons_why, statistic
+- **founder_confession:** confession, direct_address
+- **community_native / imessage:** overheard-conversation style curiosity, confession, social_proof
+- **social_proof:** social_proof, statistic, confession-from-reluctance
+- **comparison:** contrast, contrarian, warning, price_anchor
+- **contrarian:** contrarian, myth_busting, shocking_statement
+- **objection_handling:** warning, reasons_why, confession
+- **urgency_offer:** urgency, offer_only, price_anchor
+
+If the current hook still sounds like a category description, the angle is probably right but the
+hook tactic is wrong or under-specified.
 
 ## The 14 core angles
 
@@ -48,7 +81,7 @@ suggested visual templates · platform fit · example hook · notes.
 - **Templates:** ui_screenshot, device_in_hand
 - **Platforms:** Meta feed/story
 - **Hook:** "This is the screen that found me `<result>`."
-- **Notes:** Render **your own** product UI as the hero. The word "fake" here means *art-directed mock of your real interface*, never a forged screenshot of a third party, a fabricated news article, or a non-functional control implying interactivity the static image cannot deliver. Numbers shown must be representative; mark non-real numbers as illustrative. See `policy-checks.md` → misleading UI.
+- **Notes:** Render **your own** product UI as the hero. The word "fake" here means *art-directed mock of your real interface*, never a forged screenshot of a third party, a fabricated news article, or a non-functional control implying interactivity the static image cannot deliver. Numbers shown must be representative; mark non-real numbers as illustrative. Best when the audience is already somewhat bought into the category or when the interface itself is the proof. See `policy-checks.md` → misleading UI.
 
 ### 4. founder_confession
 - **Awareness:** problem_aware → solution_aware
@@ -80,7 +113,7 @@ suggested visual templates · platform fit · example hook · notes.
 - **Templates:** hero_product, ui_screenshot, result_closeup
 - **Platforms:** Meta feed/story
 - **Hook:** "Here's exactly what `<product>` does."
-- **Notes:** Show the product doing the job and the concrete output. Best when the product *is* visually compelling. Pair with one quantified result.
+- **Notes:** Show the product doing the job and the concrete output. Best when the product *is* visually compelling or the audience already understands why the mechanism matters. For colder audiences, test a transformation or outcome-led variant alongside this; the UI should support the result, not replace it.
 
 ### 8. social_proof
 - **Awareness:** solution_aware → most_aware
@@ -136,7 +169,7 @@ suggested visual templates · platform fit · example hook · notes.
 - **Templates:** transformation_grid, before_after_split, journey_strip
 - **Platforms:** Meta feed/story
 - **Hook:** "From `<bad state>` to `<good state>` in `<timeframe>`."
-- **Notes:** Show the arc, not just the endpoint. Same health/finance/cosmetic policy caution as before_after.
+- **Notes:** Show the arc, not just the endpoint. This is often stronger than UI-led creative for cold traffic because it sells the after-state people actually want. Same health/finance/cosmetic policy caution as before_after.
 
 ## Angle → spec field mapping
 
@@ -153,8 +186,12 @@ suggested visual templates · platform fit · example hook · notes.
 
 Produce in waves so a test isolates the angle, then the execution:
 - **Wave 1 — core angles:** 3–5 different angles, one creative each.
-- **Wave 2 — execution variants:** take the 1–2 winning angles, vary hook wording, visual
-  template, and overlay placement (not the strategy).
-- **Wave 3 — wildcards:** contrarian, meme_native, or a bold new angle to find a new lane.
+- **Wave 2 — tactic variants:** take the 1–2 winning angles, vary the hook tactic or creative
+  mechanic (for example `contrarian` vs. `warning`, or `reframe` vs.
+  `contrast_without_comment`) while keeping the core promise fixed.
+- **Wave 3 — execution variants:** keep the winning angle+tactic, then vary hook wording,
+  visual template, overlay placement, and proof emphasis.
+- **Wave 4 — wildcards:** a bold new angle, a more aggressive tactic, or a category-specific
+  pattern discovered from competitor or ad-library research.
 
 Log which angle each `creative_id` tests so winners and losers are attributable.

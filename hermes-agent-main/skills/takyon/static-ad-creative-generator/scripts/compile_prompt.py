@@ -72,12 +72,31 @@ def compile_prompt(spec: dict, size: Optional[str] = None) -> str:
     # 1. OBJECTIVE — guidance for art direction, not text to render.
     hook = (strat.get("hook", "") or "").strip().rstrip(".")
     promise = (strat.get("promise", "") or "").strip().rstrip(".")
-    sections["OBJECTIVE"] = (
+    boldness = (strat.get("boldness", "") or "").strip()
+    disruption_target = (strat.get("disruption_target", "") or "").strip()
+    hook_tactic = (strat.get("hook_tactic", "") or "").strip()
+    trigger = (strat.get("psychological_trigger", "") or "").strip()
+    mechanic = (strat.get("creative_mechanic", "") or "").strip()
+    claim_support = (strat.get("claim_support", "") or "").strip()
+    objective = (
         f'A {spec.get("goal", "clicks")}-focused static ad for "{aud.get("persona", "the target customer")}". '
         f'Express the "{strat.get("angle", "")}" angle. '
         f'Hook: "{hook}". Promise: "{promise}". '
         f"Render this strategy faithfully; do not change the marketing idea or add other claims."
     )
+    if boldness:
+        objective += f' Set the concept boldness to "{boldness}".'
+    if disruption_target:
+        objective += f" The concept attacks this target: {disruption_target}."
+    if hook_tactic:
+        objective += f' Use a "{hook_tactic}" hook tactic.'
+    if trigger:
+        objective += f' The emotional trigger is "{trigger}".'
+    if mechanic:
+        objective += f' Let the idea land through the "{mechanic}" mechanic.'
+    if claim_support:
+        objective += f" The claim is earned by this support: {claim_support}."
+    sections["OBJECTIVE"] = objective
 
     # 2. PLATFORM & PLACEMENT
     sections["PLATFORM & PLACEMENT"] = (

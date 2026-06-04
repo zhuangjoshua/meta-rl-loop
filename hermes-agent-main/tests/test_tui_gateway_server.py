@@ -4385,6 +4385,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
     )
     assert any(
         "No supported Chromium-family browser executable was found" in line
+        or "Start a Chromium-family browser with remote debugging" in line
         for line in resp["result"]["messages"]
     )
     assert any(
@@ -5356,6 +5357,125 @@ def test_business_overview_posts_omit_missing_artifact_preview(tmp_path):
     )
 
 
+def test_business_overview_exposes_modular_outreach_channels(tmp_path):
+    business_root = tmp_path / "demo"
+    (business_root / "distribution" / "local-published").mkdir(parents=True, exist_ok=True)
+    (business_root / "distribution" / "meta-ads" / "meta-launch").mkdir(parents=True, exist_ok=True)
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch").mkdir(parents=True, exist_ok=True)
+    (business_root / "metrics" / "meta-ads" / "meta-launch").mkdir(parents=True, exist_ok=True)
+    (business_root / "metrics" / "reddit-ads" / "reddit-launch").mkdir(parents=True, exist_ok=True)
+    (business_root / "distribution" / "local-published" / "x-launch.md").write_text("x launch\n", encoding="utf-8")
+    (business_root / "distribution" / "outreach-drafts.md").write_text("draft\n", encoding="utf-8")
+    (business_root / "distribution" / "meta-ads" / "meta-launch" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "created_paused",
+                "campaign_name": "Meta launch",
+                "daily_budget_usd": 25,
+                "created_at": "2026-06-04T10:00:00Z",
+                "ids": {"campaign_id": "meta-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (business_root / "distribution" / "meta-ads" / "meta-launch" / "plan.json").write_text(
+        json.dumps({"campaign": {"name": "Meta launch"}, "adset": {"daily_budget_usd": 25}}),
+        encoding="utf-8",
+    )
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "suppressed_test_mode",
+                "campaign_name": "Reddit launch",
+                "created_at": "2026-06-04T11:00:00Z",
+                "ids": {"campaign_id": "reddit-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "plan.json").write_text(
+        json.dumps({"campaign": {"name": "Reddit launch"}, "ad_group": {"daily_budget_usd": 15}}),
+        encoding="utf-8",
+    )
+    (business_root / "metrics" / "meta-ads" / "meta-launch" / "insights.jsonl").write_text(
+        '{"impressions":120,"clicks":4}\n',
+        encoding="utf-8",
+    )
+    (business_root / "metrics" / "reddit-ads" / "reddit-launch" / "insights.jsonl").write_text(
+        '{"impressions":80,"clicks":3}\n',
+        encoding="utf-8",
+    )
+
+    class _FakeStore:
+        def read(self, *, scope, query, **_kwargs):
+            if query == "summary":
+                return {
+                    "business": {"slug": "demo", "goal": "Test", "mode": "test"},
+                    "app": {},
+                    "jobs": [
+                        {
+                            "id": "job-meta-1",
+                            "kind": "meta.campaign_start",
+                            "status": "queued",
+                            "payload": {
+                                "channel": "meta",
+                                "requested_skill": "takyon-meta-ads",
+                                "summary": "Start Meta outreach lane.",
+                            },
+                            "created_at": "2026-06-04T09:50:00Z",
+                            "updated_at": "2026-06-04T09:50:00Z",
+                        }
+                    ],
+                    "events": [],
+                    "conversations": {
+                        "threads": [
+                            {
+                                "id": "thread-x-1",
+                                "source": "x",
+                                "title": "Launch thread",
+                                "url": "distribution/local-published/x-launch.md",
+                                "status": "active",
+                                "created_at": "2026-06-04T09:00:00Z",
+                                "updated_at": "2026-06-04T09:05:00Z",
+                            }
+                        ],
+                        "unresolved": [],
+                    },
+                }
+            if query == "list_files":
+                return {"files": []}
+            return {}
+
+        def calculate_pulse(self, slug, limit=5):
+            return {}
+
+        def _conversation_thread_relpath(self, thread_dict):
+            return "metrics/conversations/threads/thread-x-1.md"
+
+        def _business_cron_jobs(self, slug):
+            return []
+
+        def _business_root(self, slug):
+            return business_root
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            return business_root / rel
+
+        def _connect(self):
+            raise RuntimeError("db not needed for this payload test")
+
+    payload = server._takyon_business_overview_payload(_FakeStore(), "demo")
+
+    channels = payload["artifacts"]["outreach"]["channels"]
+    assert channels["x"]["published_count"] == 1
+    assert channels["x"]["items"][0]["artifact_path"] == "distribution/local-published/x-launch.md"
+    assert channels["meta"]["campaign_count"] == 1
+    assert channels["meta"]["campaigns"][0]["latest_metrics"]["impressions"] == 120
+    assert channels["meta"]["latest_job"]["kind"] == "meta.campaign_start"
+    assert channels["reddit"]["campaign_count"] == 1
+    assert channels["reddit"]["campaigns"][0]["status"] == "suppressed_test_mode"
+
+
 def test_workspace_payload_reuses_summary_for_current_and_overview(monkeypatch):
     calls: list[tuple[str, str]] = []
     summary_payload = {"business": {"slug": "demo", "name": "Demo"}}
@@ -5593,9 +5713,12 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
         "label": "CEO bootstrap",
         "status": "running",
         "detail": "Bootstrapping the product workspace.",
-        "blocker": "Missing CSS asset manifest",
+        "blocker": "npm run build failed: Missing CSS asset manifest",
     }
-    assert snapshot["overview"]["product"]["publish_blocker"] == "Missing CSS asset manifest"
+    assert (
+        snapshot["overview"]["product"]["publish_blocker"]
+        == "npm run build failed: Missing CSS asset manifest"
+    )
     assert snapshot["overview"]["product"]["latest_check_command"] == "npm run build"
     assert snapshot["overview"]["product"]["latest_check_error"] == "Missing CSS asset manifest"
     assert snapshot["overview"]["product"]["detected_frameworks"] == ["vite"]

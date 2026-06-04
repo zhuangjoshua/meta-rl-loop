@@ -6583,6 +6583,131 @@ def _takyon_business_overview_payload(
         indexed.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
         return indexed[: max(1, min(int(limit or 80), 200))]
 
+    def read_json_object(rel_path: str) -> dict[str, Any]:
+        try:
+            path = store._business_root(slug) / rel_path
+            if not path.is_file():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return as_dict(data)
+        except Exception:
+            return {}
+
+    def read_last_jsonl_object(rel_path: str) -> tuple[dict[str, Any], str]:
+        try:
+            path = store._business_root(slug) / rel_path
+            if not path.is_file():
+                return {}, ""
+            for raw_line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    return as_dict(data), rel_path
+            return {}, rel_path
+        except Exception:
+            return {}, ""
+
+    def latest_channel_job(*needles: str) -> dict[str, Any] | None:
+        wanted = [str(needle or "").strip().lower() for needle in needles if str(needle or "").strip()]
+        if not wanted:
+            return None
+        for job in jobs:
+            job_dict = as_dict(job)
+            payload = as_dict(job_dict.get("payload"))
+            kind = brief_text(job_dict.get("kind")).lower()
+            payload_channel = brief_text(payload.get("channel")).lower()
+            requested_skill = brief_text(payload.get("requested_skill")).lower()
+            if payload_channel in wanted or any(token in kind or token in requested_skill for token in wanted):
+                return {
+                    "id": brief_text(job_dict.get("id")),
+                    "kind": brief_text(job_dict.get("kind")),
+                    "status": brief_text(job_dict.get("status") or "queued"),
+                    "label": brief_text(job_dict.get("label") or payload.get("summary") or human_kind(job_dict.get("kind"))),
+                    "detail": brief_text(job_dict.get("detail") or payload.get("summary")),
+                    "updated_at": brief_text(job_dict.get("updated_at") or job_dict.get("created_at")),
+                    "created_at": brief_text(job_dict.get("created_at")),
+                }
+        return None
+
+    def collect_paid_campaigns(
+        publication_root: str,
+        metrics_root: str,
+        *,
+        plan_secondary_key: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            business_root = store._business_root(slug)
+        except Exception:
+            return []
+        root = business_root / publication_root
+        if not root.is_dir():
+            return []
+        campaigns: list[dict[str, Any]] = []
+        for receipt_abs in root.glob("*/receipt.json"):
+            receipt_rel = str(receipt_abs.relative_to(business_root))
+            receipt = read_json_object(receipt_rel)
+            if not receipt:
+                continue
+            slug_name = receipt_abs.parent.name
+            plan_rel = f"{publication_root}/{slug_name}/plan.json"
+            plan_abs = business_root / plan_rel
+            plan = read_json_object(plan_rel)
+            campaign_block = as_dict(plan.get("campaign"))
+            secondary_block = as_dict(plan.get(plan_secondary_key))
+            ad_block = as_dict(plan.get("ad"))
+            metrics_rel = f"{metrics_root}/{slug_name}/insights.jsonl"
+            latest_metrics, metrics_path = read_last_jsonl_object(metrics_rel)
+            asset_path = brief_text(
+                receipt.get("ad_video_path")
+                or receipt.get("ad_image_path")
+                or plan.get("ad_video_path")
+                or plan.get("ad_image_path")
+            )
+            campaigns.append(
+                {
+                    "slug": slug_name,
+                    "status": brief_text(receipt.get("status")),
+                    "launch_mode": brief_text(receipt.get("launch_mode") or plan.get("launch_mode")),
+                    "asset_kind": brief_text(receipt.get("asset_kind") or plan.get("asset_kind")),
+                    "asset_path": asset_path,
+                    "plan_path": plan_rel if plan_abs.is_file() else "",
+                    "receipt_path": receipt_rel,
+                    "metrics_path": metrics_path,
+                    "created_at": brief_text(receipt.get("created_at")),
+                    "updated_at": brief_text(
+                        receipt.get("updated_at")
+                        or receipt.get("externally_launched_at")
+                        or receipt.get("created_at")
+                    ),
+                    "objective": brief_text(receipt.get("objective") or campaign_block.get("objective")),
+                    "campaign_name": brief_text(receipt.get("campaign_name") or campaign_block.get("name")),
+                    "secondary_name": brief_text(
+                        receipt.get("adset_name")
+                        or receipt.get("ad_group_name")
+                        or secondary_block.get("name")
+                    ),
+                    "ad_name": brief_text(receipt.get("ad_name") or ad_block.get("name")),
+                    "daily_budget_usd": receipt.get("daily_budget_usd") or secondary_block.get("daily_budget_usd"),
+                    "actual_daily_budget_usd": receipt.get("actual_daily_budget_usd"),
+                    "message": brief_text(receipt.get("message") or ad_block.get("message")),
+                    "link": brief_text(receipt.get("link") or ad_block.get("link")),
+                    "tracked_link": brief_text(receipt.get("tracked_link") or ad_block.get("tracked_link")),
+                    "call_to_action": brief_text(receipt.get("call_to_action") or ad_block.get("call_to_action")),
+                    "ids": as_dict(receipt.get("ids")),
+                    "latest_metrics": latest_metrics,
+                    "open_url": openable_url(
+                        brief_text(receipt.get("preview_url") or receipt.get("post_url") or receipt.get("link"))
+                    ),
+                }
+            )
+        campaigns.sort(
+            key=lambda item: brief_text(item.get("updated_at") or item.get("created_at")),
+            reverse=True,
+        )
+        return campaigns
+
     source_root = source_path.strip().strip("/")
     website_candidates = [
         f"{source_root}/index.html" if source_root else "",
@@ -6632,6 +6757,90 @@ def _takyon_business_overview_payload(
             "receipt": "",
             "status": "draft_only",
         })
+    x_items = [
+        {
+            "id": brief_text(post.get("id")),
+            "title": brief_text(post.get("title")),
+            "source": brief_text(post.get("source")),
+            "status": brief_text(post.get("status")),
+            "mode": brief_text(post.get("mode")),
+            "url": brief_text(post.get("url")),
+            "artifact_path": brief_text(post.get("artifact_path")),
+            "conversation_file": brief_text(post.get("conversation_file")),
+            "created_at": brief_text(post.get("created_at")),
+            "updated_at": brief_text(post.get("updated_at")),
+            "unresolved_messages": as_int(post.get("unresolved_messages")),
+        }
+        for post in posts
+        if (
+            (brief_text(post.get("source")).lower().replace("test-", "", 1) == "x")
+            or brief_text(post.get("source")).lower().startswith("x-")
+            or "twitter" in brief_text(post.get("source")).lower()
+        )
+    ]
+    x_job = latest_channel_job("x", "twitter")
+    meta_campaigns = collect_paid_campaigns(
+        "distribution/meta-ads",
+        "metrics/meta-ads",
+        plan_secondary_key="adset",
+    )
+    reddit_campaigns = collect_paid_campaigns(
+        "distribution/reddit-ads",
+        "metrics/reddit-ads",
+        plan_secondary_key="ad_group",
+    )
+    meta_job = latest_channel_job("meta")
+    reddit_job = latest_channel_job("reddit")
+    outreach_channels = {
+        "x": {
+            "channel": "x",
+            "label": "X",
+            "status": (
+                "published_local"
+                if any(item.get("mode") == "test" for item in x_items)
+                else "published"
+                if x_items
+                else "draft_only"
+                if outreach_draft
+                else brief_text((x_job or {}).get("status")) or "missing"
+            ),
+            "updated_at": brief_text(
+                (x_items[0] if x_items else {}).get("updated_at")
+                or (outreach_draft or {}).get("updated_at")
+                or (x_job or {}).get("updated_at")
+            ),
+            "draft_path": brief_text((outreach_draft or {}).get("path")),
+            "items": x_items[:8],
+            "latest_job": x_job,
+            "published_count": len(x_items),
+        },
+        "reddit": {
+            "channel": "reddit",
+            "label": "Reddit",
+            "status": brief_text((reddit_campaigns[0] if reddit_campaigns else {}).get("status") or (reddit_job or {}).get("status") or "missing"),
+            "updated_at": brief_text(
+                (reddit_campaigns[0] if reddit_campaigns else {}).get("updated_at")
+                or (reddit_job or {}).get("updated_at")
+            ),
+            "campaigns": reddit_campaigns[:8],
+            "latest_job": reddit_job,
+            "campaign_count": len(reddit_campaigns),
+            "metrics_count": sum(1 for item in reddit_campaigns if as_dict(item.get("latest_metrics"))),
+        },
+        "meta": {
+            "channel": "meta",
+            "label": "Meta",
+            "status": brief_text((meta_campaigns[0] if meta_campaigns else {}).get("status") or (meta_job or {}).get("status") or "missing"),
+            "updated_at": brief_text(
+                (meta_campaigns[0] if meta_campaigns else {}).get("updated_at")
+                or (meta_job or {}).get("updated_at")
+            ),
+            "campaigns": meta_campaigns[:8],
+            "latest_job": meta_job,
+            "campaign_count": len(meta_campaigns),
+            "metrics_count": sum(1 for item in meta_campaigns if as_dict(item.get("latest_metrics"))),
+        },
+    }
     creative_latest = (
         latest_under("distribution", _TAKYON_MEDIA_SUFFIXES)
         or latest_under("campaigns", _TAKYON_MEDIA_SUFFIXES)
@@ -6877,6 +7086,7 @@ def _takyon_business_overview_payload(
                 "published_count": len(outreach_published),
                 "items": outreach_items,
                 "receipts": [str(receipt.get("path") or "") for receipt in outreach_receipts if receipt.get("path")],
+                "channels": outreach_channels,
             },
             "creative_assets": {
                 "status": "generated" if creative_latest else "missing",

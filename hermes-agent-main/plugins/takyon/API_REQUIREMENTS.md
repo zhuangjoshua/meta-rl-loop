@@ -19,6 +19,7 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 - Deploy/domain: `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, `VERCEL_TEAM_ID`, `VERCEL_OIDC_TOKEN`, `PUBLIC_COMPANY_BASE_DOMAIN`
 - Research: `TAVILY_API_KEY`
 - Paid/social ops: `META_ACCESS_TOKEN`, `META_SYSTEM_USER_ACCESS_TOKEN`, `META_AD_ACCOUNT_ID`, `META_APP_ID`, `META_APP_SECRET`, `META_BUSINESS_ID`, `META_PAGE_ID`
+- Reddit Ads (skill/tool requirement): `REDDIT_ADS_CLIENT_ID`, `REDDIT_ADS_CLIENT_SECRET`, `REDDIT_ADS_REFRESH_TOKEN` plus optional defaults like `REDDIT_ADS_BUSINESS_ID`, `REDDIT_ADS_ACCOUNT_ID`, `REDDIT_ADS_PROFILE_ID`, `REDDIT_ADS_FUNDING_INSTRUMENT_ID`, and `REDDIT_ADS_PIXEL_ID`, or a saved local auth state at `$TAKYON_HOME/secrets/reddit_ads.json`
 - Analytics/ops: `POSTHOG_PERSONAL_API_KEY`, `SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT`
 - X/OAuth app keys: `X_CLIENT_ID`, `X_CLIENT_SECRET`
 

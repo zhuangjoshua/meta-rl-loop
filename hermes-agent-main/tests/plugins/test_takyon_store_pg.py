@@ -396,6 +396,11 @@ def test_app_customer_upsert_delegates_to_app_identity_forcing_active(pg_store, 
         assert row[0] == app_user_id            # receipt id == persisted id
         assert row[1] == "buyer@example.com"    # leaf normalized the email
         assert (row[2], row[3]) == ("Buyer", "active")
+        prow = conn.execute(
+            "select id::text, display_name from app_user_profiles where business_slug = %s and id = %s",
+            ("custco", app_user_id),
+        ).fetchone()
+        assert prow == (app_user_id, "Buyer")
 
 
 def test_app_entitlement_upsert_email_autoprovisions_and_syncs_tier(pg_store, pg_store_dsn):
@@ -428,6 +433,11 @@ def test_app_entitlement_upsert_email_autoprovisions_and_syncs_tier(pg_store, pg
             ("entco", user_id),
         ).fetchone()
         assert erow == ("pro", "active", "internal")
+        prow = conn.execute(
+            "select id::text from app_user_profiles where business_slug = %s and id = %s",
+            ("entco", user_id),
+        ).fetchone()
+        assert prow == (user_id,)
 
 
 def test_app_entitlement_upsert_manual_paid_without_evidence_is_rejected(pg_store, pg_store_dsn):

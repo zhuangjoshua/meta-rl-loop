@@ -46,6 +46,39 @@ AUTHORITY_TERMS = ["as seen in", "#1 doctor", "number one doctor", "clinically p
 PROOF_ANGLES = {"social_proof", "community_native", "imessage", "fake_ui", "testimonial"}
 PROOF_OK_WORDS = ["real", "rights-cleared", "rights cleared", "illustrative", "representative", "sample", "fictional"]
 UI_CONTROL_TERMS = ["play button", "cursor", "notification", "close button", "progress bar"]
+PROVOCATIVE_TACTICS = {"contrarian", "warning", "confession", "curiosity", "shocking_statement"}
+HIGH_VOLTAGE_TACTICS = {"contrarian", "warning", "shocking_statement", "comparison", "price_anchor"}
+UI_TEMPLATES = {"ui_screenshot", "device_in_hand"}
+COLD_AWARENESS = {"unaware", "problem_aware"}
+FEATURE_HEAVY_TERMS = [
+    "dashboard", "workspace", "editor", "preview", "comments", "citation", "screen",
+    "platform", "feature", "ui", "workflow", "source",
+]
+OUTCOME_SIGNALS = [
+    "from", "to", "stop", "start", "without", "faster", "calm", "clear", "confident",
+    "submitted", "submit-ready", "ready", "stronger", "better", "more", "less", "finish",
+]
+SOFTENING_TERMS = ["easier", "simple", "simply", "help", "helps", "organized", "organize", "streamline", "modern", "seamless"]
+BOLDNESS_MARKERS = ["stop", "don't", "never", "wrong", "waste", "broken", "cost", "chaos", "vs", "from", "kill", "stuck"]
+GENERIC_HOOK_PHRASES = [
+    "all-in-one",
+    "all in one",
+    "better way",
+    "modern teams",
+    "powerful platform",
+    "everything you need",
+    "seamless",
+    "innovative",
+    "streamline",
+    "work smarter",
+]
+TACTIC_MARKERS = {
+    "contrarian": ["don't", "stop", "wrong", "still", "actually", "isn't", "doesn't", "instead", "myth"],
+    "warning": ["don't", "before", "avoid", "stop", "never"],
+    "confession": ["i ", "we ", "i'm", "we're", "i thought", "we thought", "i was wrong", "we messed up"],
+    "curiosity": ["why", "how", "what", "until", "secret", "mistake", "still"],
+    "shocking_statement": ["wrong", "actually", "never", "isn't", "doesn't", "still", "why"],
+}
 
 
 # ----------------------------- spec loading -----------------------------
@@ -53,9 +86,19 @@ def load_specs(path: str) -> List[Dict]:
     """Load one spec, an array of specs, or a directory of *.json into a list of dicts."""
     if os.path.isdir(path):
         specs: List[Dict] = []
-        for fn in sorted(os.listdir(path)):
-            if fn.endswith(".json") and not fn.endswith(".schema.json"):
-                specs.extend(load_specs(os.path.join(path, fn)))
+        files = sorted(os.listdir(path))
+        preferred = [fn for fn in files if fn.endswith(".spec.json")]
+        if preferred:
+            candidates = preferred
+        else:
+            candidates = [
+                fn for fn in files
+                if fn.endswith(".json")
+                and not fn.endswith((".schema.json", ".output.json", ".qa.json"))
+                and fn != "manifest.json"
+            ]
+        for fn in candidates:
+            specs.extend(load_specs(os.path.join(path, fn)))
         return specs
     with open(path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
@@ -159,12 +202,59 @@ def lint_spec(spec: Dict) -> List[Tuple[str, str]]:
         pass  # malformed strings are caught by the schema pattern
 
     overlay = (copy.get("overlay_text") or "")
+    hook = str(strat.get("hook") or "").strip()
+    boldness = str(strat.get("boldness") or "").strip().lower()
+    disruption_target = str(strat.get("disruption_target") or "").strip()
+    hook_tactic = str(strat.get("hook_tactic") or "").strip().lower()
+    claim_support = str(strat.get("claim_support") or "").strip()
+    creative_mechanic = str(strat.get("creative_mechanic") or "").strip().lower()
+    awareness = str((spec.get("audience") or {}).get("awareness_level") or "").strip().lower()
+    template = str((spec.get("visual") or {}).get("template") or "").strip().lower()
+    representation = str((prod.get("representation") or "")).strip().lower()
     if len(overlay) > 50:
         out.append(("warn", f"overlay_text is {len(overlay)} chars; keep <=50 for in-feed readability"))
     if len(copy.get("headline") or "") > 40:
         out.append(("warn", "headline >40 chars may truncate on Meta"))
     if len(copy.get("primary_text") or "") > 125:
         out.append(("warn", "primary_text >125 chars truncates before '...more' on mobile"))
+    if hook:
+        hook_words = len(re.findall(r"\b\w+\b", hook))
+        if hook_words > 12:
+            out.append(("warn", "strategy.hook is long; punchier 3-10 word hooks usually stop scroll better"))
+        if any(p in hook.lower() for p in GENERIC_HOOK_PHRASES):
+            out.append(("warn", "strategy.hook sounds like generic category copy; make it more belief-breaking, specific, or proof-led"))
+        if any(term in hook.lower() for term in FEATURE_HEAVY_TERMS) and not any(sig in hook.lower() for sig in OUTCOME_SIGNALS):
+            out.append(("warn", "strategy.hook may be feature-led rather than outcome-led; colder ads usually sell transformation, relief, or identity first"))
+        if boldness == "hard" and not any(marker in hook.lower() for marker in BOLDNESS_MARKERS):
+            out.append(("warn", "strategy.boldness='hard' but the hook text may still read too polite; make the line more blunt, contrastive, or interruptive"))
+        if boldness in {"medium", "hard"} and any(term in hook.lower() for term in SOFTENING_TERMS):
+            out.append(("warn", "the hook uses softening language that may dilute the punch; consider a sharper statement or warning"))
+    if not boldness:
+        out.append(("warn", "strategy.boldness missing; choose soft, medium, or hard intentionally"))
+    if not hook_tactic:
+        out.append(("warn", "strategy.hook_tactic missing; choose a deliberate tactic (contrarian, warning, confession, curiosity, statistic, etc.) from references/hook-strategy.md"))
+    elif hook and not any(marker in hook.lower() for marker in TACTIC_MARKERS.get(hook_tactic, []) or []):
+        if hook_tactic in TACTIC_MARKERS:
+            out.append(("warn", f"strategy.hook_tactic='{hook_tactic}' but the hook text may not express that tactic strongly"))
+    if not claim_support:
+        out.append(("warn", "strategy.claim_support missing; name the concrete proof that makes the hook fair"))
+    elif len(claim_support) < 18:
+        out.append(("warn", "strategy.claim_support is terse; name the actual demo, stat, screenshot, quote, or comparison"))
+    if boldness == "hard" and not disruption_target:
+        out.append(("warn", "strategy.boldness='hard' needs a disruption_target; name the belief, behavior, or old way the ad is attacking"))
+    if boldness == "hard" and hook_tactic and hook_tactic not in HIGH_VOLTAGE_TACTICS:
+        out.append(("warn", f"strategy.boldness='hard' usually wants a higher-voltage tactic than '{hook_tactic}'"))
+    if hook_tactic in PROVOCATIVE_TACTICS and not creative_mechanic:
+        out.append(("warn", f"strategy.hook_tactic='{hook_tactic}' is provocative; add strategy.creative_mechanic so the concept is reproducible"))
+    if awareness in COLD_AWARENESS and template in UI_TEMPLATES:
+        out.append(("warn", "cold-audience creative uses a UI-led template; test an outcome, transformation, or before/after concept first"))
+    if awareness in COLD_AWARENESS and "on-screen ui" in representation:
+        out.append(("warn", "cold-audience creative shows the interface as the main product representation; this may explain the feature instead of selling the after-state"))
+    if awareness in COLD_AWARENESS and boldness == "soft":
+        out.append(("warn", "cold-audience creative is marked soft; consider at least one medium or hard variant for the first test wave"))
+    angle = (strat.get("angle") or "").lower()
+    if angle in {"transformation", "before_after", "pain_agitation"} and ("on-screen ui" in representation or template in UI_TEMPLATES):
+        out.append(("warn", f"angle '{angle}' usually works better when the outcome or contrast is visible without relying on the product UI"))
 
     # --- policy lint (policy-checks.md, Section: machine-checkable signals) ---
     text = f"{overlay} {copy.get('primary_text','')} {copy.get('headline','')}".lower()
@@ -186,7 +276,6 @@ def lint_spec(spec: Dict) -> List[Tuple[str, str]]:
             break
 
     # proof-bearing angle must declare real vs labeled
-    angle = (strat.get("angle") or "").lower()
     risks_text = " ".join(qa.get("policy_risks") or []).lower()
     if angle in PROOF_ANGLES and not any(w in risks_text for w in PROOF_OK_WORDS):
         out.append((
@@ -194,6 +283,8 @@ def lint_spec(spec: Dict) -> List[Tuple[str, str]]:
             f"angle '{angle}' relies on proof/social signals; qa.policy_risks must state whether "
             "it is real & rights-cleared or labeled illustrative/representative",
         ))
+    if angle == "contrarian" and hook_tactic and hook_tactic not in {"contrarian", "warning", "shocking_statement", "question"}:
+        out.append(("warn", "angle 'contrarian' usually pairs best with a belief-breaking hook tactic such as contrarian, warning, shocking_statement, or question"))
 
     # competitor / IP hygiene
     mns = " ".join(prod.get("must_not_show") or []).lower()

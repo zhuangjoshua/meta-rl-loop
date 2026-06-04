@@ -886,69 +886,56 @@
     const queuedJobs = Number.isFinite(Number(metrics.queued_jobs))
       ? Math.max(0, Math.trunc(Number(metrics.queued_jobs)))
       : 0;
-    const hasConversionData = signups > 0 || checkouts > 0 || paying > 0;
+    const stagesReached = [signups, checkouts, paying].filter((value) => value > 0).length;
     const tiers = {
-      mrr: {
-        label: "MRR",
-        hero: `${formatBudgetCents(mrrCents)}/mo`,
-        pill: mrrCents > 0 ? `${formatBudgetCents(mrrCents)}/mo` : "$0",
-        note: paying > 0
-          ? `${formatMetricCount(paying)} paying customers are live right now.`
-          : `${formatMetricCount(signups)} sign-ups have reached the product.`,
-      },
-      signups: {
-        label: "Sign-ups",
-        hero: formatMetricCount(signups),
-        pill: formatMetricCount(signups),
-        note: checkouts > 0
-          ? `${formatMetricCount(checkouts)} checkout intents are moving through the funnel.`
-          : "Sign-ups exist, but nobody has started checkout yet.",
-      },
-      progress: {
-        label: "Progress",
-        hero: "Getting started",
-        pill: "—",
-        note: queuedJobs > 0
-          ? `${formatMetricCount(queuedJobs)} jobs are queued while the company comes online.`
-          : "No product metrics yet. Once customers show up, this graph becomes real.",
-      },
+      mrr: { hero: `${formatBudgetCents(mrrCents)}/mo`, pill: mrrCents > 0 ? `${formatBudgetCents(mrrCents)}/mo` : "$0" },
+      signups: { hero: formatMetricCount(signups), pill: formatMetricCount(signups) },
+      progress: { hero: `${stagesReached}/3`, pill: `${stagesReached}/3` },
     };
+    const tierLabels = { mrr: "MRR", signups: "Sign-ups", progress: "Progress" };
     const tierOrder = ["mrr", "signups", "progress"];
     const adaptiveTier = mrrCents > 0 ? "mrr" : signups > 0 ? "signups" : "progress";
     const activeTier = LIVE.northStarTab && tiers[LIVE.northStarTab] ? LIVE.northStarTab : adaptiveTier;
     const northStar = tiers[activeTier];
-    const bars = [
-      { label: "sign-ups", detail: "users", value: signups, color: "var(--blue)" },
-      { label: "checkout", detail: "intents", value: checkouts, color: "var(--amber)" },
-      { label: "paying", detail: "customers", value: paying, color: "var(--green)" },
-    ];
-    const maxValue = Math.max(...bars.map((bar) => bar.value), 1);
+    function northStarBars(items) {
+      const maxValue = Math.max(...items.map((bar) => bar.value), 1);
+      return `<div class="board-bars">${items.map((bar) => {
+        const height = bar.value > 0 ? Math.max(14, Math.round((bar.value / maxValue) * 100)) : 10;
+        const fillColor = bar.value > 0 ? bar.color : "var(--paper-2)";
+        return `<div class="board-bar">
+          <div class="board-bar-v">${esc(bar.display)}</div>
+          <div class="board-bar-track"><div class="board-bar-fill" style="height:${height}%;background:${fillColor}"></div></div>
+          <div class="board-bar-l">${esc(bar.label)}</div>
+        </div>`;
+      }).join("")}</div>`;
+    }
+    let graphHtml;
+    if (activeTier === "progress") {
+      const pct = Math.round((stagesReached / 3) * 100);
+      const stage = (label, on) => `<span class="${on ? "on" : ""}">${esc(label)}</span>`;
+      graphHtml = `<div class="board-prog">
+        <div class="board-prog-track"><div class="board-prog-fill" style="width:${pct}%${pct ? "" : ";border-right-width:0"}"></div></div>
+        <div class="board-prog-stages">${stage("sign-ups", signups > 0)}${stage("checkout", checkouts > 0)}${stage("paying", paying > 0)}</div>
+      </div>`;
+    } else if (activeTier === "mrr") {
+      graphHtml = northStarBars([
+        { label: "mrr / mo", value: mrrCents, display: formatBudgetCents(mrrCents), color: "var(--green)" },
+        { label: "lifetime", value: revenueCents, display: formatBudgetCents(revenueCents), color: "var(--blue)" },
+      ]);
+    } else {
+      graphHtml = northStarBars([
+        { label: "sign-ups", value: signups, display: formatMetricCount(signups), color: "var(--blue)" },
+        { label: "checkout", value: checkouts, display: formatMetricCount(checkouts), color: "var(--amber)" },
+        { label: "paying", value: paying, display: formatMetricCount(paying), color: "var(--green)" },
+      ]);
+    }
     return `
-      <section class="board-graph${hasConversionData ? "" : " board-graph--empty"}">
-        <div class="board-star">
-          <div class="board-star-k">north star</div>
-          <div class="board-star-v">${esc(northStar.hero)}</div>
-          <div class="board-star-note">
-            <strong style="font:700 10px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">${esc(northStar.label)}</strong>
-            ${revenueCents > 0 ? ` · lifetime revenue ${esc(formatBudgetCents(revenueCents))}` : ""}
-          </div>
-          <div class="board-star-note">${esc(northStar.note)}</div>
-        </div>
+      <section class="board-graph">
+        <div class="board-star"><div class="board-star-v">${esc(northStar.hero)}</div></div>
         <div class="board-tabs">${tierOrder.map((key) => {
-          const tier = tiers[key];
-          return `<button class="board-tab${key === activeTier ? " on" : ""}" data-tab="${key}" type="button"><span class="board-tab-k">${esc(tier.label)}</span><span class="board-tab-v">${esc(tier.pill)}</span></button>`;
+          return `<button class="board-tab${key === activeTier ? " on" : ""}" data-tab="${key}" type="button"><span class="board-tab-k">${esc(tierLabels[key])}</span><span class="board-tab-v">${esc(tiers[key].pill)}</span></button>`;
         }).join("")}</div>
-        ${hasConversionData
-          ? `<div class="board-bars">${bars.map((bar) => {
-              const height = bar.value > 0 ? Math.max(14, Math.round((bar.value / maxValue) * 100)) : 10;
-              const fillColor = bar.value > 0 ? bar.color : "var(--paper-2)";
-              return `<div class="board-bar">
-                <div class="board-bar-v">${esc(formatMetricCount(bar.value))}</div>
-                <div class="board-bar-track"><div class="board-bar-fill" style="height:${height}%;background:${fillColor}"></div></div>
-                <div class="board-bar-l">${esc(bar.label)}<small>${esc(bar.detail)}</small></div>
-              </div>`;
-            }).join("")}</div>`
-          : ""}
+        ${graphHtml}
       </section>
     `;
   }
@@ -1606,9 +1593,9 @@
     }
   }
 
-  async function startCreativeCreditsCheckoutFromWallet() {
+  async function startCreativeCreditsCheckoutFromWallet(providedErrorEl) {
     const w = document.getElementById("w-wallet");
-    const errorEl = w ? $("#wallet-business-error", w) : null;
+    const errorEl = providedErrorEl || (w ? $("#wallet-business-error", w) : null);
     if (errorEl) errorEl.textContent = "";
     const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
     if (!business) {
@@ -1888,52 +1875,330 @@
     }
   };
 
+  function outreachChannelLabel(key) {
+    if (key === "x") return "X";
+    if (key === "reddit") return "Reddit";
+    if (key === "meta") return "Meta";
+    return String(key || "Channel").trim();
+  }
+
+  function outreachStatusLabel(status) {
+    const value = String(status || "").trim().toLowerCase();
+    if (!value || value === "missing") return "idle";
+    if (value === "published_local" || value === "suppressed_test_mode") return "local preview";
+    if (value === "draft_only") return "draft ready";
+    if (value === "created_paused") return "paused";
+    if (value === "ready_for_manual_launch") return "manual handoff";
+    if (value === "externally_launched") return "live";
+    if (value === "queued") return "queued";
+    return value.replace(/_/g, " ");
+  }
+
+  function normalizeOutreachChannel(key, raw) {
+    const channel = raw && typeof raw === "object" ? raw : {};
+    return {
+      key,
+      label: String(channel.label || outreachChannelLabel(key)).trim(),
+      status: String(channel.status || "missing").trim() || "missing",
+      updatedAt: String(channel.updated_at || "").trim(),
+      draftPath: String(channel.draft_path || "").trim(),
+      items: Array.isArray(channel.items) ? channel.items : [],
+      campaigns: Array.isArray(channel.campaigns) ? channel.campaigns : [],
+      latestJob: channel.latest_job && typeof channel.latest_job === "object" ? channel.latest_job : null,
+      publishedCount: Number(channel.published_count || 0),
+      campaignCount: Number(channel.campaign_count || 0),
+      metricsCount: Number(channel.metrics_count || 0),
+    };
+  }
+
+  function outreachChannels() {
+    const overview = LIVE.workspaceOverview || {};
+    const outreach = overview.artifacts && overview.artifacts.outreach || {};
+    const channels = outreach.channels && typeof outreach.channels === "object" ? outreach.channels : {};
+    return {
+      x: normalizeOutreachChannel("x", channels.x),
+      reddit: normalizeOutreachChannel("reddit", channels.reddit),
+      meta: normalizeOutreachChannel("meta", channels.meta),
+    };
+  }
+
+  function outreachMetricsSummary(metrics) {
+    const data = metrics && typeof metrics === "object" ? metrics : {};
+    const bits = [];
+    const impressions = Number(data.impressions);
+    const clicks = Number(data.clicks);
+    const spendUsd = Number(data.spend_usd);
+    const ctr = Number(data.ctr);
+    if (Number.isFinite(impressions) && impressions > 0) bits.push(`${formatMetricCount(impressions)} impressions`);
+    if (Number.isFinite(clicks) && clicks > 0) bits.push(`${formatMetricCount(clicks)} clicks`);
+    if (Number.isFinite(spendUsd) && spendUsd > 0) bits.push(`$${spendUsd.toFixed(2)} spend`);
+    if (Number.isFinite(ctr) && ctr > 0) bits.push(`${ctr.toFixed(2)}% CTR`);
+    return bits.join(" · ");
+  }
+
+  function outreachChannelSummary(channel) {
+    if (!channel) return "No outreach lane selected.";
+    if (channel.key === "x") {
+      if (channel.items.length > 0) {
+        return `${formatMetricCount(channel.items.length)} recorded post${channel.items.length === 1 ? "" : "s"}.`;
+      }
+      if (channel.draftPath) return `Draft ready in ${compactPath(channel.draftPath)}.`;
+      if (channel.latestJob) return `${outreachStatusLabel(channel.latestJob.status)} · ${channel.latestJob.label || "channel work recorded"}`;
+      return "No X output recorded yet.";
+    }
+    if (channel.campaigns.length > 0) {
+      const latest = channel.campaigns[0] || {};
+      const metricSummary = outreachMetricsSummary(latest.latest_metrics);
+      const budget = Number(latest.actual_daily_budget_usd || latest.daily_budget_usd);
+      const bits = [`${formatMetricCount(channel.campaigns.length)} campaign${channel.campaigns.length === 1 ? "" : "s"} recorded`];
+      if (Number.isFinite(budget) && budget > 0) bits.push(`$${budget}/day`);
+      if (metricSummary) bits.push(metricSummary);
+      return bits.join(" · ");
+    }
+    if (channel.latestJob) return `${outreachStatusLabel(channel.latestJob.status)} · ${channel.latestJob.label || "channel work recorded"}`;
+    return `No ${channel.label} campaigns recorded yet.`;
+  }
+
+  async function startOutreachChannel(channelKey, errorEl) {
+    const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
+    if (errorEl) errorEl.textContent = "";
+    if (!business) {
+      if (errorEl) errorEl.textContent = "Select a business first.";
+      return;
+    }
+    try {
+      const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/outreach/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel: channelKey }),
+      });
+      if (!res || res.success === false) throw new Error("Channel start request failed.");
+      if (errorEl) errorEl.textContent = `${outreachChannelLabel(channelKey)} queued.`;
+      await refreshBusinessData(business, {
+        skipAccount: true,
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
+    } catch (err) {
+      if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  function isPausedOutreachStatus(status) {
+    const value = String(status || "").trim().toLowerCase();
+    return value === "created_paused" || value === "paused";
+  }
+
+  async function startOutreachChannelGated(channelKey, errorEl) {
+    const credits = LIVE.creativeCredits;
+    const railAvailable = !!(credits && credits.available);
+    const balance = railAvailable ? wholeCredits(credits.balance_credits) : 0;
+    if (railAvailable && balance <= 0) {
+      openAddCreditsPrompt();
+      return;
+    }
+    await startOutreachChannel(channelKey, errorEl);
+  }
+
+  function openAddCreditsPrompt() {
+    const credits = LIVE.creativeCredits;
+    const balance = credits && credits.available ? wholeCredits(credits.balance_credits) : 0;
+    const win = makeWin({ id: "w-add-credits", title: "add credits", x: 240, y: 150, w: 264, h: 172, html: "" });
+    body(win).innerHTML = `
+      <div class="big-wake" style="font-size:26px">${balance} credit${balance === 1 ? "" : "s"}</div>
+      <div class="wallet-inline" style="margin-top:14px">
+        <button class="cbtn go" id="add-credits-go" type="button">add credits</button>
+        <button class="cbtn" id="add-credits-cancel" type="button">cancel</button>
+      </div>
+      <span class="wallet-note" id="add-credits-error" style="display:block;margin-top:8px"></span>
+    `;
+    const errorEl = body(win).querySelector("#add-credits-error");
+    const goBtn = body(win).querySelector("#add-credits-go");
+    const cancelBtn = body(win).querySelector("#add-credits-cancel");
+    if (goBtn) goBtn.addEventListener("click", () => { void startCreativeCreditsCheckoutFromWallet(errorEl); });
+    if (cancelBtn) cancelBtn.addEventListener("click", () => closeWin(win));
+    focusWin(win);
+    return win;
+  }
+
+  function renderOutreachJobCard(job) {
+    if (!job) return "";
+    return `<div class="chan">
+      <div class="chan-top"><span class="chan-nm">Latest request</span><span class="chan-st">${esc(outreachStatusLabel(job.status))}</span></div>
+      <div class="meta" style="margin-top:6px">${esc(String(job.label || job.kind || "Queued channel work").trim())}</div>
+      ${job.detail ? `<div class="meta" style="margin-top:6px;opacity:.7">${esc(String(job.detail || "").trim())}</div>` : ""}
+    </div>`;
+  }
+
+  function renderXDetailCard(item, index) {
+    const mode = String(item && item.mode || "").trim().toLowerCase();
+    const status = String(item && item.status || "").trim();
+    const url = normalizeOpenableUrl(item && item.url);
+    const artifactPath = String(item && item.artifact_path || "").trim();
+    const conversationFile = String(item && item.conversation_file || "").trim();
+    return `<div class="chan">
+      <div class="chan-top"><span class="chan-nm">${esc(String(item && item.title || "X post").trim() || "X post")}</span><span class="chan-st${mode === "live" ? " live" : ""}">${esc(outreachStatusLabel(status || mode || "published_local"))}</span></div>
+      <div class="meta" style="margin-top:6px">${esc(url ? "Published externally." : artifactPath ? "Local preview recorded." : "Thread mirrored in Takyon.")}</div>
+      <div class="wallet-inline" style="margin-top:8px">
+        ${url ? `<button class="cbtn" data-x-open="${index}" type="button">open</button>` : ""}
+        ${artifactPath ? `<button class="cbtn" data-x-preview="${index}" type="button">preview</button>` : ""}
+        ${conversationFile ? `<button class="cbtn" data-x-thread="${index}" type="button">thread</button>` : ""}
+      </div>
+    </div>`;
+  }
+
+  function renderCampaignDetailCard(channelKey, campaign, index) {
+    const metricSummary = outreachMetricsSummary(campaign && campaign.latest_metrics);
+    const budget = Number(campaign && (campaign.actual_daily_budget_usd || campaign.daily_budget_usd));
+    const metaBits = [
+      outreachStatusLabel(campaign && campaign.status),
+      Number.isFinite(budget) && budget > 0 ? `$${budget}/day` : "",
+      metricSummary,
+    ].filter(Boolean);
+    return `<div class="chan">
+      <div class="chan-top"><span class="chan-nm">${esc(String(campaign && (campaign.campaign_name || campaign.slug) || `${outreachChannelLabel(channelKey)} campaign`).trim())}</span><span class="chan-st${String(campaign && campaign.status || "").trim() && String(campaign && campaign.status || "").trim() !== "missing" ? " live" : ""}">${esc(outreachStatusLabel(campaign && campaign.status))}</span></div>
+      <div class="meta" style="margin-top:6px">${esc(metaBits.join(" · ") || "Campaign recorded in Takyon.")}</div>
+      <div class="wallet-inline" style="margin-top:8px">
+        ${campaign && campaign.open_url ? `<button class="cbtn" data-campaign-open="${index}" type="button">open</button>` : ""}
+        ${campaign && campaign.asset_path ? `<button class="cbtn" data-campaign-asset="${index}" type="button">asset</button>` : ""}
+        ${campaign && campaign.plan_path ? `<button class="cbtn" data-campaign-plan="${index}" type="button">plan</button>` : ""}
+        ${campaign && campaign.receipt_path ? `<button class="cbtn" data-campaign-receipt="${index}" type="button">receipt</button>` : ""}
+      </div>
+    </div>`;
+  }
+
+  function renderOutreachChannelWindow(channelKey) {
+    const w = document.getElementById("w-outreach-channel");
+    if (!w) return;
+    const channels = outreachChannels();
+    const currentKey = String(channelKey || w.dataset.channel || "x").trim().toLowerCase();
+    const channel = channels[currentKey] || channels.x;
+    w.dataset.channel = channel.key;
+    const titleEl = w.querySelector(".win__title");
+    if (titleEl) titleEl.textContent = `${channel.label} · outreach`;
+    const detailCards = channel.key === "x"
+      ? channel.items.map((item, index) => renderXDetailCard(item, index)).join("")
+      : channel.campaigns.map((campaign, index) => renderCampaignDetailCard(channel.key, campaign, index)).join("");
+    const emptyState = channel.key === "x"
+      ? (channel.draftPath
+        ? `<div class="chan"><div class="chan-top"><span class="chan-nm">Draft</span><span class="chan-st">ready</span></div><div class="meta" style="margin-top:6px">${esc(compactPath(channel.draftPath))}</div><div class="wallet-inline" style="margin-top:8px"><button class="cbtn" data-x-draft type="button">open draft</button></div></div>`
+        : `<div class="meta">No X posts or drafts are recorded yet.</div>`)
+      : `<div class="meta">No ${esc(channel.label)} campaigns are recorded yet.</div>`;
+    body(w).innerHTML = `
+      <div class="lab">${esc(channel.label)} lane</div>
+      <div class="meta" style="margin:6px 0 11px">${esc(outreachChannelSummary(channel))}</div>
+      <div class="wallet-inline" style="margin-bottom:12px">
+        <button class="cbtn go" data-channel-start="${esc(channel.key)}" type="button">start</button>
+        <span class="wallet-note" id="outreach-channel-error"></span>
+      </div>
+      ${renderOutreachJobCard(channel.latestJob)}
+      ${detailCards || emptyState}
+    `;
+    const errorEl = body(w).querySelector("#outreach-channel-error");
+    body(w).querySelectorAll("[data-channel-start]").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        void startOutreachChannelGated(channel.key, errorEl);
+      });
+    });
+    if (channel.key === "x") {
+      body(w).querySelectorAll("[data-x-open]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const item = channel.items[Number(btn.getAttribute("data-x-open") || 0)];
+          const target = normalizeOpenableUrl(item && item.url);
+          if (target) openUrlInNewTab(target);
+        });
+      });
+      body(w).querySelectorAll("[data-x-preview]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const item = channel.items[Number(btn.getAttribute("data-x-preview") || 0)];
+          if (item && item.artifact_path) void openDocument(item.artifact_path, item.title || "X post");
+        });
+      });
+      body(w).querySelectorAll("[data-x-thread]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const item = channel.items[Number(btn.getAttribute("data-x-thread") || 0)];
+          if (item && item.conversation_file) void openDocument(item.conversation_file, item.title || "Thread");
+        });
+      });
+      const draftBtn = body(w).querySelector("[data-x-draft]");
+      if (draftBtn && channel.draftPath) {
+        draftBtn.addEventListener("click", () => {
+          void openDocument(channel.draftPath, `${channel.label} draft`);
+        });
+      }
+      return;
+    }
+    body(w).querySelectorAll("[data-campaign-open]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const campaign = channel.campaigns[Number(btn.getAttribute("data-campaign-open") || 0)];
+        const target = normalizeOpenableUrl(campaign && campaign.open_url);
+        if (target) openUrlInNewTab(target);
+      });
+    });
+    body(w).querySelectorAll("[data-campaign-asset]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const campaign = channel.campaigns[Number(btn.getAttribute("data-campaign-asset") || 0)];
+        if (campaign && campaign.asset_path) void openDocument(campaign.asset_path, campaign.campaign_name || "Campaign asset");
+      });
+    });
+    body(w).querySelectorAll("[data-campaign-plan]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const campaign = channel.campaigns[Number(btn.getAttribute("data-campaign-plan") || 0)];
+        if (campaign && campaign.plan_path) void openDocument(campaign.plan_path, campaign.campaign_name || "Campaign plan");
+      });
+    });
+    body(w).querySelectorAll("[data-campaign-receipt]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const campaign = channel.campaigns[Number(btn.getAttribute("data-campaign-receipt") || 0)];
+        if (campaign && campaign.receipt_path) void openDocument(campaign.receipt_path, campaign.campaign_name || "Campaign receipt");
+      });
+    });
+  }
+
+  function openOutreachChannel(channelKey) {
+    const win = makeWin({
+      id: "w-outreach-channel",
+      title: `${outreachChannelLabel(channelKey)} · outreach`,
+      x: 148,
+      y: 92,
+      w: 540,
+      h: 420,
+      html: "",
+    });
+    win.dataset.channel = String(channelKey || "x").trim().toLowerCase();
+    renderOutreachChannelWindow(win.dataset.channel);
+    focusWin(win);
+    return win;
+  }
+
   const originalRenderOutreach = renderOutreach;
   renderOutreach = function renderOutreachLiveAware() {
     if (!RT.live) return originalRenderOutreach();
     const w = document.getElementById("w-status");
     if (!w) return;
-    const publishedPosts = publishedPostEntries();
-    const creativeAvailable = !!(LIVE.creativeCredits && LIVE.creativeCredits.available);
-    const creativeBalance = creativeAvailable ? wholeCredits(LIVE.creativeCredits.balance_credits) : null;
-    const creativeReserved = creativeAvailable ? wholeCredits(LIVE.creativeCredits.reserved_credits) : null;
+    const channels = outreachChannels();
     body(w).innerHTML = `
-      <div class="lab">paid outreach credits</div>
-      <div class="big-wake" style="font-size:30px">${creativeBalance === null ? "—" : String(creativeBalance)}</div>
-      <div class="meta" style="margin:6px 0 11px">${creativeBalance === null
-        ? "Creative credits are unavailable for this business right now. Operator budget stays in the top rail."
-        : `${creativeBalance} available${creativeReserved ? ` · ${creativeReserved} reserved` : ""}. Operator budget stays in the top rail.`}</div>
-      ${publishedPosts.length
-        ? publishedPosts.map((item, index) => buildOutreachRow(item.title, item.meta, "live", { type: "published-post", index, label: item.actionLabel })).join("")
-        : buildOutreachRow("Published posts", "No published posts yet", "idle", null)}
+      ${["x", "reddit", "meta"].map((key) => {
+        const channel = channels[key];
+        const status = String(channel.status || "missing");
+        const paused = isPausedOutreachStatus(status);
+        const stClass = paused ? " alert" : (status && status !== "missing" ? " live" : "");
+        return `<div class="chan${paused ? " paused" : ""}" data-channel-view="${key}" tabindex="0" role="button" style="cursor:pointer">
+          <div class="chan-top"><span class="chan-nm">${esc(channel.label)}</span><span class="chan-st${stClass}">${esc(outreachStatusLabel(status))}</span></div>
+          <div class="meta" style="margin-top:6px">${esc(outreachChannelSummary(channel))}</div>
+          <div class="wallet-inline" style="margin-top:8px">
+            <button class="cbtn go" data-channel-start="${key}" type="button">start</button>
+          </div>
+        </div>`;
+      }).join("")}
+      <span class="wallet-note" id="outreach-panel-error" style="display:block;margin-top:2px"></span>
     `;
-    body(w).querySelectorAll("[data-action]").forEach((el) => {
-      const actionType = el.getAttribute("data-action") || "";
-      const actionIndex = Number(el.getAttribute("data-action-index") || 0);
-      const run = () => {
-        if (actionType === "published-post") {
-          const entry = publishedPosts[actionIndex];
-          const item = entry && entry.payload || null;
-          if (!item) return;
-          const postUrl = normalizeOpenableUrl(item.url);
-          if (postUrl) {
-            openUrlInNewTab(postUrl);
-            return;
-          }
-          if (item.artifact_path) {
-            void openDocument(item.artifact_path, item.title || entry.title || "Published post");
-            return;
-          }
-          if (item.path) {
-            void openDocument(item.path, entry.title || "Published post");
-            return;
-          }
-          if (item.conversation_file) {
-            void openDocument(item.conversation_file, item.title || entry.title || "Conversation");
-          }
-          return;
-        }
-      };
+    const errorEl = body(w).querySelector("#outreach-panel-error");
+    body(w).querySelectorAll("[data-channel-view]").forEach((el) => {
+      const channelKey = String(el.getAttribute("data-channel-view") || "").trim().toLowerCase();
+      const run = () => openOutreachChannel(channelKey);
       el.addEventListener("click", run);
       el.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -1942,6 +2207,15 @@
         }
       });
     });
+    body(w).querySelectorAll("[data-channel-start]").forEach((btn) => {
+      const channelKey = String(btn.getAttribute("data-channel-start") || "").trim().toLowerCase();
+      btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void startOutreachChannelGated(channelKey, errorEl);
+      });
+    });
+    if (document.getElementById("w-outreach-channel")) renderOutreachChannelWindow();
   };
 
   const originalUpdateMenu = updateMenu;

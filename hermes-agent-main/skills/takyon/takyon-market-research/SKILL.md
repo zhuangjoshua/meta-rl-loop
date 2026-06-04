@@ -72,7 +72,7 @@ Use this skill to reduce uncertainty about who the business should serve, what t
 - Use `business_read_file` for `research/strategy.md`, the existing `research/market.md`, and `metrics/summary.md` when they already exist.
 - Use `business_list_files` if you need to confirm whether the canonical research files already exist.
 - Update `research/market.md`, `research/sources.jsonl`, and `metrics/research-summary.json` with `business_write_file` or `business_patch_file`.
-- If the research materially changes strategy, pricing, or ICP direction, record that durable change with `business_record_memory` after publishing the research outputs.
+- If the research materially changes strategy, pricing, ICP, channel, or messaging, patch `research/strategy.md` so the working strategy matches the findings. Use `business_record_memory` only for extra durable notes that do not belong in `research/strategy.md`.
 
 ## Procedure
 
@@ -82,7 +82,7 @@ Use this skill to reduce uncertainty about who the business should serve, what t
 4. Write or patch `research/sources.jsonl` first so the source log reflects the evidence actually used. Expect one dated, source-backed entry per line.
 5. Write or patch `research/market.md` with a concise decision memo that answers: who, pain, alternatives, channel, pricing signal, and the recommended next move.
 6. Write or patch `metrics/research-summary.json` with a compact machine-readable rollup of the same conclusions so future wakes can compare deltas quickly.
-7. If the research materially changes strategy, pricing, or ICP direction, call `business_record_memory` so the durable business memory matches the published research files.
+7. If the research materially changes strategy, pricing, ICP, channel, or messaging, patch `research/strategy.md` so the working strategy matches the published findings. Use `business_record_memory` only for extra durable notes that do not belong in `research/strategy.md`.
 
 ## Output Format
 

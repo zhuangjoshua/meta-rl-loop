@@ -60,8 +60,8 @@ python scripts/batch_generate.py examples/example-batch.json -o output/ --crop
 ```
 
 Each creative produces a full bundle: `*.png`, `*.spec.json`, `*.prompt.txt`, `*.qa.json`,
-`*.output.json`. Batches also write `manifest.json`. A real example bundle (from a `--dry-run`)
-lives in [`examples/output/`](examples/output/).
+`*.output.json`. Batches also write `manifest.json`. Those generated output directories are
+local artifacts and are intentionally gitignored.
 
 ## Authoring your own ads
 
@@ -136,8 +136,7 @@ static-ad-creative-generator/
 └── examples/
     ├── example-input.json        # a filled creative brief (fictional product "Tally")
     ├── example-spec.json         # one complete ad spec
-    ├── example-batch.json        # 2 specs across angles
-    └── output/                   # real dry-run output bundle
+    └── example-batch.json        # 2 specs across angles
 ```
 
 ## Notes

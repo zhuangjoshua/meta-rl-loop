@@ -10,7 +10,7 @@ metadata:
   hermes:
     category: takyon
     tags: [ugc, video, ad, kling, marketing]
-    related_skills: []
+    related_skills: [takyon-meta-ads, takyon-reddit-ads, takyon-distribution]
     requires_toolsets: [takyon]
     requires_tools: [business_ugc_ad_generate]
     routing:

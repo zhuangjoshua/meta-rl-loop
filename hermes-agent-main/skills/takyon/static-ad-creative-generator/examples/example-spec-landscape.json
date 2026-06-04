@@ -12,8 +12,14 @@
   },
   "strategy": {
     "angle": "comparison",
-    "hook": "Spreadsheet vs. Tally.",
-    "promise": "Same answer in about a minute, not an evening.",
+    "boldness": "hard",
+    "disruption_target": "the old habit of using spreadsheets and manual statement review as a responsible default",
+    "hook_tactic": "comparison",
+    "psychological_trigger": "specificity_proof",
+    "creative_mechanic": "contrast_without_comment",
+    "hook": "Spreadsheets cost more than Tally.",
+    "claim_support": "The split-frame shows manual spreadsheeting versus the app result side by side, letting the viewer infer the time-cost contrast immediately.",
+    "promise": "Get the same answer in about a minute, not an evening.",
     "objection_addressed": "Can't I just check my statements myself?",
     "proof_type": "comparison"
   },
@@ -34,7 +40,7 @@
     "must_not_show": ["fabricated third-party brand logos", "invented endorsements", "real bank names", "named competitor products"]
   },
   "copy": {
-    "overlay_text": "Spreadsheet vs. Tally",
+    "overlay_text": "Spreadsheets cost more than Tally",
     "headline": "Stop auditing statements by hand",
     "primary_text": "Combing your statements by hand works — once. Tally finds the same recurring charges in about a minute, every month.",
     "cta": "Try Tally Free"

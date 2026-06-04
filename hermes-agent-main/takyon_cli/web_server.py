@@ -60,11 +60,17 @@ from takyon_cli.config import (
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.core import (
     handle_business_create_app_checkout,
+    handle_business_enqueue_job,
+    handle_business_meta_ad_bind_manual_launch,
+    handle_business_meta_ad_insights_sync,
     handle_business_read_app_account,
+    handle_business_read_app_profile,
     handle_business_record_app_usage,
     handle_business_record_stripe_webhook,
     handle_business_request_app_magic_link,
+    handle_business_upsert_app_profile,
     handle_business_verify_app_magic_link,
+    _is_reserved_public_subdomain,
 )
 from plugins.takyon import safebox as takyon_safebox
 
@@ -241,6 +247,113 @@ def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40)
 
     outputs.sort(key=lambda item: int(item.get("at") or 0), reverse=True)
     return outputs[: max(1, min(int(limit or 40), 100))]
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _read_last_jsonl_object(path: Path) -> dict[str, Any] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _takyon_collect_operator_meta_campaigns(store: Any, business_slugs: list[str]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for business in business_slugs:
+        try:
+            business_root = store._business_root(business, sync=False)
+        except Exception:
+            continue
+        campaigns_root = business_root / "distribution" / "meta-ads"
+        if not campaigns_root.exists() or not campaigns_root.is_dir():
+            continue
+        for receipt_abs in campaigns_root.glob("*/receipt.json"):
+            receipt = _read_json_object(receipt_abs)
+            if not receipt:
+                continue
+            campaign_slug = receipt_abs.parent.name
+            plan_abs = receipt_abs.parent / "plan.json"
+            plan = _read_json_object(plan_abs) or {}
+            campaign_block = plan.get("campaign") if isinstance(plan.get("campaign"), dict) else {}
+            adset_block = plan.get("adset") if isinstance(plan.get("adset"), dict) else {}
+            ad_block = plan.get("ad") if isinstance(plan.get("ad"), dict) else {}
+            asset_path = str(
+                receipt.get("ad_video_path")
+                or receipt.get("ad_image_path")
+                or plan.get("ad_video_path")
+                or plan.get("ad_image_path")
+                or ""
+            ).strip()
+            metrics_abs = business_root / "metrics" / "meta-ads" / campaign_slug / "insights.jsonl"
+            latest_metrics = _read_last_jsonl_object(metrics_abs)
+            targeting = receipt.get("targeting")
+            if not isinstance(targeting, dict):
+                targeting = adset_block.get("targeting") if isinstance(adset_block.get("targeting"), dict) else {}
+            items.append(
+                {
+                    "business_slug": business,
+                    "slug": campaign_slug,
+                    "status": receipt.get("status"),
+                    "launch_mode": receipt.get("launch_mode") or plan.get("launch_mode"),
+                    "asset_kind": receipt.get("asset_kind") or plan.get("asset_kind"),
+                    "asset_path": asset_path or None,
+                    "asset_download_url": (
+                        f"/api/takyon/businesses/{urllib.parse.quote(business, safe='')}/asset?path="
+                        f"{urllib.parse.quote(asset_path, safe='/')}"
+                        if asset_path
+                        else None
+                    ),
+                    "plan_path": receipt.get("plan_path")
+                    or (str(plan_abs.relative_to(business_root)) if plan_abs.is_file() else None),
+                    "receipt_path": str(receipt_abs.relative_to(business_root)),
+                    "created_at": receipt.get("created_at"),
+                    "updated_at": receipt.get("updated_at"),
+                    "externally_launched_at": receipt.get("externally_launched_at"),
+                    "objective": receipt.get("objective") or campaign_block.get("objective"),
+                    "campaign_name": receipt.get("campaign_name") or campaign_block.get("name"),
+                    "adset_name": receipt.get("adset_name") or adset_block.get("name"),
+                    "ad_name": receipt.get("ad_name") or ad_block.get("name"),
+                    "daily_budget_usd": receipt.get("daily_budget_usd") or adset_block.get("daily_budget_usd"),
+                    "actual_daily_budget_usd": receipt.get("actual_daily_budget_usd"),
+                    "message": receipt.get("message") or ad_block.get("message"),
+                    "link": receipt.get("link") or ad_block.get("link"),
+                    "tracked_link": receipt.get("tracked_link") or ad_block.get("tracked_link"),
+                    "call_to_action": receipt.get("call_to_action") or ad_block.get("call_to_action"),
+                    "targeting": targeting,
+                    "manual_launch": receipt.get("manual_launch") if isinstance(receipt.get("manual_launch"), dict) else None,
+                    "ids": receipt.get("ids") if isinstance(receipt.get("ids"), dict) else {},
+                    "latest_metrics": latest_metrics,
+                }
+            )
+
+    items.sort(
+        key=lambda item: str(
+            item.get("updated_at")
+            or item.get("externally_launched_at")
+            or item.get("created_at")
+            or ""
+        ),
+        reverse=True,
+    )
+    return items
 
 
 def _load_or_create_session_token() -> str:
@@ -1612,12 +1725,13 @@ def _takyon_app_broker_generate(
 # embedded slug ("/api/takyon/apps/<slug>/...") — and the runtime resolves
 # them to the host's business. This removes the recurring "rail not wired"
 # 404 when a generated site guesses the wrong API base. See CLAUDE.md: the
-# shared app runtime owns auth/session/account/checkout/usage/generate.
+# shared app runtime owns auth/session/account/profile/checkout/usage/generate.
 _PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
     "auth/request",
     "auth/verify",
     "session",
     "account",
+    "profile",
     "checkout",
     "usage",
     "generate",
@@ -1673,6 +1787,16 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         payload["authenticated"] = status == int(HTTPStatus.OK)
         return _takyon_app_json(status, payload)
 
+    if parts == ["profile"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_read_app_profile({
+            "business": business,
+            "session_token": token,
+        }))
+        return _takyon_app_json(status, payload)
+
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
@@ -1718,6 +1842,22 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "customer_email": body.get("customer_email") or body.get("customerEmail") or (account.get("user") or {}).get("email"),
             "app_user_id": (account.get("user") or {}).get("id"),
             "metadata": body.get("metadata") or {},
+        }))
+        return _takyon_app_json(status, payload)
+
+    if parts == ["profile"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_upsert_app_profile({
+            "business": business,
+            "session_token": token,
+            "display_name": body["display_name"] if "display_name" in body else body.get("displayName"),
+            "headline": body["headline"] if "headline" in body else body.get("headline"),
+            "bio": body["bio"] if "bio" in body else body.get("bio"),
+            "attributes": body["attributes"] if "attributes" in body else None,
+            "metadata": body["metadata"] if "metadata" in body else None,
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"profile:{business}:{uuid.uuid4().hex}",
         }))
         return _takyon_app_json(status, payload)
 
@@ -2502,6 +2642,54 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/takyon/businesses/{slug}/asset")
+async def get_takyon_business_asset(request: Request, slug: str, path: str = ""):
+    """Direct authenticated media download for manual launch handoff."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    rel_path = str(path or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        file_path = store._resolve_business_file(business, rel_path, sync=False)
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f"asset not found: {rel_path}")
+        suffix = file_path.suffix.lower()
+        if suffix not in _TAKYON_DIRECT_MEDIA_SUFFIXES:
+            raise HTTPException(status_code=400, detail="asset endpoint only serves image/video files")
+        media_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+            ".m4v": "video/mp4",
+        }
+        return FileResponse(
+            file_path,
+            media_type=media_types.get(suffix, "application/octet-stream"),
+            filename=file_path.name,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - handoff should fail honestly
+        _log.warning("dashboard business asset download failed for %s:%s: %s", business, rel_path, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/takyon/businesses/{slug}/site-preview")
 async def get_takyon_business_site_preview(
     request: Request,
@@ -2670,6 +2858,38 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
         }
 
 
+@app.get("/api/takyon/operator/meta-campaigns")
+async def get_takyon_operator_meta_campaigns(request: Request) -> dict[str, Any]:
+    """Read-only Meta campaign handoff queue for the SAI operator surface."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        return {
+            "available": False,
+            "campaigns": [],
+            "reason": "operator_principal_unavailable",
+        }
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        campaigns = _takyon_collect_operator_meta_campaigns(
+            store,
+            sorted({str(slug or "").strip() for slug in (principal.business_slugs or []) if str(slug or "").strip()}),
+        )
+        return {
+            "available": True,
+            "campaigns": campaigns,
+            "owned_business_count": len(principal.business_slugs),
+        }
+    except Exception as exc:  # noqa: BLE001 - queue should degrade honestly
+        _log.warning("dashboard operator meta campaign queue failed: %s", exc)
+        return {
+            "available": False,
+            "campaigns": [],
+            "reason": "read_failed",
+        }
+
+
 @app.get("/api/takyon/businesses/{slug}/creative-credits/packs")
 async def get_takyon_business_creative_credit_packs(
     request: Request, slug: str
@@ -2787,6 +3007,174 @@ async def create_takyon_business_creative_credit_checkout(
         "credits": pack["credits"],
         "amount_cents": pack["amount_cents"],
     }
+
+
+@app.post("/api/takyon/businesses/{slug}/outreach/start")
+async def start_takyon_business_outreach_channel(
+    request: Request,
+    slug: str,
+) -> JSONResponse:
+    """Record a durable start request for one outreach lane from the dashboard."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    channel = str(body.get("channel") or "").strip().lower()
+    channel_specs = {
+        "x": {
+            "label": "X",
+            "kind": "x-social.campaign_start",
+            "requested_skill": "takyon-x",
+        },
+        "reddit": {
+            "label": "Reddit",
+            "kind": "reddit.campaign_start",
+            "requested_skill": "takyon-reddit-ads",
+        },
+        "meta": {
+            "label": "Meta",
+            "kind": "meta.campaign_start",
+            "requested_skill": "takyon-meta-ads",
+        },
+    }
+    spec = channel_specs.get(channel)
+    if spec is None:
+        raise HTTPException(status_code=400, detail="channel must be one of: x, reddit, meta")
+    status, payload = _takyon_app_tool(
+        handle_business_enqueue_job(
+            {
+                "business": business,
+                "scope": f"business:{business}/distribution:campaign",
+                "kind": spec["kind"],
+                "status": "queued",
+                "payload": {
+                    "channel": channel,
+                    "channel_label": spec["label"],
+                    "requested_skill": spec["requested_skill"],
+                    "requested_action": "create_or_continue_channel_campaign",
+                    "workspace": "distribution/campaign/",
+                    "ui_origin": "litebulb.outreach_panel",
+                    "summary": f"Start or continue the {spec['label']} outreach lane.",
+                },
+                "idempotency_key": str(body.get("idempotency_key") or f"dashboard-outreach-start-{uuid.uuid4().hex}"),
+                "reason": f"start {spec['label']} outreach lane from dashboard panel",
+                "actor": "dashboard",
+            }
+        )
+    )
+    return _takyon_app_json(status, payload)
+
+
+@app.post("/api/takyon/businesses/{slug}/meta-campaigns/{campaign_slug}/bind-manual-launch")
+async def bind_takyon_business_meta_manual_launch(
+    request: Request,
+    slug: str,
+    campaign_slug: str,
+) -> JSONResponse:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    status, payload = _takyon_app_tool(
+        handle_business_meta_ad_bind_manual_launch(
+            {
+                **body,
+                "business": business,
+                "slug": str(campaign_slug or "").strip(),
+                "idempotency_key": str(body.get("idempotency_key") or f"dashboard-manual-bind-{uuid.uuid4().hex}"),
+                "actor": "dashboard",
+                "reason": "bind manual meta launch from campaign ops",
+            }
+        )
+    )
+    return _takyon_app_json(status, payload)
+
+
+@app.post("/api/takyon/businesses/{slug}/meta-campaigns/{campaign_slug}/manual-metrics")
+async def sync_takyon_business_meta_manual_metrics(
+    request: Request,
+    slug: str,
+    campaign_slug: str,
+) -> JSONResponse:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    status, payload = _takyon_app_tool(
+        handle_business_meta_ad_insights_sync(
+            {
+                **body,
+                "business": business,
+                "slug": str(campaign_slug or "").strip(),
+                "source": "manual",
+                "level": str(body.get("level") or "campaign"),
+                "idempotency_key": str(body.get("idempotency_key") or f"dashboard-manual-metrics-{uuid.uuid4().hex}"),
+                "actor": "dashboard",
+                "reason": "record manual meta metrics from campaign ops",
+            }
+        )
+    )
+    return _takyon_app_json(status, payload)
+
+
+@app.post("/api/takyon/businesses/{slug}/meta-campaigns/{campaign_slug}/sync")
+async def sync_takyon_business_meta_metrics(
+    request: Request,
+    slug: str,
+    campaign_slug: str,
+) -> JSONResponse:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    status, payload = _takyon_app_tool(
+        handle_business_meta_ad_insights_sync(
+            {
+                **body,
+                "business": business,
+                "slug": str(campaign_slug or "").strip(),
+                "source": "meta_api",
+                "level": str(body.get("level") or "campaign"),
+                "date_preset": str(body.get("date_preset") or "today"),
+                "idempotency_key": str(body.get("idempotency_key") or f"dashboard-meta-sync-{uuid.uuid4().hex}"),
+                "actor": "dashboard",
+                "reason": "sync meta metrics from campaign ops",
+            }
+        )
+    )
+    return _takyon_app_json(status, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -5535,7 +5923,7 @@ def _business_slug_from_product_host(host: str) -> str:
     if not host or not base or not host.endswith(f".{base}"):
         return ""
     slug = host[: -(len(base) + 1)]
-    if slug in {"app", "www", "admin", "dashboard"}:
+    if _is_reserved_public_subdomain(slug):
         return ""
     try:
         return _safe_product_slug(slug)

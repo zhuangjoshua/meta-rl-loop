@@ -66,6 +66,8 @@ pnpm-debug.log*
 **/hermes_cli/web_dist/
 **/web/public/fonts/
 **/web/public/ds-assets/
+**/skills/takyon/static-ad-creative-generator/examples/output/
+**/skills/takyon/static-ad-creative-generator/output/
 **/website/static/api/skills-index.json
 **/website/static/llms.txt
 **/website/static/llms-full.txt

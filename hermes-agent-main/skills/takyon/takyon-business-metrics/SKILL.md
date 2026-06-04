@@ -69,7 +69,7 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 ## How to Run
 
 - Call `business_calculate_pulse` first. Treat that as the deterministic input snapshot for the current turn.
-- Use `business_read_business` and `business_read_file` to inspect `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`, and any relevant strategy file before rewriting them.
+- Use `business_read_business` and `business_read_file` to inspect `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`, and `research/strategy.md` before rewriting them.
 - Use `takyon-conversation-followup` if unresolved inbound or conversation volume is too noisy to summarize directly.
 - Use `business_write_file` or `business_patch_file` to update the canonical metrics files.
 
@@ -77,10 +77,11 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 
 1. Call `business_calculate_pulse` and inspect the current snapshot: users, revenue, usage, jobs, controls, unresolved inbound, and recent events.
 2. If `metrics/summary.md`, `metrics/summary.json`, or `metrics/wake-history.md` already exist, load them with `business_read_file` and compare the current pulse against the prior state. If they do not exist, create a first baseline instead of implying history that is not there.
-3. If unresolved inbound or conversation volume is too noisy to summarize confidently, load `takyon-conversation-followup` and use its published `metrics/conversations/followup.md` before finalizing the metrics narrative.
-4. Write or patch `metrics/summary.md` with the short human summary: what changed, what matters, what is blocked, and what evidence gap remains.
-5. Write or patch `metrics/summary.json` with the same state in compact structured form so future wakes can compare deltas quickly.
-6. After the CEO chooses the next move, append one concise note to `metrics/wake-history.md` describing the wake context and chosen action. Do not turn it into a diary.
+3. Read `research/strategy.md` before finalizing the wake output. If the pulse or follow-up evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, patch `research/strategy.md` first.
+4. If unresolved inbound or conversation volume is too noisy to summarize confidently, load `takyon-conversation-followup` and use its published `metrics/conversations/followup.md` before finalizing the metrics narrative.
+5. Write or patch `metrics/summary.md` with the short human summary: what changed, what matters, what is blocked, and what evidence gap remains.
+6. Write or patch `metrics/summary.json` with the same state in compact structured form so future wakes can compare deltas quickly.
+7. After the CEO chooses the next move, append one concise note to `metrics/wake-history.md` describing the wake context and chosen action. Do not turn it into a diary.
 
 ## Output Format
 

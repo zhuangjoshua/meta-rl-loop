@@ -606,6 +606,44 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert isinstance(body["outputs"], list)
 
 
+def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+
+    def _fake_enqueue_job(args, **_kwargs):
+        captured.update(args)
+        return json.dumps({"success": True, "job": {"kind": args["kind"], "status": args["status"]}})
+
+    monkeypatch.setattr(web_server, "handle_business_enqueue_job", _fake_enqueue_job)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.post("/api/takyon/businesses/alpha/outreach/start", json={"channel": "reddit"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert captured["business"] == "alpha"
+    assert captured["kind"] == "reddit.campaign_start"
+    assert captured["status"] == "queued"
+    assert captured["scope"] == "business:alpha/distribution:campaign"
+    assert captured["payload"]["channel"] == "reddit"
+    assert captured["payload"]["requested_skill"] == "takyon-reddit-ads"
+
+
 def test_auth0_public_path_allows_machine_facing_pg_routes():
     import takyon_cli.web_server as web_server
 
@@ -727,6 +765,7 @@ def test_normalize_product_rail_route_handles_path_variants():
     assert norm("/api/takyon/apps/otherslug/generate") == "generate"
     assert norm("session") == "session"
     assert norm("/account") == "account"
+    assert norm("/profile") == "profile"
     assert norm("/checkout") == "checkout"
     assert norm("/usage") == "usage"
     # Non-rail paths and static pages must not be claimed.
