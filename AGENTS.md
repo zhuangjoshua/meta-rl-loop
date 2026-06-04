@@ -86,6 +86,7 @@ Current deploy reality under the tightened firewall:
 - Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
 - The dedicated Safebox service app now runs live on `10.116.0.2:8000`, and the tracked operator/sub-user systemd units point at it with `TAKYON_SAFEBOX_URL=http://10.116.0.2:8000`.
 - The sub-user VPS now runs the tracked shared product-host Caddyfile and serves product hosts through `takyon-subuser.service`; if a product host falls back to the default Caddy page, treat that as a sub-user Caddy drift or missing `product-sites` sync, not as a frontend build issue.
+- During `app.fourmanifold.com` / in-app-browser E2E waits, do not sit idle. Keep polling both the visible browser state and the live VPS/backend/job/workspace state so you can tell the difference between a slow bootstrap, a stale preview, and a real production failure.
 
 Fast path for ordinary code/docs/UI changes:
 

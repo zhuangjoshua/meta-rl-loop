@@ -15,6 +15,7 @@ Two layers:
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import uuid
@@ -286,6 +287,66 @@ def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tm
     resumed = tmp_path / "resumed"
     storage.sync_down(backend, "acme", resumed)
     assert (resumed / "product" / "surface.md").read_text() == "partial surface\n"
+
+
+def test_refresh_business_surface_after_bootstrap_uses_declared_surface(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class _FakeStore:
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:acme"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "source_path": "product/site",
+                        "publish_target": "https://acme.fourmanifold.com/",
+                        "publish_policy": "publish_after_refresh",
+                    }
+                }
+            }
+
+    def _fake_refresh(args, **_kw):
+        seen.update(args)
+        return json.dumps(
+            {
+                "success": True,
+                "surface_refresh": {
+                    "status": "passed",
+                    "publish": {
+                        "status": "published",
+                        "public_url": "https://acme.fourmanifold.com/",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: _FakeStore())
+    monkeypatch.setattr(core, "handle_business_refresh_product_surface", _fake_refresh)
+
+    refreshed = worker._refresh_business_surface_after_bootstrap("acme", job_id="job-1")
+
+    assert refreshed["publish"]["status"] == "published"
+    assert seen["business"] == "acme"
+    assert seen["source_path"] == "product/site"
+    assert seen["publish_target"] == "https://acme.fourmanifold.com/"
+    assert seen["publish_policy"] == "publish_after_refresh"
+    assert seen["idempotency_key"] == "job-1:bootstrap-final-surface-refresh"
+
+
+def test_refresh_business_surface_after_bootstrap_skips_missing_source_path(monkeypatch):
+    class _FakeStore:
+        def read(self, *, scope, query, include=None, limit=None):
+            return {"app": {"surface_contract": {"source_path": ""}}}
+
+    monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: _FakeStore())
+    monkeypatch.setattr(
+        core,
+        "handle_business_refresh_product_surface",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("refresh should not be called")),
+    )
+
+    assert worker._refresh_business_surface_after_bootstrap("acme", job_id="job-1") is None
 
 
 def test_zero_cost_turn_reports_zero_cents(monkeypatch):

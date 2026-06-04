@@ -33,6 +33,7 @@ enabled). Activation is a separate, operator-gated step.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -97,6 +98,55 @@ def _record_runtime_event(
             )
     except Exception as exc:  # pragma: no cover - best-effort trace only
         _log.debug("failed to record worker runtime event for %s: %s", slug, exc)
+
+
+def _refresh_business_surface_after_bootstrap(slug: str, *, job_id: str) -> dict[str, Any] | None:
+    """After scratch sync-up, refresh the durable product surface if this bootstrap declared one.
+
+    This closes the gap where a bootstrap turn writes final `product/site/*` files late in the turn
+    (for example via `business_write_file`) after an earlier worker refresh already ran against an
+    incomplete scratch workspace. The durable business root is the source of truth for product-host
+    publication, so do one final trusted refresh against that durable state before marking bootstrap
+    complete.
+    """
+
+    from .core import TakyonStore, handle_business_refresh_product_surface
+
+    store = TakyonStore()
+    summary = store.read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
+    app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+    surface = app.get("surface") or app.get("surface_contract") or {}
+    if not isinstance(surface, Mapping):
+        return None
+    source_path = str(surface.get("source_path") or "").strip()
+    if not source_path:
+        return None
+
+    raw = handle_business_refresh_product_surface(
+        {
+            "business": slug,
+            "source_path": source_path,
+            "publish_target": surface.get("publish_target"),
+            "publish_policy": surface.get("publish_policy"),
+            "activate_on_success": True,
+            "install": True,
+            "idempotency_key": f"{job_id}:bootstrap-final-surface-refresh",
+            "reason": "bootstrap final product surface refresh",
+            "actor": "worker",
+        }
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"status": "failed", "error": f"invalid product surface refresh payload: {raw[:400]}"}
+    if not isinstance(payload, dict):
+        return {"status": "failed", "error": "invalid product surface refresh payload"}
+    refresh = payload.get("surface_refresh")
+    if isinstance(refresh, dict):
+        return refresh
+    if not payload.get("success", False):
+        return {"status": "failed", "error": str(payload.get("error") or "product surface refresh failed")}
+    return None
 
 
 def _humanize_trace_label(value: str) -> str:
@@ -594,6 +644,32 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         if tokens:
             clear_session_vars(tokens)
 
+    surface_refresh = _refresh_business_surface_after_bootstrap(slug, job_id=str(job.id))
+    if surface_refresh:
+        publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
+        publish_status = str(publish.get("status") or surface_refresh.get("status") or "").strip() or "unknown"
+        publish_target = str(publish.get("public_url") or publish.get("publish_target") or "").strip()
+        publish_blocker = str(
+            publish.get("blocker")
+            or surface_refresh.get("blocker")
+            or surface_refresh.get("error")
+            or ""
+        ).strip()
+        if publish_status == "published":
+            detail = f"product surface -> published {publish_target or slug}"
+        elif publish_blocker:
+            detail = f"product surface -> {publish_status}: {publish_blocker}"
+        else:
+            detail = f"product surface -> {publish_status}"
+        _record_runtime_event(
+            slug,
+            kind="ceo_bootstrap",
+            status="output",
+            detail=detail,
+            line=detail,
+            command=command,
+        )
+
     wake_result: dict[str, object] | None = None
     if schedule:
         wake_result = store.commit(
@@ -633,6 +709,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             "final_response": final_response[:4000],
             "cost_usd": round(cost_usd, 6),
             "cost_status": cost_status,
+            "surface_refresh": surface_refresh,
             "wake": wake_result,
         },
         actual_cost_cents=cents,
