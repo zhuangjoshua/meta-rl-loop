@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import path from "node:path";
 
+const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
+
 function readStdin() {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -80,6 +82,135 @@ function redact(text) {
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-[redacted]")
     .replace(/EAA[A-Za-z0-9_-]{20,}/g, "EAA[redacted]")
     .replace(/\b(api[_-]?key|access[_-]?token|secret)=([^&\s]+)/gi, "$1=[redacted]");
+}
+
+function compactText(text, maxLen = 240) {
+  const cleaned = redact(String(text || "").replace(/\s+/g, " ").trim());
+  if (!cleaned) return "";
+  return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen - 1)}…` : cleaned;
+}
+
+function humanizeLabel(value) {
+  const cleaned = String(value || "")
+    .replace(/[._-]+/g, " ")
+    .trim();
+  if (!cleaned) return "Claude task";
+  return cleaned.replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function progressEventFromSdkMessage(message) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record) return null;
+  if (record.type === "system" && record.subtype === "task_started") {
+    const entryKey = `claude-task:${String(record.task_id || record.uuid || "task").trim()}`;
+    const detail = compactText(record.description || record.prompt || record.workflow_name || record.task_type || "Claude task started.");
+    return {
+      kind: "claude_agent_sdk",
+      status: "trace",
+      detail,
+      line: detail,
+      trace: {
+        kind: "task",
+        entry_key: entryKey,
+        label: compactText(record.description || record.workflow_name || record.subagent_type || record.task_type || "Claude task", 80) || "Claude task",
+        detail,
+        status: "running",
+        skill_name: compactText(record.workflow_name || record.subagent_type || "", 80),
+      },
+    };
+  }
+  if (record.type === "system" && record.subtype === "task_progress") {
+    const entryKey = `claude-task:${String(record.task_id || record.uuid || "task").trim()}`;
+    const detail = compactText(record.summary || record.description || record.last_tool_name || "Claude task is running.");
+    return {
+      kind: "claude_agent_sdk",
+      status: "trace",
+      detail,
+      line: detail,
+      trace: {
+        kind: "task",
+        entry_key: entryKey,
+        label: compactText(record.description || record.subagent_type || "Claude task", 80) || "Claude task",
+        detail,
+        status: "running",
+        tool_name: compactText(record.last_tool_name || "", 80),
+        summary: detail,
+      },
+    };
+  }
+  if (record.type === "system" && record.subtype === "task_updated") {
+    const patch = record.patch && typeof record.patch === "object" ? record.patch : {};
+    const rawStatus = String(patch.status || "running").trim().toLowerCase();
+    const traceStatus = rawStatus === "completed" ? "completed" : rawStatus === "failed" || rawStatus === "killed" ? "failed" : "running";
+    const entryKey = `claude-task:${String(record.task_id || record.uuid || "task").trim()}`;
+    const detail = compactText(patch.error || patch.description || `Claude task ${rawStatus || "updated"}.`);
+    return {
+      kind: "claude_agent_sdk",
+      status: "trace",
+      detail,
+      line: detail,
+      trace: {
+        kind: "task",
+        entry_key: entryKey,
+        label: compactText(patch.description || "Claude task", 80) || "Claude task",
+        detail,
+        status: traceStatus,
+        summary: detail,
+      },
+    };
+  }
+  if (record.type === "tool_progress") {
+    const roundedSeconds = Math.max(0, Math.round(Number(record.elapsed_time_seconds || 0)));
+    if (roundedSeconds > 0 && roundedSeconds % 5 !== 0) return null;
+    const detail = compactText(`${humanizeLabel(record.tool_name)} running${roundedSeconds > 0 ? ` · ${roundedSeconds}s` : ""}`);
+    return {
+      kind: "claude_agent_sdk",
+      status: "output",
+      detail,
+      line: detail,
+      trace: {
+        kind: "tool",
+        entry_key: `claude-tool:${String(record.tool_use_id || record.uuid || record.tool_name || "tool").trim()}`,
+        label: humanizeLabel(record.tool_name || "Tool"),
+        detail,
+        status: "running",
+        tool_name: compactText(record.tool_name || "", 80),
+      },
+    };
+  }
+  if (record.type === "tool_use_summary") {
+    const detail = compactText(record.summary || "Claude tool completed.");
+    return detail ? { kind: "claude_agent_sdk", status: "output", detail, line: detail } : null;
+  }
+  if (record.type === "system" && record.subtype === "api_retry") {
+    const detail = compactText(`Claude API retry ${Number(record.attempt || 0)}/${Number(record.max_retries || 0)} in ${Number(record.retry_delay_ms || 0)}ms.`);
+    return detail ? { kind: "claude_agent_sdk", status: "output", detail, line: detail } : null;
+  }
+  return null;
+}
+
+let lastProgressSignature = "";
+
+function emitProgress(event) {
+  if (!event || typeof event !== "object") return;
+  const payload = {
+    kind: compactText(event.kind || "claude_agent_sdk", 80) || "claude_agent_sdk",
+    status: compactText(event.status || "output", 24) || "output",
+    detail: compactText(event.detail || event.line || "", 240),
+    line: compactText(event.line || event.detail || "", 240),
+  };
+  if (event.trace && typeof event.trace === "object") {
+    payload.trace = Object.fromEntries(
+      Object.entries(event.trace)
+        .map(([key, value]) => [key, compactText(value, key === "entry_key" ? 120 : 160)])
+        .filter(([, value]) => value)
+    );
+  }
+  if (!payload.detail && !payload.line && !payload.trace) return;
+  const serialized = JSON.stringify(payload);
+  if (serialized === lastProgressSignature) return;
+  lastProgressSignature = serialized;
+  process.stderr.write(`${PROGRESS_PREFIX}${serialized}\n`);
 }
 
 function buildPrompt(input) {
@@ -188,6 +319,7 @@ async function main() {
             }
           }
         })) {
+          emitProgress(progressEventFromSdkMessage(message));
           const chunk = textFromSdkMessage(message);
           if (chunk) text += `${chunk}\n`;
         }
@@ -212,6 +344,12 @@ async function main() {
 }
 
 main().catch((error) => {
+  emitProgress({
+    kind: "claude_agent_sdk",
+    status: "failed",
+    detail: compactText(error?.message || String(error)),
+    line: compactText(error?.message || String(error)),
+  });
   process.stdout.write(JSON.stringify({
     success: false,
     source: "claude-agent-sdk",

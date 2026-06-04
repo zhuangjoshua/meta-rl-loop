@@ -1275,12 +1275,186 @@ def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
     return _workspace_needs_runtime_ui_contract(workspace_rel)
 
 
+_CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
+
+
+def _record_claude_agent_runtime_event(
+    *,
+    business: str,
+    workspace_rel: str,
+    kind: str = "claude_agent_sdk",
+    status: str = "output",
+    detail: str = "",
+    line: str = "",
+    trace: Mapping[str, Any] | None = None,
+) -> None:
+    slug = _slugify(business)
+    if not slug:
+        return
+    status_value = str(status or "output").strip().lower()
+    if status_value not in {"started", "running", "output", "trace", "completed", "failed", "heartbeat"}:
+        status_value = "output"
+    command = f"Claude worker -> {workspace_rel or '.'}"
+    payload: dict[str, Any] = {
+        "kind": str(kind or "claude_agent_sdk").strip() or "claude_agent_sdk",
+        "status": status_value,
+        "detail": _truncate_text(str(detail or line or "").strip(), 400),
+        "line": _truncate_text(str(line or detail or "").strip(), 400),
+        "command": command,
+    }
+    if isinstance(trace, Mapping) and trace:
+        trace_payload = {
+            str(key): _truncate_text(str(value).strip(), 240)
+            for key, value in trace.items()
+            if value not in (None, "", [], {})
+        }
+        if trace_payload:
+            payload["trace"] = trace_payload
+    if not payload.get("detail") and not payload.get("line") and not payload.get("trace"):
+        return
+    try:
+        store = _store()
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}/runtime",
+                business_slug=slug,
+                event_type=f"dashboard.run.{status_value}",
+                payload=payload,
+            )
+    except Exception:
+        pass
+
+
+def _record_claude_agent_sdk_progress(
+    *,
+    business: str,
+    workspace_rel: str,
+    event: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(event, Mapping):
+        return
+    _record_claude_agent_runtime_event(
+        business=business,
+        workspace_rel=workspace_rel,
+        kind=str(event.get("kind") or "claude_agent_sdk").strip() or "claude_agent_sdk",
+        status=str(event.get("status") or "output").strip() or "output",
+        detail=str(event.get("detail") or event.get("line") or "").strip(),
+        line=str(event.get("line") or event.get("detail") or "").strip(),
+        trace=event.get("trace") if isinstance(event.get("trace"), Mapping) else None,
+    )
+
+
+def _run_claude_agent_task_process(
+    *,
+    run_cmd: list[str],
+    payload: dict[str, Any],
+    cwd: str,
+    timeout_ms: int,
+    env: Mapping[str, str] | None,
+    business: str,
+    workspace_rel: str,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(
+        run_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=dict(env or {}),
+        bufsize=1,
+    )
+    stdout_chunks: list[str] = []
+    stderr_lines: list[str] = []
+
+    def _read_stdout() -> None:
+        if proc.stdout is None:
+            return
+        try:
+            data = proc.stdout.read()
+        except Exception:
+            data = ""
+        if data:
+            stdout_chunks.append(data)
+
+    def _read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        for raw_line in proc.stderr:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            if line.startswith(_CLAUDE_SDK_EVENT_PREFIX):
+                raw_event = line[len(_CLAUDE_SDK_EVENT_PREFIX):].strip()
+                try:
+                    event = json.loads(raw_event)
+                except json.JSONDecodeError:
+                    clean = _truncate_text(line, 800).strip()
+                    if clean:
+                        stderr_lines.append(clean)
+                    continue
+                _record_claude_agent_sdk_progress(
+                    business=business,
+                    workspace_rel=workspace_rel,
+                    event=event if isinstance(event, Mapping) else None,
+                )
+                continue
+            clean = _truncate_text(line, 800).strip()
+            if not clean:
+                continue
+            stderr_lines.append(clean)
+            _record_claude_agent_runtime_event(
+                business=business,
+                workspace_rel=workspace_rel,
+                detail=clean,
+                line=clean,
+            )
+
+    stdout_thread = threading.Thread(target=_read_stdout, name="takyon-claude-stdout", daemon=True)
+    stderr_thread = threading.Thread(target=_read_stderr, name="takyon-claude-stderr", daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(json.dumps(payload))
+            proc.stdin.close()
+        returncode = proc.wait(timeout=(timeout_ms / 1000.0) + 30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    finally:
+        stdout_thread.join(timeout=2.0)
+        stderr_thread.join(timeout=2.0)
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+        if proc.stderr is not None:
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+    return subprocess.CompletedProcess(
+        run_cmd,
+        returncode,
+        stdout="".join(stdout_chunks),
+        stderr="\n".join(stderr_lines).strip(),
+    )
+
+
 def _run_claude_agent_task_in_docker(
     *,
     payload: dict[str, Any],
     workspace_path: Path,
     timeout_ms: int,
-) -> subprocess.CompletedProcess[str]:
+) -> tuple[list[str], dict[str, Any], str, Mapping[str, str]]:
     from tools.environments.docker import _build_security_args, find_docker
 
     docker = find_docker()
@@ -1339,15 +1513,7 @@ def _run_claude_agent_task_in_docker(
         "node",
         "/repo/scripts/takyon-claude-agent-task.mjs",
     ]
-    return subprocess.run(
-        run_cmd,
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        cwd=str(repo_root),
-        timeout=(timeout_ms / 1000.0) + 30,
-        env=runtime_env,
-    )
+    return run_cmd, payload, str(repo_root), runtime_env
 
 
 def _find_guidance_skill_file(identifier: str) -> Path | None:
@@ -14752,21 +14918,37 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         }
 
         worker_invoked = True
+        _record_claude_agent_runtime_event(
+            business=business,
+            workspace_rel=workspace_rel,
+            status="output",
+            detail=f"Claude worker started for {workspace_rel}.",
+            line=f"Claude worker started for {workspace_rel}.",
+        )
         if docker_isolated_worker:
-            proc = _run_claude_agent_task_in_docker(
+            run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
                 payload=payload,
                 workspace_path=workspace_path,
                 timeout_ms=timeout_ms,
             )
+            proc = _run_claude_agent_task_process(
+                run_cmd=run_cmd,
+                payload=docker_payload,
+                cwd=worker_cwd,
+                timeout_ms=timeout_ms,
+                env=worker_env,
+                business=business,
+                workspace_rel=workspace_rel,
+            )
         else:
-            proc = subprocess.run(
-                [node, str(script)],
-                input=json.dumps(payload),
-                text=True,
-                capture_output=True,
+            proc = _run_claude_agent_task_process(
+                run_cmd=[node, str(script)],
+                payload=payload,
                 cwd=str(_repo_root()),
-                timeout=(timeout_ms / 1000.0) + 15,
+                timeout_ms=timeout_ms,
                 env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
+                business=business,
+                workspace_rel=workspace_rel,
             )
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
@@ -14798,6 +14980,26 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "product source contains fake/demo auth, account, checkout, or integration state. "
                 "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
             )
+        if sdk_result.get("success"):
+            summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
+            if summary_text:
+                _record_claude_agent_runtime_event(
+                    business=business,
+                    workspace_rel=workspace_rel,
+                    status="completed",
+                    detail=summary_text,
+                    line=summary_text,
+                )
+        else:
+            error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
+            if error_text:
+                _record_claude_agent_runtime_event(
+                    business=business,
+                    workspace_rel=workspace_rel,
+                    status="failed",
+                    detail=error_text,
+                    line=error_text,
+                )
         if sdk_result.get("success"):
             # Claude Agent SDK edits the isolated workspace tree directly, so persist those writes before
             # any later refresh/publish/agent-record step can fail and let the scratch workspace be

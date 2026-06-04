@@ -976,6 +976,8 @@
     });
   }
 
+  const LIVE_WORKSPACE_VIEW = "full";
+
   function restartLivePollTimer(ms) {
     const nextMs = Number(ms);
     if (!Number.isFinite(nextMs) || nextMs < 250) return;
@@ -987,7 +989,7 @@
         skipAccount: true,
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
     }, nextMs);
   }
@@ -1022,7 +1024,7 @@
         skipAccount: true,
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
     }, waitMs);
   }
@@ -1724,7 +1726,7 @@
         skipAccount: true,
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
       renderWakeWindow("");
     } catch (err) {
@@ -1978,7 +1980,7 @@
         skipAccount: true,
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
     } catch (err) {
       if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
@@ -2637,7 +2639,7 @@
       void refreshBusinessData(LIVE.activeBusiness, {
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
       return;
     }
@@ -2697,7 +2699,7 @@
       void refreshBusinessData(LIVE.activeBusiness, {
         skipCredits: true,
         skipBoard: true,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
       return;
     }
@@ -2786,7 +2788,7 @@
     if (!business || LIVE.refreshBusy) return;
     LIVE.refreshBusy = true;
     try {
-      const view = String(options && options.view || "boot").trim().toLowerCase() === "full" ? "full" : "boot";
+      const view = String(options && options.view || LIVE_WORKSPACE_VIEW).trim().toLowerCase() === "full" ? "full" : "boot";
       const skipBoard = options && Object.prototype.hasOwnProperty.call(options, "skipBoard")
         ? !!options.skipBoard
         : true;
@@ -2879,7 +2881,7 @@
       skipAccount: true,
       skipDashboardState: true,
       skipBoard: true,
-      view: "boot",
+      view: LIVE_WORKSPACE_VIEW,
     });
     if (LIVE.activeBusiness === business) {
       await refreshBusinessData(business, {
@@ -2887,7 +2889,7 @@
         skipCredits: true,
         skipDashboardState: true,
         skipBoard: false,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
     }
     const sessionId = await sessionPromise;
@@ -2896,7 +2898,7 @@
         skipAccount: true,
         skipCredits: true,
         skipBoard: false,
-        view: "boot",
+        view: LIVE_WORKSPACE_VIEW,
       });
     }
   }
