@@ -1563,6 +1563,8 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "product code should not call providers or internal authority endpoints directly" in instruction
     assert "`tk_` top-level operator tokens never belong in product code" in instruction
     assert "`tkg_` is the app/business AI mediation boundary, not a customer login or session token" in instruction
+    assert "Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail." in instruction
+    assert "Frontend-local, non-authoritative behavior may look live when it runs entirely in the browser" in instruction
     assert "`account` is the canonical paid-state read rail." in instruction
     assert "No app plans are configured yet. Do not render pricing cards" in instruction
 

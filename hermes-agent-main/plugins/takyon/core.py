@@ -123,7 +123,8 @@ RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
 - If a declared runtime feature is not wired yet, keep the blocked state visible and name the missing runtime step.
-- Do not claim undeclared runtime-backed features without first updating the app surface contract.
+- Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
+- Do not claim undeclared runtime-backed or authority-backed features without first updating the app surface contract.
 """
 SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI.
@@ -131,7 +132,8 @@ SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - `tk_` top-level operator tokens never belong in product code, browser code, or customer flows.
 - `tkg_` is the app/business AI mediation boundary, not a customer login or session token.
 - Customer identity comes only from the app session rails and account/session endpoints.
-- Only declared runtime-backed features may look live. Undeclared or unwired features must stay absent or visibly blocked.
+- Only declared runtime-backed or authority-backed features may look live as shared Takyon truth.
+- Frontend-local, non-authoritative behavior may look live when it runs entirely in the browser, does not contradict declared rails, and does not simulate persistence, auth, billing, or provider-backed results.
 - Long-running or mutating customer actions are typed app jobs only when explicitly declared; never replace them with generic tool access.
 """
 SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
