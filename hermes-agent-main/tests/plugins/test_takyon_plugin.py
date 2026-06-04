@@ -1303,6 +1303,46 @@ def test_landing_only_surface_does_not_force_app_route():
     assert shape["required_routes"] == ["/"]
 
 
+def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-bootstrap-shape",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/app",
+                "app_mode": "ai_tool",
+                "subscription_style": "monthly",
+                "runtime_features": ["generate"],
+                "conversion_model": "self-serve signup -> free tier (5 docs) -> $9/mo paid plan",
+                "required_routes": ["/", "/editor", "/documents", "/pricing", "/app"],
+                "required_app_tabs": ["Documents", "Editor", "Share", "Account"],
+                "notes": "Auth, checkout, and entitlements show as DEBUG/blocked states when Hermes rails are not wired.",
+                "idempotency_key": "bootstrap-shape",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    surface = app["surface_contract"]
+    shape = _surface_customer_experience_shape(surface)
+
+    assert surface["source_path"] == "product/site"
+    assert shape["conversion_model"] == "monthly subscription"
+    assert shape["required_routes"] == ["/", "/app"]
+    assert shape["required_app_tabs"] == []
+    assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
+    assert "DEBUG/blocked" not in str(surface.get("notes") or "")
+
+
 def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):
     site = tmp_path / "product" / "site"
     app = site / "app"

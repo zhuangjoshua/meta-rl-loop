@@ -916,7 +916,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider.",
         "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace websites, outreach publication, checkout, deploys, or provider-backed work with Markdown summaries.",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
-        "If a product feature is not wired to Hermes/Takyon rails, show a visible DEBUG/blocked state instead of demo localStorage, hardcoded users, fake checkout, or fake billing.",
+        "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable instead of inventing demo localStorage, hardcoded users, fake checkout, fake billing, or customer-visible debug banners.",
+        "For the first app surface, seed the minimal honest monthly app shell only: `product/site`, required routes `/` and `/app`, no free tier/trial copy, and no speculative extra routes or tabs unless the operator explicitly asked for them.",
         "",
         "Final response: concise status only. Include business filesystem root, research/strategy updated,",
         "files changed, jobs/wakeups, the next CEO action, and what is still blocked or missing.",
@@ -2478,7 +2479,7 @@ def _run_agent_with_meta(
         "for manual turns and scheduled wakes. Keep every write business-scoped. "
         "Do not claim a file write, budget allocation, job enqueue, agent record, wakeup schedule, auth state, billing state, "
         "checkout, subscription, entitlement, deploy, outreach, revenue, metric, or provider result succeeded unless the specific "
-        "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or a visible DEBUG/blocked state."
+        "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or keep unavailable features out of customer-facing debug states."
     )
 
     progress = _ShellProgress(show_indicator and not show_agent_activity)

@@ -106,7 +106,7 @@ NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
 - Use canonical Hermes/Takyon runtime tools or endpoints for auth, billing, entitlements, usage, outreach, and receipts.
 - If no browser endpoint exists for auth, billing, entitlements, usage, or outreach, build the screen as unavailable/blocking, not fake.
-- If a runtime endpoint or provider path is unavailable in this workspace, show a visible DEBUG/blocked state that says the feature is not wired yet.
+- If a runtime endpoint or provider path is unavailable in this workspace, keep the customer UI normal and unavailable; record the missing runtime step in operator-facing contracts, receipts, or summaries instead of customer-visible debug copy.
 - Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
 - In customer-facing product copy, describe capabilities instead of naming upstream foundation model vendors or snapshot ids unless the operator explicitly wants model-led positioning.
 """
@@ -122,7 +122,7 @@ RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
-- If a declared runtime feature is not wired yet, keep the blocked state visible and name the missing runtime step.
+- If a declared runtime feature is not wired yet, keep the customer UI honest without exposing runtime/debug ontology; disable or omit the unavailable action and leave the exact runtime reason to operator-facing state.
 - Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
 - Do not claim undeclared runtime-backed or authority-backed features without first updating the app surface contract.
 """
@@ -816,6 +816,47 @@ def _normalize_surface_string_list(raw: Any) -> list[str]:
         seen.add(text)
         normalized.append(text)
     return normalized
+
+
+_BOOTSTRAP_FREE_OR_TRIAL_PATTERN = re.compile(
+    r"\b(free|trial|waitlist|starter|freemium)\b",
+    re.IGNORECASE,
+)
+_BOOTSTRAP_DEBUG_NOTE_PATTERN = re.compile(
+    r"(debug/?blocked|blocked state|not wired|missing app session|fake checkout|fake billing)",
+    re.IGNORECASE,
+)
+
+
+def _canonical_bootstrap_conversion_model(
+    raw: Any,
+    *,
+    subscription_style: str,
+    bootstrap_seed: bool,
+    app_shell_required: bool,
+) -> str:
+    text = str(raw or "").strip()
+    if not (bootstrap_seed and app_shell_required):
+        return text
+    if subscription_style != DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+        return text
+    if not text or _BOOTSTRAP_FREE_OR_TRIAL_PATTERN.search(text):
+        return "monthly subscription"
+    return text
+
+
+def _canonical_bootstrap_surface_notes(
+    raw: Any,
+    *,
+    bootstrap_seed: bool,
+    app_shell_required: bool,
+) -> str:
+    text = str(raw or "").strip()
+    if not (bootstrap_seed and app_shell_required):
+        return text
+    if _BOOTSTRAP_DEBUG_NOTE_PATTERN.search(text):
+        return ""
+    return text
 
 
 def _surface_customer_experience_metadata(surface: dict[str, Any] | None) -> dict[str, Any]:
@@ -7628,9 +7669,17 @@ class TakyonStore:
                 raise TakyonError("surface status is required")
             existing = self._stored_app_surface_contract(conn, slug)
             existing_shape = _surface_subuser_app_shape(existing)
-            source_path = None
-            if op.get("source_path"):
-                source_path = _canonical_product_surface_source_path(str(op.get("source_path")))
+            existing_source_path = _canonical_product_surface_source_path(str(existing.get("source_path") or ""))
+            existing_source_root = self._business_root(slug) / existing_source_path if existing_source_path else None
+            existing_has_source_files = bool(
+                existing_source_root
+                and existing_source_root.exists()
+                and existing_source_root.is_dir()
+                and _product_source_files(existing_source_root, limit=1)
+            )
+            source_path = _canonical_product_surface_source_path(
+                str(op.get("source_path") or existing_source_path or "product/site")
+            )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
             runtime_features_raw = op.get("runtime_features")
             runtime_features = (
@@ -7695,19 +7744,43 @@ class TakyonStore:
                 required_app_tabs=op.get("required_app_tabs"),
                 research_sources=op.get("research_sources"),
             )
+            bootstrap_seed = not existing_has_source_files
             customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
-            surface_preview = {
-                "metadata": metadata,
-                "constraints": constraints,
-                "runtime_features": runtime_features,
-            }
-            if _surface_allows_landing_only(surface_preview) and _surface_shape_requires_app_shell(
+            surface_requires_app_shell = _surface_shape_requires_app_shell(
                 app_mode=app_mode,
                 subscription_style=subscription_style,
                 runtime_features=runtime_features,
                 required_app_tabs=customer_experience.get("required_app_tabs") or [],
                 required_routes=customer_experience.get("required_routes") or [],
-            ):
+            )
+            if surface_requires_app_shell:
+                source_path = "product/site"
+            if bootstrap_seed and surface_requires_app_shell:
+                customer_experience_metadata = (
+                    metadata.get("customer_experience") if isinstance(metadata.get("customer_experience"), dict) else {}
+                )
+                customer_experience_metadata = dict(customer_experience_metadata)
+                customer_experience_metadata["required_routes"] = ["/", "/app"]
+                customer_experience_metadata.pop("required_app_tabs", None)
+                canonical_conversion_model = _canonical_bootstrap_conversion_model(
+                    customer_experience_metadata.get("conversion_model"),
+                    subscription_style=subscription_style,
+                    bootstrap_seed=bootstrap_seed,
+                    app_shell_required=surface_requires_app_shell,
+                )
+                if canonical_conversion_model:
+                    customer_experience_metadata["conversion_model"] = canonical_conversion_model
+                else:
+                    customer_experience_metadata.pop("conversion_model", None)
+                metadata["customer_experience"] = customer_experience_metadata
+                customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
+                routes = [{"path": route} for route in (customer_experience.get("required_routes") or ["/", "/app"])]
+            surface_preview = {
+                "metadata": metadata,
+                "constraints": constraints,
+                "runtime_features": runtime_features,
+            }
+            if _surface_allows_landing_only(surface_preview) and surface_requires_app_shell:
                 raise TakyonError(
                     "app-like product surfaces must ship a real /app route and cannot be landing_page_only under the current runtime contract"
                 )
@@ -7723,6 +7796,11 @@ class TakyonStore:
                     {"path": route}
                     for route in (customer_experience.get("required_routes") or [])
                 ]
+            notes = _canonical_bootstrap_surface_notes(
+                op.get("notes") if op.get("notes") is not None else existing.get("notes"),
+                bootstrap_seed=bootstrap_seed,
+                app_shell_required=surface_requires_app_shell,
+            )
             status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
             now = _now()
             conn.execute(
@@ -7762,7 +7840,7 @@ class TakyonStore:
                     publish_policy,
                     mode_behavior,
                     done_gate,
-                    str(op.get("notes") or ""),
+                    notes,
                     _json_dumps(metadata),
                     now,
                     now,
@@ -15162,7 +15240,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             sdk_result["error"] = (
                 "Claude Agent SDK output blocked by Hermes no-pretend contract: "
                 "product source contains fake/demo auth, account, checkout, or integration state. "
-                "Use real Hermes runtime calls or a visible DEBUG/blocked state instead."
+                "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
             )
         if sdk_result.get("success"):
             summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
@@ -15545,7 +15623,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
-                "conversion_model": {"type": "string", "description": "CEO-chosen conversion model for the product surface, such as self-serve signup, demo request, trial, or paid plan purchase."},
+                "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path instead of free tiers or trials."},
                 "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},
                 "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
                 "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
