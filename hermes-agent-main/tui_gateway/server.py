@@ -5370,11 +5370,15 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5017, str(e))
 
 
+def _takyon_business_payload_from_summary(summary: Any) -> dict[str, Any] | None:
+    business = summary.get("business") if isinstance(summary, dict) else None
+    return business if isinstance(business, dict) else None
+
+
 def _takyon_business_payload(store: Any, slug: str) -> dict[str, Any] | None:
     try:
         data = store.read(scope=f"business:{slug}", query="summary")
-        business = data.get("business") if isinstance(data, dict) else None
-        return business if isinstance(business, dict) else None
+        return _takyon_business_payload_from_summary(data)
     except Exception:
         return None
 
@@ -5538,7 +5542,12 @@ def _takyon_registry_display_payload() -> dict[str, Any]:
     return {"version": "takyon-hermes-skills", "tools": tools, "skills": skills}
 
 
-def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
+def _takyon_business_overview_payload(
+    store: Any,
+    slug: str,
+    *,
+    summary_data: Any | None = None,
+) -> dict[str, Any]:
     def as_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
 
@@ -5769,7 +5778,9 @@ def _takyon_business_overview_payload(store: Any, slug: str) -> dict[str, Any]:
             return blocked_reason or "Checkout cannot go live until Stripe/provider approval is complete."
         return blocked_reason or f"{job_label(kind)} is {status}."
 
-    summary = as_dict(store.read(scope=f"business:{slug}", query="summary", limit=12))
+    summary = as_dict(summary_data) if isinstance(summary_data, dict) else {}
+    if not summary:
+        summary = as_dict(store.read(scope=f"business:{slug}", query="summary", limit=12))
     business = as_dict(summary.get("business"))
     app = as_dict(summary.get("app"))
     surface = as_dict(app.get("surface_contract") or app.get("surface"))
@@ -6983,8 +6994,12 @@ def _takyon_workspace_payload(
             "background_run": None,
         }
     store = _takyon_store(session)
-    current = _takyon_business_payload(store, slug) or {}
-    overview = _takyon_business_overview_payload(store, slug)
+    try:
+        summary = store.read(scope=f"business:{slug}", query="summary", limit=12)
+    except Exception:
+        summary = {}
+    current = _takyon_business_payload_from_summary(summary) or {}
+    overview = _takyon_business_overview_payload(store, slug, summary_data=summary)
     outputs = _takyon_historical_outputs_payload(
         store,
         slug,

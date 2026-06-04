@@ -172,6 +172,22 @@
     return LIVE.businessIndex.get(String(slug || "").trim().toLowerCase()) || null;
   }
 
+  function seedBusinessSnapshot(slug, summary) {
+    const business = String(slug || "").trim().toLowerCase();
+    if (!business) return null;
+    return normalizeLiveSnapshot({
+      business_slug: business,
+      current: {
+        name: String(summary && summary.name || business).trim(),
+        goal: String(summary && summary.goal || "").trim(),
+        mode: String(summary && summary.mode || "test").trim().toLowerCase() || "test",
+      },
+      overview: {},
+      outputs: [],
+      background_run: null,
+    });
+  }
+
   function isTransientConnectionMessage(message) {
     const text = String(message || "").trim();
     if (!text) return false;
@@ -2337,24 +2353,35 @@
     if (!business || LIVE.refreshBusy) return;
     LIVE.refreshBusy = true;
     try {
+      const skipBoard = !!(options && options.skipBoard);
+      const skipCredits = !!(options && options.skipCredits);
+      const skipAccount = !!(options && options.skipAccount);
+      const skipDashboardState = !!(options && options.skipDashboardState);
       const activeSessionId =
-        LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
-      const settled = await Promise.allSettled([
-        fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50`),
-        fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`),
-        fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`),
-        options && options.skipAccount ? Promise.resolve(LIVE.operatorAccount) : fetchJSON("/api/takyon/operator/account"),
-        activeSessionId ? rpc("takyon.dashboard.state", {
+        !skipDashboardState && LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
+      const workspacePromise = fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50`);
+      const boardPromise = skipBoard
+        ? Promise.resolve(null)
+        : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`);
+      const creditsPromise = skipCredits
+        ? Promise.resolve(LIVE.creativeCredits)
+        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`);
+      const accountPromise = skipAccount
+        ? Promise.resolve(LIVE.operatorAccount)
+        : fetchJSON("/api/takyon/operator/account");
+      const dashboardPromise = activeSessionId
+        ? rpc("takyon.dashboard.state", {
           session_id: activeSessionId,
           business_slug: business,
           limit: 50,
-        }, 10000) : Promise.resolve(null),
+        }, 10000)
+        : Promise.resolve(null);
+      const [workspaceSettled, dashboardSettled] = await Promise.allSettled([
+        workspacePromise,
+        dashboardPromise,
       ]);
-      const workspace = settled[0].status === "fulfilled" ? settled[0].value : null;
-      const board = settled[1].status === "fulfilled" ? settled[1].value : null;
-      LIVE.creativeCredits = settled[2].status === "fulfilled" ? settled[2].value : LIVE.creativeCredits;
-      LIVE.operatorAccount = settled[3].status === "fulfilled" ? settled[3].value : LIVE.operatorAccount;
-      const dashboardState = settled[4].status === "fulfilled" ? settled[4].value : null;
+      const workspace = workspaceSettled.status === "fulfilled" ? workspaceSettled.value : null;
+      const dashboardState = dashboardSettled.status === "fulfilled" ? dashboardSettled.value : null;
       const snapshot = mergeLiveSnapshots(workspace, dashboardState);
       if (snapshot) {
         LIVE.workspaceOverview = snapshot.overview || {};
@@ -2362,12 +2389,16 @@
         const nextStatus = liveStatusFromSnapshot(snapshot);
         setStatus(nextStatus.text, nextStatus.state);
       }
+      if (!snapshot) setStatus("idle", "idle");
+      const settled = await Promise.allSettled([boardPromise, creditsPromise, accountPromise]);
+      const board = settled[0].status === "fulfilled" ? settled[0].value : null;
+      LIVE.creativeCredits = settled[1].status === "fulfilled" ? settled[1].value : LIVE.creativeCredits;
+      LIVE.operatorAccount = settled[2].status === "fulfilled" ? settled[2].value : LIVE.operatorAccount;
       if (snapshot || board) applyBoard(board, snapshot || LIVE.workspaceSnapshot || null);
       if (document.getElementById("w-operator")) renderOperatorWindow();
       if (document.getElementById("w-wallet")) renderWalletWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
-      if (!snapshot) setStatus("idle", "idle");
     } catch (err) {
       setStatus("paused", "paused");
       addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
@@ -2406,8 +2437,15 @@
       if (document.getElementById("w-files")) renderDeliverablesWindow();
       setStatus("running", "run");
     }
-    await ensureSession(business);
-    await refreshBusinessData(business);
+    const sessionPromise = ensureSession(business).catch(() => "");
+    await refreshBusinessData(business, {
+      skipAccount: true,
+      skipDashboardState: true,
+    });
+    const sessionId = await sessionPromise;
+    if (sessionId && LIVE.activeBusiness === business) {
+      await refreshBusinessData(business, { skipAccount: true });
+    }
   }
 
   function mountLiveShell(biz) {
@@ -2657,22 +2695,35 @@
 
   async function bootstrapLive() {
     interceptClicks();
-    try {
-      const [businesses, account] = await Promise.all([
-        fetchJSON("/api/takyon/operator/businesses"),
-        fetchJSON("/api/takyon/operator/account"),
-      ]);
-      LIVE.operatorAccount = account;
-      rememberBusinesses(Array.isArray(businesses && businesses.businesses) ? businesses.businesses : []);
-      renderWalletRail();
-      const initialBusiness = currentBusinessParam() || (LIVE.businesses.length === 1 ? String(LIVE.businesses[0].slug || "") : "");
-      if (initialBusiness) {
-        await mountLiveBusiness(initialBusiness);
-      }
-    } catch (_err) {
-      renderLauncherBusinesses();
-      renderWalletRail();
+    const requestedBusiness = String(currentBusinessParam() || "").trim().toLowerCase();
+    if (requestedBusiness) {
+      const placeholder = { slug: requestedBusiness, name: requestedBusiness, goal: "", mode: "test" };
+      void mountLiveBusiness(
+        requestedBusiness,
+        placeholder,
+        seedBusinessSnapshot(requestedBusiness, placeholder),
+      );
     }
+    const businessesPromise = fetchJSON("/api/takyon/operator/businesses")
+      .then((businesses) => {
+        rememberBusinesses(Array.isArray(businesses && businesses.businesses) ? businesses.businesses : []);
+        if (!requestedBusiness) {
+          const initialBusiness = LIVE.businesses.length === 1 ? String(LIVE.businesses[0].slug || "") : "";
+          if (initialBusiness) void mountLiveBusiness(initialBusiness);
+        }
+      })
+      .catch(() => {
+        if (!LIVE.activeBusiness) renderLauncherBusinesses();
+      });
+    const accountPromise = fetchJSON("/api/takyon/operator/account")
+      .then((account) => {
+        LIVE.operatorAccount = account;
+        renderWalletRail();
+      })
+      .catch(() => {
+        renderWalletRail();
+      });
+    await Promise.allSettled([businessesPromise, accountPromise]);
   }
 
   void bootstrapLive();

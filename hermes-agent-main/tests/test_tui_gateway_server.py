@@ -5352,3 +5352,35 @@ def test_business_overview_posts_omit_missing_artifact_preview(tmp_path):
         payload["posts"][0]["conversation_file"]
         == "metrics/conversations/threads/thread-test-1.md"
     )
+
+
+def test_workspace_payload_reuses_summary_for_current_and_overview(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    summary_payload = {"business": {"slug": "demo", "name": "Demo"}}
+
+    class _FakeStore:
+        def read(self, scope, query, **kwargs):
+            calls.append((scope, query))
+            if query == "summary":
+                return summary_payload
+            return {}
+
+    captured: dict[str, object] = {}
+
+    def _fake_overview(store, slug, *, summary_data=None):
+        captured["slug"] = slug
+        captured["summary_data"] = summary_data
+        return {"product": {"publish_status": "draft"}}
+
+    monkeypatch.setattr(server, "_takyon_store", lambda session: _FakeStore())
+    monkeypatch.setattr(server, "_takyon_business_overview_payload", _fake_overview)
+    monkeypatch.setattr(server, "_takyon_historical_outputs_payload", lambda store, slug, limit=50: [])
+    monkeypatch.setattr(server, "_takyon_get_background_run", lambda slug: None)
+    monkeypatch.setattr(server, "_takyon_reconcile_background_run", lambda slug, run, overview: None)
+
+    payload = server._takyon_workspace_payload({"takyon_operator_user_id": "demo"}, "demo")
+
+    assert payload["current"] == {"slug": "demo", "name": "Demo"}
+    assert captured["slug"] == "demo"
+    assert captured["summary_data"] == summary_payload
+    assert calls == [("business:demo", "summary")]
