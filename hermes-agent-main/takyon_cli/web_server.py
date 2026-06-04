@@ -5738,7 +5738,9 @@ async def _serve_product_site_file(business: str, full_path: str = "") -> Respon
             candidate = candidate.resolve()
             if root in (candidate, *candidate.parents) and candidate.is_file():
                 return FileResponse(candidate)
-    materialized_root = _materialize_product_site_from_storage(slug)
+    # Lazy publish hydrate can hit object storage. Keep that sync path off the
+    # main server loop so one cold product host cannot wedge the whole runtime.
+    materialized_root = await asyncio.to_thread(_materialize_product_site_from_storage, slug)
     if materialized_root is not None:
         target = (materialized_root / rel).resolve()
         if target.is_dir():

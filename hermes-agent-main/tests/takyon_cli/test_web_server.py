@@ -984,6 +984,45 @@ def test_product_tls_ask_does_not_block_status_route(monkeypatch):
     assert elapsed < 0.2
 
 
+def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_path):
+    import httpx
+
+    import takyon_cli.web_server as web_server
+
+    publish_root = tmp_path / "product-sites"
+    publish_root.mkdir(parents=True, exist_ok=True)
+
+    def _slow_materialize(_business: str):
+        time.sleep(0.25)
+        return None
+
+    monkeypatch.setattr(web_server, "_dashboard_product_site_root", lambda: publish_root)
+    monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", _slow_materialize)
+    monkeypatch.setattr(web_server, "check_config_version", lambda: (23, 23))
+    monkeypatch.setattr(web_server, "get_running_pid", lambda: None)
+    monkeypatch.setattr(web_server, "read_runtime_status", lambda: None)
+    monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "")
+
+    async def _exercise() -> tuple[httpx.Response, float]:
+        transport = httpx.ASGITransport(app=web_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            product_task = asyncio.create_task(
+                client.get("/", headers={"Host": "plannerly.fourmanifold.com"})
+            )
+            await asyncio.sleep(0.02)
+            started = time.perf_counter()
+            status_resp = await client.get("/api/status")
+            elapsed = time.perf_counter() - started
+            product_resp = await product_task
+            assert product_resp.status_code == 404
+            return status_resp, elapsed
+
+    status_resp, elapsed = asyncio.run(_exercise())
+
+    assert status_resp.status_code == 200
+    assert elapsed < 0.2
+
+
 class TestWebServerEndpoints:
     """Test the FastAPI REST endpoints using Starlette TestClient."""
 
