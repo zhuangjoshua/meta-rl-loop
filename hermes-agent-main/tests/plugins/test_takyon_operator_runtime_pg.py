@@ -39,7 +39,7 @@ _OPERATOR_TABLES = {
     "conversation_threads": "external_id",
     "conversation_messages": "direction",
     "idempotency_keys": "operation_hash",
-    "app_surface_contracts": "design_brief_path",
+    "app_surface_contracts": "source_path",
     "business_work_requests": "scope",
 }
 

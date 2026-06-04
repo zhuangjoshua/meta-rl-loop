@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from plugins.takyon import core as takyon_core
 
 
@@ -28,7 +30,6 @@ def test_merge_customer_experience_metadata_normalizes_worker_contract_fields():
         required_sections=["hero", "sample plan", "pricing"],
         required_app_tabs=["Planner", "Progress"],
         research_sources=["research/strategy.md", "research/market.md"],
-        experience_notes="Show the locked upgrade path honestly even before billing is live.",
     )
     payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
         {
@@ -45,4 +46,35 @@ def test_merge_customer_experience_metadata_normalizes_worker_contract_fields():
     assert customer["requiredSections"] == ["hero", "sample plan", "pricing"]
     assert customer["requiredAppTabs"] == ["Planner", "Progress"]
     assert customer["researchSources"] == ["research/strategy.md", "research/market.md"]
-    assert "billing is live" in customer["experienceNotes"]
+    assert "experienceNotes" not in customer
+
+
+def test_materialized_subuser_kit_writes_js_context_only(tmp_path: Path):
+    workspace_root = tmp_path / "product" / "site"
+    workspace_root.mkdir(parents=True)
+
+    takyon_core._materialize_subuser_app_kit(  # type: ignore[attr-defined]
+        workspace_root,
+        slug="plannerly",
+        surface={"runtime_features": ["auth", "account"], "routes": [{"path": "/"}, {"path": "/app"}]},
+    )
+
+    kit_root = workspace_root / takyon_core.SUBUSER_KIT_DIRNAME
+    assert (kit_root / "surface-context.js").exists()
+    assert not (kit_root / "surface-context.md").exists()
+
+
+def test_default_surface_contract_omits_design_brief(tmp_path: Path):
+    store = takyon_core.TakyonStore(tmp_path)
+
+    class _FakeCursor:
+        def fetchone(self):
+            return None
+
+    class _FakeConn:
+        def execute(self, *_args, **_kwargs):
+            return _FakeCursor()
+
+    surface = store._stored_app_surface_contract(_FakeConn(), "plannerly")  # type: ignore[attr-defined]
+
+    assert "design_brief_path" not in surface

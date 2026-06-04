@@ -275,10 +275,10 @@ do $$
 begin
     if to_regclass('public.app_surface_contracts') is not null
        and not exists (select 1 from information_schema.columns
-                       where table_schema='public' and table_name='app_surface_contracts' and column_name='design_brief_path')
+                       where table_schema='public' and table_name='app_surface_contracts' and column_name='source_path')
     then
         raise exception
-            'public.app_surface_contracts exists but is not the takyon shape (no design_brief_path). '
+            'public.app_surface_contracts exists but is not the takyon shape (no source_path). '
             'Inspect and remove it before applying takyon migrations. See mediationplan.md > Build Discipline (Gate 1).'
             using errcode = 'feature_not_supported';
     end if;
@@ -286,7 +286,6 @@ end $$;
 create table if not exists app_surface_contracts (
     business_slug        text not null primary key references businesses (slug) on delete cascade,
     status               text not null default 'draft',
-    design_brief_path    text not null default 'product/design-brief.md',
     source_path          text,
     runtime_api_base     text,
     runtime_features_json text,

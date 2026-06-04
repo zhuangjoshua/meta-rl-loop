@@ -18,7 +18,7 @@ Keep these two identity layers separate:
 
 ## Takyon Product App Surfaces
 
-Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `product/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
+Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `product/surface.md`, and point it at the canonical product source path plus the recorded customer shape that the CEO and skills should inspect.
 
 ## Creative Credits vs Usage Billing
 

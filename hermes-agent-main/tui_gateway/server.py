@@ -5716,7 +5716,6 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
             "product": {
                 "status": as_text(surface.get("status")) or "missing",
                 "source_path": source_path,
-                "design_brief_path": as_text(surface.get("design_brief_path")) or "product/design-brief.md",
                 "runtime_api_base": as_text(surface.get("runtime_api_base")),
                 "publish_target": as_text(surface.get("publish_target")),
                 "publish_policy": as_text(surface.get("publish_policy")),
@@ -7001,7 +7000,6 @@ def _takyon_business_overview_payload(
         "product": {
             "status": brief_text(surface.get("status") or "missing"),
             "source_path": source_path,
-            "design_brief_path": brief_text(surface.get("design_brief_path") or "product/design-brief.md"),
             "runtime_api_base": brief_text(surface.get("runtime_api_base")),
             "publish_target": brief_text(surface.get("publish_target")),
             "publish_policy": brief_text(surface.get("publish_policy")),
@@ -7216,7 +7214,6 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         "research/index.md",
         "metrics/summary.md",
         "metrics/wake-history.md",
-        "product/design-brief.md",
         "product/mvp-spec.md",
         "product/site/index.html",
     }

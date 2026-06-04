@@ -93,7 +93,6 @@ type BusinessSummary = TakyonOperatorBusinessSummary;
 interface BusinessOverviewProduct {
   status?: string;
   source_path?: string;
-  design_brief_path?: string;
   runtime_api_base?: string;
   publish_target?: string;
   publish_policy?: string;

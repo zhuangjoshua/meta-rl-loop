@@ -439,7 +439,6 @@ _DOMAIN_RE = re.compile(
 
 _COMMENTARY_BUSINESS_PATHS = {
     "product/surface.md",
-    "product/design-brief.md",
     "distribution/surface.md",
     "metrics/summary.md",
     "metrics/wake-history.md",
@@ -965,12 +964,6 @@ def _surface_customer_experience_shape(surface: dict[str, Any] | None) -> dict[s
         ),
         "required_app_tabs": required_app_tabs,
         "research_sources": research_sources,
-        "experience_notes": str(
-            payload.get("experience_notes")
-            if payload.get("experience_notes") is not None
-            else payload.get("notes")
-            or ""
-        ).strip(),
     }
 
 
@@ -983,11 +976,21 @@ def _merge_customer_experience_metadata(
     required_sections: Any = None,
     required_app_tabs: Any = None,
     research_sources: Any = None,
-    experience_notes: Any = None,
 ) -> dict[str, Any]:
     merged = dict(metadata if isinstance(metadata, dict) else {})
     existing = merged.get("customer_experience") if isinstance(merged.get("customer_experience"), dict) else {}
-    next_payload = dict(existing)
+    next_payload = {
+        key: existing[key]
+        for key in (
+            "surface_goal",
+            "conversion_model",
+            "required_routes",
+            "required_sections",
+            "required_app_tabs",
+            "research_sources",
+        )
+        if key in existing
+    }
 
     def _merge_text_field(key: str, raw: Any) -> None:
         if raw is None:
@@ -1017,7 +1020,6 @@ def _merge_customer_experience_metadata(
     _merge_list_field("required_sections", required_sections)
     _merge_list_field("required_app_tabs", required_app_tabs)
     _merge_list_field("research_sources", research_sources, fallback=DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
-    _merge_text_field("experience_notes", experience_notes)
 
     if not next_payload.get("research_sources"):
         next_payload["research_sources"] = list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
@@ -1047,7 +1049,6 @@ def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: st
             "requiredSections": customer_experience.get("required_sections") or [],
             "requiredAppTabs": customer_experience.get("required_app_tabs") or [],
             "researchSources": customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES),
-            "experienceNotes": customer_experience.get("experience_notes") or "",
         },
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
@@ -1059,6 +1060,7 @@ def _merge_subuser_app_metadata(
     metadata: dict[str, Any] | None,
     *,
     runtime_features: list[str],
+    previous_runtime_features: list[str] | None = None,
     app_mode: Any = None,
     subscription_style: Any = None,
     api_mode: Any = None,
@@ -1072,6 +1074,10 @@ def _merge_subuser_app_metadata(
         subscription_style if subscription_style is not None else existing.get("subscription_style")
     )
     normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
+    existing_app_mode = _normalize_subuser_surface_choice(existing.get("app_mode"), allowed=SUBUSER_APP_MODE_CHOICES)
+    existing_subscription = _normalize_subscription_style(existing.get("subscription_style"))
+    existing_api_mode = _normalize_subuser_surface_choice(existing.get("api_mode"), allowed=SUBUSER_API_MODE_CHOICES)
+    existing_runtime_features = _normalize_runtime_features(previous_runtime_features or [], strict=True)
     if normalized_app_mode:
         next_payload["app_mode"] = normalized_app_mode
     elif "app_mode" not in next_payload and existing.get("app_mode"):
@@ -1081,10 +1087,14 @@ def _merge_subuser_app_metadata(
         next_payload["api_mode"] = normalized_api_mode
     elif "api_mode" not in next_payload and existing.get("api_mode"):
         next_payload["api_mode"] = existing.get("api_mode")
-    normalized_rail_state = _normalize_subuser_rail_state(
-        rail_state if rail_state is not None else existing.get("rail_state"),
-        declared_rails=runtime_features,
+    shape_changed = (
+        normalized_app_mode != existing_app_mode
+        or normalized_subscription != existing_subscription
+        or normalized_api_mode != existing_api_mode
+        or runtime_features != existing_runtime_features
     )
+    raw_rail_state = rail_state if rail_state is not None else ({} if shape_changed else existing.get("rail_state"))
+    normalized_rail_state = _normalize_subuser_rail_state(raw_rail_state, declared_rails=runtime_features)
     next_payload["rail_state"] = normalized_rail_state
     next_payload["frontend_api_mode"] = SUBUSER_FRONTEND_API_MODE
     next_payload["kit_path"] = SUBUSER_KIT_DIRNAME
@@ -1136,69 +1146,6 @@ def _render_runtime_endpoint_hints(
     return ", ".join(rendered)
 
 
-def _subuser_app_kit_context_markdown(surface: dict[str, Any] | None, *, slug: str) -> str:
-    context = _subuser_surface_context_payload(surface, slug=slug)
-    rail_state = context.get("railState") if isinstance(context.get("railState"), dict) else {}
-    customer_experience = context.get("customerExperience") if isinstance(context.get("customerExperience"), dict) else {}
-    lines = [
-        "# Subuser App Context",
-        "",
-        f"- Business: {slug}",
-        f"- App mode: {context.get('appMode') or 'not set'}",
-        f"- Subscription style: {context.get('subscriptionStyle') or 'not set'}",
-        f"- API mode: {context.get('apiMode') or 'not set'}",
-        f"- Frontend API mode: {context.get('frontendApiMode') or SUBUSER_FRONTEND_API_MODE}",
-        f"- Runtime API base fallback: {context.get('runtimeApiBase') or f'/api/takyon/apps/{slug}'}",
-        f"- Kit path: {context.get('kitPath') or SUBUSER_KIT_DIRNAME}",
-        "",
-        "## Declared Rails",
-        "",
-    ]
-    runtime_features = context.get("runtimeFeatures") if isinstance(context.get("runtimeFeatures"), list) else []
-    if runtime_features:
-        for rail in runtime_features:
-            lines.append(f"- {rail}: {rail_state.get(rail) or 'unknown'}")
-    else:
-        lines.append("- none declared")
-    lines.extend(["", "## Routes", ""])
-    routes = context.get("routes") if isinstance(context.get("routes"), list) else []
-    if routes:
-        lines.extend(f"- {route}" for route in routes)
-    else:
-        lines.append("- none recorded")
-    lines.extend(["", "## Customer Experience Shape", ""])
-    lines.append(f"- Surface goal: {customer_experience.get('surfaceGoal') or 'not set'}")
-    lines.append(f"- Conversion model: {customer_experience.get('conversionModel') or 'not set'}")
-    required_routes = customer_experience.get("requiredRoutes") if isinstance(customer_experience.get("requiredRoutes"), list) else []
-    lines.append(f"- Required routes: {', '.join(required_routes) or 'not set'}")
-    if _surface_requires_app_shell(
-        surface,
-        app_mode=context.get("appMode") or "",
-        subscription_style=context.get("subscriptionStyle") or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
-        runtime_features=context.get("runtimeFeatures") if isinstance(context.get("runtimeFeatures"), list) else [],
-        required_app_tabs=customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else [],
-        required_routes=required_routes,
-    ):
-        lines.append("- App-like route contract: ship both `/` and `/app` unless the owning surface is intentionally landing_page_only.")
-    required_sections = customer_experience.get("requiredSections") if isinstance(customer_experience.get("requiredSections"), list) else []
-    lines.append(f"- Required sections: {', '.join(required_sections) or 'not set'}")
-    required_tabs = customer_experience.get("requiredAppTabs") if isinstance(customer_experience.get("requiredAppTabs"), list) else []
-    lines.append(f"- Required app tabs: {', '.join(required_tabs) or 'not set'}")
-    research_sources = customer_experience.get("researchSources") if isinstance(customer_experience.get("researchSources"), list) else []
-    lines.append(f"- Research sources: {', '.join(research_sources) or ', '.join(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)}")
-    lines.append(f"- Experience notes: {customer_experience.get('experienceNotes') or 'not set'}")
-    lines.extend([
-        "",
-        "## Freedom Boundary",
-        "",
-        "- Preserve runtime semantics.",
-        "- Redesign the product freely above that substrate.",
-        "- Keep business-specific copy and UI outside the managed `_takyon/` support files.",
-        "",
-    ])
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def _materialize_subuser_app_kit(
     workspace_root: Path,
     *,
@@ -1221,10 +1168,6 @@ def _materialize_subuser_app_kit(
         "export const subuserSurfaceContext = "
         + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
         + ";\nexport default subuserSurfaceContext;\n",
-        encoding="utf-8",
-    )
-    (target_root / "surface-context.md").write_text(
-        _subuser_app_kit_context_markdown(surface, slug=slug),
         encoding="utf-8",
     )
 
@@ -1304,8 +1247,6 @@ def _subuser_app_worker_contract_block(
     research_sources = customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
     if research_sources:
         lines.append(f"- The recorded customer shape was grounded in research/, especially: {', '.join(research_sources)}")
-    if customer_experience.get("experience_notes"):
-        lines.append(f"- Additional customer-shape notes: {customer_experience.get('experience_notes')}")
     if runtime_features:
         lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
@@ -5412,7 +5353,6 @@ class TakyonStore:
             CREATE TABLE IF NOT EXISTS app_surface_contracts (
               business_slug TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'draft',
-              design_brief_path TEXT NOT NULL DEFAULT 'product/design-brief.md',
               source_path TEXT,
               runtime_api_base TEXT,
               runtime_features_json TEXT,
@@ -6043,12 +5983,11 @@ class TakyonStore:
         return {
             "business_slug": slug,
             "status": "missing",
-            "design_brief_path": "product/design-brief.md",
             "source_path": None,
             "runtime_api_base": f"/api/takyon/apps/{slug}",
             "runtime_features": [],
             "routes": [],
-            "theme": {"source": "business design brief"},
+            "theme": {"source": "business product workspace"},
             "constraints": {
                 "no_hardcoded_product_ui": True,
                 "backend_runtime_only": True,
@@ -6165,12 +6104,11 @@ class TakyonStore:
             "",
             "The shared Hermes app runtime owns backend rails only: auth, sessions, entitlements, checkout, subscription reconciliation, revenue, usage budgets, and webhooks.",
             "",
-            "The product's visual design, layout, copy, information architecture, interaction model, and frontend source must come from this business's design brief and product workspace. Do not use a hardcoded Takyon template as the final customer surface.",
+            "The product's visual design, layout, copy, information architecture, interaction model, and frontend source must come from the recorded customer shape, supporting research, and the business product workspace. Do not use a hardcoded Takyon template as the final customer surface.",
             "",
             "## Contract",
             "",
             f"- Status: {surface.get('status') or 'missing'}",
-            f"- Design brief path: {surface.get('design_brief_path') or 'product/design-brief.md'}",
             f"- Source path: {surface.get('source_path') or 'not set'}",
             f"- Runtime API base fallback: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
             f"- Runtime features: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
@@ -6201,7 +6139,6 @@ class TakyonStore:
             f"- Required sections: {', '.join(customer_experience.get('required_sections') or []) or 'not set'}",
             f"- Required app tabs: {', '.join(customer_experience.get('required_app_tabs') or []) or 'not set'}",
             f"- Research sources: {', '.join(customer_experience.get('research_sources') or []) or ', '.join(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)}",
-            f"- Experience notes: {customer_experience.get('experience_notes') or 'not set'}",
             "",
             "## Routes",
             "",
@@ -6218,7 +6155,7 @@ class TakyonStore:
         else:
             surface_lines.append("- No frontend routes recorded.")
         surface_lines.extend(["", "## Theme Source", ""])
-        surface_lines.extend(_markdown_kv_lines(surface.get("theme"), empty="business design brief"))
+        surface_lines.extend(_markdown_kv_lines(surface.get("theme"), empty="business product workspace"))
         surface_lines.extend(["", "## Constraints", ""])
         surface_lines.extend(_markdown_kv_lines(surface.get("constraints"), empty="no hardcoded product UI"))
         selected_runtime_rails = _surface_runtime_features(surface)
@@ -7691,7 +7628,6 @@ class TakyonStore:
                 raise TakyonError("surface status is required")
             existing = self._stored_app_surface_contract(conn, slug)
             existing_shape = _surface_subuser_app_shape(existing)
-            design_brief_path = _safe_relpath(str(op.get("design_brief_path") or "product/design-brief.md"), field="design_brief_path").as_posix()
             source_path = None
             if op.get("source_path"):
                 source_path = _canonical_product_surface_source_path(str(op.get("source_path")))
@@ -7720,7 +7656,7 @@ class TakyonStore:
                 api_mode=api_mode,
             )
             routes = op.get("routes") if op.get("routes") is not None else []
-            theme = op.get("theme") if op.get("theme") is not None else {"source": "business design brief"}
+            theme = op.get("theme") if op.get("theme") is not None else (existing.get("theme") or {"source": "business product workspace"})
             constraints = op.get("constraints") if op.get("constraints") is not None else {}
             if not isinstance(routes, (list, dict)):
                 raise TakyonError("surface routes must be an object or list")
@@ -7744,6 +7680,7 @@ class TakyonStore:
             metadata = _merge_subuser_app_metadata(
                 {**existing_metadata, **metadata},
                 runtime_features=runtime_features,
+                previous_runtime_features=_surface_runtime_features(existing),
                 app_mode=app_mode,
                 subscription_style=subscription_style,
                 api_mode=api_mode,
@@ -7757,7 +7694,6 @@ class TakyonStore:
                 required_sections=op.get("required_sections"),
                 required_app_tabs=op.get("required_app_tabs"),
                 research_sources=op.get("research_sources"),
-                experience_notes=op.get("experience_notes"),
             )
             customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
             surface_preview = {
@@ -7792,14 +7728,13 @@ class TakyonStore:
             conn.execute(
                 """
                 INSERT INTO app_surface_contracts (
-                  business_slug, status, design_brief_path, source_path, runtime_api_base,
+                  business_slug, status, source_path, runtime_api_base,
                   runtime_features_json, routes_json, theme_json, constraints_json, publish_target, publish_policy,
                   mode_behavior, done_gate, notes, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_slug) DO UPDATE SET
                   status = excluded.status,
-                  design_brief_path = excluded.design_brief_path,
                   source_path = excluded.source_path,
                   runtime_api_base = excluded.runtime_api_base,
                   runtime_features_json = excluded.runtime_features_json,
@@ -7817,7 +7752,6 @@ class TakyonStore:
                 (
                     slug,
                     status,
-                    design_brief_path,
                     source_path,
                     runtime_api_base,
                     _json_dumps(runtime_features),
@@ -7844,7 +7778,6 @@ class TakyonStore:
                 event_type=action,
                 payload={
                     "status": status,
-                    "design_brief_path": design_brief_path,
                     "source_path": source_path,
                     "runtime_features": runtime_features,
                     "publish_target": publish_target,
@@ -9617,7 +9550,6 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "action": "app.surface.upsert",
         "business": args.get("business"),
         "status": args.get("status") or "draft",
-        "design_brief_path": args.get("design_brief_path") or "product/design-brief.md",
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
         "runtime_features": args.get("runtime_features"),
@@ -9631,9 +9563,8 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "required_sections": args.get("required_sections"),
         "required_app_tabs": args.get("required_app_tabs"),
         "research_sources": args.get("research_sources"),
-        "experience_notes": args.get("experience_notes"),
         "routes": args.get("routes") or [],
-        "theme": args.get("theme") or {"source": "business design brief"},
+        "theme": args.get("theme") or {"source": "business product workspace"},
         "constraints": args.get("constraints") or {},
         "publish_target": args.get("publish_target"),
         "publish_policy": args.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
@@ -9766,11 +9697,10 @@ def _product_surface_refresh_operations(
                 "business": business,
                 "_skip_auto_verify": True,
                 "status": next_status,
-                "design_brief_path": surface.get("design_brief_path") or "product/design-brief.md",
                 "source_path": surface_refresh.get("source_path"),
                 "runtime_api_base": surface.get("runtime_api_base"),
                 "routes": surface.get("routes") or [],
-                "theme": surface.get("theme") or {"source": "business design brief"},
+                "theme": surface.get("theme") or {"source": "business product workspace"},
                 "constraints": surface.get("constraints") or {},
                 "publish_target": publish_target,
                 "publish_policy": publish_policy,
@@ -14908,10 +14838,10 @@ def _apply_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, plan: 
         conn.execute(
             """
             INSERT INTO app_surface_contracts (
-              business_slug, status, design_brief_path, source_path, runtime_api_base,
+              business_slug, status, source_path, runtime_api_base,
               routes_json, theme_json, constraints_json, notes, metadata_json, created_at, updated_at
             )
-            VALUES (?, 'legacy_detected', 'product/design-brief.md', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'legacy_detected', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(business_slug) DO NOTHING
             """,
             (
@@ -15599,7 +15529,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_app_surface_contract",
-        "description": "Record the business-owned product surface contract: source/design/routes, customer experience shape, plus publish target, policy, and done gate.",
+        "description": "Record the business-owned product surface contract: source/routes, customer experience shape, plus publish target, policy, and done gate.",
         "handler": handle_business_upsert_app_surface_contract,
         "schema": _schema(
             "business_upsert_app_surface_contract",
@@ -15607,7 +15537,6 @@ TAKYON_TOOL_DEFINITIONS = [
             {
                 "business": _BUSINESS_PROP,
                 "status": {"type": "string"},
-                "design_brief_path": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
@@ -15617,11 +15546,10 @@ TAKYON_TOOL_DEFINITIONS = [
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
                 "conversion_model": {"type": "string", "description": "CEO-chosen conversion model for the product surface, such as self-serve signup, demo request, trial, or paid plan purchase."},
-                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and product/design-brief.md."},
+                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},
                 "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
                 "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
                 "research_sources": {"type": "array", "items": {"type": "string"}, "description": "Research files that grounded the CEO's customer-shape decision. Default and canonical first source is research/strategy.md, but the whole research/ tree may contribute."},
-                "experience_notes": {"type": "string", "description": "Additional CEO guidance about the customer-facing experience shape, distilled from research/ and product/design-brief.md."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},

@@ -17,7 +17,6 @@ metadata:
     allowed_roots: [product, metrics]
     output_root: product
     publication:
-      - product/design-brief.md
       - product/surface.md
       - product/site
 required_environment_variables: []
@@ -40,7 +39,7 @@ Use this skill to create or materially improve the business-owned product surfac
 ## Quick Reference
 
 - Primary root: `product/`
-- Publication paths: `product/design-brief.md`, `product/surface.md`, `product/site/`
+- Publication paths: `product/surface.md`, `product/site/`
 - Best call points: post-research product creation, surface repair, honest publication work
 - Publication lane: publish from `product/site/`; reflect refreshed state in `product/surface.md`
 - Tool names used by this skill: `business_read_business`, `business_read_file`, `business_list_files`, `business_check_runtime_capabilities`, `business_upsert_app_surface_contract`, `business_create_workspace`, `business_write_file`, `business_patch_file`, `business_claude_agent_task`, `business_refresh_product_surface`
@@ -48,7 +47,7 @@ Use this skill to create or materially improve the business-owned product surfac
 ## Prerequisites
 
 - The Takyon toolset must be available.
-- Start with canonical business state: `business_read_business`, then load `product/design-brief.md` and `product/surface.md` with `business_read_file` if they already exist.
+- Start with canonical business state: `business_read_business`, then load `product/surface.md` with `business_read_file` if it already exists.
 - If the source path, framework, or local toolchain is unclear, use `business_check_runtime_capabilities` before acting as if a build stack already exists.
 - If the business has no surface contract yet, create it first with `business_upsert_app_surface_contract`.
 - For substantial `product/site/` work, prefer one delegated `business_claude_agent_task` pass and let that worker finish the source itself. Do not default to CEO source inspection, local hand-patching, or a second delegated pass in the same turn unless the worker explicitly returns `BLOCKED:` or the operator asked for manual repair.
@@ -60,17 +59,16 @@ Use this skill to create or materially improve the business-owned product surfac
 
 ## Templates
 
-- `templates/design-brief.md`
 - `templates/surface.md`
 
 ## How to Run
 
 - Call `business_read_business` first to inspect the current business summary, product surface, and publication state.
-- Use `business_read_file` and `business_list_files` to inspect `product/design-brief.md`, `product/surface.md`, and the current source tree before rewriting anything.
+- Use `business_read_file` and `business_list_files` to inspect `product/surface.md` and the current source tree before rewriting anything.
 - Use `business_upsert_app_surface_contract` to set or repair the canonical source path, routes, runtime_features, the CEO-owned customer experience shape, publish target, and done gate.
 - Set the subuser app shape on that same surface contract before delegation when the answer is known: `app_mode`, `subscription_style`, `api_mode`, and any per-rail `rail_state`. Right now the only supported `subscription_style` is `monthly`.
-- Before delegation, read `research/` broadly, especially `research/strategy.md`, then write the chosen customer experience shape onto the same surface contract: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, `research_sources`, and any `experience_notes`.
-- Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially briefs, receipts, and small source fixes under `product/`.
+- Before delegation, read `research/` broadly, especially `research/strategy.md`, then write the chosen customer experience shape onto the same surface contract: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, and `research_sources`.
+- Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially receipts and small source fixes under `product/`.
 - Use `business_claude_agent_task` only when the delegated worker lane is available and the job is meaningfully larger than a direct first-surface build. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 - For `product/site/`, delegate one bounded source pass and let the worker own the source/build loop. The worker will receive the prepared shared subuser app kit under `product/site/_takyon/`; build the business-specific UI around that substrate instead of reinventing app-plane rails.
 - When first publish speed matters, prefer the smallest honest, dependency-light source that can verify and publish quickly. Do not default to a heavy framework if a static or minimal app shell is enough for the first truthful surface.
@@ -79,21 +77,20 @@ Use this skill to create or materially improve the business-owned product surfac
 
 ## Procedure
 
-1. Call `business_read_business` and identify the current offer, source path, publish target, and blocker state. If `product/design-brief.md` or `product/surface.md` exist, load them with `business_read_file`.
+1. Call `business_read_business` and identify the current offer, source path, publish target, and blocker state. If `product/surface.md` exists, load it with `business_read_file`.
 2. If there is no canonical surface contract or the source path is wrong, call `business_upsert_app_surface_contract` first. Default to a real source path under `product/site/`; do not invent a publish target without recording it.
 3. If the product will claim runtime-backed behavior such as auth, account, profile, checkout, billing, usage, entitlements, or generate, record those as `runtime_features` on the surface contract before delegating source work.
 4. Read `research/` broadly before deciding the customer surface, and explicitly inspect `research/strategy.md` by name plus any other relevant files in `research/`. Use that evidence to choose the customer-maximizing surface shape.
-5. Record that customer experience shape on the surface contract before delegation: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, `research_sources`, and any `experience_notes`. This is the CEO-owned product decision that Claude should implement rather than rediscovering from scratch.
+5. Record that customer experience shape on the surface contract before delegation: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, and `research_sources`. This is the CEO-owned product decision that Claude should implement rather than rediscovering from scratch.
 6. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `live`, `blocked`, `broken`, or `unknown`. `subscription_style` should currently be `monthly`.
 7. If `product/site/` or the expected source directory does not exist, create it with `business_create_workspace` and write the initial structure there before claiming product work is underway.
 8. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
-9. Write or patch `product/design-brief.md` so it names the audience, offer, routes, constraints, and what evidence this product surface is supposed to create next.
-10. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface. When the surface is app-like, record `/app` explicitly in `required_routes` instead of relying on an implied shell.
-11. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, customer experience shape, app shape, what works now, what is blocked, and what still depends on app-runtime or provider work. That same contract is what refreshes the prepared `_takyon/` kit and what the worker receives as product-site UI truth.
-12. Decide whether the source work fits inside one CEO turn. For a substantial first honest site/app publish, default to one delegated `business_claude_agent_task` pass under `product/site/` so the worker can finish the source, local build/test, and cleanup inside its isolated lane. If that worker explicitly returns `BLOCKED:` or hits a provider/runtime gate, record the blocker instead of defaulting to CEO source repair in the same turn.
-13. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
-14. If the operator asked for publication and the source is real, call `business_refresh_product_surface` before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop the same-turn source loop instead of defaulting to CEO repair passes.
-15. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting extra runtime notes become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
+9. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface. When the surface is app-like, record `/app` explicitly in `required_routes` instead of relying on an implied shell.
+10. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, customer experience shape, app shape, what works now, what is blocked, and what still depends on app-runtime or provider work. That same contract is what refreshes the prepared `_takyon/` kit and what the worker receives as product-site UI truth.
+11. Decide whether the source work fits inside one CEO turn. For a substantial first honest site/app publish, default to one delegated `business_claude_agent_task` pass under `product/site/` so the worker can finish the source, local build/test, and cleanup inside its isolated lane. If that worker explicitly returns `BLOCKED:` or hits a provider/runtime gate, record the blocker instead of defaulting to CEO source repair in the same turn.
+12. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
+13. If the operator asked for publication and the source is real, call `business_refresh_product_surface` before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop the same-turn source loop instead of defaulting to CEO repair passes.
+14. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting extra runtime notes become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
 
 ### Shared style skills
 
@@ -109,14 +106,12 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 
 ## Output Format
 
-- `product/design-brief.md` should describe audience, offer, routes, and constraints.
 - `product/surface.md` should describe what is actually wired, what is blocked, and which `runtime_features` the app-runtime lane must reconcile.
 - `product/site/` should contain real source, not placeholder notes pretending to be source.
 
 ## Publication
 
 - The canonical local source path is `product/site/`.
-- Publish the design brief to `product/design-brief.md`.
 - Publish the surface contract and current state to `product/surface.md`.
 - Public or local publication state must be reflected honestly in `product/surface.md`.
 - Do not claim a deployed URL, working route, or finished publish unless the runtime or tool receipts actually support it.
@@ -132,7 +127,6 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 
 ## Verification Checklist
 
-- [ ] `product/design-brief.md` and `product/surface.md` agree on the offer and current state
 - [ ] `product/site/` contains usable source, not only notes
 - [ ] Any claimed publication state is backed by `business_refresh_product_surface` output or visible receipts
 - [ ] Any runtime-dependent feature is either routed to `takyon-app-runtime` or left visibly blocked
