@@ -227,7 +227,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "tools": ["business_upsert_app_plan", "business_create_app_checkout", "business_record_stripe_webhook"],
         "endpoints": [("POST", "checkout"), ("GET", "account")],
         "worker_contract": [
-            "Plan, billing, and paid-state UI must reflect Takyon billing rails, not local assumptions.",
+            "Legacy alias only: normalize customer-facing paid UI around account + checkout instead of a standalone billing rail.",
             "Do not claim a paid tier without real runtime entitlement or checkout truth.",
         ],
     },
@@ -262,6 +262,25 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         ],
     },
 }
+_RUNTIME_FEATURE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
+    "billing": ("account", "checkout"),
+}
+_RUNTIME_FEATURE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "account": ("auth",),
+    "profile": ("auth", "account"),
+    "checkout": ("auth", "account"),
+    "entitlements": ("auth", "account"),
+    "usage": ("auth", "account"),
+}
+_RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
+    "auth",
+    "account",
+    "profile",
+    "checkout",
+    "entitlements",
+    "usage",
+    "generate",
+)
 
 SUBUSER_APP_MODE_CHOICES = frozenset({"standard_saas", "ai_tool", "api_product"})
 SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset(
@@ -595,22 +614,42 @@ def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
         values = []
     normalized: list[str] = []
     seen: set[str] = set()
+    unknown: list[str] = []
     for value in values:
         text = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
         if not text or not re.match(r"^[a-z0-9][a-z0-9_]{0,63}$", text):
             continue
-        if text in seen:
+        expanded = _RUNTIME_FEATURE_LEGACY_ALIASES.get(text, (text,))
+        invalid = [item for item in expanded if item not in PRODUCT_RUNTIME_RAILS or item == "billing"]
+        if invalid:
+            unknown.append(text)
             continue
-        seen.add(text)
-        normalized.append(text)
-    unknown = [item for item in normalized if item not in PRODUCT_RUNTIME_RAILS]
+        for item in expanded:
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
     if strict and unknown:
         raise TakyonError(
             "unknown runtime_features: "
             + ", ".join(unknown)
             + f". Known rails: {', '.join(sorted(PRODUCT_RUNTIME_RAILS))}"
         )
-    return [item for item in normalized if item in PRODUCT_RUNTIME_RAILS]
+    resolved: set[str] = set()
+
+    def include(rail: str) -> None:
+        if rail in resolved:
+            return
+        for dep in _RUNTIME_FEATURE_DEPENDENCIES.get(rail, ()):
+            include(dep)
+        resolved.add(rail)
+
+    for item in normalized:
+        include(item)
+
+    ordered = [rail for rail in _RUNTIME_FEATURE_ORDER if rail in resolved]
+    trailing = [rail for rail in normalized if rail in resolved and rail not in _RUNTIME_FEATURE_ORDER and rail not in ordered]
+    return ordered + trailing
 
 
 def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
@@ -646,9 +685,13 @@ def _normalize_subuser_rail_state(
         rail = re.sub(r"[\s-]+", "_", str(key or "").strip().lower())
         state = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
         state = _LEGACY_SUBUSER_RAIL_STATE_ALIASES.get(state, state)
-        if rail not in PRODUCT_RUNTIME_RAILS or state not in SUBUSER_RAIL_STATE_CHOICES:
+        if state not in SUBUSER_RAIL_STATE_CHOICES:
             continue
-        normalized[rail] = state
+        expanded = _RUNTIME_FEATURE_LEGACY_ALIASES.get(rail, (rail,))
+        for item in expanded:
+            if item not in PRODUCT_RUNTIME_RAILS or item == "billing":
+                continue
+            normalized[item] = state
     for rail in declared_rails:
         normalized.setdefault(rail, "unknown")
     return {rail: normalized[rail] for rail in declared_rails if rail in normalized}
@@ -1177,8 +1220,14 @@ def _subuser_app_worker_contract_block(
     else:
         lines.append("- AI generation is not declared for this surface. Do not present a live AI chat/generate flow.")
 
-    if "checkout" not in runtime_features and "billing" not in runtime_features:
-        lines.append("- Checkout/billing rails are not declared. Do not render pricing cards, upgrade buttons, subscriptions, or paid-tier UI as live.")
+    paid_runtime = set(runtime_features)
+    if "checkout" in paid_runtime or "account" in paid_runtime:
+        lines.append("- `account` is the canonical paid-state read rail. Use it for current user, entitlements, usage, and subscription state; do not model customer-facing paid state as a standalone `billing` dependency.")
+    if "checkout" not in paid_runtime and "account" not in paid_runtime:
+        lines.append("- Paid rails are not declared. Do not render pricing cards, upgrade buttons, subscriptions, or paid-tier UI as live.")
+    elif not {"account", "checkout"} <= paid_runtime:
+        missing = ", ".join(sorted({"account", "checkout"} - paid_runtime))
+        lines.append(f"- Paid rails are incomplete (missing {missing}). Do not render live pricing or subscribe flows until both account and checkout are declared.")
     elif not plans_configured:
         lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
 
@@ -2776,7 +2825,7 @@ def _validate_product_surface_contract(
     if kind["auth"] and not ({"auth", "session", "account"} & integrations):
         return False, f"auth/session product surface must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
     if kind["checkout"] and "checkout" not in integrations:
-        return False, f"checkout/billing product surface must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
+        return False, f"paid product surface must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
     return True, ""
 
 
@@ -15011,7 +15060,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "design_brief_path": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, billing, entitlements, usage, or generate."},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
                 "subscription_style": {"type": "string", "enum": ["free_only", "one_time", "monthly", "monthly_yearly", "hybrid_usage"], "description": "Subscription style the prepared subuser app kit should assume for this business."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},

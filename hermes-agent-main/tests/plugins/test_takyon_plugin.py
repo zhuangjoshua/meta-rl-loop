@@ -23,6 +23,7 @@ from plugins.takyon.core import (
     _product_publish_target,
     _scan_for_pretend_product_state,
     _refresh_product_surface_path,
+    _surface_subuser_app_shape,
     _surface_customer_experience_shape,
     handle_business_check_runtime_capabilities,
     handle_business_delete_business,
@@ -1154,6 +1155,7 @@ def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeyp
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
     monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
@@ -1200,6 +1202,7 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
     monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
@@ -1281,6 +1284,7 @@ def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path,
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
     monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
@@ -1424,9 +1428,38 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
 
     assert result["success"] is True
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["runtime_features"] == ["auth", "checkout", "generate"]
+    assert app["surface_contract"]["runtime_features"] == ["auth", "account", "checkout", "generate"]
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
-    assert "Runtime features: auth, checkout, generate" in surface_md
+    assert "Runtime features: auth, account, checkout, generate" in surface_md
+
+
+def test_app_surface_contract_normalizes_legacy_billing_to_account_and_checkout(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-billing-alias",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["billing"],
+                "rail_state": {"billing": "blocked"},
+                "idempotency_key": "surface-runtime-features-billing-alias",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["runtime_features"] == ["auth", "account", "checkout"]
+    shape = _surface_subuser_app_shape(app["surface_contract"])
+    assert shape["rail_state"] == {"auth": "unknown", "account": "blocked", "checkout": "blocked"}
 
 
 def test_app_surface_contract_rejects_unknown_runtime_features(tmp_path, monkeypatch):
@@ -1488,6 +1521,7 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
     monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
@@ -1508,17 +1542,21 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert result["success"] is True
     assert "Hermes runtime UI contract" in instruction
     assert "Hermes sub-user app plane contract" in instruction
-    assert "Declared runtime-backed features: auth, checkout, generate" in instruction
+    assert "Declared runtime-backed features: auth, account, checkout, generate" in instruction
     assert "Runtime API base: /api/takyon/apps/latexflow" in instruction
+    assert "account (owner: takyon-app-runtime)" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
+    assert "Canonical tools: business_read_app_account" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/auth/request, GET /api/takyon/apps/latexflow/auth/verify, GET /api/takyon/apps/latexflow/session" in instruction
+    assert "Exact runtime endpoints: GET /api/takyon/apps/latexflow/account" in instruction
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/checkout" in instruction
     assert "Exact runtime endpoints: POST /api/takyon/apps/latexflow/generate" in instruction
     assert "Treat POST <runtime_api_base>/generate as the public product contract for AI generation" in instruction
     assert "product code should not call providers or internal authority endpoints directly" in instruction
     assert "`tk_` top-level operator tokens never belong in product code" in instruction
     assert "`tkg_` is the app/business AI mediation boundary, not a customer login or session token" in instruction
+    assert "`account` is the canonical paid-state read rail." in instruction
     assert "No app plans are configured yet. Do not render pricing cards" in instruction
 
 
@@ -1591,7 +1629,9 @@ def test_surface_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
     assert "## Runtime Rails" in surface_md
     assert "- auth — owner: takyon-app-runtime" in surface_md
+    assert "- account — owner: takyon-app-runtime" in surface_md
     assert "- checkout — owner: takyon-app-runtime" in surface_md
+    assert "Canonical tools: business_read_app_account" in surface_md
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in surface_md
 
 
