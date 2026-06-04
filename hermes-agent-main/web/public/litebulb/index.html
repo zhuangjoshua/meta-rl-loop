@@ -238,9 +238,9 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .card.running .ct::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--amber);margin-left:5px;animation:blink 1s infinite;vertical-align:middle}
 
 /* product mini-browser */
-.mini{border:2px solid var(--ink);background:#fff;height:100%;display:flex;flex-direction:column}
+.mini{border:2px solid var(--ink);background:#fff;height:100%;min-height:220px;display:flex;flex-direction:column}
 .mini__frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
-.mini__viewport{flex:1;min-height:0;position:relative;overflow:hidden;background:#fff}
+.mini__viewport{flex:1;min-height:180px;position:relative;overflow:hidden;background:#fff}
 .mini__frame--scaled{position:absolute;top:0;left:0;width:1280px;height:820px;transform-origin:top left;pointer-events:none;will-change:transform}
 .mini__bar{display:flex;align-items:center;gap:5px;background:var(--ink);padding:5px 7px;flex:0 0 auto}
 .mini__bar i{width:8px;height:8px;border-radius:50%;background:var(--paper);opacity:.7}
