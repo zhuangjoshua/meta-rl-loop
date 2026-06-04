@@ -1670,14 +1670,43 @@
     // Avoid rebuilding (and reloading the iframe) when nothing material changed.
     const sig = JSON.stringify([live, directUrl, hasLocalPreview, previewPath, hostLabel]);
     if (w.dataset.productSig === sig) return;
+    if (typeof w._productPreviewCleanup === "function") {
+      try { w._productPreviewCleanup(); } catch (_) {}
+      delete w._productPreviewCleanup;
+    }
     w.dataset.productSig = sig;
     const frameTitle = `${RT.biz.name || RT.biz.slug || "product"} preview`;
     body(w).innerHTML = `<div class="mini">
       <div class="mini__bar"><i></i><i></i><i></i><span>${esc(hostLabel)}</span></div>
       ${hasSite
-        ? `<iframe class="mini__frame" id="product-frame" title="${esc(frameTitle)}"${directUrl ? ` src="${esc(directUrl)}"` : ""}></iframe>`
+        ? `<div class="mini__viewport" id="product-viewport"><iframe class="mini__frame mini__frame--scaled" id="product-frame" title="${esc(frameTitle)}"${directUrl ? ` src="${esc(directUrl)}"` : ""}></iframe></div>`
         : `<div class="mini__page"><div class="lab">no site yet</div><p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p><div class="meta">A live preview of the site appears here once it exists.</div></div>`}
     </div>`;
+    const viewport = body(w).querySelector("#product-viewport");
+    const frame = body(w).querySelector("#product-frame");
+    if (viewport && frame) {
+      const previewWidth = 1280;
+      const previewHeight = 820;
+      const applyScale = () => {
+        const width = viewport.clientWidth || 1;
+        const height = viewport.clientHeight || 1;
+        const scale = Math.max(0.12, Math.min(width / previewWidth, height / previewHeight));
+        frame.style.transform = `scale(${scale})`;
+      };
+      let resizeObserver = null;
+      if (typeof ResizeObserver === "function") {
+        resizeObserver = new ResizeObserver(() => applyScale());
+        resizeObserver.observe(viewport);
+      } else {
+        window.addEventListener("resize", applyScale);
+      }
+      frame.addEventListener("load", applyScale);
+      applyScale();
+      w._productPreviewCleanup = () => {
+        if (resizeObserver) resizeObserver.disconnect();
+        else window.removeEventListener("resize", applyScale);
+      };
+    }
     if (hasSite && !directUrl && previewPath) {
       const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
       if (business) {

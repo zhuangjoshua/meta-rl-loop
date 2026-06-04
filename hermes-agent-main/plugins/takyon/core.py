@@ -3156,8 +3156,18 @@ def _product_next_service_metadata(source_root: Path) -> tuple[dict[str, Any] | 
         return None, "product source is not a Next.js app and no static publish directory exists"
     if "start" not in scripts:
         return None, "Next.js product source has no package.json start script for production serving"
-    if not (source_root / ".next").exists():
+    next_root = source_root / ".next"
+    if not next_root.exists():
         return None, "Next.js build output .next is missing after the refresh/build step"
+    required_markers = (
+        next_root / "BUILD_ID",
+        next_root / "build-manifest.json",
+    )
+    if any(not marker.exists() for marker in required_markers):
+        return None, (
+            "Next.js build output .next is incomplete after the refresh/build step; "
+            "wait for BUILD_ID and build-manifest.json before publishing"
+        )
     manager_name = _javascript_package_manager_name(source_root, package_data)
     manager = _javascript_package_manager_command(manager_name)
     start_command = _javascript_run_script_command(manager, "start", root=source_root)
