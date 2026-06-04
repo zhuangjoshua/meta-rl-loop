@@ -14,6 +14,7 @@ from gateway.session_context import clear_session_vars, set_session_vars
 from plugins.takyon import business_credits as takyon_business_credits
 from plugins.takyon import core as takyon_core
 from plugins.takyon import storage
+from plugins.takyon.stripe_util import build_signature_header
 from plugins.takyon.core import (
     TAKYON_TOOL_DEFINITIONS,
     TakyonError,
@@ -26,6 +27,7 @@ from plugins.takyon.core import (
     _surface_subuser_app_shape,
     _surface_customer_experience_shape,
     handle_business_check_runtime_capabilities,
+    handle_business_create_app_checkout,
     handle_business_delete_business,
     handle_business_list_businesses,
     handle_business_meta_ad_control,
@@ -37,7 +39,10 @@ from plugins.takyon.core import (
     handle_business_reddit_ad_insights_sync,
     handle_business_reddit_ad_launch,
     handle_business_publish_outreach,
+    handle_business_read_app_account,
     handle_business_request_app_magic_link,
+    handle_business_record_stripe_webhook,
+    handle_business_verify_app_magic_link,
     handle_business_static_ad_generate,
     handle_business_ugc_ad_generate,
     handle_business_ugc_ad_write,
@@ -1609,6 +1614,45 @@ def test_claude_agent_task_uses_docker_lane_for_product_site_when_terminal_env_i
     assert captured["workspace_path"].endswith("product/site")
 
 
+def test_run_claude_agent_task_in_docker_passes_stdin_into_container(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    from tools.environments import docker as docker_env
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: ["--security-opt=test"])
+    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: {"ANTHROPIC_API_KEY": "test-key", **(extra or {})})
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = takyon_core._run_claude_agent_task_in_docker(
+        payload={
+            "business": "latexflow",
+            "workspace": "product/site",
+            "instruction": "Build the product shell.",
+        },
+        workspace_path=workspace,
+        timeout_ms=30_000,
+    )
+
+    assert result.returncode == 0
+    assert "-i" in captured["command"]
+    payload = json.loads(str(captured["input"]))
+    assert payload["instruction"] == "Build the product shell."
+    assert payload["cwd"] == "/workspace"
+    assert payload["root"] == "/workspace"
+
+
 def test_surface_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -2518,6 +2562,216 @@ def test_work_focus_blocks_direct_product_app_handlers(tmp_path, monkeypatch):
 
     assert result["success"] is False
     assert "marketing-only" in result["error"]
+
+
+def test_pg_magic_link_verify_creates_session_and_free_entitlement(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:authrail",
+        [{"action": "business.upsert", "business": "authrail", "name": "Authrail", "mode": "test"}],
+        "init-authrail",
+    )
+
+    request = json.loads(
+        handle_business_request_app_magic_link(
+            {
+                "business": "authrail",
+                "email": "tester@example.com",
+                "name": "Test User",
+                "origin": "https://authrail.example.com",
+                "send_email": False,
+            }
+        )
+    )
+    verify = json.loads(
+        handle_business_verify_app_magic_link(
+            {
+                "business": "authrail",
+                "token": request["token"],
+            }
+        )
+    )
+    account = json.loads(
+        handle_business_read_app_account(
+            {
+                "business": "authrail",
+                "session_token": verify["session_token"],
+            }
+        )
+    )
+
+    assert verify["success"] is True
+    assert verify["session_token"]
+    assert account["success"] is True
+    assert account["user"]["email"] == "tester@example.com"
+    assert any(ent["tier"] == "free" and ent["status"] == "active" for ent in account["entitlements"])
+
+
+def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:checkoutrail",
+        [{"action": "business.upsert", "business": "checkoutrail", "name": "Checkoutrail", "mode": "test"}],
+        "init-checkoutrail",
+    )
+    _commit(
+        store,
+        "business:checkoutrail",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "checkoutrail",
+                "plan_key": "pro_monthly",
+                "tier": "pro",
+                "price_cents": 1900,
+                "currency": "usd",
+                "billing_interval": "month",
+            }
+        ],
+        "init-checkoutrail-plan",
+    )
+
+    checkout = json.loads(
+        handle_business_create_app_checkout(
+            {
+                "business": "checkoutrail",
+                "plan_key": "pro_monthly",
+                "customer_email": "tester@example.com",
+                "success_url": "https://example.test/success",
+                "cancel_url": "https://example.test/cancel",
+            }
+        )
+    )
+
+    assert checkout["success"] is True
+    assert checkout["mode"] == "test"
+    assert checkout["checkout_url"].startswith("local://takyon/checkout/checkoutrail/")
+
+
+def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:paidacct",
+        [{"action": "business.upsert", "business": "paidacct", "name": "Paidacct", "mode": "test"}],
+        "init-paidacct",
+    )
+    _commit(
+        store,
+        "business:paidacct",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "paidacct",
+                "plan_key": "pro_yearly",
+                "tier": "pro",
+                "price_cents": 14900,
+                "currency": "usd",
+                "billing_interval": "year",
+            }
+        ],
+        "init-paidacct-plan",
+    )
+
+    request = json.loads(
+        handle_business_request_app_magic_link(
+            {
+                "business": "paidacct",
+                "email": "paid@example.com",
+                "name": "Paid User",
+                "origin": "https://paidacct.example.com",
+                "send_email": False,
+            }
+        )
+    )
+    verify = json.loads(
+        handle_business_verify_app_magic_link(
+            {
+                "business": "paidacct",
+                "token": request["token"],
+            }
+        )
+    )
+    account_before = json.loads(
+        handle_business_read_app_account(
+            {
+                "business": "paidacct",
+                "session_token": verify["session_token"],
+            }
+        )
+    )
+    checkout = json.loads(
+        handle_business_create_app_checkout(
+            {
+                "business": "paidacct",
+                "plan_key": "pro_yearly",
+                "app_user_id": account_before["user"]["id"],
+                "customer_email": "paid@example.com",
+                "success_url": "https://example.test/success",
+                "cancel_url": "https://example.test/cancel",
+            }
+        )
+    )
+
+    event = {
+        "id": "evt_paidacct",
+        "type": "checkout.session.completed",
+        "created": 1_700_000_000,
+        "data": {
+            "object": {
+                "id": "cs_paidacct",
+                "object": "checkout.session",
+                "mode": "subscription",
+                "payment_status": "paid",
+                "status": "complete",
+                "currency": "usd",
+                "amount_subtotal": 14900,
+                "amount_total": 14900,
+                "customer": "cus_paidacct",
+                "subscription": "sub_paidacct",
+                "customer_details": {"email": "paid@example.com"},
+                "customer_email": "paid@example.com",
+                "client_reference_id": checkout["client_reference_id"],
+                "metadata": {"checkout_intent_id": checkout["checkout_intent_id"]},
+            }
+        },
+    }
+    raw_event = json.dumps(event)
+    webhook = json.loads(
+        handle_business_record_stripe_webhook(
+            {
+                "raw_body": raw_event,
+                "stripe_signature": build_signature_header(raw_event, "whsec_test"),
+            }
+        )
+    )
+    account_after = json.loads(
+        handle_business_read_app_account(
+            {
+                "business": "paidacct",
+                "session_token": verify["session_token"],
+            }
+        )
+    )
+
+    assert webhook["success"] is True
+    assert webhook["type"] == "checkout.session.completed"
+    assert webhook["processed"]["recorded"] is True
+    assert account_after["user"]["tier"] == "paid"
+    assert account_after["revenue"]["amount_paid_cents"] == 14900
+    assert any(
+        ent["tier"] == "paid"
+        and ent["status"] == "active"
+        and ent["plan_key"] == "pro_yearly"
+        and ent["stripe_subscription_id"] == "sub_paidacct"
+        for ent in account_after["entitlements"]
+    )
 
 
 def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_path, monkeypatch):

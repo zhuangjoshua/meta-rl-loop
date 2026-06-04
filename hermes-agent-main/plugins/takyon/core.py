@@ -1321,6 +1321,7 @@ def _run_claude_agent_task_in_docker(
         "run",
         "--rm",
         "--init",
+        "-i",
         "--read-only",
         *(_build_security_args(run_as_host_user=False)),
         "--tmpfs",
@@ -9772,7 +9773,11 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                         raise TakyonError("magic link user is missing")
                     existing_free = any(
                         ent.source == "manual" and ent.tier == "free"
-                        for ent in leaves["entitlements"].list_entitlements(leaf, business, user_record.id)
+                        for ent in leaves["entitlements"].list_entitlements(
+                            leaf,
+                            business,
+                            app_user_id=user_record.id,
+                        )
                     )
                     if not existing_free:
                         leaves["entitlements"].grant_entitlement(
@@ -9996,8 +10001,9 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             intent_id = uuid.uuid4().hex
             client_reference_id = uuid.uuid4().hex
             now = _now()
+            metadata_column = "metadata" if isinstance(conn, _PGConn) else "metadata_json"
             conn.execute(
-                "INSERT INTO app_checkout_intents (id, business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)",
+                f"INSERT INTO app_checkout_intents (id, business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, {metadata_column}, created_at, updated_at) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)",
                 (intent_id, business, args.get("app_user_id"), plan_key, client_reference_id, customer_email, _json_dumps(args.get("metadata") or {}), now, now),
             )
             params: dict[str, Any] = {
