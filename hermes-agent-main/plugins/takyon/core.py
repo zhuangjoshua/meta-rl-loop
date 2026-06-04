@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from textwrap import dedent
 from typing import Any, Iterable, Mapping
 
 try:
@@ -1211,6 +1212,782 @@ def _materialize_subuser_app_kit(
         + ";\nexport default subuserSurfaceContext;\n",
         encoding="utf-8",
     )
+    _materialize_subuser_app_starter(workspace_root, slug=slug, surface=surface)
+
+
+def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
+    shape = _surface_subuser_app_shape(surface)
+    customer_experience = _surface_customer_experience_shape(surface)
+    return _surface_shape_requires_app_shell(
+        app_mode=shape.get("app_mode") or "",
+        subscription_style=shape.get("subscription_style") or "",
+        runtime_features=_surface_runtime_features(surface),
+        required_app_tabs=customer_experience.get("required_app_tabs") or [],
+        required_routes=customer_experience.get("required_routes") or [],
+    )
+
+
+def _humanize_business_slug(slug: str) -> str:
+    parts = [part for part in re.split(r"[^a-z0-9]+", str(slug or "").strip().lower()) if part]
+    if not parts:
+        return "Workspace"
+    return " ".join(part.capitalize() for part in parts)
+
+
+def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
+    customer_experience = _surface_customer_experience_shape(surface)
+    title = _humanize_business_slug(slug)
+    surface_goal = str(customer_experience.get("surface_goal") or "").strip()
+    conversion_model = str(customer_experience.get("conversion_model") or "").strip()
+    required_tabs = [str(tab).strip() for tab in (customer_experience.get("required_app_tabs") or []) if str(tab).strip()]
+    if not required_tabs:
+        required_tabs = ["Workspace", "Account", "Billing"]
+    hero = surface_goal or f"{title} turns customer intent into a clean monthly workflow."
+    supporting = conversion_model or "Monthly subscription access"
+    return {
+        "title": title,
+        "hero": hero,
+        "supporting": supporting,
+        "tabs": required_tabs[:5],
+    }
+
+
+def _write_text_if_missing(path: Path, content: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
+    copy = _subuser_app_starter_strings(surface, slug=slug)
+    title_literal = json.dumps(copy["title"], ensure_ascii=False)
+    hero_literal = json.dumps(copy["hero"], ensure_ascii=False)
+    supporting_literal = json.dumps(copy["supporting"], ensure_ascii=False)
+    tabs_literal = json.dumps(copy["tabs"], ensure_ascii=False)
+    package_name = re.sub(r"[^a-z0-9-]+", "-", str(slug or "workspace").strip().lower()).strip("-") or "workspace"
+    return {
+        "package.json": json.dumps(
+            {
+                "name": package_name,
+                "version": "0.1.0",
+                "private": True,
+                "scripts": {
+                    "dev": "next dev",
+                    "build": "next build",
+                    "start": "next start",
+                },
+                "dependencies": {
+                    "next": "14.2.3",
+                    "react": "^18",
+                    "react-dom": "^18",
+                },
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        "next.config.js": "const nextConfig = {};\n\nmodule.exports = nextConfig;\n",
+        "src/app/layout.js": dedent(
+            f"""
+            import "../../_takyon/tokens.css";
+            import "./globals.css";
+
+            export const metadata = {{
+              title: {title_literal},
+              description: {supporting_literal},
+            }};
+
+            export default function RootLayout({{ children }}) {{
+              return (
+                <html lang="en">
+                  <body>{{children}}</body>
+                </html>
+              );
+            }}
+            """
+        ).strip()
+        + "\n",
+        "src/app/globals.css": dedent(
+            """
+            :root {
+              --starter-bg: #f6f2e8;
+              --starter-panel: rgba(255, 255, 255, 0.92);
+              --starter-border: rgba(25, 23, 19, 0.14);
+              --starter-ink: #191713;
+              --starter-muted: #625b4e;
+              --starter-accent: #0f766e;
+              --starter-accent-strong: #0a5d57;
+            }
+
+            * {
+              box-sizing: border-box;
+            }
+
+            html,
+            body {
+              margin: 0;
+              min-height: 100%;
+              background:
+                radial-gradient(circle at top, rgba(15, 118, 110, 0.12), transparent 38%),
+                linear-gradient(180deg, #faf6ee 0%, #f2ecdf 100%);
+              color: var(--starter-ink);
+              font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+            }
+
+            a {
+              color: inherit;
+              text-decoration: none;
+            }
+
+            button,
+            input {
+              font: inherit;
+            }
+
+            .starter-shell {
+              min-height: 100vh;
+              padding: 32px 20px 56px;
+            }
+
+            .starter-frame {
+              max-width: 1120px;
+              margin: 0 auto;
+              display: grid;
+              gap: 24px;
+            }
+
+            .starter-nav,
+            .starter-panel,
+            .starter-card,
+            .starter-sidebar {
+              background: var(--starter-panel);
+              border: 1px solid var(--starter-border);
+              border-radius: 28px;
+              box-shadow: 0 18px 60px rgba(34, 29, 22, 0.08);
+            }
+
+            .starter-nav {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 16px;
+              padding: 18px 22px;
+            }
+
+            .starter-brand {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+            }
+
+            .starter-brand-mark {
+              width: 42px;
+              height: 42px;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 14px;
+              background: linear-gradient(135deg, rgba(15, 118, 110, 0.2), rgba(15, 118, 110, 0.05));
+              color: var(--starter-accent-strong);
+              font-weight: 700;
+            }
+
+            .starter-brand-copy {
+              display: grid;
+              gap: 2px;
+            }
+
+            .starter-brand-copy strong {
+              font-size: 0.95rem;
+              letter-spacing: 0.04em;
+              text-transform: uppercase;
+            }
+
+            .starter-brand-copy span,
+            .starter-meta,
+            .starter-muted {
+              color: var(--starter-muted);
+            }
+
+            .starter-links {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 10px;
+            }
+
+            .starter-link,
+            .starter-chip {
+              display: inline-flex;
+              align-items: center;
+              gap: 8px;
+              border-radius: 999px;
+              border: 1px solid rgba(25, 23, 19, 0.12);
+              padding: 10px 14px;
+              font-size: 0.92rem;
+              background: rgba(255, 255, 255, 0.76);
+            }
+
+            .starter-link-primary,
+            .starter-button {
+              background: var(--starter-accent);
+              border-color: var(--starter-accent);
+              color: #f8fffe;
+            }
+
+            .starter-button {
+              cursor: pointer;
+              padding: 13px 18px;
+              border-radius: 14px;
+              font-weight: 600;
+            }
+
+            .starter-button:disabled {
+              opacity: 0.7;
+              cursor: progress;
+            }
+
+            .starter-hero {
+              display: grid;
+              gap: 20px;
+              padding: 34px;
+            }
+
+            .starter-eyebrow {
+              letter-spacing: 0.18em;
+              text-transform: uppercase;
+              font-size: 0.74rem;
+              color: var(--starter-accent-strong);
+            }
+
+            .starter-hero h1,
+            .starter-app-copy h1 {
+              margin: 0;
+              font-size: clamp(2.5rem, 5vw, 4.7rem);
+              line-height: 0.98;
+              font-weight: 500;
+            }
+
+            .starter-hero p,
+            .starter-app-copy p,
+            .starter-list,
+            .starter-kv dd {
+              margin: 0;
+              color: var(--starter-muted);
+              font-size: 1.04rem;
+              line-height: 1.7;
+            }
+
+            .starter-grid {
+              display: grid;
+              gap: 24px;
+              grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.9fr);
+            }
+
+            .starter-card,
+            .starter-sidebar {
+              padding: 24px;
+            }
+
+            .starter-card h2,
+            .starter-sidebar h2,
+            .starter-card h3 {
+              margin: 0 0 10px;
+              font-size: 1.18rem;
+            }
+
+            .starter-form {
+              display: grid;
+              gap: 12px;
+              margin-top: 16px;
+            }
+
+            .starter-input {
+              width: 100%;
+              border-radius: 14px;
+              border: 1px solid rgba(25, 23, 19, 0.16);
+              padding: 14px 16px;
+              background: #fff;
+            }
+
+            .starter-note {
+              border-radius: 18px;
+              padding: 14px 16px;
+              background: rgba(15, 118, 110, 0.08);
+              color: var(--starter-ink);
+            }
+
+            .starter-note.warn {
+              background: rgba(157, 87, 12, 0.1);
+            }
+
+            .starter-list {
+              display: grid;
+              gap: 10px;
+              padding: 0;
+              list-style: none;
+            }
+
+            .starter-kv {
+              margin: 0;
+              display: grid;
+              gap: 12px;
+            }
+
+            .starter-kv div {
+              display: grid;
+              gap: 2px;
+            }
+
+            .starter-kv dt {
+              color: var(--starter-muted);
+              font-size: 0.82rem;
+              text-transform: uppercase;
+              letter-spacing: 0.12em;
+            }
+
+            .starter-app-shell {
+              display: grid;
+              gap: 24px;
+              grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
+            }
+
+            .starter-sidebar {
+              align-self: start;
+            }
+
+            .starter-tablist {
+              display: grid;
+              gap: 10px;
+              margin-top: 18px;
+            }
+
+            .starter-app-main {
+              display: grid;
+              gap: 18px;
+            }
+
+            .starter-app-copy {
+              padding: 30px;
+            }
+
+            .starter-actions {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 12px;
+              margin-top: 12px;
+            }
+
+            .starter-outline {
+              background: transparent;
+              color: var(--starter-ink);
+            }
+
+            @media (max-width: 920px) {
+              .starter-grid,
+              .starter-app-shell {
+                grid-template-columns: 1fr;
+              }
+
+              .starter-nav {
+                align-items: flex-start;
+                flex-direction: column;
+              }
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/app/page.js": dedent(
+            """
+            import StarterLanding from "../components/StarterLanding.js";
+
+            export default function HomePage() {
+              return <StarterLanding />;
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/app/app/page.js": dedent(
+            """
+            import StarterWorkspace from "../../components/StarterWorkspace.js";
+
+            export default function AppPage() {
+              return <StarterWorkspace />;
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/components/starter-context.js": dedent(
+            f"""
+            import surfaceContext from "../../_takyon/surface-context.js";
+            import {{ createSubuserRuntimeClient }} from "../../_takyon/runtime-client.js";
+            import {{ planSubuserSurface }} from "../../_takyon/packs.js";
+
+            export const starterSurfaceContext = surfaceContext;
+            export const starterRuntime = createSubuserRuntimeClient(surfaceContext);
+            export const starterPlan = planSubuserSurface({{
+              appMode: surfaceContext.appMode,
+              subscriptionStyle: surfaceContext.subscriptionStyle,
+              apiMode: surfaceContext.apiMode,
+              routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
+            }});
+
+            export const starterTitle = {title_literal};
+            export const starterHero = {hero_literal};
+            export const starterSupporting = {supporting_literal};
+            export const starterTabs = {tabs_literal};
+
+            export function authRailIsLive() {{
+              return starterRuntime.isRailCallable("auth");
+            }}
+
+            export function checkoutRailIsLive() {{
+              return starterRuntime.isRailCallable("checkout");
+            }}
+            """
+        ).strip()
+        + "\n",
+        "src/components/StarterAuthForm.js": dedent(
+            """
+            "use client";
+
+            import { useState } from "react";
+
+            import { starterRuntime } from "./starter-context.js";
+
+            export default function StarterAuthForm({ title, subtitle, buttonLabel = "Email me a sign-in link" }) {
+              const [email, setEmail] = useState("");
+              const [busy, setBusy] = useState(false);
+              const [notice, setNotice] = useState("");
+              const [link, setLink] = useState("");
+
+              async function handleSubmit(event) {
+                event.preventDefault();
+                if (!email.trim()) {
+                  setNotice("Enter your email to continue.");
+                  return;
+                }
+                setBusy(true);
+                setNotice("");
+                setLink("");
+                try {
+                  const response = await starterRuntime.requestAuth({
+                    email: email.trim(),
+                    product_name: title,
+                    send_email: true,
+                  });
+                  setNotice(
+                    response?.email_sent
+                      ? "Check your inbox for your sign-in link."
+                      : "Your sign-in link is ready."
+                  );
+                  if (response?.verify_url) {
+                    setLink(String(response.verify_url));
+                  }
+                } catch (error) {
+                  setNotice("We couldn't send the sign-in link right now. Please try again.");
+                } finally {
+                  setBusy(false);
+                }
+              }
+
+              return (
+                <section className="starter-card">
+                  <h2>{title}</h2>
+                  <p>{subtitle}</p>
+                  <form className="starter-form" onSubmit={handleSubmit}>
+                    <input
+                      className="starter-input"
+                      type="email"
+                      inputMode="email"
+                      autoComplete="email"
+                      placeholder="name@company.com"
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                    />
+                    <button className="starter-button" type="submit" disabled={busy}>
+                      {busy ? "Sending..." : buttonLabel}
+                    </button>
+                  </form>
+                  {notice ? <p className="starter-note">{notice}</p> : null}
+                  {link ? (
+                    <div className="starter-actions">
+                      <a className="starter-link starter-link-primary" href={link}>
+                        Continue with your sign-in link
+                      </a>
+                    </div>
+                  ) : null}
+                </section>
+              );
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/components/StarterLanding.js": dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+
+            import StarterAuthForm from "./StarterAuthForm.js";
+            import {
+              authRailIsLive,
+              starterHero,
+              starterSupporting,
+              starterSurfaceContext,
+              starterTabs,
+              starterTitle,
+            } from "./starter-context.js";
+
+            export default function StarterLanding() {
+              const monthlyLabel = starterSurfaceContext.subscriptionStyle === "monthly" ? "Monthly access" : "Customer access";
+
+              return (
+                <main className="starter-shell">
+                  <div className="starter-frame">
+                    <nav className="starter-nav">
+                      <div className="starter-brand">
+                        <span className="starter-brand-mark">{starterTitle.slice(0, 1)}</span>
+                        <div className="starter-brand-copy">
+                          <strong>{starterTitle}</strong>
+                          <span>{starterSupporting}</span>
+                        </div>
+                      </div>
+                      <div className="starter-links">
+                        <Link className="starter-link" href="/app">
+                          Open app
+                        </Link>
+                        <a className="starter-link starter-link-primary" href="#pricing">
+                          See pricing
+                        </a>
+                      </div>
+                    </nav>
+
+                    <section className="starter-panel starter-hero">
+                      <span className="starter-eyebrow">{monthlyLabel}</span>
+                      <h1>{starterHero}</h1>
+                      <p>
+                        Start on the public surface, sign in with your email, and continue into the full product
+                        workspace without losing your place.
+                      </p>
+                      <div className="starter-links">
+                        {starterTabs.map((tab) => (
+                          <span className="starter-chip" key={tab}>
+                            {tab}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+
+                    <div className="starter-grid">
+                      {authRailIsLive() ? (
+                        <StarterAuthForm
+                          title={`Join ${starterTitle}`}
+                          subtitle="Start with your email and we’ll send a secure sign-in link."
+                        />
+                      ) : (
+                        <section className="starter-card">
+                          <h2>Open the app</h2>
+                          <p>
+                            Open the main app route to continue into the guided product workflow for this business.
+                          </p>
+                          <div className="starter-actions">
+                            <Link className="starter-link starter-link-primary" href="/app">
+                              Open workspace
+                            </Link>
+                          </div>
+                        </section>
+                      )}
+
+                      <aside className="starter-sidebar" id="pricing">
+                        <h2>Pricing</h2>
+                        <p>Choose a monthly subscription to keep access active for your team.</p>
+                        <dl className="starter-kv">
+                          <div>
+                            <dt>Access</dt>
+                            <dd>Email sign-in, account continuity, and a dedicated workspace.</dd>
+                          </div>
+                          <div>
+                            <dt>Billing</dt>
+                            <dd>Monthly subscription access.</dd>
+                          </div>
+                          <div>
+                            <dt>Next step</dt>
+                            <dd>Open the workspace and continue where you left off.</dd>
+                          </div>
+                        </dl>
+                      </aside>
+                    </div>
+                  </div>
+                </main>
+              );
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/components/StarterWorkspace.js": dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+            import { useEffect, useState } from "react";
+
+            import StarterAuthForm from "./StarterAuthForm.js";
+            import {
+              authRailIsLive,
+              checkoutRailIsLive,
+              starterRuntime,
+              starterSupporting,
+              starterTabs,
+              starterTitle,
+            } from "./starter-context.js";
+
+            export default function StarterWorkspace() {
+              const [account, setAccount] = useState(null);
+              const [loading, setLoading] = useState(true);
+              const [authNeeded, setAuthNeeded] = useState(false);
+
+              useEffect(() => {
+                let active = true;
+
+                async function loadAccount() {
+                  if (!authRailIsLive()) {
+                    if (!active) return;
+                    setAuthNeeded(false);
+                    setLoading(false);
+                    return;
+                  }
+                  try {
+                    const payload = await starterRuntime.account();
+                    if (!active) return;
+                    setAccount(payload);
+                    setAuthNeeded(false);
+                  } catch (error) {
+                    if (!active) return;
+                    setAuthNeeded(true);
+                    setAccount(null);
+                  } finally {
+                    if (active) {
+                      setLoading(false);
+                    }
+                  }
+                }
+
+                loadAccount();
+                return () => {
+                  active = false;
+                };
+              }, []);
+
+              const signedInEmail = account?.user?.email || "";
+              const signedInTier = account?.user?.tier || "free";
+              const entitlementCount = Array.isArray(account?.entitlements) ? account.entitlements.length : 0;
+
+              return (
+                <main className="starter-shell">
+                  <div className="starter-frame">
+                    <nav className="starter-nav">
+                      <div className="starter-brand">
+                        <span className="starter-brand-mark">{starterTitle.slice(0, 1)}</span>
+                        <div className="starter-brand-copy">
+                          <strong>{starterTitle}</strong>
+                          <span>{starterSupporting}</span>
+                        </div>
+                      </div>
+                      <div className="starter-links">
+                        <Link className="starter-link" href="/">
+                          Back home
+                        </Link>
+                        {checkoutRailIsLive() ? <a className="starter-link" href="/#pricing">Manage subscription</a> : null}
+                      </div>
+                    </nav>
+
+                    <div className="starter-app-shell">
+                      <aside className="starter-sidebar">
+                        <h2>App areas</h2>
+                        <div className="starter-tablist">
+                          {starterTabs.map((tab) => (
+                            <span className="starter-chip" key={tab}>
+                              {tab}
+                            </span>
+                          ))}
+                        </div>
+                      </aside>
+
+                      <section className="starter-app-main">
+                        <article className="starter-panel starter-app-copy">
+                          <span className="starter-eyebrow">Workspace</span>
+                          <h1>{starterTitle}</h1>
+                          <p>
+                            Continue with your account, pick up where you left off, and move through the main
+                            workflow for this product.
+                          </p>
+                          <div className="starter-actions">
+                            <Link className="starter-link starter-link-primary" href="/">
+                              Review the landing surface
+                            </Link>
+                            {checkoutRailIsLive() ? <a className="starter-link" href="/#pricing">Upgrade path</a> : null}
+                          </div>
+                        </article>
+
+                        {loading ? (
+                          <section className="starter-card">
+                            <h2>Checking your session</h2>
+                            <p>We’re loading your account state now.</p>
+                          </section>
+                        ) : null}
+
+                        {!loading && authNeeded ? (
+                          <StarterAuthForm
+                            title={`Sign in to ${starterTitle}`}
+                            subtitle="Use your email to continue into the monthly workspace."
+                            buttonLabel="Send my sign-in link"
+                          />
+                        ) : null}
+
+                        {!loading && !authNeeded && account ? (
+                          <section className="starter-card">
+                            <h2>Account</h2>
+                            <dl className="starter-kv">
+                              <div>
+                                <dt>Email</dt>
+                                <dd>{signedInEmail || "Signed in"}</dd>
+                              </div>
+                              <div>
+                                <dt>Tier</dt>
+                                <dd>{signedInTier}</dd>
+                              </div>
+                              <div>
+                                <dt>Entitlements</dt>
+                                <dd>{String(entitlementCount)}</dd>
+                              </div>
+                            </dl>
+                          </section>
+                        ) : null}
+                      </section>
+                    </div>
+                  </div>
+                </main>
+              );
+            }
+            """
+        ).strip()
+        + "\n",
+    }
+
+
+def _materialize_subuser_app_starter(
+    workspace_root: Path,
+    *,
+    slug: str,
+    surface: dict[str, Any] | None,
+) -> None:
+    if not _surface_requires_subuser_app_starter(surface):
+        return
+    if _product_source_files(workspace_root, limit=1):
+        return
+    for rel, content in _subuser_app_starter_files(surface, slug=slug).items():
+        _write_text_if_missing(workspace_root / rel, content)
 
 
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
@@ -3392,6 +4169,48 @@ def _surface_refresh_exact_blocker(
     if publish_blocker:
         return publish_blocker
     return str(refresh_dict.get("error") or "").strip()
+
+
+def _surface_refresh_supports_local_repair_retry(surface_refresh: dict[str, Any] | None) -> bool:
+    if not isinstance(surface_refresh, dict):
+        return False
+    refresh_status = str(surface_refresh.get("status") or "").strip().lower()
+    if refresh_status in {"failed", "blocked", "missing"}:
+        return True
+    publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
+    publish_status = str(publish.get("status") or "").strip().lower()
+    if publish_status != "blocked":
+        return False
+    blocker = str(publish.get("blocker") or surface_refresh.get("blocker") or "").strip().lower()
+    return any(
+        marker in blocker
+        for marker in (
+            "no package.json start script",
+            "source path contains no recognized product source files",
+            "static publish directory",
+            "next.js build output .next is incomplete",
+            "product source is not a next.js app",
+        )
+    )
+
+
+def _worker_local_repair_instruction(base_instruction: str, *, blocker: str, attempt_number: int) -> str:
+    trimmed = _truncate_text(str(blocker or "").strip() or "local verification failed", 1600)
+    return "\n\n".join(
+        [
+            base_instruction.rstrip(),
+            dedent(
+                f"""
+                Hermes automatic local repair retry ({attempt_number} of 2):
+                - The previous source pass produced real local files, but Takyon blocked refresh/publish on this exact local verification result:
+                  {trimmed}
+                - Repair the existing source in place instead of restarting from scratch.
+                - Use local build/test/install commands inside the current workspace until this blocker is cleared.
+                - Keep the runtime contract truthful and preserve any working files that do not need changes.
+                """
+            ).strip(),
+        ]
+    )
 
 
 def _javascript_package_manager_name(root: Path, package_data: dict[str, Any]) -> str:
@@ -15165,12 +15984,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             worker_instruction_parts.append(_subuser_app_kit_contract_block(surface_for_worker))
         worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
         worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
-        payload = {
+        payload_base = {
             "business": business,
             "workspace": workspace_rel,
             "cwd": str(workspace_path),
             "root": str(workspace_path),
-            "instruction": worker_instruction,
             "model": model,
             "effort": effort,
             "maxTurns": max_turns,
@@ -15180,132 +15998,182 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         }
 
         worker_invoked = True
-        _record_claude_agent_runtime_event(
-            business=business,
-            workspace_rel=workspace_rel,
-            status="output",
-            detail=f"Claude worker started for {workspace_rel}.",
-            line=f"Claude worker started for {workspace_rel}.",
+        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
+        if not worker_session_bound and not refresh_surface:
+            normalized_workspace = workspace_rel.strip("/").lower()
+            refresh_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
+        install_surface = _boolish(args.get("install"), default=True)
+        refresh_timeout_seconds = _clamp_int(
+            args.get("refresh_timeout_seconds"),
+            default=180 if customer_facing_product_workspace else 300,
+            minimum=15,
+            maximum=900,
         )
-        if docker_isolated_worker:
-            run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
-                payload=payload,
-                workspace_path=workspace_path,
-                timeout_ms=timeout_ms,
+        sdk_result: dict[str, Any] = {}
+        pretend_findings: list[dict[str, Any]] = []
+        surface_refresh: dict[str, Any] | None = None
+        surface = surface_for_worker if isinstance(surface_for_worker, dict) else {}
+        requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+        publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+        active_worker_instruction = worker_instruction
+        worker_attempts = 0
+        local_repair_retries: list[str] = []
+        max_local_repair_retries = 1 if refresh_surface and _workspace_needs_runtime_ui_contract(workspace_rel) else 0
+        while True:
+            worker_attempts += 1
+            attempt_payload = {
+                **payload_base,
+                "instruction": active_worker_instruction,
+            }
+            started_line = (
+                f"Claude worker started for {workspace_rel}."
+                if worker_attempts == 1
+                else f"Claude worker started for {workspace_rel} (attempt {worker_attempts})."
             )
-            proc = _run_claude_agent_task_process(
-                run_cmd=run_cmd,
-                payload=docker_payload,
-                cwd=worker_cwd,
-                timeout_ms=timeout_ms,
-                env=worker_env,
+            _record_claude_agent_runtime_event(
                 business=business,
                 workspace_rel=workspace_rel,
+                status="output",
+                detail=started_line,
+                line=started_line,
             )
-        else:
-            proc = _run_claude_agent_task_process(
-                run_cmd=[node, str(script)],
-                payload=payload,
-                cwd=str(_repo_root()),
-                timeout_ms=timeout_ms,
-                env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
-                business=business,
-                workspace_rel=workspace_rel,
-            )
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        try:
-            sdk_result = json.loads(stdout) if stdout else {}
-        except json.JSONDecodeError:
-            sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
-        if proc.returncode != 0:
-            sdk_result.setdefault("success", False)
-            sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
-        if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
-            sdk_result["blocked"] = True
-        if sdk_result.get("success"):
-            prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
-            if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
-                sdk_result["workspace_prefix_repair"] = prefix_repair
-            if prefix_repair.get("blocked"):
+            if docker_isolated_worker:
+                run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
+                    payload=attempt_payload,
+                    workspace_path=workspace_path,
+                    timeout_ms=timeout_ms,
+                )
+                proc = _run_claude_agent_task_process(
+                    run_cmd=run_cmd,
+                    payload=docker_payload,
+                    cwd=worker_cwd,
+                    timeout_ms=timeout_ms,
+                    env=worker_env,
+                    business=business,
+                    workspace_rel=workspace_rel,
+                )
+            else:
+                proc = _run_claude_agent_task_process(
+                    run_cmd=[node, str(script)],
+                    payload=attempt_payload,
+                    cwd=str(_repo_root()),
+                    timeout_ms=timeout_ms,
+                    env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
+                    business=business,
+                    workspace_rel=workspace_rel,
+                )
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
+            try:
+                sdk_result = json.loads(stdout) if stdout else {}
+            except json.JSONDecodeError:
+                sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+            if proc.returncode != 0:
+                sdk_result.setdefault("success", False)
+                sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+            if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+                sdk_result["blocked"] = True
+            if sdk_result.get("success"):
+                prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
+                if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
+                    sdk_result["workspace_prefix_repair"] = prefix_repair
+                if prefix_repair.get("blocked"):
+                    sdk_result["success"] = False
+                    sdk_result["error"] = (
+                        "Claude Agent SDK output blocked because source files were written under a "
+                        f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
+                    )
+            pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
+            if pretend_findings:
                 sdk_result["success"] = False
+                sdk_result["pretend_product_findings"] = pretend_findings
                 sdk_result["error"] = (
-                    "Claude Agent SDK output blocked because source files were written under a "
-                    f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
+                    "Claude Agent SDK output blocked by Hermes no-pretend contract: "
+                    "product source contains fake/demo auth, account, checkout, or integration state. "
+                    "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
                 )
-        pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
-        if pretend_findings:
-            sdk_result["success"] = False
-            sdk_result["pretend_product_findings"] = pretend_findings
-            sdk_result["error"] = (
-                "Claude Agent SDK output blocked by Hermes no-pretend contract: "
-                "product source contains fake/demo auth, account, checkout, or integration state. "
-                "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
+            if sdk_result.get("success"):
+                summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
+                if summary_text:
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="completed",
+                        detail=summary_text,
+                        line=summary_text,
+                    )
+            else:
+                error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
+                if error_text:
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="failed",
+                        detail=error_text,
+                        line=error_text,
+                    )
+            if sdk_result.get("success"):
+                # Claude Agent SDK edits the isolated workspace tree directly, so persist those writes before
+                # any later refresh/publish/agent-record step can fail and let the scratch workspace be
+                # discarded. Without this sync, successful site work vanishes when the enclosing worker turn
+                # exits uncleanly.
+                store._sync_business_workspace_remote(business)
+            surface_refresh = None
+            if sdk_result.get("success") and refresh_surface:
+                summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
+                app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+                surface = app.get("surface") or app.get("surface_contract") or {}
+                if not isinstance(surface, dict):
+                    surface = {}
+                requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+                publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+                receipt_id = hashlib.sha256(
+                    f"{idempotency_key}:surface-refresh:{workspace_rel}:attempt:{worker_attempts}".encode("utf-8")
+                ).hexdigest()[:32]
+                surface_refresh = _finalize_product_surface_refresh(
+                    store=store,
+                    business=business,
+                    surface=surface,
+                    source_path=workspace_rel,
+                    publish_target=_product_publish_target(business, surface.get("publish_target")),
+                    requested_publish_policy=requested_publish_policy,
+                    publish_policy=publish_policy,
+                    install=install_surface,
+                    timeout_seconds=refresh_timeout_seconds,
+                    receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
+                    refresh_source="business_claude_agent_task",
+                )
+            should_retry_local_repair = (
+                sdk_result.get("success")
+                and surface_refresh is not None
+                and len(local_repair_retries) < max_local_repair_retries
+                and _surface_refresh_supports_local_repair_retry(surface_refresh)
             )
-        if sdk_result.get("success"):
-            summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
-            if summary_text:
-                _record_claude_agent_runtime_event(
-                    business=business,
-                    workspace_rel=workspace_rel,
-                    status="completed",
-                    detail=summary_text,
-                    line=summary_text,
-                )
-        else:
-            error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
-            if error_text:
-                _record_claude_agent_runtime_event(
-                    business=business,
-                    workspace_rel=workspace_rel,
-                    status="failed",
-                    detail=error_text,
-                    line=error_text,
-                )
-        if sdk_result.get("success"):
-            # Claude Agent SDK edits the isolated workspace tree directly, so persist those writes before
-            # any later refresh/publish/agent-record step can fail and let the scratch workspace be
-            # discarded. Without this sync, successful site work vanishes when the enclosing worker turn
-            # exits uncleanly.
-            store._sync_business_workspace_remote(business)
+            if should_retry_local_repair:
+                blocker = str(surface_refresh.get("blocker") or _surface_refresh_exact_blocker(surface_refresh)).strip()
+                if blocker:
+                    local_repair_retries.append(blocker)
+                    retry_note = _truncate_text(blocker, 280)
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="output",
+                        detail=f"Retrying local product repair once: {retry_note}",
+                        line=f"Retrying local product repair once: {retry_note}",
+                    )
+                    active_worker_instruction = _worker_local_repair_instruction(
+                        worker_instruction,
+                        blocker=blocker,
+                        attempt_number=worker_attempts + 1,
+                    )
+                    continue
+            break
         operator_budget = _finalize_operator_task_budget(
             operator_user_id=operator_user_id,
             reservation_key=str(operator_budget.get("reservation_key") or ""),
             reserved_cents=int(operator_budget.get("reserved_cents") or 0),
             consume_reserved=worker_invoked,
         )
-        surface_refresh: dict[str, Any] | None = None
-        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
-        if not worker_session_bound and not refresh_surface:
-            normalized_workspace = workspace_rel.strip("/").lower()
-            refresh_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
-        if sdk_result.get("success") and refresh_surface:
-            summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-            app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
-            surface = app.get("surface") or app.get("surface_contract") or {}
-            if not isinstance(surface, dict):
-                surface = {}
-            requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-            publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
-            receipt_id = hashlib.sha256(f"{idempotency_key}:surface-refresh:{workspace_rel}".encode("utf-8")).hexdigest()[:32]
-            surface_refresh = _finalize_product_surface_refresh(
-                store=store,
-                business=business,
-                surface=surface,
-                source_path=workspace_rel,
-                publish_target=_product_publish_target(business, surface.get("publish_target")),
-                requested_publish_policy=requested_publish_policy,
-                publish_policy=publish_policy,
-                install=_boolish(args.get("install"), default=True),
-                timeout_seconds=_clamp_int(
-                    args.get("refresh_timeout_seconds"),
-                    default=180 if customer_facing_product_workspace else 300,
-                    minimum=15,
-                    maximum=900,
-                ),
-                receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
-                refresh_source="business_claude_agent_task",
-            )
         status = "completed" if sdk_result.get("success") else "failed"
         if sdk_result.get("blocked"):
             status = "blocked"
@@ -15331,7 +16199,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "business": business,
                 "scope": f"business:{business}/workspace:{workspace_rel}",
                 "status": status,
-                "prompt": worker_instruction,
+                "prompt": active_worker_instruction,
                 "result": {
                     "source": "claude-agent-sdk",
                     "workspace": workspace_rel,
@@ -15340,6 +16208,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "summary": sdk_result.get("summary") or "",
                     "error": sdk_result.get("error") or None,
                     "blocked": bool(sdk_result.get("blocked")),
+                    "worker_attempts": worker_attempts,
+                    "local_repair_retries": local_repair_retries,
                     "pretend_product_findings": pretend_findings,
                     "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
                     "surface_refresh": surface_refresh,
@@ -15367,6 +16237,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "operator_budget": operator_budget,
                 "agent_record": agent_record,
                 "surface_refresh": surface_refresh,
+                "worker_attempts": worker_attempts,
+                "local_repair_retries": local_repair_retries,
                 "summary": sdk_result.get("summary") or "",
                 "error": sdk_result.get("error"),
                 "pretend_product_findings": pretend_findings,

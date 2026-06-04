@@ -50,7 +50,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - Start with canonical business state: `business_read_business`, then load `product/surface.md` with `business_read_file` if it already exists.
 - If the source path, framework, or local toolchain is unclear, use `business_check_runtime_capabilities` before acting as if a build stack already exists.
 - If the business has no surface contract yet, create it first with `business_upsert_app_surface_contract`.
-- For substantial `product/site/` work, prefer one delegated `business_claude_agent_task` pass and let that worker finish the source itself. Do not default to CEO source inspection, local hand-patching, or a second delegated pass in the same turn unless the worker explicitly returns `BLOCKED:` or the operator asked for manual repair.
+- For substantial `product/site/` work, prefer one delegated `business_claude_agent_task` call and let that worker finish the source itself. The runtime may perform one automatic local source/build repair retry before the call returns. Do not default to CEO source inspection, local hand-patching, or a second delegated pass in the same turn unless the worker explicitly returns `BLOCKED:` or the operator asked for manual repair.
 - During bootstrap for a software business, establish a real `product/site/` source path before creating extra runtime notes or billing prose.
 
 ## References
@@ -71,10 +71,10 @@ Use this skill to create or materially improve the business-owned product surfac
 - Before delegation, read `research/` broadly, especially `research/strategy.md`, then write the chosen customer experience shape onto the same surface contract: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, and `research_sources`.
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially receipts and small source fixes under `product/`.
 - Use `business_claude_agent_task` only when the delegated worker lane is available and the job is meaningfully larger than a direct first-surface build. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
-- For `product/site/`, delegate one bounded source pass and let the worker own the source/build loop. The worker will receive the prepared shared subuser app kit under `product/site/_takyon/`; build the business-specific UI around that substrate instead of reinventing app-plane rails.
+- For `product/site/`, delegate one bounded worker call and let that worker own the source/build loop. The worker will receive the prepared shared subuser app kit under `product/site/_takyon/`; build the business-specific UI around that substrate instead of reinventing app-plane rails.
 - When first publish speed matters, prefer the smallest honest, dependency-light source that can verify and publish quickly. Do not default to a heavy framework if a static or minimal app shell is enough for the first truthful surface.
 - Use `business_refresh_product_surface` only when there is real source to publish. Treat its blocker output and receipt as truth.
-- During bootstrap, once `product/site/` exists with real source, complete one honest refresh/publish pass before later auth/customer/outreach follow-on work.
+- During bootstrap, once `product/site/` exists with real source, complete one honest refresh/publish pass before later auth/customer/outreach follow-on work. If that refresh hits a local source/build blocker, the delegated runtime may retry once with the exact blocker before it returns control.
 
 ## Procedure
 
@@ -89,7 +89,7 @@ Use this skill to create or materially improve the business-owned product surfac
 8. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
 9. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface. When the surface is app-like, record `/app` explicitly in `required_routes` instead of relying on an implied shell.
 10. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, customer experience shape, app shape, what works now, what is blocked, and what still depends on app-runtime or provider work. That same contract is what refreshes the prepared `_takyon/` kit and what the worker receives as product-site UI truth.
-11. Decide whether the source work fits inside one CEO turn. For a substantial first honest site/app publish, default to one delegated `business_claude_agent_task` pass under `product/site/` so the worker can finish the source, local build/test, and cleanup inside its isolated lane. If that worker explicitly returns `BLOCKED:` or hits a provider/runtime gate, record the blocker instead of defaulting to CEO source repair in the same turn.
+11. Decide whether the source work fits inside one CEO turn. For a substantial first honest site/app publish, default to one delegated `business_claude_agent_task` call under `product/site/` so the worker can finish the source, local build/test, and cleanup inside its isolated lane. If the worker explicitly returns `BLOCKED:` or hits a provider/runtime gate, record the blocker instead of defaulting to CEO source repair in the same turn.
 12. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
 13. If the operator asked for publication and the source is real, call `business_refresh_product_surface` before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop the same-turn source loop instead of defaulting to CEO repair passes.
 14. During bootstrap, treat `product/site/` plus a truthful `product/surface.md` source path as the product completion threshold before letting extra runtime notes become the main visible outcome. Once the first honest public surface is live, continue the rest of bootstrap in the same turn.
@@ -125,7 +125,7 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 - Splitting the actual product surface across random directories
 - Treating `business_claude_agent_task` as a second owner instead of the implementation lane underneath this skill
 - Claiming publication state without an explicit `business_refresh_product_surface` result or visible receipt
-- Falling back to CEO hand-patching right after a delegated `product/site/` worker pass instead of letting the worker finish or block cleanly
+- Falling back to CEO hand-patching right after a delegated `product/site/` worker call instead of letting the worker finish, use its automatic local repair retry, or block cleanly
 
 ## Verification Checklist
 
@@ -140,7 +140,7 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 2. Use real source files when the operator asked for a built surface.
 3. Keep the surface business-owned and honest.
 4. Use app-runtime rails when the product needs shared backend behavior.
-5. For substantial `product/site/` implementation, prefer one delegated `business_claude_agent_task` pass. Do not default to CEO source inspection or a second delegated pass in the same turn unless the worker explicitly returns `BLOCKED:` or the operator asked for manual repair.
+5. For substantial `product/site/` implementation, prefer one delegated `business_claude_agent_task` call. Do not default to CEO source inspection or a second delegated pass in the same turn unless the worker explicitly returns `BLOCKED:` or the operator asked for manual repair.
 6. For software businesses, bootstrap should default to a real app shell. Do not quietly substitute a landing-only waitlist page unless the operator or evidence explicitly calls for landing-page-only validation mode.
 7. In customer-facing design and copy, default to capability language instead of vendor/model labels. If the operator explicitly wants named model positioning, use current names accurately; do not leak stale labels like `GPT-4o-mini` into the product surface.
 

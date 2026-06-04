@@ -64,6 +64,37 @@ def test_materialized_subuser_kit_writes_js_context_only(tmp_path: Path):
     assert not (kit_root / "surface-context.md").exists()
 
 
+def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_path: Path):
+    workspace_root = tmp_path / "product" / "site"
+    workspace_root.mkdir(parents=True)
+
+    takyon_core._materialize_subuser_app_kit(  # type: ignore[attr-defined]
+        workspace_root,
+        slug="plannerly",
+        surface={
+            "runtime_features": ["auth", "checkout"],
+            "routes": [{"path": "/"}, {"path": "/app"}],
+            "metadata": {
+                "subuser_app": {
+                    "app_mode": "standard_saas",
+                    "subscription_style": "monthly",
+                },
+                "customer_experience": {
+                    "required_routes": ["/", "/app"],
+                    "required_app_tabs": ["Planner", "Account"],
+                },
+            },
+        },
+    )
+
+    assert (workspace_root / "package.json").exists()
+    assert (workspace_root / "next.config.js").exists()
+    assert (workspace_root / "src" / "app" / "layout.js").exists()
+    assert (workspace_root / "src" / "app" / "globals.css").exists()
+    assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
+    assert (workspace_root / "src" / "components" / "StarterAuthForm.js").exists()
+
+
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):
     store = takyon_core.TakyonStore(tmp_path)
 
