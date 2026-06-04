@@ -948,7 +948,12 @@
     LIVE.pollMs = nextMs;
     LIVE.pollTimer = window.setInterval(() => {
       if (!LIVE.activeBusiness) return;
-      void refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+      void refreshBusinessData(LIVE.activeBusiness, {
+        skipAccount: true,
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
     }, nextMs);
   }
 
@@ -978,7 +983,12 @@
     if (LIVE.refreshTimer) window.clearTimeout(LIVE.refreshTimer);
     LIVE.refreshTimer = window.setTimeout(() => {
       LIVE.refreshTimer = null;
-      void refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+      void refreshBusinessData(LIVE.activeBusiness, {
+        skipAccount: true,
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
     }, waitMs);
   }
 
@@ -1656,7 +1666,12 @@
       const output = String(res && res.output || "").trim();
       if (output) ceolog(esc(output), true);
       w.dataset.scheduleValue = normalized;
-      await refreshBusinessData(LIVE.activeBusiness, { skipAccount: true });
+      await refreshBusinessData(LIVE.activeBusiness, {
+        skipAccount: true,
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
       renderWakeWindow("");
     } catch (err) {
       renderWakeWindow(err instanceof Error ? err.message : String(err));
@@ -2209,7 +2224,11 @@
       if (payload.warning) ceolog(esc(String(payload.warning)), true);
       LIVE.historyRunning = false;
       syncHistoryPollTimer();
-      void refreshBusinessData(LIVE.activeBusiness);
+      void refreshBusinessData(LIVE.activeBusiness, {
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
       return;
     }
     if (ev.type === "thinking.delta" || ev.type === "reasoning.delta") {
@@ -2265,7 +2284,11 @@
       }
       if (payload.summary) ceolog(`<span class="l-green">[tool]</span> ${esc(payload.summary)}`, true);
       scheduleLiveRefresh(150);
-      void refreshBusinessData(LIVE.activeBusiness);
+      void refreshBusinessData(LIVE.activeBusiness, {
+        skipCredits: true,
+        skipBoard: true,
+        view: "boot",
+      });
       return;
     }
     if (ev.type === "error") {
@@ -2353,13 +2376,16 @@
     if (!business || LIVE.refreshBusy) return;
     LIVE.refreshBusy = true;
     try {
-      const skipBoard = !!(options && options.skipBoard);
+      const view = String(options && options.view || "boot").trim().toLowerCase() === "full" ? "full" : "boot";
+      const skipBoard = options && Object.prototype.hasOwnProperty.call(options, "skipBoard")
+        ? !!options.skipBoard
+        : true;
       const skipCredits = !!(options && options.skipCredits);
       const skipAccount = !!(options && options.skipAccount);
       const skipDashboardState = !!(options && options.skipDashboardState);
       const activeSessionId =
-        !skipDashboardState && LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
-      const workspacePromise = fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50`);
+        !skipDashboardState && view === "full" && LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
+      const workspacePromise = fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50&view=${encodeURIComponent(view)}`);
       const boardPromise = skipBoard
         ? Promise.resolve(null)
         : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`);
@@ -2373,6 +2399,7 @@
         ? rpc("takyon.dashboard.state", {
           session_id: activeSessionId,
           business_slug: business,
+          view,
           limit: 50,
         }, 10000)
         : Promise.resolve(null);
@@ -2441,10 +2468,16 @@
     await refreshBusinessData(business, {
       skipAccount: true,
       skipDashboardState: true,
+      skipBoard: true,
+      view: "boot",
     });
     const sessionId = await sessionPromise;
     if (sessionId && LIVE.activeBusiness === business) {
-      await refreshBusinessData(business, { skipAccount: true });
+      await refreshBusinessData(business, {
+        skipAccount: true,
+        skipBoard: true,
+        view: "boot",
+      });
     }
   }
 

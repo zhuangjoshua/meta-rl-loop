@@ -1023,6 +1023,20 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
     assert elapsed < 0.2
 
 
+def test_operator_root_redirects_to_chat(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    client = TestClient(web_server.app)
+
+    response = client.get("/?business=dashboardsly", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/chat?business=dashboardsly"
+
+
 class TestWebServerEndpoints:
     """Test the FastAPI REST endpoints using Starlette TestClient."""
 

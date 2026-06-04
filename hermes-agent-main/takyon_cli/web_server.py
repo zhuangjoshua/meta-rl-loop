@@ -2564,6 +2564,7 @@ async def get_takyon_business_workspace(
     request: Request,
     slug: str,
     limit: int = 50,
+    view: str = "full",
 ) -> dict[str, Any]:
     """Direct authenticated workspace snapshot for a single business.
 
@@ -2585,6 +2586,7 @@ async def get_takyon_business_workspace(
             {"takyon_operator_user_id": str(principal.user_id)},
             business,
             output_limit=max(1, min(int(limit or 50), 100)),
+            view=str(view or "full").strip().lower() or "full",
         )
         return payload if isinstance(payload, dict) else {
             "business_slug": business,
@@ -6330,6 +6332,12 @@ def mount_spa(application: FastAPI):
         if product_business:
             return await _serve_product_site_file(product_business, full_path)
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "":
+            target_path = f"{prefix}/chat" if prefix else "/chat"
+            query = str(request.url.query or "").strip()
+            if query:
+                target_path = f"{target_path}?{query}"
+            return RedirectResponse(url=target_path, status_code=307)
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (

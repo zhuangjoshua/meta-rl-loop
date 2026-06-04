@@ -5384,3 +5384,34 @@ def test_workspace_payload_reuses_summary_for_current_and_overview(monkeypatch):
     assert captured["slug"] == "demo"
     assert captured["summary_data"] == summary_payload
     assert calls == [("business:demo", "summary")]
+
+
+def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
+    class _FakeStore:
+        pass
+
+    monkeypatch.setattr(
+        server,
+        "_takyon_business_home_snapshot",
+        lambda store, slug: {
+            "current": {"name": "Demo", "goal": "Fast workspace", "mode": "test"},
+            "overview": {"metrics": {"users": 3}, "product": {"public_url": "https://demo.test"}},
+        },
+    )
+    monkeypatch.setattr(server, "_takyon_store", lambda session: _FakeStore())
+    monkeypatch.setattr(server, "_takyon_get_background_run", lambda slug: None)
+    monkeypatch.setattr(server, "_takyon_reconcile_background_run", lambda slug, run, overview: None)
+
+    payload = server._takyon_workspace_payload(
+        {"takyon_operator_user_id": "demo"},
+        "demo",
+        view="boot",
+    )
+
+    assert payload == {
+        "business_slug": "demo",
+        "current": {"name": "Demo", "goal": "Fast workspace", "mode": "test"},
+        "overview": {"metrics": {"users": 3}, "product": {"public_url": "https://demo.test"}},
+        "outputs": [],
+        "background_run": None,
+    }

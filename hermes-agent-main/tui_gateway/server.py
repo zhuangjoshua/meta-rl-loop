@@ -5383,6 +5383,227 @@ def _takyon_business_payload(store: Any, slug: str) -> dict[str, Any] | None:
         return None
 
 
+def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
+    business_slug = str(slug or "").strip().lower()
+    if not business_slug:
+        return {"current": {}, "overview": {}}
+
+    def as_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def as_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def headline(kind: str, status: str) -> str:
+        label = {
+            "ceo_bootstrap": "CEO bootstrap",
+            "ceo_wake": "CEO wake",
+            "ceo_turn": "CEO turn",
+            "product.deploy": "Product publish",
+            "product.build": "Product build",
+        }.get(kind, "Work request")
+        status_text = as_text(status).lower() or "recorded"
+        if status_text == "running":
+            return f"{label} is running."
+        if status_text == "queued":
+            return f"{label} is queued."
+        if status_text in {"completed", "done", "succeeded", "success"}:
+            return f"{label} completed."
+        if status_text in {"failed", "blocked", "error"}:
+            return f"{label} needs attention."
+        return f"{label} is {status_text}."
+
+    with store._connect() as conn:
+        store._enforce_operator_business_access(conn, business_slug)
+        business = store._ensure_business(conn, business_slug)
+        budget = store._ensure_app_budget(conn, business_slug)
+        surface = store._app_surface_contract(conn, business_slug)
+
+        users = conn.execute(
+            "SELECT COUNT(*) AS count FROM app_users WHERE business_slug = ?",
+            (business_slug,),
+        ).fetchone()
+        paid_customers = conn.execute(
+            """
+            SELECT COUNT(DISTINCT app_user_id) AS count
+            FROM app_entitlements
+            WHERE business_slug = ? AND status IN ('active', 'trialing') AND tier IN ('paid', 'pro', 'team', 'owner')
+            """,
+            (business_slug,),
+        ).fetchone()
+        mrr = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                CASE
+                  WHEN p.billing_interval = 'year' THEN p.price_cents / 12.0
+                  WHEN p.billing_interval = 'month' THEN p.price_cents
+                  ELSE 0
+                END
+            ), 0) AS mrr_cents
+            FROM app_entitlements e
+            JOIN app_plan_policies p
+              ON p.business_slug = e.business_slug AND p.plan_key = e.plan_key
+            WHERE e.business_slug = ? AND e.status IN ('active', 'trialing')
+            """,
+            (business_slug,),
+        ).fetchone()
+        revenue = conn.execute(
+            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents FROM app_revenue_events WHERE business_slug = ?",
+            (business_slug,),
+        ).fetchone()
+        checkout_intents = conn.execute(
+            "SELECT COUNT(*) AS count FROM app_checkout_intents WHERE business_slug = ?",
+            (business_slug,),
+        ).fetchone()
+        usage = conn.execute(
+            """
+            SELECT COALESCE(SUM(actual_cost_microusd), 0) AS actual,
+                   COALESCE(SUM(estimated_cost_microusd), 0) AS estimated
+            FROM app_usage_events
+            WHERE business_slug = ? AND created_at >= ?
+            """,
+            (business_slug, budget["current_period_start"]),
+        ).fetchone()
+        queued_jobs = conn.execute(
+            f"SELECT COUNT(*) AS count FROM {store._work_requests_table()} WHERE business_slug = ? AND status = 'queued'",
+            (business_slug,),
+        ).fetchone()
+        latest_job = conn.execute(
+            f"SELECT kind, status FROM {store._work_requests_table()} WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 1",
+            (business_slug,),
+        ).fetchone()
+        try:
+            worker_queued = conn.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE business_slug = ? AND status = 'queued'",
+                (business_slug,),
+            ).fetchone()
+            if worker_queued is not None:
+                queued_jobs = worker_queued
+            worker_latest = conn.execute(
+                "SELECT kind, status FROM jobs WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 1",
+                (business_slug,),
+            ).fetchone()
+            if worker_latest is not None:
+                latest_job = worker_latest
+        except Exception:
+            pass
+
+    publish_status = as_text(surface.get("publish_status")).lower()
+    public_url = as_text(surface.get("public_url"))
+    source_path = as_text(surface.get("source_path"))
+    spent_microusd = as_int((usage["actual"] if usage else 0) or (usage["estimated"] if usage else 0))
+
+    return {
+        "current": {
+            "name": as_text(business.get("name")) or business_slug,
+            "goal": as_text(business.get("goal")),
+            "mode": as_text(business.get("mode") or business.get("status") or business.get("state")) or "test",
+        },
+        "overview": {
+            "product": {
+                "status": as_text(surface.get("status")) or "missing",
+                "source_path": source_path,
+                "design_brief_path": as_text(surface.get("design_brief_path")) or "product/design-brief.md",
+                "runtime_api_base": as_text(surface.get("runtime_api_base")),
+                "publish_target": as_text(surface.get("publish_target")),
+                "publish_policy": as_text(surface.get("publish_policy")),
+                "publish_status": as_text(surface.get("publish_status")),
+                "public_url": public_url,
+                "published_at": as_text(surface.get("published_at")),
+                "publish_receipt_path": as_text(surface.get("publish_receipt_path")),
+                "publish_blocker": as_text(surface.get("publish_blocker")),
+                "notes": as_text(surface.get("notes")),
+            },
+            "metrics": {
+                "users": as_int(users["count"] if users else 0),
+                "paid_customers": as_int(paid_customers["count"] if paid_customers else 0),
+                "mrr_cents": as_int(round(float((mrr["mrr_cents"] if mrr else 0) or 0))),
+                "revenue_cents": as_int(revenue["cents"] if revenue else 0),
+                "checkout_intents": as_int(checkout_intents["count"] if checkout_intents else 0),
+                "usage_events": 0,
+                "unresolved_inbound": 0,
+                "queued_jobs": as_int(queued_jobs["count"] if queued_jobs else 0),
+            },
+            "budget": {
+                "business_amount": None,
+                "business_status": "",
+                "app_status": as_text(budget.get("status")),
+                "app_limit_microusd": as_int(budget.get("hard_limit_microusd")),
+                "app_spent_microusd": spent_microusd,
+                "app_remaining_microusd": as_int(budget.get("hard_limit_microusd")) - spent_microusd,
+            },
+            "posts": [],
+            "cron": [],
+            "files": [],
+            "jobs": [],
+            "agent_runs": [],
+            "workers": [],
+            "trace": [],
+            "tasks": [],
+            "status_cards": [],
+            "ceo_loop": {
+                "status": as_text(latest_job["status"] if latest_job else ""),
+                "headline": headline(
+                    as_text(latest_job["kind"] if latest_job else ""),
+                    as_text(latest_job["status"] if latest_job else ""),
+                ) if latest_job else "",
+                "detail": "",
+                "next_action": "",
+            },
+            "wake_health": {},
+            "research": {"status": "needed", "latest_path": "", "count": 0, "outputs": []},
+            "research_outputs": [],
+            "artifacts": {
+                "website": {
+                    "status": (
+                        "published"
+                        if publish_status == "published" and public_url
+                        else "local_source"
+                        if source_path
+                        else "missing"
+                    ),
+                    "path": "",
+                    "updated_at": "",
+                    "deploy_status": "",
+                    "source_path": source_path,
+                    "public_url": public_url,
+                    "publish_target": as_text(surface.get("publish_target")),
+                    "publish_policy": as_text(surface.get("publish_policy")),
+                    "publish_status": as_text(surface.get("publish_status")),
+                    "publish_blocker": as_text(surface.get("publish_blocker")),
+                    "publish_receipt_path": as_text(surface.get("publish_receipt_path")),
+                },
+                "outreach": {
+                    "status": "missing",
+                    "path": "",
+                    "receipt": "",
+                    "updated_at": "",
+                    "published_count": 0,
+                    "items": [],
+                    "receipts": [],
+                },
+                "creative_assets": {
+                    "status": "missing",
+                    "path": "",
+                    "receipt": "",
+                    "updated_at": "",
+                    "count": 0,
+                },
+            },
+            "conversations": {
+                "active_threads": 0,
+                "unresolved_messages": 0,
+                "latest_message_at": "",
+            },
+            "generated_at": "",
+            "pulse_warning": "",
+        },
+    }
+
+
 def _takyon_business_slugs(businesses: Any) -> set[str]:
     if not isinstance(businesses, list):
         return set()
@@ -6978,11 +7199,9 @@ def _takyon_requested_business(
         return raw
 
 
-def _takyon_workspace_payload(
+def _takyon_workspace_boot_payload(
     session: dict | None,
     business: str,
-    *,
-    output_limit: int = 50,
 ) -> dict[str, Any]:
     slug = str(business or "").strip()
     if not slug:
@@ -6993,6 +7212,45 @@ def _takyon_workspace_payload(
             "outputs": [],
             "background_run": None,
         }
+    store = _takyon_store(session)
+    try:
+        snapshot = _takyon_business_home_snapshot(store, slug)
+    except Exception:
+        snapshot = {}
+    current = snapshot.get("current") if isinstance(snapshot, dict) else {}
+    overview = snapshot.get("overview") if isinstance(snapshot, dict) else {}
+    background_run = _takyon_reconcile_background_run(
+        slug,
+        _takyon_get_background_run(slug),
+        overview if isinstance(overview, dict) else {},
+    )
+    return {
+        "business_slug": slug,
+        "current": current if isinstance(current, dict) else {},
+        "overview": overview if isinstance(overview, dict) else {},
+        "outputs": [],
+        "background_run": background_run,
+    }
+
+
+def _takyon_workspace_payload(
+    session: dict | None,
+    business: str,
+    *,
+    output_limit: int = 50,
+    view: str = "full",
+) -> dict[str, Any]:
+    slug = str(business or "").strip()
+    if not slug:
+        return {
+            "business_slug": "",
+            "current": {},
+            "overview": {},
+            "outputs": [],
+            "background_run": None,
+        }
+    if str(view or "").strip().lower() == "boot":
+        return _takyon_workspace_boot_payload(session, slug)
     store = _takyon_store(session)
     try:
         summary = store.read(scope=f"business:{slug}", query="summary", limit=12)
@@ -7025,6 +7283,7 @@ def _takyon_dashboard_state_payload(
     explicit_business: bool = False,
     business: str = "",
     output_limit: int = 50,
+    view: str = "full",
 ) -> dict[str, Any]:
     store = _takyon_store(session)
     businesses = _takyon_businesses_for_session(session, store=store)
@@ -7052,6 +7311,7 @@ def _takyon_dashboard_state_payload(
         session,
         current_business,
         output_limit=output_limit,
+        view=view,
     )
     return {
         "scope": f"business:{current_business}" if current_business else "global",
@@ -7457,6 +7717,7 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     business = _takyon_requested_business(session, params)
+    view = str(params.get("view") or "full").strip().lower()
     if not business:
         return _ok(
             rid,
@@ -7478,6 +7739,7 @@ def _(rid, params: dict) -> dict:
                 session,
                 business,
                 output_limit=int(params.get("limit") or 50),
+                view=view,
             ),
         )
     except Exception as e:
@@ -7491,6 +7753,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4001, "session not found")
     explicit_business = "business_slug" in params or "business" in params
     business = _takyon_requested_business(session, params)
+    view = str(params.get("view") or "full").strip().lower()
     try:
         return _ok(
             rid,
@@ -7499,6 +7762,7 @@ def _(rid, params: dict) -> dict:
                 explicit_business=explicit_business,
                 business=business,
                 output_limit=int(params.get("limit") or 50),
+                view=view,
             ),
         )
     except PermissionError as e:
@@ -7568,7 +7832,12 @@ def _(rid, params: dict) -> dict:
             "job_id": str(bootstrap_job.get("job_id") or ""),
         }
         _takyon_set_background_run(slug, session["takyon_background_run"])
-        workspace = _takyon_workspace_payload(session, slug, output_limit=int(params.get("limit") or 50))
+        workspace = _takyon_workspace_payload(
+            session,
+            slug,
+            output_limit=int(params.get("limit") or 50),
+            view="boot",
+        )
         return _ok(
             rid,
             {
