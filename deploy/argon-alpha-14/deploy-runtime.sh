@@ -95,6 +95,19 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   fi
   docker run --rm --entrypoint node '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' --version >/dev/null
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
+  if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator \
+      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from plugins.takyon.core import load_takyon_env
+from plugins.takyon.db.runner import run_migrations
+from plugins.takyon.runtime_app import resolve_database_url
+import psycopg
+
+load_takyon_env()
+with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
+    run_migrations(conn)
+PY
+  fi
   systemctl daemon-reload
   systemctl restart takyon-dashboard.service
   systemctl is-active --quiet takyon-dashboard.service
