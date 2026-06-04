@@ -5416,6 +5416,51 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
             return f"{label} needs attention."
         return f"{label} is {status_text}."
 
+    def tone(status: str) -> str:
+        status_text = as_text(status).lower()
+        if re.search(r"blocked|fail|error|missing|attention", status_text):
+            return "blocked"
+        if re.search(r"queued|scheduled|waiting|pending", status_text):
+            return "waiting"
+        if re.search(r"done|complete|completed|success|passed", status_text):
+            return "done"
+        if re.search(r"running|active|working", status_text):
+            return "active"
+        return "neutral"
+
+    def trace_status(status: str) -> str:
+        status_text = as_text(status).lower()
+        if status_text in {"started", "output", "heartbeat"}:
+            return "running"
+        if re.search(r"blocked|fail|error", status_text):
+            return "blocked"
+        if re.search(r"queued|scheduled|waiting|pending", status_text):
+            return "scheduled"
+        if re.search(r"done|complete|completed|success|passed", status_text):
+            return "done"
+        if re.search(r"running|active", status_text):
+            return "running"
+        return status_text or "recorded"
+
+    def job_label(kind: str) -> str:
+        key = as_text(kind).lower()
+        mapping = {
+            "ceo_bootstrap": "CEO bootstrap",
+            "ceo_wake": "CEO wake",
+            "ceo_turn": "CEO turn",
+            "product.deploy": "Product publish",
+            "product.build": "Product build",
+        }
+        if key in mapping:
+            return mapping[key]
+        key = re.sub(r"[._-]+", " ", key).strip()
+        return " ".join(part.capitalize() for part in key.split()) if key else "Work request"
+
+    from plugins.takyon.core import (
+        _product_surface_operational_facts,
+        _read_product_surface_receipt,
+    )
+
     with store._connect() as conn:
         store._enforce_operator_business_access(conn, business_slug)
         business = store._ensure_business(conn, business_slug)
@@ -5471,10 +5516,44 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
             f"SELECT COUNT(*) AS count FROM {store._work_requests_table()} WHERE business_slug = ? AND status = 'queued'",
             (business_slug,),
         ).fetchone()
-        latest_job = conn.execute(
-            f"SELECT kind, status FROM {store._work_requests_table()} WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 1",
-            (business_slug,),
-        ).fetchone()
+        latest_jobs: list[dict[str, Any]] = []
+        latest_job: dict[str, Any] = {}
+        for table_name, source_name in (
+            (store._work_requests_table(), "job"),
+            ("jobs", "worker"),
+        ):
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, kind, status, payload_json, created_at, updated_at
+                    FROM {table_name}
+                    WHERE business_slug = ?
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT 6
+                    """,
+                    (business_slug,),
+                ).fetchall()
+            except Exception:
+                continue
+            for row in rows:
+                item = store._row_to_dict(row)
+                if not item:
+                    continue
+                item["source"] = source_name
+                latest_jobs.append(item)
+        latest_jobs.sort(
+            key=lambda item: (
+                as_text(item.get("updated_at") or item.get("created_at")),
+                as_text(item.get("id")),
+            ),
+            reverse=True,
+        )
+        latest_jobs = latest_jobs[:8]
+        if latest_jobs:
+            latest_job = latest_jobs[0]
+
+        trace_entries: list[dict[str, Any]] = []
+        seen_trace_keys: set[str] = set()
         try:
             worker_queued = conn.execute(
                 "SELECT COUNT(*) AS count FROM jobs WHERE business_slug = ? AND status = 'queued'",
@@ -5482,19 +5561,150 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
             ).fetchone()
             if worker_queued is not None:
                 queued_jobs = worker_queued
-            worker_latest = conn.execute(
-                "SELECT kind, status FROM jobs WHERE business_slug = ? ORDER BY updated_at DESC LIMIT 1",
-                (business_slug,),
-            ).fetchone()
-            if worker_latest is not None:
-                latest_job = worker_latest
         except Exception:
             pass
+        try:
+            event_rows = conn.execute(
+                """
+                SELECT * FROM events
+                WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%'
+                ORDER BY created_at DESC
+                LIMIT 24
+                """,
+                (business_slug,),
+            ).fetchall()
+            for row in event_rows:
+                event = store._row_to_dict(row)
+                if not event:
+                    continue
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                event_kind = as_text(payload.get("kind"))
+                status_value = as_text(payload.get("status") or event.get("event_type")).replace("dashboard.run.", "")
+                detail = as_text(payload.get("line") or payload.get("detail") or payload.get("command"))
+                updated_at = as_text(event.get("created_at"))
+                trace_payload = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
+                trace_entry = {
+                    "id": as_text(event.get("id")),
+                    "entry_key": as_text(trace_payload.get("entry_key") or event.get("id")),
+                    "source": "runtime",
+                    "kind": as_text(trace_payload.get("kind") or "note"),
+                    "label": as_text(trace_payload.get("label")) or job_label(event_kind or "note"),
+                    "detail": as_text(trace_payload.get("detail") or detail or trace_payload.get("summary")),
+                    "status": trace_status(as_text(trace_payload.get("status") or status_value)),
+                    "tone": tone(as_text(trace_payload.get("status") or status_value)),
+                    "updated_at": updated_at,
+                    "tool_name": as_text(trace_payload.get("tool_name")),
+                    "skill_name": as_text(trace_payload.get("skill_name")),
+                    "summary": as_text(trace_payload.get("summary")),
+                }
+                trace_key = as_text(trace_entry.get("entry_key") or trace_entry.get("id"))
+                if trace_key and trace_key not in seen_trace_keys:
+                    seen_trace_keys.add(trace_key)
+                    trace_entries.append(trace_entry)
+        except Exception:
+            trace_entries = []
 
     publish_status = as_text(surface.get("publish_status")).lower()
     public_url = as_text(surface.get("public_url"))
     source_path = as_text(surface.get("source_path"))
     spent_microusd = as_int((usage["actual"] if usage else 0) or (usage["estimated"] if usage else 0))
+    receipt = _read_product_surface_receipt(
+        store._business_root(business_slug),
+        as_text(surface.get("publish_receipt_path")),
+    )
+    receipt_inventory = receipt.get("inventory") if isinstance(receipt.get("inventory"), dict) else {}
+    product_facts = _product_surface_operational_facts(
+        surface=surface,
+        receipt=receipt,
+        inventory=receipt_inventory,
+    )
+    product_blocker = as_text(product_facts.get("blocker") or surface.get("publish_blocker"))
+    latest_job_label = job_label(as_text(latest_job.get("kind")))
+    latest_job_status = trace_status(as_text(latest_job.get("status")))
+    latest_job_payload = latest_job.get("payload") if isinstance(latest_job.get("payload"), dict) else {}
+    latest_job_detail = as_text(latest_job_payload.get("detail")) or headline(
+        as_text(latest_job.get("kind")),
+        as_text(latest_job.get("status")),
+    )
+    task_cards: list[dict[str, Any]] = []
+    for entry in trace_entries[:8]:
+        task_cards.append(
+            {
+                "id": f"runtime:{entry.get('entry_key') or entry.get('id')}",
+                "source": "runtime",
+                "label": entry.get("label") or "Runtime event",
+                "status": entry.get("status") or "recorded",
+                "detail": entry.get("detail") or "",
+                "tone": entry.get("tone") or tone(entry.get("status") or ""),
+                "updated_at": entry.get("updated_at") or "",
+            }
+        )
+    for job in latest_jobs[:6]:
+        task_cards.append(
+            {
+                "id": f"{as_text(job.get('source') or 'job')}:{as_text(job.get('id'))}",
+                "source": as_text(job.get("source") or "job"),
+                "label": job_label(as_text(job.get("kind"))),
+                "status": trace_status(as_text(job.get("status"))),
+                "detail": latest_job_detail if job is latest_job else headline(as_text(job.get("kind")), as_text(job.get("status"))),
+                "tone": tone(as_text(job.get("status"))),
+                "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
+            }
+        )
+    if product_blocker:
+        task_cards.insert(
+            0,
+            {
+                "id": "product:blocker",
+                "source": "product",
+                "label": "Product publish blocker",
+                "status": "blocked",
+                "detail": product_blocker,
+                "tone": "blocked",
+                "updated_at": as_text(surface.get("published_at") or surface.get("updated_at")),
+            },
+        )
+
+    current_action = {
+        "source": "idle",
+        "label": "Business is synced.",
+        "status": "idle",
+        "detail": "",
+        "blocker": product_blocker,
+    }
+    for preferred_status in ("running", "scheduled", "blocked"):
+        for task in task_cards:
+            status_value = trace_status(as_text(task.get("status")))
+            if status_value != preferred_status:
+                continue
+            current_action = {
+                "source": as_text(task.get("source")),
+                "label": as_text(task.get("label")) or "Current work",
+                "status": status_value,
+                "detail": as_text(task.get("detail")),
+                "blocker": product_blocker,
+            }
+            break
+        if current_action["status"] != "idle":
+            break
+    if current_action["status"] == "idle" and latest_job:
+        current_action = {
+            "source": as_text(latest_job.get("source") or "job"),
+            "label": latest_job_label,
+            "status": latest_job_status or "recorded",
+            "detail": latest_job_detail,
+            "blocker": product_blocker,
+        }
+
+    website_status = (
+        "published"
+        if publish_status == "published" and public_url
+        else "publish_blocked"
+        if product_blocker
+        else "local_source"
+        if source_path
+        else "missing"
+    )
 
     return {
         "current": {
@@ -5514,7 +5724,17 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
                 "public_url": public_url,
                 "published_at": as_text(surface.get("published_at")),
                 "publish_receipt_path": as_text(surface.get("publish_receipt_path")),
-                "publish_blocker": as_text(surface.get("publish_blocker")),
+                "publish_blocker": product_blocker,
+                "publish_mode": as_text(product_facts.get("publish_mode")),
+                "publish_source_path": as_text(product_facts.get("publish_source_path")),
+                "inventory_status": as_text(product_facts.get("inventory_status")),
+                "detected_frameworks": list(product_facts.get("detected_frameworks") or []),
+                "detected_package_manager": as_text(product_facts.get("detected_package_manager")),
+                "runtime_integrations": list(product_facts.get("runtime_integrations") or []),
+                "workflow_markers": list(product_facts.get("workflow_markers") or []),
+                "latest_check_status": as_text(product_facts.get("latest_check_status")),
+                "latest_check_command": as_text(product_facts.get("latest_check_command")),
+                "latest_check_error": as_text(product_facts.get("latest_check_error")),
                 "notes": as_text(surface.get("notes")),
             },
             "metrics": {
@@ -5538,33 +5758,38 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
             "posts": [],
             "cron": [],
             "files": [],
-            "jobs": [],
+            "jobs": latest_jobs[:6],
             "agent_runs": [],
             "workers": [],
-            "trace": [],
-            "tasks": [],
-            "status_cards": [],
+            "trace": trace_entries[:12],
+            "tasks": task_cards[:16],
+            "status_cards": [
+                {
+                    "label": "Current action",
+                    "status": current_action["status"],
+                    "detail": current_action["label"],
+                    "tone": tone(current_action["status"]),
+                },
+                {
+                    "label": "Product publish",
+                    "status": website_status,
+                    "detail": product_blocker or as_text(surface.get("publish_status")) or "Not published yet.",
+                    "tone": "blocked" if product_blocker else ("done" if website_status == "published" else "waiting"),
+                },
+            ],
+            "current_action": current_action,
             "ceo_loop": {
-                "status": as_text(latest_job["status"] if latest_job else ""),
-                "headline": headline(
-                    as_text(latest_job["kind"] if latest_job else ""),
-                    as_text(latest_job["status"] if latest_job else ""),
-                ) if latest_job else "",
-                "detail": "",
-                "next_action": "",
+                "status": current_action["status"],
+                "headline": current_action["label"],
+                "detail": current_action["detail"],
+                "next_action": current_action["detail"] or current_action["label"],
             },
             "wake_health": {},
             "research": {"status": "needed", "latest_path": "", "count": 0, "outputs": []},
             "research_outputs": [],
             "artifacts": {
                 "website": {
-                    "status": (
-                        "published"
-                        if publish_status == "published" and public_url
-                        else "local_source"
-                        if source_path
-                        else "missing"
-                    ),
+                    "status": website_status,
                     "path": "",
                     "updated_at": "",
                     "deploy_status": "",
@@ -5573,8 +5798,10 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
                     "publish_target": as_text(surface.get("publish_target")),
                     "publish_policy": as_text(surface.get("publish_policy")),
                     "publish_status": as_text(surface.get("publish_status")),
-                    "publish_blocker": as_text(surface.get("publish_blocker")),
+                    "publish_blocker": product_blocker,
                     "publish_receipt_path": as_text(surface.get("publish_receipt_path")),
+                    "publish_mode": as_text(product_facts.get("publish_mode")),
+                    "publish_source_path": as_text(product_facts.get("publish_source_path")),
                 },
                 "outreach": {
                     "status": "missing",

@@ -5548,6 +5548,18 @@ _PRODUCT_HOST_BUSINESS_CACHE: dict[str, tuple[float, bool, str]] = {}
 _PRODUCT_HOST_BUSINESS_POSITIVE_TTL_SECONDS = 60.0
 _PRODUCT_HOST_BUSINESS_NEGATIVE_TTL_SECONDS = 5.0
 _PRODUCT_HOST_BUSINESS_CACHE_MAX = 2048
+_PRODUCT_SITE_MATERIALIZE_LOCK = threading.Lock()
+_PRODUCT_SITE_MATERIALIZE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _product_site_materialize_lock_for_slug(slug: str) -> threading.Lock:
+    normalized = str(slug or "").strip().lower()
+    with _PRODUCT_SITE_MATERIALIZE_LOCK:
+        lock = _PRODUCT_SITE_MATERIALIZE_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.Lock()
+            _PRODUCT_SITE_MATERIALIZE_LOCKS[normalized] = lock
+        return lock
 
 
 def _product_host_has_business_uncached(domain: str) -> tuple[bool, str]:
@@ -5648,79 +5660,83 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
     target_root = (publish_root / slug).resolve()
     if publish_root not in (target_root, *target_root.parents):
         return None
+    materialize_lock = _product_site_materialize_lock_for_slug(slug)
 
-    try:
-        from plugins.takyon.core import TakyonStore, _product_static_publish_source
-        from plugins.takyon.storage import get_storage_backend, sync_down
-    except Exception as exc:
-        _log.warning("product site materialize imports failed for %s: %s", slug, exc)
-        return None
-
-    try:
-        app = (
-            TakyonStore(get_takyon_home())
-            .read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
-            .get("app")
-            or {}
-        )
-    except Exception as exc:
-        _log.warning("product site summary read failed for %s: %s", slug, exc)
-        return None
-
-    surface = app.get("surface_contract") or {}
-    if str(surface.get("publish_status") or "").strip().lower() != "published":
-        return None
-    published_at = str(surface.get("published_at") or "").strip()
-    source_path = str(surface.get("source_path") or "product/site").strip()
-    rel = Path(source_path.replace("\\", "/"))
-    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
-        _log.warning("product site source path is unsafe for %s: %r", slug, source_path)
-        return None
-
-    marker = target_root / ".takyon-published-at"
-    if target_root.is_dir() and published_at:
+    with materialize_lock:
         try:
-            if marker.read_text(encoding="utf-8").strip() == published_at:
-                return target_root
-        except OSError:
-            pass
-
-    try:
-        backend = get_storage_backend()
-    except Exception as exc:
-        _log.warning("product site backend unavailable for %s: %s", slug, exc)
-        return None
-
-    with tempfile.TemporaryDirectory(prefix=f"takyon-product-site-{slug}-") as tmp_dir:
-        business_root = Path(tmp_dir) / "businesses" / slug
-        try:
-            sync_down(backend, slug, business_root, delete_local=True)
+            from plugins.takyon.core import (
+                TakyonStore,
+                _product_static_publish_source,
+                _replace_directory_tree_atomic,
+            )
+            from plugins.takyon.storage import get_storage_backend, sync_down
         except Exception as exc:
-            _log.warning("product site sync_down failed for %s: %s", slug, exc)
-            return None
-        source_root = (business_root / rel).resolve()
-        if business_root.resolve() not in (source_root, *source_root.parents):
-            _log.warning("product site source escaped business root for %s: %s", slug, source_root)
-            return None
-        publish_source, _publish_label = _product_static_publish_source(source_root)
-        if publish_source is None:
+            _log.warning("product site materialize imports failed for %s: %s", slug, exc)
             return None
 
-        publish_root.mkdir(parents=True, exist_ok=True)
-        if target_root.exists():
-            shutil.rmtree(target_root)
+        try:
+            app = (
+                TakyonStore(get_takyon_home())
+                .read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
+                .get("app")
+                or {}
+            )
+        except Exception as exc:
+            _log.warning("product site summary read failed for %s: %s", slug, exc)
+            return None
 
-        def ignore(_directory: str, names: list[str]) -> set[str]:
-            return {
-                name
-                for name in names
-                if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
-                or name.endswith(".pyc")
-            }
+        surface = app.get("surface_contract") or {}
+        if str(surface.get("publish_status") or "").strip().lower() != "published":
+            return None
+        published_at = str(surface.get("published_at") or "").strip()
+        source_path = str(surface.get("source_path") or "product/site").strip()
+        rel = Path(source_path.replace("\\", "/"))
+        if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+            _log.warning("product site source path is unsafe for %s: %r", slug, source_path)
+            return None
 
-        shutil.copytree(publish_source, target_root, ignore=ignore)
-        if published_at:
-            marker.write_text(published_at + "\n", encoding="utf-8")
+        marker = target_root / ".takyon-published-at"
+        if target_root.is_dir() and published_at:
+            try:
+                if marker.read_text(encoding="utf-8").strip() == published_at:
+                    return target_root
+            except OSError:
+                pass
+
+        try:
+            backend = get_storage_backend()
+        except Exception as exc:
+            _log.warning("product site backend unavailable for %s: %s", slug, exc)
+            return None
+
+        with tempfile.TemporaryDirectory(prefix=f"takyon-product-site-{slug}-") as tmp_dir:
+            business_root = Path(tmp_dir) / "businesses" / slug
+            try:
+                sync_down(backend, slug, business_root, delete_local=True)
+            except Exception as exc:
+                _log.warning("product site sync_down failed for %s: %s", slug, exc)
+                return None
+            source_root = (business_root / rel).resolve()
+            if business_root.resolve() not in (source_root, *source_root.parents):
+                _log.warning("product site source escaped business root for %s: %s", slug, source_root)
+                return None
+            publish_source, _publish_label = _product_static_publish_source(source_root)
+            if publish_source is None:
+                return None
+
+            publish_root.mkdir(parents=True, exist_ok=True)
+
+            def ignore(_directory: str, names: list[str]) -> set[str]:
+                return {
+                    name
+                    for name in names
+                    if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
+                    or name.endswith(".pyc")
+                }
+
+            _replace_directory_tree_atomic(publish_source, target_root, ignore=ignore)
+            if published_at:
+                marker.write_text(published_at + "\n", encoding="utf-8")
 
     return target_root if target_root.is_dir() else None
 

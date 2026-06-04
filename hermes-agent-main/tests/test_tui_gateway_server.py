@@ -1,9 +1,11 @@
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -5415,3 +5417,187 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
         "outputs": [],
         "background_run": None,
     }
+
+
+def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tmp_path):
+    business_root = tmp_path / "businesses" / "demo"
+    site_root = business_root / "product" / "site"
+    site_root.mkdir(parents=True)
+    (site_root / "index.html").write_text("<html><body>demo</body></html>\n", encoding="utf-8")
+    receipt_rel = "product/site/publish-receipt.json"
+    (business_root / receipt_rel).write_text(
+        json.dumps(
+            {
+                "status": "blocked_build",
+                "checks": [
+                    {
+                        "status": "failed",
+                        "command": ["npm", "run", "build"],
+                        "error": "Missing CSS asset manifest",
+                    }
+                ],
+                "publish": {
+                    "status": "blocked",
+                    "deploy_kind": "local_static",
+                    "publish_source_path": "product/site",
+                    "blocker": "Missing CSS asset manifest",
+                },
+                "inventory": {
+                    "status": "collected",
+                    "package": {"frameworks": ["vite"], "package_manager": "npm"},
+                    "runtime_integrations": ["checkout"],
+                    "workflow_markers": ["static_export"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _SnapshotStore:
+        def __init__(self, root: Path):
+            self.root = root
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE app_users (business_slug TEXT, id TEXT);
+                CREATE TABLE app_entitlements (business_slug TEXT, app_user_id TEXT, status TEXT, tier TEXT, plan_key TEXT);
+                CREATE TABLE app_plan_policies (business_slug TEXT, plan_key TEXT, billing_interval TEXT, price_cents INTEGER);
+                CREATE TABLE app_revenue_events (business_slug TEXT, amount_paid_cents INTEGER);
+                CREATE TABLE app_checkout_intents (business_slug TEXT, id TEXT);
+                CREATE TABLE app_usage_events (business_slug TEXT, actual_cost_microusd INTEGER, estimated_cost_microusd INTEGER, created_at TEXT);
+                CREATE TABLE work_requests (
+                  id TEXT,
+                  business_slug TEXT,
+                  kind TEXT,
+                  status TEXT,
+                  payload_json TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
+                CREATE TABLE jobs (
+                  id TEXT,
+                  business_slug TEXT,
+                  kind TEXT,
+                  status TEXT,
+                  payload_json TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+            self.conn.execute("INSERT INTO app_users (business_slug, id) VALUES (?, ?)", ("demo", "user-1"))
+            self.conn.execute(
+                """
+                INSERT INTO work_requests (id, business_slug, kind, status, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job-1",
+                    "demo",
+                    "ceo_bootstrap",
+                    "running",
+                    json.dumps({"detail": "Bootstrapping the product workspace."}),
+                    "2026-06-04T10:00:00Z",
+                    "2026-06-04T10:05:00Z",
+                ),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt-1",
+                    "demo",
+                    "dashboard.run.started",
+                    json.dumps(
+                        {
+                            "kind": "ceo_bootstrap",
+                            "status": "running",
+                            "detail": "Bootstrapping the product workspace.",
+                            "trace": {
+                                "entry_key": "trace-1",
+                                "kind": "skill",
+                                "label": "CEO bootstrap",
+                                "detail": "Bootstrapping the product workspace.",
+                                "status": "running",
+                            },
+                        }
+                    ),
+                    "2026-06-04T10:05:30Z",
+                ),
+            )
+            self.conn.commit()
+
+        @contextmanager
+        def _connect(self):
+            yield self.conn
+
+        def _enforce_operator_business_access(self, conn, slug):
+            return None
+
+        def _ensure_business(self, conn, slug):
+            return {"name": "Demo", "goal": "Ship a planner", "mode": "test"}
+
+        def _ensure_app_budget(self, conn, slug):
+            return {
+                "status": "active",
+                "hard_limit_microusd": 5_000_000,
+                "current_period_start": "2026-06-01T00:00:00Z",
+            }
+
+        def _app_surface_contract(self, conn, slug):
+            return {
+                "status": "ready",
+                "source_path": "product/site",
+                "publish_status": "blocked",
+                "publish_receipt_path": receipt_rel,
+                "publish_blocker": "Missing CSS asset manifest",
+                "public_url": "",
+                "publish_target": "https://demo.fourmanifold.com/",
+                "publish_policy": "publish_after_refresh",
+            }
+
+        def _work_requests_table(self):
+            return "work_requests"
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            if "payload_json" in data:
+                try:
+                    data["payload"] = json.loads(data.pop("payload_json") or "{}")
+                except Exception:
+                    data["payload"] = {}
+            return data
+
+        def _business_root(self, slug):
+            return self.root / "businesses" / slug
+
+    snapshot = server._takyon_business_home_snapshot(_SnapshotStore(tmp_path), "demo")
+
+    assert snapshot["current"] == {
+        "name": "Demo",
+        "goal": "Ship a planner",
+        "mode": "test",
+    }
+    assert snapshot["overview"]["current_action"] == {
+        "source": "runtime",
+        "label": "CEO bootstrap",
+        "status": "running",
+        "detail": "Bootstrapping the product workspace.",
+        "blocker": "Missing CSS asset manifest",
+    }
+    assert snapshot["overview"]["product"]["publish_blocker"] == "Missing CSS asset manifest"
+    assert snapshot["overview"]["product"]["latest_check_command"] == "npm run build"
+    assert snapshot["overview"]["product"]["latest_check_error"] == "Missing CSS asset manifest"
+    assert snapshot["overview"]["product"]["detected_frameworks"] == ["vite"]
+    assert any(task["status"] == "running" and task["label"] == "CEO bootstrap" for task in snapshot["overview"]["tasks"])
+    assert any(task["status"] == "blocked" and task["label"] == "Product publish blocker" for task in snapshot["overview"]["tasks"])

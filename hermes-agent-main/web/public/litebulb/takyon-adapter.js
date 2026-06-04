@@ -452,8 +452,44 @@
     return Array.from(byKey.values()).sort((a, b) => traceUpdatedAtMs(a && a.updated_at) - traceUpdatedAtMs(b && b.updated_at));
   }
 
+  function currentActionFromSnapshot(snapshot) {
+    const overview = snapshot && snapshot.overview || {};
+    const currentAction = overview.current_action && typeof overview.current_action === "object"
+      ? overview.current_action
+      : {};
+    const ceo = overview.ceo_loop && typeof overview.ceo_loop === "object"
+      ? overview.ceo_loop
+      : {};
+    const product = overview.product && typeof overview.product === "object"
+      ? overview.product
+      : {};
+    const label = String(currentAction.label || ceo.headline || "").trim();
+    const detail = String(currentAction.detail || ceo.detail || ceo.next_action || "").trim();
+    const blocker = String(currentAction.blocker || product.publish_blocker || "").trim();
+    const status = traceStatus({ status: currentAction.status || ceo.status || (blocker ? "blocked" : "") });
+    return {
+      source: String(currentAction.source || "").trim(),
+      label,
+      detail,
+      blocker,
+      status: status || (blocker ? "blocked" : "todo"),
+    };
+  }
+
   function liveStatusFromSnapshot(snapshot) {
     if (LIVE.historyRunning) return { text: "thinking…", state: "run" };
+    const currentAction = currentActionFromSnapshot(snapshot);
+    if (currentAction.status === "blocked") {
+      return { text: currentAction.label || "blocked", state: "paused" };
+    }
+    if (currentAction.status === "running" || currentAction.status === "scheduled") {
+      const activityText = `${currentAction.label} ${currentAction.detail}`.toLowerCase();
+      const state = /bootstrap|build|publish|deploy|product|site/.test(activityText) ? "build" : "run";
+      return {
+        text: currentAction.label || currentAction.detail || currentAction.status,
+        state,
+      };
+    }
     const trace = mergedTraceEntries(snapshot);
     if (trace.some((entry) => traceStatus(entry) === "running")) {
       return { text: "running", state: "run" };
@@ -674,6 +710,14 @@
 
   function applyBoard(board, snapshot) {
     const next = [];
+    const seen = new Set();
+    const pushTask = (task) => {
+      if (!task || !task.id) return;
+      const key = String(task.id).trim();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      next.push(task);
+    };
     const cols = Array.isArray(board && board.columns) ? board.columns : [];
     const boardTasks = [];
     cols.forEach((col) => {
@@ -695,35 +739,34 @@
           .sort((a, b) => a.created - b.created)
       : [];
     const backgroundTask = mapBackgroundRunTask(snapshot);
-    next.push(...cronTasks);
-    if (backgroundTask) next.push(backgroundTask);
-    next.push(...deliverableTasks);
-    if (!next.length) {
+    cronTasks.forEach(pushTask);
+    if (backgroundTask) pushTask(backgroundTask);
+    const overviewTasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
+      ? snapshot.overview.tasks
+      : [];
+    overviewTasks.forEach((task, index) => {
+      const mapped = mapOverviewTask(task || {}, index);
+      if (!mapped || !["running", "scheduled", "blocked"].includes(mapped.status)) return;
+      pushTask(mapped);
+    });
+    if (!next.some((task) => task.status === "running" || task.status === "blocked")) {
       const trace = mergedTraceEntries(snapshot);
-      if (trace.length) {
-        trace.forEach((entry, index) => {
-          const mapped = mapTraceEntry(entry || {}, index);
-          if (!mapped || mapped.status !== "running" || mapped.key === "tool" || mapped.assignee === "runtime") return;
-          next.push(mapped);
-        });
-      }
-    }
-    if (!next.length) {
-      const overviewTasks = Array.isArray(snapshot && snapshot.overview && snapshot.overview.tasks)
-        ? snapshot.overview.tasks
-        : [];
-      overviewTasks.forEach((task, index) => {
-        const mapped = mapOverviewTask(task || {}, index);
-        if (!mapped || mapped.status !== "running") return;
-        next.push(mapped);
+      trace.forEach((entry, index) => {
+        const mapped = mapTraceEntry(entry || {}, index);
+        if (!mapped || !["running", "scheduled", "blocked"].includes(mapped.status)) return;
+        if (mapped.key === "tool" && mapped.assignee === "runtime") return;
+        pushTask(mapped);
       });
     }
-    if (!next.some((task) => task.status === "running") && boardTasks.length) {
-      next.push(...boardTasks.filter((task) => task.status === "running"));
-    }
-    if (!next.some((task) => task.status === "scheduled") && boardTasks.length) {
-      next.push(...boardTasks.filter((task) => task.status === "scheduled"));
-    }
+    boardTasks.forEach((task) => {
+      if (!["running", "scheduled", "blocked"].includes(task.status)) return;
+      pushTask(task);
+    });
+    deliverableTasks.forEach(pushTask);
+    boardTasks.forEach((task) => {
+      if (task.status !== "done") return;
+      pushTask(task);
+    });
     RT.tasks = next;
     renderBoard();
   }
@@ -755,7 +798,10 @@
     const ceo = overview.ceo_loop || {};
     const wake = overview.wake_health || {};
     const background = snapshot && snapshot.background_run || {};
+    const currentAction = currentActionFromSnapshot(snapshot);
     return (
+      String(currentAction.label || "").trim() ||
+      String(currentAction.detail || "").trim() ||
       String(ceo.next_action || "").trim() ||
       String(ceo.headline || "").trim() ||
       String(background.detail || "").trim() ||
@@ -920,6 +966,8 @@
   }
 
   function hasLiveProgress(snapshot) {
+    const currentAction = currentActionFromSnapshot(snapshot);
+    if (currentAction.status === "running" || currentAction.status === "scheduled") return true;
     const backgroundStatus = String(snapshot && snapshot.background_run && snapshot.background_run.status || "").trim().toLowerCase();
     if (backgroundStatus === "queued" || backgroundStatus === "running") return true;
     const trace = mergedTraceEntries(snapshot);
@@ -1084,7 +1132,7 @@
     const overview = LIVE.workspaceOverview || {};
     const website = overview.artifacts && overview.artifacts.website || {};
     const product = overview.product || {};
-    return String(website.path || website.source_path || product.source_path || "product/site").trim();
+    return String(website.path || website.source_path || product.source_path || "").trim();
   }
 
   async function openSitePreview(path, label) {
@@ -1185,6 +1233,7 @@
 
   function syncOverviewActivity(snapshot) {
     if (!snapshot) return;
+    const overview = snapshot.overview || {};
     const backgroundRun = snapshot.background_run || {};
 
     const backgroundDetail = String(backgroundRun.detail || "").trim();
@@ -1201,7 +1250,25 @@
         LIVE.traceLogSeen.add(signature);
         ceolog(traceLogHtml(entry), true);
       });
-      return;
+    }
+    const currentAction = currentActionFromSnapshot(snapshot);
+    const product = overview.product || {};
+    const blocker = String(currentAction.blocker || product.publish_blocker || "").trim();
+    const headline = [
+      currentAction.status,
+      currentAction.label,
+      currentAction.detail,
+      blocker,
+    ].join("|");
+    if (headline && headline !== LIVE.lastCeoHeadline) {
+      const statusLabel = currentAction.status || "recorded";
+      const summary = currentAction.label || currentAction.detail || "Business is synced.";
+      const detail = blocker || currentAction.detail;
+      ceolog(
+        `<span class="sys">[${esc(statusLabel)}]</span> ${esc(summary)}${detail && detail !== summary ? ` — ${esc(detail)}` : ""}`,
+        true,
+      );
+      LIVE.lastCeoHeadline = headline;
     }
   }
 
@@ -1692,14 +1759,73 @@
     const overview = LIVE.workspaceOverview || {};
     const product = overview.product || {};
     const website = overview.artifacts && overview.artifacts.website || {};
+    const currentAction = currentActionFromSnapshot(LIVE.workspaceSnapshot || { overview });
+    const blocker = String(product.publish_blocker || website.publish_blocker || currentAction.blocker || "").trim();
+    const currentStatus = String(currentAction.status || "").trim().toLowerCase();
     const live = String(product.publish_status || RT.biz.publishStatus || "").trim().toLowerCase() === "published" || !!RT.biz.publicUrl;
-    const hasLocalPreview = !!String(website.path || "").trim();
-    const previewPath = hasLocalPreview ? previewPathForLive() : "";
+    const previewPath = previewPathForLive();
+    const hasLocalPreview = !!previewPath;
     const directUrl = live ? normalizeOpenableUrl(RT.biz.publicUrl) : "";
-    const hostLabel = live ? (prettyHost(RT.biz.publicUrl) || "live site") : hasLocalPreview ? "local preview" : "no site yet";
+    const hostLabel = live
+      ? (prettyHost(RT.biz.publicUrl) || "live site")
+      : hasLocalPreview
+        ? compactPath(previewPath) || "local preview"
+        : "product workspace";
     const hasSite = live || hasLocalPreview;
+    const frameworkSummary = Array.isArray(product.detected_frameworks) && product.detected_frameworks.length
+      ? product.detected_frameworks.join(", ")
+      : "";
+    const factLine = [
+      product.publish_mode ? `publish ${String(product.publish_mode).replace(/_/g, " ")}` : "",
+      frameworkSummary ? `framework ${frameworkSummary}` : "",
+      product.latest_check_status ? `check ${String(product.latest_check_status).replace(/_/g, " ")}` : "",
+    ].filter(Boolean).join(" · ");
+    const commandLine = String(product.latest_check_command || "").trim();
+    const errorLine = String(product.latest_check_error || "").trim();
+    const summaryTitle = currentAction.label
+      || (live ? "Public site is live." : hasLocalPreview ? "Preview is ready." : "Product is still taking shape.");
+    const summaryDetail = blocker || currentAction.detail || "";
+    const summaryTone = blocker || currentStatus === "blocked"
+      ? "var(--alert)"
+      : currentStatus === "running"
+        ? "var(--amber)"
+        : currentStatus === "scheduled"
+          ? "var(--blue)"
+          : "var(--green)";
+    const summaryBadge = blocker
+      ? "blocked"
+      : currentStatus === "running" || currentStatus === "scheduled"
+        ? currentStatus
+        : live
+          ? "published"
+          : hasLocalPreview
+            ? "preview"
+            : "waiting";
+    const summaryPanel = `
+      <div style="padding:10px 12px;border-bottom:2px solid var(--ink);background:var(--paper)">
+        <div class="chan-top">
+          <span class="chan-nm">${esc(summaryTitle)}</span>
+          <span class="chan-st${summaryBadge === "published" ? " live" : ""}" style="border-color:${summaryTone};color:${summaryTone}">${esc(summaryBadge)}</span>
+        </div>
+        ${summaryDetail ? `<div class="meta" style="${blocker ? "color:var(--alert);" : ""}margin-top:6px">${esc(summaryDetail)}</div>` : ""}
+        ${factLine ? `<div class="meta" style="margin-top:6px">${esc(factLine)}</div>` : ""}
+        ${commandLine ? `<div class="meta" style="margin-top:6px"><strong>command</strong> ${esc(commandLine)}</div>` : ""}
+        ${errorLine && errorLine !== summaryDetail ? `<div class="meta" style="margin-top:6px;color:var(--alert)">${esc(errorLine)}</div>` : ""}
+      </div>`;
     // Avoid rebuilding (and reloading the iframe) when nothing material changed.
-    const sig = JSON.stringify([live, directUrl, hasLocalPreview, previewPath, hostLabel]);
+    const sig = JSON.stringify([
+      live,
+      directUrl,
+      hasLocalPreview,
+      previewPath,
+      hostLabel,
+      summaryTitle,
+      summaryDetail,
+      factLine,
+      commandLine,
+      errorLine,
+      summaryBadge,
+    ]);
     if (w.dataset.productSig === sig) return;
     if (typeof w._productPreviewCleanup === "function") {
       try { w._productPreviewCleanup(); } catch (_) {}
@@ -1708,10 +1834,11 @@
     w.dataset.productSig = sig;
     const frameTitle = `${RT.biz.name || RT.biz.slug || "product"} preview`;
     body(w).innerHTML = `<div class="mini">
-      <div class="mini__bar"><i></i><i></i><i></i><span>${esc(hostLabel)}</span></div>
+      <div class="mini__bar"${hasSite ? ' id="product-bar" title="open the site in a new tab" style="cursor:pointer"' : ""}><i></i><i></i><i></i><span>${esc(hostLabel)}</span>${hasSite ? '<span style="margin-left:auto;font-size:9px;letter-spacing:.1em;opacity:.7">↗ open</span>' : ""}</div>
+      ${summaryPanel}
       ${hasSite
         ? `<div class="mini__viewport" id="product-viewport"><iframe class="mini__frame mini__frame--scaled" id="product-frame" title="${esc(frameTitle)}"${directUrl ? ` src="${esc(directUrl)}"` : ""}></iframe></div>`
-        : `<div class="mini__page"><div class="lab">no site yet</div><p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p><div class="meta">A live preview of the site appears here once it exists.</div></div>`}
+        : `<div class="mini__page"><div class="lab">product workspace</div><p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p><div class="meta">${esc(blocker || currentAction.detail || "Takyon is still bootstrapping the product surface.")}</div></div>`}
     </div>`;
     const viewport = body(w).querySelector("#product-viewport");
     const frame = body(w).querySelector("#product-frame");
@@ -1737,6 +1864,15 @@
         if (resizeObserver) resizeObserver.disconnect();
         else window.removeEventListener("resize", applyScale);
       };
+    }
+    const bar = body(w).querySelector("#product-bar");
+    if (bar) {
+      bar.addEventListener("click", () => {
+        const activeFrame = document.getElementById("product-frame");
+        const target = directUrl || (activeFrame && activeFrame.getAttribute("src")) || "";
+        if (target) openUrlInNewTab(target);
+        else if (previewPath) void openSitePreview(previewPath, frameTitle);
+      });
     }
     if (hasSite && !directUrl && previewPath) {
       const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
@@ -1823,7 +1959,7 @@
     if (!RT.live) return originalRenderBoard();
     const w = document.getElementById("w-board");
     if (!w) return;
-    const cols = ["scheduled", "running", "done"];
+    const cols = ["running", "blocked", "scheduled", "done"];
     body(w).innerHTML = `<div class="board-shell">
       <div class="board-cols"><div class="kanban">${cols.map((st) => {
       const items = RT.tasks.filter((t) => t.status === st);
@@ -2471,11 +2607,21 @@
       skipBoard: true,
       view: "boot",
     });
+    if (LIVE.activeBusiness === business) {
+      await refreshBusinessData(business, {
+        skipAccount: true,
+        skipCredits: true,
+        skipDashboardState: true,
+        skipBoard: false,
+        view: "boot",
+      });
+    }
     const sessionId = await sessionPromise;
     if (sessionId && LIVE.activeBusiness === business) {
       await refreshBusinessData(business, {
         skipAccount: true,
-        skipBoard: true,
+        skipCredits: true,
+        skipBoard: false,
         view: "boot",
       });
     }

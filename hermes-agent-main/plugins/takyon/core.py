@@ -2396,6 +2396,119 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
         }
 
 
+def _read_product_surface_receipt(
+    business_root: Path,
+    receipt_path: str,
+) -> dict[str, Any]:
+    rel = str(receipt_path or "").strip()
+    if not rel:
+        return {}
+    try:
+        safe_rel = _safe_relpath(rel, field="publish_receipt_path").as_posix()
+    except Exception:
+        return {}
+    candidate = (business_root / safe_rel).resolve()
+    if business_root.resolve() not in (candidate, *candidate.parents):
+        return {}
+    if not candidate.is_file():
+        return {}
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _product_surface_operational_facts(
+    *,
+    surface: dict[str, Any] | None,
+    receipt: dict[str, Any] | None,
+    inventory: dict[str, Any] | None,
+) -> dict[str, Any]:
+    surface_dict = surface if isinstance(surface, dict) else {}
+    receipt_dict = receipt if isinstance(receipt, dict) else {}
+    publish = receipt_dict.get("publish") if isinstance(receipt_dict.get("publish"), dict) else {}
+    effective_inventory = (
+        inventory if isinstance(inventory, dict) and inventory
+        else receipt_dict.get("inventory") if isinstance(receipt_dict.get("inventory"), dict)
+        else {}
+    )
+    package = effective_inventory.get("package") if isinstance(effective_inventory.get("package"), dict) else {}
+    checks = receipt_dict.get("checks") if isinstance(receipt_dict.get("checks"), list) else []
+    latest_check = checks[-1] if checks and isinstance(checks[-1], dict) else {}
+    latest_problem_check = next(
+        (
+            item for item in reversed(checks)
+            if isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower() not in {"passed", "success", "completed"}
+        ),
+        latest_check,
+    )
+
+    def _command_text(value: Any) -> str:
+        if isinstance(value, list):
+            parts = [str(part).strip() for part in value if str(part).strip()]
+            return shlex.join(parts) if parts else ""
+        return str(value or "").strip()
+
+    frameworks = [
+        str(item).strip()
+        for item in (package.get("frameworks") or [])
+        if str(item).strip()
+    ]
+    runtime_integrations = [
+        str(item).strip()
+        for item in (effective_inventory.get("runtime_integrations") or [])
+        if str(item).strip()
+    ]
+    workflow_markers = [
+        str(item).strip()
+        for item in (effective_inventory.get("workflow_markers") or [])
+        if str(item).strip()
+    ]
+    routes = [
+        str(item).strip()
+        for item in (effective_inventory.get("routes") or [])
+        if str(item).strip()
+    ]
+    blocker = (
+        str(receipt_dict.get("blocker") or publish.get("blocker") or receipt_dict.get("error") or "").strip()
+        or str(surface_dict.get("publish_blocker") or "").strip()
+    )
+    latest_check_error = str(
+        latest_problem_check.get("error")
+        or latest_problem_check.get("stderr")
+        or latest_problem_check.get("stdout")
+        or ""
+    ).strip()
+    latest_check_status = str(latest_problem_check.get("status") or latest_check.get("status") or "").strip()
+    latest_check_command = _command_text(
+        latest_problem_check.get("command") or latest_check.get("command")
+    )
+    latest_failed_command = ""
+    if latest_check_status.lower() not in {"", "passed", "success", "completed"}:
+        latest_failed_command = latest_check_command
+    return {
+        "detected_frameworks": frameworks,
+        "detected_package_manager": str(package.get("package_manager") or "").strip(),
+        "inventory_status": str(effective_inventory.get("status") or "").strip(),
+        "routes": routes,
+        "runtime_integrations": runtime_integrations,
+        "workflow_markers": workflow_markers,
+        "refresh_status": str(receipt_dict.get("status") or "").strip(),
+        "latest_check_status": latest_check_status,
+        "latest_check_command": latest_check_command,
+        "latest_check_error": _truncate_text(latest_check_error, 1000),
+        "latest_failed_command": latest_failed_command,
+        "publish_mode": str(publish.get("publish_mode") or publish.get("deploy_kind") or "").strip(),
+        "publish_source_path": str(publish.get("publish_source_path") or "").strip(),
+        "publish_root": str(publish.get("publish_root") or "").strip(),
+        "publish_status": str(publish.get("status") or surface_dict.get("publish_status") or "").strip(),
+        "public_url": str(publish.get("public_url") or surface_dict.get("public_url") or "").strip(),
+        "blocker": blocker,
+    }
+
+
 def _surface_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -3129,6 +3242,48 @@ def _copy_product_public_asset(source: Path, target: Path) -> None:
         target.chmod(0o644)
     except OSError:
         pass
+
+
+def _replace_directory_tree_atomic(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    ignore=None,
+    overlay_paths: Iterable[tuple[Path, str]] = (),
+) -> None:
+    """Stage a replacement tree beside the live target, then swap it in."""
+    src = source_dir.resolve()
+    target = target_dir.resolve()
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".takyon-stage-{target.name}-",
+            dir=str(parent),
+        )
+    ).resolve()
+    staged_target = stage_root / target.name
+    backup_target = stage_root / f"{target.name}.previous"
+    try:
+        shutil.copytree(src, staged_target, ignore=ignore)
+        for overlay_source, overlay_rel in overlay_paths:
+            source_path = Path(overlay_source).resolve()
+            rel_text = _safe_relpath(overlay_rel, field="overlay_relpath").as_posix()
+            staged_path = (staged_target / rel_text).resolve()
+            if staged_target not in (staged_path, *staged_path.parents):
+                raise TakyonError("staged publish path escaped target root")
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            if source_path.is_dir():
+                shutil.copytree(source_path, staged_path, dirs_exist_ok=True)
+            elif source_path.is_file():
+                shutil.copy2(source_path, staged_path)
+        if target.exists():
+            os.replace(target, backup_target)
+        os.replace(staged_target, target)
+        if backup_target.exists():
+            shutil.rmtree(backup_target, ignore_errors=True)
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
 
 
 def _probe_public_asset_url(url: str) -> tuple[bool, str]:
@@ -3950,7 +4105,6 @@ def _publish_product_surface_path(
         if runtime_dir.exists():
             preserved_runtime_dir = Path(tempfile.mkdtemp(prefix=f"takyon-product-runtime-{_slugify(slug)}-"))
             shutil.copytree(runtime_dir, preserved_runtime_dir / "_takyon")
-        shutil.rmtree(target_dir)
 
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {
@@ -3960,11 +4114,18 @@ def _publish_product_surface_path(
             or name.endswith(".pyc")
         }
 
-    shutil.copytree(publish_source, target_dir, ignore=ignore)
+    overlay_paths: list[tuple[Path, str]] = []
     if preserved_runtime_dir is not None:
         restored_runtime_dir = preserved_runtime_dir / "_takyon"
         if restored_runtime_dir.exists():
-            shutil.copytree(restored_runtime_dir, target_dir / "_takyon", dirs_exist_ok=True)
+            overlay_paths.append((restored_runtime_dir, "_takyon"))
+    _replace_directory_tree_atomic(
+        publish_source,
+        target_dir,
+        ignore=ignore,
+        overlay_paths=overlay_paths,
+    )
+    if preserved_runtime_dir is not None:
         shutil.rmtree(preserved_runtime_dir, ignore_errors=True)
     _make_static_publish_tree_readable(target_dir)
     caddyfile, blocker = _ensure_product_static_caddy_route(slug=slug, publish_target=publish_target, static_root=target_dir)
@@ -5206,6 +5367,15 @@ class TakyonStore:
                 "public_url": str(surface.get("public_url") or inventory.get("public_url") or ""),
                 "publish_receipt_path": str(surface.get("publish_receipt_path") or inventory.get("publish_receipt_path") or ""),
             }
+        receipt = _read_product_surface_receipt(
+            self._business_root(slug),
+            str(surface.get("publish_receipt_path") or ""),
+        )
+        operational_facts = _product_surface_operational_facts(
+            surface=surface,
+            receipt=receipt,
+            inventory=inventory,
+        )
         root = self._business_root(slug) / source_path if source_path else None
         has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
         local_work: list[str] = []
@@ -5234,6 +5404,7 @@ class TakyonStore:
             "latest_receipt_path": str(surface.get("publish_receipt_path") or ""),
             "publish_blocker": str(surface.get("publish_blocker") or ""),
             "inventory": inventory or {},
+            "operational_facts": operational_facts,
             "local_continuable_work": local_work[:8],
         }
 
@@ -5352,12 +5523,28 @@ class TakyonStore:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
                 f"- Status: {inventory.get('status') or 'unknown'}",
+                f"- Frameworks: {', '.join((inventory.get('package') or {}).get('frameworks') or []) or 'none detected'}",
+                f"- Package manager: {(inventory.get('package') or {}).get('package_manager') or 'unknown'}",
                 f"- Routes: {', '.join(inventory.get('routes') or []) or 'none found'}",
                 f"- API routes: {', '.join(inventory.get('api_routes') or []) or 'none found'}",
+                f"- Runtime integrations: {', '.join(inventory.get('runtime_integrations') or []) or 'none found'}",
+                f"- Workflow markers: {', '.join(inventory.get('workflow_markers') or []) or 'none found'}",
                 f"- Risk markers: {len(inventory.get('risk_markers') or [])}",
                 f"- Claim snippets: {len(inventory.get('claim_snippets') or [])}",
                 f"- Pretend-state findings: {len(inventory.get('pretend_findings') or [])}",
             ])
+            operational_facts = surface_evidence.get("operational_facts") if isinstance(surface_evidence.get("operational_facts"), dict) else {}
+            if operational_facts:
+                surface_lines.extend(["", "## Operational Facts", ""])
+                surface_lines.extend([
+                    f"- Refresh status: {operational_facts.get('refresh_status') or 'unknown'}",
+                    f"- Publish mode: {operational_facts.get('publish_mode') or 'unknown'}",
+                    f"- Publish source path: {operational_facts.get('publish_source_path') or 'unknown'}",
+                    f"- Latest check status: {operational_facts.get('latest_check_status') or 'unknown'}",
+                    f"- Latest check command: {operational_facts.get('latest_check_command') or 'none recorded'}",
+                    f"- Latest check error: {operational_facts.get('latest_check_error') or 'none'}",
+                    f"- Exact blocker: {operational_facts.get('blocker') or 'none'}",
+                ])
             local_work = surface_evidence.get("local_continuable_work") or []
             if local_work:
                 surface_lines.extend(["", "### Local Continuable Work", ""])
