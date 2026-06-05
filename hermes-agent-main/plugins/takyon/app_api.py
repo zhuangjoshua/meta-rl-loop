@@ -21,6 +21,7 @@ from .ai_provider import (
     call_anthropic as _call_anthropic,
     microusd_cost as _microusd_cost,
 )
+from .app_runtime_constants import APP_SESSION_COOKIE
 from .core import (
     TakyonStore,
     handle_business_create_app_checkout,
@@ -33,7 +34,7 @@ from .core import (
 )
 
 
-SESSION_COOKIE = "takyon_app_session"
+SESSION_COOKIE = APP_SESSION_COOKIE
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:

@@ -43,6 +43,7 @@ from .ai_provider import (
 )
 from . import app_entitlements, app_funding, app_identity
 from .app_gateway_keys import GatewayPrincipal, resolve_gateway_key
+from .app_runtime_constants import APP_SESSION_COOKIE
 from .app_usage import (
     AppBudgetExceeded,
     AppBudgetInactive,
@@ -55,7 +56,6 @@ from .app_usage import (
 
 _BEARER_PREFIX = "Bearer "
 _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
-_APP_SESSION_COOKIE = "takyon_app_session"
 _APP_SESSION_HEADER = "X-Takyon-App-Session"
 
 # A provider caller is a server-side closure that already holds the shared key. The endpoint only
@@ -133,7 +133,7 @@ def _session_token(body: dict, header_value: str | None, cookie_header: str | No
     if body_token:
         return body_token
     cookie = SimpleCookie(cookie_header or "")
-    morsel = cookie.get(_APP_SESSION_COOKIE)
+    morsel = cookie.get(APP_SESSION_COOKIE)
     return "" if morsel is None else str(morsel.value or "").strip()
 
 

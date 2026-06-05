@@ -145,6 +145,11 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "Anonymous visitors can see the landing page" not in starter_pages
     assert "Sign in to view your account." in starter_pages
     assert "Use your email to manage your subscription and profile." in starter_pages
+    starter_server = (workspace_root / "src" / "components" / "starter-server.js").read_text()
+    assert "function requestHasSessionCookie()" in starter_server
+    assert 'const target = "takyon_app_session="' in starter_server
+    assert 'if (!requestHasSessionCookie()) {' in starter_server
+    assert "return starterAppState({}, null, { errors });" in starter_server
     app_page = (workspace_root / "src" / "app" / "app" / "page.js").read_text()
     product_layout = (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").read_text()
     assert "loadServerAppState" in app_page

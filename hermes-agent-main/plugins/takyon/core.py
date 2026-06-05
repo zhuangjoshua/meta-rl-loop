@@ -54,6 +54,7 @@ from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_takyon_home
 from tools.registry import tool_error, tool_result
 
+from .app_runtime_constants import APP_SESSION_COOKIE
 from . import safebox
 
 
@@ -2125,6 +2126,17 @@ def _subuser_app_starter_server_js() -> str:
               return `${proto}://${host}`;
             }
 
+            function requestCookieHeader() {
+              return headers().get("cookie") || "";
+            }
+
+            function requestHasSessionCookie() {
+              const target = "__APP_SESSION_COOKIE__=";
+              return requestCookieHeader()
+                .split(";")
+                .some((part) => String(part || "").trim().startsWith(target));
+            }
+
             function requestLocation(origin) {
               const url = new URL(origin);
               return {
@@ -2146,13 +2158,12 @@ def _subuser_app_starter_server_js() -> str:
             }
 
             async function serverJson(route) {
-              const requestHeaders = headers();
               const response = await fetch(runtimeUrl(route), {
                 method: "GET",
                 cache: "no-store",
                 headers: {
                   Accept: "application/json",
-                  Cookie: requestHeaders.get("cookie") || "",
+                  Cookie: requestCookieHeader(),
                 },
               });
               const payload = await response
@@ -2171,6 +2182,9 @@ def _subuser_app_starter_server_js() -> str:
 
             export async function loadServerAppState() {
               const errors = {};
+              if (!requestHasSessionCookie()) {
+                return starterAppState({}, null, { errors });
+              }
               const session = await serverJson("session").catch((error) => {
                 errors.session = String(error?.message || error || "session_unavailable");
                 return {};
@@ -2185,7 +2199,7 @@ def _subuser_app_starter_server_js() -> str:
               return starterAppState(session || {}, account, { errors });
             }
             """
-        ).strip()
+        ).strip().replace("__APP_SESSION_COOKIE__", APP_SESSION_COOKIE)
         + "\n"
     )
 
