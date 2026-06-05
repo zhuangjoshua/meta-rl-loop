@@ -2518,7 +2518,6 @@
   const originalRenderBoard = renderBoard;
   renderBoard = function renderBoardLiveAware() {
     if (!RT.live) return originalRenderBoard();
-    renderGraphWindow();
     const w = document.getElementById("w-board");
     if (!w) return;
     const cols = ["running", "blocked", "scheduled", "done"];
@@ -2547,17 +2546,7 @@
   };
 
   if (typeof openGraph === "function") {
-    const originalOpenGraphFn = openGraph;
-    openGraph = function openGraphLiveAware() {
-      const win = originalOpenGraphFn();
-      if (RT.live) renderGraphWindow();
-      return win;
-    };
-    try {
-      if (typeof OPENERS === "object" && OPENERS) OPENERS["w-graph"] = openGraph;
-    } catch (_err) {
-      /* OPENERS not reachable here; mountLiveBusiness still opens the graph */
-    }
+    openGraph = function openGraphLiveAware() { /* north star removed */ };
   }
 
   const originalOpenTask = openTask;
@@ -2770,7 +2759,7 @@
     if (LIVE.assistantBubble && document.body.contains(LIVE.assistantBubble)) return LIVE.assistantBubble;
     const container = document.createElement("div");
     container.className = "m m-ceo";
-    container.innerHTML = `<div class="who">takyon · ceo</div><div class="bubble"></div>`;
+    container.innerHTML = `<div class="who">litebulb · ceo</div><div class="bubble"></div>`;
     msgs().appendChild(container);
     LIVE.assistantBubble = $(".bubble", container);
     scrollChat();
@@ -3002,6 +2991,28 @@
         syncHistoryPollTimer();
         scheduleLiveRefresh(250);
       }
+      return;
+    }
+    if (ev.type === "progress") {
+      const phase = String(payload.phase || "running").trim();
+      const message = String(payload.message || "").trim();
+      const target = payload.target ? String(payload.target).trim() : "";
+      const percent = payload.percent;
+      if (!message) return;
+      let el = document.getElementById("progress-status");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "progress-status";
+        el.className = "m";
+        const m = msgs();
+        if (m) m.appendChild(el);
+      }
+      const colors = { thinking: "var(--muted)", planning: "var(--blue)", editing: "var(--amber)", running: "var(--green)", fixing: "var(--alert)", finalizing: "var(--purple)", done: "var(--green)" };
+      const c = colors[phase] || "var(--muted)";
+      const bar = typeof percent === "number" && isFinite(percent) ? `<div class="bar" style="margin:4px 0 0"><i style="width:${Math.max(0, Math.min(100, percent))}%;background:${c}"></i></div>` : "";
+      el.innerHTML = `<div class="tool" style="border-color:${c};border-style:solid"><span class="ic" style="color:${c}">${phase === "done" ? "✓" : "▸"}</span><span class="nm" style="color:${c}">${esc(phase)}</span><span class="ttl">${esc(message)}${target ? " · " + esc(target) : ""}</span></div>${bar}`;
+      scrollChat();
+      if (phase === "done") { el.removeAttribute("id"); el.style.opacity = "0.5"; }
       return;
     }
     if (ev.type === "tool.start") {
@@ -3288,11 +3299,8 @@
       tickH: null,
       wakeH: null,
       secH: null,
-      ceoFeed: null,
       shipped: [],
-      moved: new Set(),
       logBuf: [],
-      ro: null,
       blockedNote: false,
       channels: freshChannels(),
       live: true,
@@ -3308,26 +3316,11 @@
     bulb.classList.add("on");
     setStatus("syncing…", "build");
     desk = $("#desk");
-    if (desk) {
-      desk.querySelectorAll(".win").forEach((win) => win.remove());
-      desk.classList.remove("stack");
-    }
-    openGraph();
+    if (desk) desk.innerHTML = "";
     openProduct();
     openStatus();
-    openCeoLog();
-    syncDock();
-    renderGraphWindow();
-    layoutMain();
-    try {
-      RT.ro = new ResizeObserver(layoutMain);
-      RT.ro.observe(desk);
-    } catch (_err) {
-      /* layout observer is optional */
-    }
     msgs().innerHTML = "";
     RT.logBuf = [];
-    if (RT.ceoFeed) renderLog(RT.ceoFeed);
     addThink("connecting to Takyon.");
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);

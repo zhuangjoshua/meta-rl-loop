@@ -436,6 +436,29 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     )
 
 
+_PROGRESS_PHASES = frozenset({
+    "thinking", "planning", "editing", "running",
+    "fixing", "finalizing", "done",
+})
+
+
+def _emit_progress(
+    sid: str,
+    phase: str,
+    message: str,
+    target: str | None = None,
+    percent: int | None = None,
+):
+    if phase not in _PROGRESS_PHASES:
+        phase = "running"
+    payload: dict = {"phase": phase, "message": str(message).strip()}
+    if target is not None:
+        payload["target"] = str(target).strip()
+    if percent is not None and isinstance(percent, (int, float)):
+        payload["percent"] = max(0, min(100, int(percent)))
+    _emit("progress", sid, payload)
+
+
 def _estimate_image_tokens(width: int, height: int) -> int:
     """Very rough UI estimate for image prompt cost.
 
@@ -1682,13 +1705,12 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             },
         )
     if _tool_progress_enabled(sid):
-        # tool.complete is the source of truth for todos (full list from the
-        # tool result). args.todos here may be a partial merge update.
         _emit(
             "tool.start",
             sid,
             {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)},
         )
+        _emit_progress(sid, "running", f"Running {name}", target=_tool_ctx(name, args))
 
 
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
@@ -2052,6 +2074,7 @@ def _forward_isolated_turn_event(
         "reasoning.available",
         "status.update",
         "review.summary",
+        "progress",
     }:
         _emit(event, sid, payload)
 
@@ -4068,6 +4091,7 @@ def _run_prompt_submit(
             if rendered:
                 payload["rendered"] = rendered
             _emit("message.complete", sid, payload)
+            _emit_progress(sid, "done", "Turn complete.")
             if current_business:
                 trace_status_value = "completed" if status == "complete" else "failed"
                 trace_detail = (raw or "").strip()[:280]
@@ -8327,32 +8351,27 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     try:
-        from plugins.takyon.cli import TakyonStore, _slugify, run_takyon_command
+        from plugins.takyon.cli import TakyonStore, _resolve_create_identity, run_takyon_command
 
-        requested_name = str(
-            params.get("name")
-            or params.get("business_name")
-            or params.get("slug")
-            or params.get("business")
-            or ""
-        ).strip()
+        requested_name = str(params.get("name") or params.get("business_name") or "").strip()
         requested_goal = str(params.get("goal") or "").strip()
         requested_mode = str(params.get("mode") or "live").strip().lower()
         if requested_mode == "test":
             return _err(rid, 4004, "test mode is disabled; all businesses run live")
         if requested_mode != "live":
             return _err(rid, 4004, "mode must be live")
-        slug_source = requested_name or requested_goal
-        slug = _slugify(str(params.get("slug") or slug_source or "").strip())
-        if not slug:
-            return _err(rid, 4004, "business slug required")
+        resolved_name, slug = _resolve_create_identity(
+            requested_name,
+            requested_goal,
+            str(params.get("slug") or params.get("business") or "").strip(),
+        )
 
         operator_user_id = _takyon_operator_user_id(session) or None
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
         command_argv = ["create", "--live"]
-        if requested_name:
-            command_argv.extend(["--name", requested_name])
+        if resolved_name:
+            command_argv.extend(["--name", resolved_name])
         command_argv.append(slug)
         if requested_goal:
             command_argv.append(requested_goal)
@@ -8390,7 +8409,7 @@ def _(rid, params: dict) -> dict:
             rid,
             {
                 "business_slug": slug,
-                "business_name": requested_name or slug,
+                "business_name": resolved_name,
                 "goal": requested_goal,
                 "mode": active_mode,
                 "job_id": str(bootstrap_job.get("job_id") or ""),
