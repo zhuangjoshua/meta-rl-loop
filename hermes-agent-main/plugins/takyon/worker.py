@@ -994,12 +994,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     )
 
 
-# The kind→handler registry the drain consults. New job kinds register here.
-HANDLERS: dict[str, jobs.Handler] = {
-    "ceo_bootstrap": ceo_bootstrap_handler,
-    "ceo_wake": ceo_wake_handler,
-}
-
 def x_publish_outreach_handler(job: Job) -> JobRunResult:
     payload = job.payload or {}
     slug = job.business_slug
@@ -1077,8 +1071,14 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
 # ── the drain loop ──────────────────────────────────────────────────────────────────────────────
 
 
-    "x.publish_outreach": x_publish_outreach_handler,
 def drain_tick(
+# The kind→handler registry the drain consults. New job kinds register here.
+HANDLERS: dict[str, jobs.Handler] = {
+    "ceo_bootstrap": ceo_bootstrap_handler,
+    "ceo_wake": ceo_wake_handler,
+    "x.publish_outreach": x_publish_outreach_handler,
+}
+
     conn,
     *,
     worker_id: str,
