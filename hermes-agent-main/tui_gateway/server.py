@@ -7532,6 +7532,24 @@ def _takyon_store(session: dict | None):
     return store
 
 
+def _takyon_runtime_event_cursor(created_at: Any, event_id: Any) -> str:
+    ts = str(created_at or "").strip()
+    eid = str(event_id or "").strip()
+    if not ts and not eid:
+        return ""
+    return f"{ts}::{eid}"
+
+
+def _takyon_parse_runtime_event_cursor(cursor: Any) -> tuple[str, str]:
+    text = str(cursor or "").strip()
+    if not text:
+        return "", ""
+    if "::" not in text:
+        return text, ""
+    created_at, event_id = text.split("::", 1)
+    return created_at.strip(), event_id.strip()
+
+
 _TAKYON_BUSINESSES_CACHE_TTL_SECONDS = max(
     0.25,
     float(os.getenv("TAKYON_BUSINESSES_CACHE_TTL_SECONDS", "1.5") or 1.5),
@@ -8175,6 +8193,107 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5050, str(e))
+
+
+@method("takyon.dashboard.runtime")
+def _(rid, params: dict) -> dict:
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    business = _takyon_requested_business(session, params)
+    if not business:
+        return _ok(rid, {"business_slug": "", "events": [], "cursor": "", "after": ""})
+    access_error = _takyon_require_business_access(session, business)
+    if access_error:
+        return _err(rid, 4004, access_error)
+    requested_after = str(params.get("after") or "").strip()
+    after_created_at, after_event_id = _takyon_parse_runtime_event_cursor(requested_after)
+    try:
+        limit = max(1, min(int(params.get("limit") or 24), 100))
+    except (TypeError, ValueError):
+        limit = 24
+    try:
+        store = _takyon_store(session)
+        with store._connect() as conn:
+            if after_created_at or after_event_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM events
+                    WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%'
+                      AND (
+                        created_at > ?
+                        OR (created_at = ? AND id > ?)
+                      )
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (business, after_created_at, after_created_at, after_event_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM (
+                      SELECT * FROM events
+                      WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%'
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT ?
+                    ) recent
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (business, limit),
+                ).fetchall()
+        events: list[dict[str, Any]] = []
+        cursor = requested_after
+        for row in rows:
+            event = store._row_to_dict(row)
+            if not isinstance(event, dict):
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
+            created_at = str(event.get("created_at") or "").strip()
+            event_id = str(event.get("id") or "").strip()
+            cursor_value = _takyon_runtime_event_cursor(created_at, event_id)
+            if cursor_value:
+                cursor = cursor_value
+            events.append(
+                {
+                    "id": event_id,
+                    "created_at": created_at,
+                    "kind": str(payload.get("kind") or "").strip(),
+                    "status": str(payload.get("status") or event.get("event_type") or "")
+                    .replace("dashboard.run.", "")
+                    .strip(),
+                    "detail": str(payload.get("detail") or "").strip(),
+                    "line": str(payload.get("line") or "").strip(),
+                    "command": str(payload.get("command") or "").strip(),
+                    "trace": (
+                        {
+                            "entry_key": str(trace.get("entry_key") or "").strip(),
+                            "kind": str(trace.get("kind") or "").strip(),
+                            "label": str(trace.get("label") or "").strip(),
+                            "detail": str(trace.get("detail") or "").strip(),
+                            "status": str(trace.get("status") or "").strip(),
+                            "tool_name": str(trace.get("tool_name") or "").strip(),
+                            "skill_name": str(trace.get("skill_name") or "").strip(),
+                            "preview": str(trace.get("preview") or "").strip(),
+                            "summary": str(trace.get("summary") or "").strip(),
+                        }
+                        if trace
+                        else None
+                    ),
+                }
+            )
+        return _ok(
+            rid,
+            {
+                "business_slug": business,
+                "events": events,
+                "cursor": cursor,
+                "after": requested_after,
+            },
+        )
+    except Exception as e:
+        return _err(rid, 5053, str(e))
 
 
 @method("takyon.dashboard.state")

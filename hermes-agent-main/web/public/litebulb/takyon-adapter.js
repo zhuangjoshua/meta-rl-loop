@@ -38,6 +38,7 @@
     ws: null,
     reconnectTimer: null,
     pollTimer: null,
+    runtimePollTimer: null,
     menuTimer: null,
     toolEls: new Map(),
     assistantBubble: null,
@@ -62,6 +63,10 @@
     lastBackgroundDetail: "",
     lastCeoHeadline: "",
     pollMs: 0,
+    runtimePollMs: 0,
+    runtimePollBusy: false,
+    runtimeCursor: "",
+    runtimeSeen: new Set(),
     historyPollTimer: null,
     historyPollMs: 0,
     historySeen: new Set(),
@@ -1153,6 +1158,22 @@
     if (LIVE.pollMs !== desiredMs) restartLivePollTimer(desiredMs);
   }
 
+  function restartRuntimePollTimer(ms) {
+    const nextMs = Number(ms);
+    if (!Number.isFinite(nextMs) || nextMs < 500) return;
+    if (LIVE.runtimePollTimer) window.clearInterval(LIVE.runtimePollTimer);
+    LIVE.runtimePollMs = nextMs;
+    LIVE.runtimePollTimer = window.setInterval(() => {
+      void pollRuntimeEvents();
+    }, nextMs);
+  }
+
+  function syncRuntimePollTimer(snapshot) {
+    if (!LIVE.activeBusiness) return;
+    const desiredMs = hasLiveProgress(snapshot) ? 1250 : 4000;
+    if (LIVE.runtimePollMs !== desiredMs) restartRuntimePollTimer(desiredMs);
+  }
+
   function restartHistoryPollTimer(ms) {
     const nextMs = Number(ms);
     if (!Number.isFinite(nextMs) || nextMs < 500) return;
@@ -1367,6 +1388,158 @@
     return `<span class="${badgeClass}">[${esc(badge)}]</span> ${esc(label)}${detail ? ` — ${esc(detail)}` : ""}`;
   }
 
+  function logTraceEntry(entry) {
+    const signature = traceLogSignature(entry);
+    if (!signature || LIVE.traceLogSeen.has(signature)) return false;
+    LIVE.traceLogSeen.add(signature);
+    ceolog(traceLogHtml(entry), true);
+    return true;
+  }
+
+  function runtimeEventTraceEntry(event) {
+    const eventId = String(event && event.id || "").trim();
+    const eventKind = String(event && event.kind || "").trim().toLowerCase();
+    if (eventKind === "ceo_turn") return null;
+    const eventStatus = String(event && event.status || "").trim();
+    const updatedAt = String(event && event.created_at || "").trim() || new Date().toISOString();
+    const detail = String(event && (event.line || event.detail || "") || "").trim();
+    const trace = event && event.trace && typeof event.trace === "object" ? event.trace : null;
+    if (trace) {
+      return {
+        id: eventId,
+        entry_key: String(trace.entry_key || eventId || `runtime:${updatedAt}`).trim() || `runtime:${updatedAt}`,
+        source: "runtime",
+        kind: String(trace.kind || "note").trim().toLowerCase() || "note",
+        label: String(trace.label || humanizeKey(trace.tool_name || trace.skill_name || eventKind || "runtime")).trim(),
+        detail: String(trace.detail || detail || trace.summary || "").trim(),
+        status: traceStatus({ status: trace.status || eventStatus }),
+        updated_at: updatedAt,
+        tool_name: String(trace.tool_name || "").trim(),
+        skill_name: String(trace.skill_name || "").trim(),
+        summary: String(trace.summary || "").trim(),
+      };
+    }
+    if ((eventKind === "ceo_bootstrap" || eventKind === "ceo_wake") && /^(?:started|completed|failed)$/i.test(eventStatus)) {
+      const label = eventKind === "ceo_bootstrap" ? "CEO bootstrap" : "CEO wake";
+      return {
+        id: eventId,
+        entry_key: `turn:${eventKind}`,
+        source: "runtime",
+        kind: "turn",
+        label,
+        detail: detail || (traceStatus({ status: eventStatus }) === "done" ? `${label} completed.` : `${label} is running.`),
+        status: traceStatus({ status: eventStatus }),
+        updated_at: updatedAt,
+        tool_name: "",
+        skill_name: "",
+        summary: "",
+      };
+    }
+    const toolStarted = detail.match(/^tool started -> ([^·]+?)(?: · (.+))?$/i);
+    if (toolStarted) {
+      const toolName = String(toolStarted[1] || "").trim();
+      const preview = String(toolStarted[2] || "").trim();
+      return {
+        id: eventId,
+        entry_key: `legacy-tool:${toolName}:${preview}`,
+        source: "runtime",
+        kind: "tool",
+        label: humanizeKey(toolName || "tool"),
+        detail: preview || detail,
+        status: "running",
+        updated_at: updatedAt,
+        tool_name: toolName,
+        skill_name: "",
+        summary: "",
+      };
+    }
+    const toolCompleted = detail.match(/^tool completed -> ([^·]+?)(?: · (.+))?$/i);
+    if (toolCompleted) {
+      const toolName = String(toolCompleted[1] || "").trim();
+      const summary = String(toolCompleted[2] || "").trim();
+      return {
+        id: eventId,
+        entry_key: `legacy-tool:${toolName}`,
+        source: "runtime",
+        kind: "tool",
+        label: humanizeKey(toolName || "tool"),
+        detail: summary || detail,
+        status: "completed",
+        updated_at: updatedAt,
+        tool_name: toolName,
+        skill_name: "",
+        summary,
+      };
+    }
+    const preparingTool = detail.match(/^preparing tool -> (.+)$/i);
+    if (preparingTool) {
+      return {
+        id: eventId,
+        entry_key: `note:${eventId || updatedAt}`,
+        source: "runtime",
+        kind: "note",
+        label: "Preparing tool",
+        detail: String(preparingTool[1] || "").trim() || detail,
+        status: "running",
+        updated_at: updatedAt,
+        tool_name: "",
+        skill_name: "",
+        summary: "",
+      };
+    }
+    if (/^agent -> /i.test(detail)) {
+      return {
+        id: eventId,
+        entry_key: `note:${eventId || updatedAt}`,
+        source: "runtime",
+        kind: "note",
+        label: "Agent",
+        detail: detail.replace(/^agent -> /i, "").trim(),
+        status: traceStatus({ status: eventStatus }),
+        updated_at: updatedAt,
+        tool_name: "",
+        skill_name: "",
+        summary: "",
+      };
+    }
+    return null;
+  }
+
+  function runtimeEventHtml(event) {
+    const eventKind = String(event && event.kind || "").trim().toLowerCase();
+    if (eventKind !== "ceo_bootstrap" && eventKind !== "ceo_wake") return "";
+    const detail = String(event && (event.line || event.detail || event.command || "") || "").trim();
+    if (!detail) return "";
+    const status = traceStatus({ status: event && event.status });
+    const label = eventKind === "ceo_bootstrap" ? "bootstrap" : "wake";
+    const badgeClass = status === "done" ? "l-green" : status === "blocked" ? "l-red" : "sys";
+    return `<span class="${badgeClass}">[${esc(label)}]</span> ${esc(detail)}`;
+  }
+
+  function applyRuntimeEvent(event, options) {
+    if (!event || typeof event !== "object") return;
+    const eventId = String(event.id || "").trim();
+    if (eventId && LIVE.runtimeSeen.has(eventId)) return;
+    if (eventId) LIVE.runtimeSeen.add(eventId);
+    const entry = runtimeEventTraceEntry(event);
+    if (entry) {
+      upsertLiveTrace(entry);
+      logTraceEntry(entry);
+      if (entry.kind === "turn" || entry.status === "done" || entry.status === "blocked") {
+        scheduleLiveRefresh(150);
+      }
+      return;
+    }
+    if (options && options.initialSeed) return;
+    const html = runtimeEventHtml(event);
+    if (!html) return;
+    ceolog(html, true);
+    const rawStatus = String(event.status || "").trim().toLowerCase();
+    if (rawStatus === "started" || rawStatus === "completed" || rawStatus === "failed") {
+      scheduleLiveRefresh(150);
+    }
+  }
+
   function syncOverviewActivity(snapshot) {
     if (!snapshot) return;
     const overview = snapshot.overview || {};
@@ -1381,10 +1554,7 @@
     const trace = mergedTraceEntries(snapshot);
     if (trace.length) {
       trace.forEach((entry) => {
-        const signature = traceLogSignature(entry);
-        if (!signature || LIVE.traceLogSeen.has(signature)) return;
-        LIVE.traceLogSeen.add(signature);
-        ceolog(traceLogHtml(entry), true);
+        logTraceEntry(entry);
       });
     }
     const currentAction = currentActionFromSnapshot(snapshot);
@@ -1445,6 +1615,7 @@
     renderPlanSummary(snapshot);
     syncOverviewActivity(snapshot);
     syncLivePollTimer(snapshot);
+    syncRuntimePollTimer(snapshot);
     syncHistoryPollTimer();
     const modeEl = $("#mb-mode");
     if (modeEl) {
@@ -2460,6 +2631,10 @@
     LIVE.lastBackgroundDetail = "";
     LIVE.lastCeoHeadline = "";
     LIVE.pollMs = 0;
+    LIVE.runtimePollMs = 0;
+    LIVE.runtimePollBusy = false;
+    LIVE.runtimeCursor = "";
+    LIVE.runtimeSeen = new Set();
     LIVE.historyRunning = false;
     LIVE.historySeen = new Set();
     LIVE.historyPollMs = 0;
@@ -2469,11 +2644,13 @@
   function stopLiveTimers() {
     if (LIVE.menuTimer) window.clearInterval(LIVE.menuTimer);
     if (LIVE.pollTimer) window.clearInterval(LIVE.pollTimer);
+    if (LIVE.runtimePollTimer) window.clearInterval(LIVE.runtimePollTimer);
     if (LIVE.historyPollTimer) window.clearInterval(LIVE.historyPollTimer);
     if (LIVE.reconnectTimer) window.clearTimeout(LIVE.reconnectTimer);
     if (LIVE.refreshTimer) window.clearTimeout(LIVE.refreshTimer);
     LIVE.menuTimer = null;
     LIVE.pollTimer = null;
+    LIVE.runtimePollTimer = null;
     LIVE.historyPollTimer = null;
     LIVE.reconnectTimer = null;
     LIVE.refreshTimer = null;
@@ -2711,6 +2888,39 @@
     }
   }
 
+  async function pollRuntimeEvents() {
+    if (!LIVE.sessionId || !LIVE.activeBusiness || LIVE.runtimePollBusy) return;
+    const business = LIVE.activeBusiness;
+    const sessionId = LIVE.sessionId;
+    const initialSeed = !LIVE.runtimeCursor;
+    LIVE.runtimePollBusy = true;
+    try {
+      const res = await rpc("takyon.dashboard.runtime", {
+        session_id: sessionId,
+        business_slug: business,
+        after: LIVE.runtimeCursor,
+        limit: LIVE.runtimeCursor ? 32 : 16,
+      }, 10000);
+      if (LIVE.sessionId !== sessionId || LIVE.activeBusiness !== business) return;
+      const events = Array.isArray(res && res.events) ? res.events : [];
+      events.forEach((event) => applyRuntimeEvent(event, { initialSeed }));
+      const cursor = String(res && res.cursor || "").trim();
+      if (cursor) LIVE.runtimeCursor = cursor;
+    } catch (err) {
+      if (isMissingSessionError(err)) {
+        LIVE.sessionId = "";
+        LIVE.sessionBusiness = "";
+        if (LIVE.activeBusiness) {
+          void ensureSession(LIVE.activeBusiness).catch(() => {
+            /* best effort session recovery */
+          });
+        }
+      }
+    } finally {
+      LIVE.runtimePollBusy = false;
+    }
+  }
+
   async function ensureSession(business) {
     const desired = String(business || "").trim().toLowerCase();
     if (LIVE.sessionId && LIVE.sessionBusiness === desired) return LIVE.sessionId;
@@ -2721,7 +2931,10 @@
     }, 120000);
     LIVE.sessionId = res && res.session_id || "";
     LIVE.sessionBusiness = desired;
-    if (LIVE.sessionId) connectLiveSocket(LIVE.sessionId);
+    if (LIVE.sessionId) {
+      connectLiveSocket(LIVE.sessionId);
+      void pollRuntimeEvents();
+    }
     return LIVE.sessionId;
   }
 
@@ -3119,6 +3332,7 @@
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);
     restartLivePollTimer(15000);
+    restartRuntimePollTimer(4000);
     restartHistoryPollTimer(4000);
   }
 

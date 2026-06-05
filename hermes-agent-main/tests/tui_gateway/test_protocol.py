@@ -2,10 +2,12 @@
 
 import io
 import json
+import sqlite3
 import sys
 import threading
 import time
 import types
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -463,6 +465,154 @@ def test_takyon_dashboard_state_sets_explicit_business(server, monkeypatch):
 
     assert response["result"]["business_slug"] == "latexflow"
     assert response["result"]["scope"] == "business:latexflow"
+
+
+def test_takyon_dashboard_runtime_tails_incrementally(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": "demo"}
+
+    class FakeStore:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+            self.conn.execute(
+                """
+                INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt-1",
+                    "demo",
+                    "dashboard.run.started",
+                    json.dumps(
+                        {
+                            "kind": "ceo_bootstrap",
+                            "status": "started",
+                            "detail": "CEO bootstrap is running.",
+                            "trace": {
+                                "entry_key": "turn:ceo_bootstrap",
+                                "kind": "turn",
+                                "label": "CEO bootstrap",
+                                "detail": "CEO bootstrap is running.",
+                                "status": "running",
+                            },
+                        }
+                    ),
+                    "2026-06-05T19:00:00Z",
+                ),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt-2",
+                    "demo",
+                    "dashboard.run.output",
+                    json.dumps(
+                        {
+                            "kind": "ceo_bootstrap",
+                            "status": "output",
+                            "detail": "tool started -> business_claude_agent_task · product/site",
+                            "line": "tool started -> business_claude_agent_task · product/site",
+                            "command": "/create demo",
+                        }
+                    ),
+                    "2026-06-05T19:00:02Z",
+                ),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "evt-3",
+                    "demo",
+                    "dashboard.run.completed",
+                    json.dumps(
+                        {
+                            "kind": "ceo_bootstrap",
+                            "status": "completed",
+                            "detail": "CEO bootstrap completed.",
+                        }
+                    ),
+                    "2026-06-05T19:00:05Z",
+                ),
+            )
+            self.conn.commit()
+
+        @contextmanager
+        def _connect(self):
+            yield self.conn
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload_raw = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload_raw) if payload_raw else {}
+            return data
+
+    store = FakeStore()
+    monkeypatch.setattr(server, "_takyon_store", lambda _session: store)
+    monkeypatch.setattr(server, "_takyon_require_business_access", lambda *_args, **_kwargs: None)
+
+    initial = server._methods["takyon.dashboard.runtime"](
+        "runtime-1",
+        {"session_id": sid, "business_slug": "demo", "limit": 8},
+    )
+
+    initial_result = initial["result"]
+    assert [item["id"] for item in initial_result["events"]] == ["evt-1", "evt-2", "evt-3"]
+    assert initial_result["events"][0]["trace"]["entry_key"] == "turn:ceo_bootstrap"
+    assert initial_result["cursor"] == "2026-06-05T19:00:05Z::evt-3"
+
+    store.conn.execute(
+        """
+        INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-4",
+            "demo",
+            "dashboard.run.output",
+            json.dumps(
+                {
+                    "kind": "ceo_bootstrap",
+                    "status": "output",
+                    "detail": "product surface -> published https://demo.fourmanifold.com/",
+                }
+            ),
+            "2026-06-05T19:00:06Z",
+        ),
+    )
+    store.conn.commit()
+
+    incremental = server._methods["takyon.dashboard.runtime"](
+        "runtime-2",
+        {
+            "session_id": sid,
+            "business_slug": "demo",
+            "after": initial_result["cursor"],
+            "limit": 8,
+        },
+    )
+
+    incremental_result = incremental["result"]
+    assert [item["id"] for item in incremental_result["events"]] == ["evt-4"]
+    assert incremental_result["after"] == "2026-06-05T19:00:05Z::evt-3"
+    assert incremental_result["cursor"] == "2026-06-05T19:00:06Z::evt-4"
 
 
 def test_takyon_businesses_for_session_caches_reads(server, monkeypatch):
