@@ -207,6 +207,22 @@ def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
     assert core._missing_env_for_requirement("x") == []
 
 
+def test_xurl_auth_status_rejects_empty_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
+    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".xurl").write_text("apps: {}\n", encoding="utf-8")
+
+    class _Proc:
+        returncode = 0
+        stdout = "No apps registered. Use 'xurl auth apps add' to register one.\n"
+        stderr = ""
+
+    monkeypatch.setattr(core.subprocess, "run", lambda *args, **kwargs: _Proc())
+    assert core._xurl_auth_status_ok(home=str(home)) is False
+
+
 def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     # The handler converts the turn's true USD cost to integer cents for settlement and packages the
     # response. $0.0734 → 7 cents.

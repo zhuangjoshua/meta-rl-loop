@@ -4543,6 +4543,9 @@ def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
     if not xurl:
         return False
     resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
+    auth_path = _xurl_auth_path(home=resolved_home)
+    if not auth_path.exists():
+        return False
     try:
         proc = subprocess.run(
             [xurl, "auth", "status"],
@@ -4553,7 +4556,21 @@ def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
         )
     except Exception:
         return False
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        return False
+    output = "\n".join(part for part in (proc.stdout, proc.stderr) if part).strip().lower()
+    if any(
+        marker in output
+        for marker in (
+            "no apps registered",
+            "no app registered",
+            "no tokens",
+            "not authenticated",
+            "no users",
+        )
+    ):
+        return False
+    return True
 
 
 def _read_xurl_shared_auth_secret() -> tuple[str, str]:
