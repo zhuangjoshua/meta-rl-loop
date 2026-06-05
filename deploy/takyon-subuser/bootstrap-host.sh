@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 
 SOURCE_HOST="${TAKYON_SOURCE_HOST:-root@137.184.75.57}"
@@ -14,12 +15,18 @@ REMOTE_HOME="${TAKYON_REMOTE_HOME:-$REMOTE_ROOT/.takyon}"
 REMOTE_SECRETS="${TAKYON_REMOTE_SECRETS:-$REMOTE_ROOT/secrets}"
 REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-subuser.service}"
 REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-subuser.service}"
+REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 
 source_ssh=(-i "$SOURCE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 target_ssh=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 
 if [[ ! -f "$SERVICE_FILE" ]]; then
   echo "service file not found: $SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$SEED_XURL_AUTH_SCRIPT" ]]; then
+  echo "xurl auth seed script not found: $SEED_XURL_AUTH_SCRIPT" >&2
   exit 1
 fi
 
@@ -37,6 +44,13 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y ca-certificates curl rsync caddy
+  if ! command -v xurl >/dev/null 2>&1; then
+    curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
+  fi
+  if ! command -v xurl >/dev/null 2>&1 && [ -x /root/.local/bin/xurl ]; then
+    ln -sf /root/.local/bin/xurl /usr/local/bin/xurl
+  fi
+  command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_HOME/product-sites' '$REMOTE_SECRETS'
 "
 
@@ -61,6 +75,13 @@ tar \
 EOF
 
 scp "${target_ssh[@]}" "$SERVICE_FILE" "$TARGET_HOST:$REMOTE_SERVICE_FILE"
+
+TARGET_HOST="$TARGET_HOST" \
+TARGET_KEY="$TARGET_KEY" \
+TAKYON_REMOTE_RUNTIME="$REMOTE_RUNTIME" \
+TAKYON_REMOTE_HOME="$REMOTE_HOME" \
+TAKYON_REMOTE_SAFEBOX_URL="$REMOTE_SAFEBOX_URL" \
+  "$SEED_XURL_AUTH_SCRIPT"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   python3 -m compileall -q '$REMOTE_RUNTIME/plugins/takyon' '$REMOTE_RUNTIME/takyon_cli' '$REMOTE_RUNTIME/tui_gateway'

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_HOST="${TARGET_HOST:?TARGET_HOST is required}"
+TARGET_KEY="${TARGET_KEY:?TARGET_KEY is required}"
+TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:?TAKYON_REMOTE_RUNTIME is required}"
+TAKYON_REMOTE_HOME="${TAKYON_REMOTE_HOME:-/opt/takyon/.takyon}"
+TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
+TAKYON_REMOTE_XURL_PATH="${TAKYON_REMOTE_XURL_PATH:-/root/.xurl}"
+
+if [[ ! -f "$TARGET_KEY" ]]; then
+  echo "target key not found: $TARGET_KEY" >&2
+  exit 1
+fi
+
+ssh_opts=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+
+ssh "${ssh_opts[@]}" "$TARGET_HOST" 'bash -s' <<EOF
+set -euo pipefail
+
+command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
+
+env \
+  TAKYON_HOME='$TAKYON_REMOTE_HOME' \
+  HOME=/root \
+  PYTHONUNBUFFERED=1 \
+  TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+  TAKYON_REMOTE_XURL_PATH='$TAKYON_REMOTE_XURL_PATH' \
+  '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+import base64
+import os
+import sys
+from pathlib import Path
+
+from plugins.takyon import safebox
+from plugins.takyon.core import _xurl_auth_status_ok, load_takyon_env
+
+load_takyon_env()
+
+auth_path = Path(os.environ.get("TAKYON_REMOTE_XURL_PATH") or "/root/.xurl").expanduser()
+auth_path.parent.mkdir(parents=True, exist_ok=True)
+
+raw_secret = ""
+for key in ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET"):
+    raw_secret = str(safebox.read_env_backed_value(key) or "").strip()
+    if raw_secret:
+        break
+
+if raw_secret:
+    try:
+        decoded = base64.b64decode(raw_secret.encode("utf-8"), validate=True)
+    except Exception:
+        decoded = raw_secret.encode("utf-8")
+    decoded = decoded.replace(b"\r\n", b"\n")
+    if not decoded.strip():
+        print("shared xurl auth secret is empty after decode", file=sys.stderr)
+        raise SystemExit(1)
+    auth_path.write_bytes(decoded)
+    os.chmod(auth_path, 0o600)
+    print(f"seeded {auth_path} from Safebox")
+elif auth_path.exists():
+    data = auth_path.read_bytes()
+    if not data.strip():
+        print(f"existing {auth_path} is empty", file=sys.stderr)
+        raise SystemExit(1)
+    encoded = base64.b64encode(data).decode("ascii")
+    safebox.save_env_backed_value("XURL_SHARED_AUTH_B64_SECRET", encoded)
+    print(f"promoted existing {auth_path} into Safebox")
+else:
+    print("shared xurl auth is not configured yet; leaving xurl auth unseeded")
+    raise SystemExit(0)
+
+if not _xurl_auth_status_ok(home=str(auth_path.parent)):
+    print(f"xurl auth status failed for {auth_path}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+EOF

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
+SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -15,6 +16,7 @@ TAKYON_REMOTE_HOME="${TAKYON_REMOTE_HOME:-/opt/takyon/.takyon}"
 TAKYON_REMOTE_PRODUCT_SITES="${TAKYON_REMOTE_PRODUCT_SITES:-$TAKYON_REMOTE_HOME/product-sites}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-subuser.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-subuser.service}"
+TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SYNC_PRODUCT_SITES="${TAKYON_SYNC_PRODUCT_SITES:-1}"
@@ -26,6 +28,11 @@ fi
 
 if [[ ! -f "$SERVICE_FILE" ]]; then
   echo "service file not found: $SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$SEED_XURL_AUTH_SCRIPT" ]]; then
+  echo "xurl auth seed script not found: $SEED_XURL_AUTH_SCRIPT" >&2
   exit 1
 fi
 
@@ -63,6 +70,13 @@ rsync -az --delete --force \
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$SERVICE_FILE" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE"
+
+TARGET_HOST="$TAKYON_VPS_HOST" \
+TARGET_KEY="$TAKYON_VPS_KEY" \
+TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
+TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
+  "$SEED_XURL_AUTH_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
