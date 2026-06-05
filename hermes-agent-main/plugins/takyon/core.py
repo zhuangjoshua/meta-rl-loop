@@ -2200,6 +2200,7 @@ def _subuser_app_worker_contract_block(
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
+        lines.append("- If AppKit already provides a working auth component or helper, keep its sign-in behavior authoritative and only wrap, restyle, reposition, or compose around it unless you are intentionally changing auth rail logic.")
     else:
         lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
 
@@ -2243,7 +2244,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        "- Any starter source already present in `src/` is plumbing only: package/runtime wiring, route shell, and generic rail forms. Replace or restyle that starter structure freely; do not treat its layout, labels, or copy as the product.",
+        "- Any starter source already present in `src/` is generic layout/copy only. Keep the package/runtime wiring you still need, but do not treat generic labels or structure as the product.",
+        "- AppKit-owned rail components and helpers are canonical behavior, not inspiration. If a shared component already implements a declared rail correctly (for example `StarterAuthForm`, `StarterCheckoutForm`, `StarterGenerateForm`, or helpers in `starter-context.js`), preserve that behavior and only wrap, restyle, reposition, or compose around it unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Preserve runtime semantics, but redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
     ]

@@ -131,6 +131,46 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "const showGenerate =" in starter_workspace
 
 
+def test_appkit_contract_block_preserves_canonical_rail_components():
+    block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
+        {
+            "runtime_features": ["auth", "account", "checkout", "generate"],
+            "routes": ["/", "/app"],
+            "metadata": {
+                "subuser_app": {
+                    "app_mode": "standard_saas",
+                    "subscription_style": "monthly",
+                }
+            },
+        }
+    )
+
+    assert "AppKit-owned rail components and helpers are canonical behavior, not inspiration." in block
+    assert "preserve that behavior and only wrap, restyle, reposition, or compose around it" in block
+
+
+def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
+    block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
+        {
+            "runtime_features": ["auth", "account", "checkout"],
+            "routes": ["/", "/app"],
+            "metadata": {
+                "subuser_app": {
+                    "app_mode": "standard_saas",
+                    "subscription_style": "monthly",
+                },
+                "customer_experience": {
+                    "required_routes": ["/", "/app"],
+                },
+            },
+        },
+        plans_configured=True,
+    )
+
+    assert "keep its sign-in behavior authoritative" in block
+    assert "do not fake browser-only sessions" in block
+
+
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):
     store = takyon_core.TakyonStore(tmp_path)
 
