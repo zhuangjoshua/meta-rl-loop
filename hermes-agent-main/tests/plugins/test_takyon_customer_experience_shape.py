@@ -85,6 +85,18 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
                 },
             },
         },
+        plans=[
+            {
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 1900,
+                "currency": "usd",
+                "billing_interval": "month",
+                "included_ai_budget_microusd": 5_000_000,
+                "included_action_quota": 0,
+                "allow_overage": False,
+            }
+        ],
     )
 
     assert (workspace_root / "package.json").exists()
@@ -97,14 +109,25 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "components" / "StarterGenerateForm.js").exists()
     starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
     starter_checkout = (workspace_root / "src" / "components" / "StarterCheckoutForm.js").read_text()
+    starter_auth = (workspace_root / "src" / "components" / "StarterAuthForm.js").read_text()
     starter_landing = (workspace_root / "src" / "components" / "StarterLanding.js").read_text()
+    next_config = (workspace_root / "next.config.js").read_text()
     starter_workspace = (workspace_root / "src" / "components" / "StarterWorkspace.js").read_text()
     assert 'export const starterDefaultPlanKey =' in starter_context
+    assert "export const starterConfiguredPlans =" in starter_context
+    assert "export const starterDefaultMonthlyPlan =" in starter_context
+    assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
+    assert '"includedAiBudgetMicrousd": 5000000' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert 'useState(starterDefaultPlanKey)' in starter_checkout
     assert 'fixedMonthlyPlan ? "Subscribe" : "Start checkout"' in starter_checkout
+    assert 'origin: typeof window !== "undefined" ? window.location.origin : ""' in starter_auth
+    assert 'TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN' in next_config
+    assert 'source: "/api/takyon/:path*"' in next_config
     assert "See pricing" not in starter_landing
     assert "Monthly access" not in starter_landing
     assert "Continue with your account" not in starter_workspace
+    assert "const hasPaidAccess =" in starter_workspace
+    assert "const showGenerate =" in starter_workspace
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

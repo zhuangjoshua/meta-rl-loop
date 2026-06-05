@@ -363,6 +363,9 @@ def get_config_path() -> Path:
 
 def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
+    explicit = str(os.environ.get("TAKYON_ENV_FILE") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
     return get_takyon_home() / ".env"
 
 def get_project_root() -> Path:

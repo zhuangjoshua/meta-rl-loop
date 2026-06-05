@@ -66,7 +66,7 @@ def test_upsert_plan_creates_with_documented_defaults(pg_conn):
     assert plan.currency == "usd"
     assert plan.billing_interval == "month"
     assert plan.included_ai_budget_microusd == 0
-    assert plan.included_action_quota == 25  # documented default
+    assert plan.included_action_quota == 0  # documented default
     assert plan.allow_overage is False
     assert plan.source == "takyon"
 
@@ -121,6 +121,20 @@ def test_upsert_plan_rejects_negative_price(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     with pytest.raises(InvalidPlan):
         app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", price_cents=-1)
+
+
+def test_upsert_monthly_plan_rejects_included_ai_budget_above_plan_price(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    with pytest.raises(InvalidPlan):
+        app_entitlements.upsert_plan_policy(
+            pg_conn,
+            slug,
+            "pro",
+            tier="paid",
+            price_cents=1900,
+            billing_interval="month",
+            included_ai_budget_microusd=19_000_001,
+        )
 
 
 def test_upsert_plan_normalizes_plan_key_slug(pg_conn):

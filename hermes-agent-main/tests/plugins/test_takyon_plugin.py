@@ -1462,26 +1462,24 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert shape["required_app_tabs"] == []
     assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
-    assert app["plans"] == [
-        {
-            "plan_key": "monthly",
-            "tier": "paid",
-            "price_cents": 0,
-            "currency": "usd",
-            "billing_interval": "month",
-            "included_ai_budget_microusd": 0,
-            "included_action_quota": 25,
-            "allow_overage": False,
-            "stripe_product_id": None,
-            "stripe_price_id": None,
-            "metadata": {
-                "takyon_seed": {
-                    "kind": "monthly_app_shell",
-                    "price_status": "unset",
-                }
-            },
-        }
-    ]
+    assert len(app["plans"]) == 1
+    plan = app["plans"][0]
+    assert plan["plan_key"] == "monthly"
+    assert plan["tier"] == "paid"
+    assert plan["price_cents"] == 1_900
+    assert plan["currency"] == "usd"
+    assert plan["billing_interval"] == "month"
+    assert plan["included_ai_budget_microusd"] == 5_000_000
+    assert plan["included_action_quota"] == 0
+    assert plan["allow_overage"] is False
+    assert plan["stripe_product_id"] is None
+    assert plan["stripe_price_id"] is None
+    assert plan["source"] == "takyon_starter"
+    assert plan["notes"] == ""
+    assert plan["metadata"]["takyon_seed"] == {
+        "kind": "monthly_app_shell",
+        "price_status": "unset",
+    }
 
 
 def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):
@@ -3063,6 +3061,38 @@ def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch)
     assert checkout["success"] is True
     assert checkout["mode"] == "test"
     assert checkout["checkout_url"].startswith("local://takyon/checkout/checkoutrail/")
+
+
+def test_monthly_plan_upsert_rejects_included_ai_budget_above_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:budgetcap",
+        [{"action": "business.upsert", "business": "budgetcap", "name": "Budgetcap", "mode": "test"}],
+        "init-budgetcap",
+    )
+
+    result = _commit(
+        store,
+        "business:budgetcap",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "budgetcap",
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 1900,
+                "currency": "usd",
+                "billing_interval": "month",
+                "included_ai_budget_microusd": 19_000_001,
+            }
+        ],
+        "budgetcap-plan",
+    )["results"][0]
+
+    assert result["success"] is False
+    assert "included_ai_budget_microusd must be between 0 and the monthly plan price" in result["error"]
 
 
 def test_test_app_checkout_url_prefers_same_origin_http_url():

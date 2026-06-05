@@ -291,6 +291,9 @@ DEFAULT_SUBUSER_SUBSCRIPTION_STYLE = "monthly"
 SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset({DEFAULT_SUBUSER_SUBSCRIPTION_STYLE})
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY = "monthly"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
+DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
+DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
+DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
@@ -1072,7 +1075,35 @@ def _merge_customer_experience_metadata(
     return merged
 
 
-def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
+def _starter_plan_shape_payload(plans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for raw in plans or []:
+        if not isinstance(raw, dict):
+            continue
+        plan_key = str(raw.get("plan_key") or "").strip()
+        if not plan_key:
+            continue
+        payloads.append(
+            {
+                "planKey": plan_key,
+                "tier": str(raw.get("tier") or "").strip(),
+                "priceCents": int(raw.get("price_cents") or 0),
+                "currency": str(raw.get("currency") or "usd").strip().lower() or "usd",
+                "billingInterval": _normalize_billing_interval(raw.get("billing_interval") or "month"),
+                "includedAiBudgetMicrousd": int(raw.get("included_ai_budget_microusd") or 0),
+                "includedActionQuota": int(raw.get("included_action_quota") or 0),
+                "allowOverage": bool(raw.get("allow_overage")),
+            }
+        )
+    return payloads
+
+
+def _subuser_surface_context_payload(
+    surface: dict[str, Any] | None,
+    *,
+    slug: str,
+    plans: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     shape = _surface_subuser_app_shape(surface)
     customer_experience = _surface_customer_experience_shape(surface)
     routes = _surface_routes(surface)
@@ -1086,6 +1117,7 @@ def _subuser_surface_context_payload(surface: dict[str, Any] | None, *, slug: st
         "runtimeApiBase": str((surface or {}).get("runtime_api_base") or f"/api/takyon/apps/{slug}"),
         "runtimeFeatures": _surface_runtime_features(surface),
         "railState": shape.get("rail_state") or {},
+        "plans": _starter_plan_shape_payload(plans),
         "routes": routes,
         "customerExperience": {
             "surfaceGoal": customer_experience.get("surface_goal") or "",
@@ -1196,6 +1228,7 @@ def _materialize_subuser_app_kit(
     *,
     slug: str,
     surface: dict[str, Any] | None,
+    plans: list[dict[str, Any]] | None = None,
 ) -> None:
     target_root = workspace_root / SUBUSER_KIT_DIRNAME
     target_root.mkdir(parents=True, exist_ok=True)
@@ -1208,7 +1241,7 @@ def _materialize_subuser_app_kit(
             destination = target_root / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
-    context_payload = _subuser_surface_context_payload(surface, slug=slug)
+    context_payload = _subuser_surface_context_payload(surface, slug=slug, plans=plans)
     (target_root / "surface-context.js").write_text(
         "export const subuserSurfaceContext = "
         + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -1276,7 +1309,27 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             ensure_ascii=False,
         )
         + "\n",
-        "next.config.js": "const nextConfig = {};\n\nmodule.exports = nextConfig;\n",
+        "next.config.js": dedent(
+            """
+            const runtimeProxyOrigin = String(process.env.TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN || "").trim().replace(/\\/+$/, "");
+
+            const nextConfig = runtimeProxyOrigin
+              ? {
+                  async rewrites() {
+                    return [
+                      {
+                        source: "/api/takyon/:path*",
+                        destination: `${runtimeProxyOrigin}/api/takyon/:path*`,
+                      },
+                    ];
+                  },
+                }
+              : {};
+
+            module.exports = nextConfig;
+            """
+        ).strip()
+        + "\n",
         "src/app/layout.js": dedent(
             f"""
             import "../../_takyon/tokens.css";
@@ -1507,9 +1560,18 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
               apiMode: surfaceContext.apiMode,
               routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
             }});
+            export const starterConfiguredPlans = Array.isArray(surfaceContext.plans)
+              ? surfaceContext.plans
+                  .filter((plan) => plan && typeof plan === "object" && String(plan.planKey || "").trim())
+                  .map((plan) => ({{ ...plan }}))
+              : [];
+            export const starterDefaultMonthlyPlan =
+              starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || null;
             export const starterDefaultPlanKey =
-              String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
-                ? "monthly"
+              starterDefaultMonthlyPlan?.planKey
+                ? String(starterDefaultMonthlyPlan.planKey)
+                : String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
+                  ? "monthly"
                 : "";
 
             export const starterTitle = {title_literal};
@@ -1660,6 +1722,7 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 try {
                   const response = await starterRequestAuth({
                     email: email.trim(),
+                    origin: typeof window !== "undefined" ? window.location.origin : "",
                     product_name: "",
                     send_email: true,
                   });
@@ -1953,6 +2016,17 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 : session
                   ? JSON.stringify(session, null, 2)
                   : "";
+              const activeEntitlements = Array.isArray(account?.entitlements)
+                ? account.entitlements.filter((item) => String(item?.status || "active") === "active")
+                : [];
+              const hasPaidAccess = activeEntitlements.some((item) => {
+                const tier = String(item?.tier || "").trim().toLowerCase();
+                const planKey = String(item?.plan_key || "").trim();
+                return Boolean(planKey) || (tier && tier !== "free");
+              });
+              const showGenerate = !loading && !authNeeded && railDeclared("generate") && (
+                !railDeclared("checkout") || hasPaidAccess
+              );
 
               return (
                 <main className="starter-root">
@@ -1999,7 +2073,7 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
                       {!loading && !authNeeded && railDeclared("checkout") ? <StarterCheckoutForm /> : null}
 
-                      {!loading && !authNeeded && railDeclared("generate") ? <StarterGenerateForm /> : null}
+                      {showGenerate ? <StarterGenerateForm /> : null}
                     </section>
                   </div>
                 </main>
@@ -2148,6 +2222,8 @@ def _subuser_app_worker_contract_block(
         lines.append(f"- Paid rails are incomplete (missing {missing}). Do not render live pricing or subscribe flows until both account and checkout are declared.")
     elif not plans_configured:
         lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
+    elif shape.get("subscription_style") == "monthly":
+        lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -2162,6 +2238,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "Prepared subuser app kit:",
         "- Managed kit files are available under `./_takyon/` in this workspace.",
         "- `./_takyon/surface-context.js` exports the current app truth for this business, including the CEO-chosen customer experience shape.",
+        "- `./_takyon/surface-context.js` also exports any configured starter plan shape, including `priceCents` and `includedAiBudgetMicrousd` for the canonical monthly plan when present.",
         "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
@@ -4504,6 +4581,30 @@ def _normalize_billing_interval(value: Any) -> str:
     return aliases.get(raw, raw)
 
 
+def _monthly_plan_price_cap_microusd(price_cents: Any) -> int:
+    return max(0, int(float(price_cents or 0)) * 10_000)
+
+
+def _normalize_included_ai_budget_microusd(
+    value: Any,
+    *,
+    price_cents: Any,
+    billing_interval: Any,
+    tier: Any,
+    default: int = 0,
+) -> int:
+    budget = int(float(default if value in {None, ""} else value))
+    if budget < 0:
+        raise TakyonError("included_ai_budget_microusd must be non-negative")
+    interval = _normalize_billing_interval(billing_interval or "month")
+    tier_value = _file_slug(str(tier or "").strip().lower(), str(tier or ""))
+    if interval == "month" and tier_value != "free":
+        cap = _monthly_plan_price_cap_microusd(price_cents)
+        if budget > cap:
+            raise TakyonError("included_ai_budget_microusd must be between 0 and the monthly plan price")
+    return budget
+
+
 def _plan_validation_warnings(plan_key: str, tier: str, quota: int, allow_overage: bool, metadata: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     normalized_key = _file_slug(plan_key, plan_key)
@@ -6294,7 +6395,7 @@ class TakyonStore:
               currency TEXT NOT NULL DEFAULT 'usd',
               billing_interval TEXT NOT NULL DEFAULT 'month',
               included_ai_budget_microusd INTEGER NOT NULL DEFAULT 0,
-              included_action_quota INTEGER NOT NULL DEFAULT 25,
+              included_action_quota INTEGER NOT NULL DEFAULT 0,
               allow_overage INTEGER NOT NULL DEFAULT 0,
               stripe_product_id TEXT,
               stripe_price_id TEXT,
@@ -7186,7 +7287,18 @@ class TakyonStore:
         if source_path and _workspace_needs_runtime_ui_contract(source_path):
             source_root = (self._business_root(slug) / source_path).resolve()
             if self._business_root(slug).resolve() in (source_root, *source_root.parents):
-                _materialize_subuser_app_kit(source_root, slug=slug, surface=surface)
+                _materialize_subuser_app_kit(
+                    source_root,
+                    slug=slug,
+                    surface=surface,
+                    plans=[
+                        self._row_to_dict(row)
+                        for row in conn.execute(
+                            "SELECT * FROM app_plan_policies WHERE business_slug = ? ORDER BY price_cents ASC, plan_key ASC LIMIT 12",
+                            (slug,),
+                        ).fetchall()
+                    ],
+                )
 
     def _distribution_surface_evidence(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
         root = self._business_root(slug)
@@ -8716,11 +8828,11 @@ class TakyonStore:
                                     slug,
                                     DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
                                     tier=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
-                                    price_cents=0,
+                                    price_cents=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
                                     currency="usd",
                                     billing_interval="month",
-                                    included_ai_budget_microusd=0,
-                                    included_action_quota=25,
+                                    included_ai_budget_microusd=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
+                                    included_action_quota=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
                                     allow_overage=False,
                                     source="takyon_starter",
                                     notes="",
@@ -8746,11 +8858,11 @@ class TakyonStore:
                                 slug,
                                 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
                                 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
-                                0,
+                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
                                 "usd",
                                 "month",
-                                0,
-                                25,
+                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
+                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
                                 0,
                                 None,
                                 None,
@@ -8866,7 +8978,7 @@ class TakyonStore:
                     event_type="app.plan.upsert",
                     payload={
                         "plan_key": DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
-                        "price_cents": 0,
+                        "price_cents": DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
                         "source": "takyon_starter",
                     },
                 )
@@ -8942,7 +9054,14 @@ class TakyonStore:
             interval = _normalize_billing_interval(op.get("billing_interval") or "month")
             if interval not in {"month", "year", "one_time"}:
                 raise TakyonError("billing_interval must be one of: month, year, one_time")
-            included_action_quota = int(op.get("included_action_quota") or 25)
+            included_ai_budget_microusd = _normalize_included_ai_budget_microusd(
+                op.get("included_ai_budget_microusd"),
+                price_cents=price_cents,
+                billing_interval=interval,
+                tier=tier,
+            )
+            quota_raw = op.get("included_action_quota")
+            included_action_quota = int(0 if quota_raw in {None, ""} else quota_raw)
             allow_overage = bool(op.get("allow_overage"))
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
@@ -8963,7 +9082,7 @@ class TakyonStore:
                             price_cents=price_cents,
                             currency=str(op.get("currency") or "usd").lower(),
                             billing_interval=interval,
-                            included_ai_budget_microusd=int(float(op.get("included_ai_budget_microusd") or 0)),
+                            included_ai_budget_microusd=included_ai_budget_microusd,
                             included_action_quota=included_action_quota,
                             allow_overage=allow_overage,
                             stripe_product_id=op.get("stripe_product_id"),
@@ -9023,7 +9142,7 @@ class TakyonStore:
                         price_cents,
                         str(op.get("currency") or "usd").lower(),
                         interval,
-                        int(float(op.get("included_ai_budget_microusd") or 0)),
+                        included_ai_budget_microusd,
                         included_action_quota,
                         1 if allow_overage else 0,
                         op.get("stripe_product_id"),
@@ -10872,8 +10991,8 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         "price_cents": args.get("price_cents"),
         "currency": args.get("currency") or "usd",
         "billing_interval": args.get("billing_interval") or "month",
-        "included_ai_budget_microusd": args.get("included_ai_budget_microusd") or 0,
-        "included_action_quota": args.get("included_action_quota") or 25,
+        "included_ai_budget_microusd": args.get("included_ai_budget_microusd"),
+        "included_action_quota": 0 if args.get("included_action_quota") in {None, ""} else args.get("included_action_quota"),
         "allow_overage": bool(args.get("allow_overage")),
         "stripe_product_id": args.get("stripe_product_id"),
         "stripe_price_id": args.get("stripe_price_id"),
@@ -16158,7 +16277,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_rel)
         plans_configured = _app_summary_has_configured_plans(app) if _workspace_needs_runtime_ui_contract(workspace_rel) else False
         if _workspace_needs_runtime_ui_contract(workspace_rel):
-            _materialize_subuser_app_kit(workspace_path, slug=business, surface=surface_for_worker)
+            _materialize_subuser_app_kit(
+                workspace_path,
+                slug=business,
+                surface=surface_for_worker,
+                plans=app.get("plans") if isinstance(app, dict) else None,
+            )
         worker_instruction_parts = [instruction.rstrip()]
         if guidance_block:
             worker_instruction_parts.append(guidance_block)
@@ -16737,7 +16861,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer"}, "included_action_quota": {"type": "integer"}, "allow_overage": {"type": "boolean"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer", "description": "Included AI budget for the plan, denominated in microusd. For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "allow_overage": {"type": "boolean"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",

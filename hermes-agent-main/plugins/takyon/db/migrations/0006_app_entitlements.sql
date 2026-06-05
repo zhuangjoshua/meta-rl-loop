@@ -73,7 +73,7 @@ create table if not exists app_plan_policies (
     billing_interval            text not null default 'month'
                                     check (billing_interval in ('month', 'year', 'one_time')),
     included_ai_budget_microusd bigint not null default 0 check (included_ai_budget_microusd >= 0),
-    included_action_quota       integer not null default 25 check (included_action_quota >= 0),
+    included_action_quota       integer not null default 0 check (included_action_quota >= 0),
     allow_overage               boolean not null default false,
     stripe_product_id           text,
     stripe_price_id             text,

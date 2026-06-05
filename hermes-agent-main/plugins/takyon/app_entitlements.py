@@ -60,6 +60,10 @@ _NON_BILLING_SOURCES = {"internal", "owner", "comp", "test"}
 _ACTIVE_STATUSES = ("active", "trialing")
 
 
+def _monthly_plan_price_cap_microusd(price_cents: int) -> int:
+    return max(0, int(price_cents) * 10_000)
+
+
 class EntitlementError(Exception):
     """Base for plan/entitlement errors."""
 
@@ -236,7 +240,7 @@ def upsert_plan_policy(
     currency: str = "usd",
     billing_interval: str = "month",
     included_ai_budget_microusd: int = 0,
-    included_action_quota: int = 25,
+    included_action_quota: int = 0,
     allow_overage: bool = False,
     stripe_product_id: str | None = None,
     stripe_price_id: str | None = None,
@@ -259,7 +263,11 @@ def upsert_plan_policy(
     budget = int(float(included_ai_budget_microusd or 0))
     if budget < 0:
         raise InvalidPlan("included_ai_budget_microusd must be non-negative")
-    quota = int(included_action_quota if included_action_quota is not None else 25)
+    if interval == "month" and str(tier_value or "free").lower() != "free":
+        cap = _monthly_plan_price_cap_microusd(price)
+        if budget > cap:
+            raise InvalidPlan("included_ai_budget_microusd must be between 0 and the monthly plan price")
+    quota = int(included_action_quota if included_action_quota is not None else 0)
     if quota < 0:
         raise InvalidPlan("included_action_quota must be non-negative")
     overage = bool(allow_overage)
