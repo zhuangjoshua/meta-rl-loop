@@ -3436,6 +3436,8 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
 
 def _route_from_source_path(rel: str) -> tuple[str, str] | None:
     parts = rel.split("/")
+    if len(parts) >= 2 and parts[0] == "src" and parts[1] in {"app", "pages"}:
+        parts = parts[1:]
     name = parts[-1] if parts else rel
     suffix = Path(name).suffix.lower()
     if len(parts) >= 3 and parts[0] == "app" and parts[1] == "api" and name.startswith("route."):

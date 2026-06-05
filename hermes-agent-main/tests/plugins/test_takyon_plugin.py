@@ -892,6 +892,126 @@ def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
     assert (tmp_path / "published-sites" / "briefpilot" / "app" / "index.html").exists()
 
 
+def test_next_app_surface_with_src_app_routes_passes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:noteleaf",
+        [{"action": "business.upsert", "business": "noteleaf", "name": "NoteLeaf"}],
+        "init-next-src-app",
+    )
+    _commit(
+        store,
+        "business:noteleaf",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "noteleaf",
+                "status": "draft",
+                "source_path": "product/site",
+                "runtime_api_base": "/api/takyon/apps/noteleaf",
+                "runtime_features": ["auth", "account", "checkout", "generate"],
+                "routes": [
+                    {"path": "/", "name": "Homepage"},
+                    {"path": "/app", "name": "Workspace", "description": "Monthly compile workflow"},
+                ],
+                "metadata": {
+                    "subuser_app": {
+                        "app_mode": "ai_tool",
+                        "subscription_style": "monthly",
+                    }
+                },
+                "notes": "Monthly app shell.",
+            }
+        ],
+        "surface-next-src-app",
+    )
+    site = tmp_path / "businesses" / "noteleaf" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "noteleaf",
+                "private": True,
+                "dependencies": {"next": "14.2.3", "react": "18.3.1", "react-dom": "18.3.1"},
+                "scripts": {"build": "next build"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (site / "src" / "app" / "page.js").parent.mkdir(parents=True, exist_ok=True)
+    (site / "src" / "app" / "page.js").write_text(
+        """
+        export default function HomePage() {
+          return <a href="/app">Open workspace</a>;
+        }
+        """,
+        encoding="utf-8",
+    )
+    (site / "src" / "app" / "app" / "page.js").parent.mkdir(parents=True, exist_ok=True)
+    (site / "src" / "app" / "app" / "page.js").write_text(
+        """
+        export default function WorkspacePage() {
+          return (
+            <form>
+              <input name="email" type="email" />
+              <textarea name="prompt" />
+            </form>
+          );
+        }
+        """,
+        encoding="utf-8",
+    )
+    (site / "src" / "app" / "layout.js").write_text(
+        """
+        export const metadata = {
+          title: "NoteLeaf",
+        };
+
+        export default function RootLayout({ children }) {
+          return (
+            <html lang="en">
+              <body>{children}</body>
+            </html>
+          );
+        }
+        """,
+        encoding="utf-8",
+    )
+    (site / "src" / "app" / "globals.css").write_text("body { font-family: sans-serif; }\n", encoding="utf-8")
+    (site / "src" / "lib").mkdir(parents=True, exist_ok=True)
+    (site / "src" / "lib" / "runtime.js").write_text(
+        """
+        export async function pingRuntime() {
+          await fetch('/api/takyon/apps/noteleaf/session');
+          await fetch('/api/takyon/apps/noteleaf/auth/request', { method: 'POST' });
+          await fetch('/api/takyon/apps/noteleaf/generate', { method: 'POST' });
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    verification = json.loads(
+        handle_business_refresh_product_surface(
+            {
+                "business": "noteleaf",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "verify-next-src-app",
+            }
+        )
+    )["surface_refresh"]
+
+    assert verification["status"] == "passed"
+    inventory = verification["inventory"]
+    assert inventory["routes"] == ["/", "/app"]
+    assert inventory["declared_routes"] == ["/app"]
+    assert {"auth", "generate", "session"}.issubset(set(inventory["runtime_integrations"]))
+    assert {"form", "input", "runtime_fetch"}.issubset(set(inventory["workflow_markers"]))
+
+
 def test_legacy_shared_renderer_policy_requires_real_product_source_files(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9127/site")
