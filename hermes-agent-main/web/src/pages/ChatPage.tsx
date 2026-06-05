@@ -3338,13 +3338,13 @@ function GlobalLaunchpad({
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const rawName = name.trim() || goal.trim().split(/\s+/).slice(0, 3).join(" ");
-    const slug = normalizeBusinessLookup(rawName);
-    if (!slug) return;
+    const rawName = name.trim();
+    const rawGoal = goal.trim();
+    if (!rawName && !rawGoal) return;
     void onCreate({
-      goal: goal.trim(),
+      goal: rawGoal,
       name: rawName,
-      slug,
+      slug: normalizeBusinessLookup(rawName),
     });
   };
 

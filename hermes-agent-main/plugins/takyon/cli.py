@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -596,6 +597,128 @@ def _scope_for_business(slug: str) -> str:
     return f"business:{_slugify(slug)}"
 
 
+_CREATE_NAME_LEADING_VERBS = {
+    "build",
+    "create",
+    "make",
+    "start",
+    "launch",
+}
+_CREATE_NAME_LEADING_FILLERS = {
+    "a",
+    "an",
+    "the",
+}
+_CREATE_NAME_STOP_WORDS = {
+    "for",
+    "that",
+    "which",
+    "with",
+    "using",
+    "via",
+    "to",
+}
+_CREATE_NAME_GENERIC_NOUNS = {
+    "app",
+    "application",
+    "business",
+    "company",
+    "platform",
+    "product",
+    "service",
+    "site",
+    "startup",
+    "store",
+    "tool",
+}
+
+
+def _collapse_whitespace(value: str) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _format_create_name_token(token: str) -> str:
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    pieces: list[str] = []
+    for part in re.split(r"([/+_-])", raw):
+        if not part:
+            continue
+        if part in {"/", "+", "_", "-"}:
+            pieces.append(part)
+            continue
+        if part.isupper() and len(part) <= 4:
+            pieces.append(part)
+            continue
+        if "'" in part:
+            left, right = part.split("'", 1)
+            left = f"{left[:1].upper()}{left[1:].lower()}" if left else ""
+            part = f"{left}'{right.lower()}"
+        else:
+            part = f"{part[:1].upper()}{part[1:].lower()}"
+        pieces.append(part)
+    return "".join(pieces)
+
+
+def _display_name_from_slug(slug: str) -> str:
+    parts = [part for part in re.split(r"[-_]+", _slugify(slug)) if part]
+    name = " ".join(_format_create_name_token(part) for part in parts if part)
+    return name or _slugify(slug)
+
+
+def _derive_name_from_goal(goal: str) -> str:
+    text = _collapse_whitespace(goal)
+    if not text:
+        raise TakyonError("business name or goal is required")
+    candidate = text
+    for separator in (" - ", " — ", " – ", ": "):
+        if separator in candidate:
+            prefix = candidate.split(separator, 1)[0].strip()
+            if prefix:
+                candidate = prefix
+                break
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_+-]*", candidate)
+    if not tokens:
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_+-]*", text)
+    selected: list[str] = []
+    for token in tokens:
+        lowered = token.lower()
+        if not selected and lowered in _CREATE_NAME_LEADING_VERBS:
+            continue
+        if not selected and lowered in _CREATE_NAME_LEADING_FILLERS:
+            continue
+        if selected and lowered in (_CREATE_NAME_STOP_WORDS | _CREATE_NAME_GENERIC_NOUNS):
+            break
+        if lowered in _CREATE_NAME_GENERIC_NOUNS and not selected:
+            continue
+        selected.append(token)
+        if len(selected) >= 3:
+            break
+    if not selected:
+        raise TakyonError("could not derive a business name from the goal")
+    name = " ".join(_format_create_name_token(token) for token in selected if token)
+    name = _collapse_whitespace(name)
+    if not name:
+        raise TakyonError("could not derive a business name from the goal")
+    return name
+
+
+def _resolve_create_identity(name: str, goal: str, slug_hint: str = "") -> tuple[str, str]:
+    explicit_name = _collapse_whitespace(name)
+    if explicit_name:
+        return explicit_name, _slugify(explicit_name)
+    goal_text = _collapse_whitespace(goal)
+    if goal_text:
+        resolved_name = _derive_name_from_goal(goal_text)
+        return resolved_name, _slugify(resolved_name)
+    slug_seed = _collapse_whitespace(slug_hint)
+    if slug_seed:
+        slug = _slugify(slug_seed)
+        return _display_name_from_slug(slug), slug
+    raise TakyonError("business name or goal is required")
+
+
 @contextlib.contextmanager
 def _business_workspace_execution_context(
     slug: str,
@@ -894,7 +1017,13 @@ def _operator_budget_finalize(
         conn.close()
 
 
-def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> str:
+def _business_bootstrap_instruction(
+    slug: str,
+    goal: str,
+    active_mode: str,
+    *,
+    business_name: str = "",
+) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
     effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
     lines = [
@@ -903,6 +1032,8 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "This is an operational create/build request, not a request for instructions. Do not respond with a command recipe,",
         "a checklist for the operator, or 'want me to start?'. Use Takyon skills and concrete business_* tools now.",
         "",
+        f"Canonical business name: {business_name or slug}",
+        "Use exactly this business name on the first pass. Do not invent a second company, umbrella brand, or product name.",
         f"Business goal: {goal_text}",
         f"Mode: {effective_mode}",
         "",
