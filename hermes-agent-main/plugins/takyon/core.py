@@ -5324,7 +5324,7 @@ def _write_product_service_file(*, slug: str, source_root: Path, port: int, meta
             f"Environment=PORT={port}",
             "Environment=HOSTNAME=127.0.0.1",
             f"Environment=PATH={path_value}",
-            f"ExecStart=/bin/bash -lc {shlex.quote('exec ' + command_line)}",
+            f"ExecStart={command_line}",
             "Restart=always",
             "RestartSec=3",
             "",

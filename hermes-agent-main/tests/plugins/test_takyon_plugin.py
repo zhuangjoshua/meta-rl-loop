@@ -2443,8 +2443,10 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert os.access(service_root / "node_modules" / ".bin" / "next", os.X_OK)
     assert (service_root / "node_modules" / ".bin" / "next").is_symlink()
     service = tmp_path / "systemd" / "takyon-product-latexflow.service"
-    assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
-    assert str(service_root) in service.read_text(encoding="utf-8")
+    service_text = service.read_text(encoding="utf-8")
+    assert "ExecStart=/usr/bin/npm run start -- -H 127.0.0.1 -p" in service_text
+    assert "/bin/bash -lc" not in service_text
+    assert str(service_root) in service_text
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert "latexflow.fourmanifold.com" in caddyfile
     assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /checkout /usage /generate" in caddyfile
