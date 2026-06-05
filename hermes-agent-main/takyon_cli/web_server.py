@@ -197,7 +197,6 @@ def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40)
         "research/index.md",
         "metrics/summary.md",
         "metrics/wake-history.md",
-        "product/design-brief.md",
         "product/mvp-spec.md",
         "product/site/index.html",
     }
@@ -390,6 +389,8 @@ _AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
 _AUTH0_JWKS_CLIENTS: dict[str, Any] = {}
 _RUNTIME_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
 _POSTGRES_RUNTIME_ROUTES_MOUNTED = False
+_REQUEST_RUNTIME_DATABASE_URL_ATTR = "_takyon_runtime_database_url"
+_REQUEST_RUNTIME_DATABASE_URL_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -428,6 +429,24 @@ def _resolve_runtime_database_url() -> str:
     return resolve_database_url(
         explicit=takyon_safebox.first_env_backed_value(*_RUNTIME_DATABASE_URL_ENV) or None
     )
+
+
+def _request_runtime_database_url(request: Request) -> str | None:
+    """Resolve the runtime DB URL once per request.
+
+    Several dashboard routes resolve the operator principal first and then open a second
+    Postgres connection for the endpoint body. Keeping the URL lookup on the request avoids
+    paying the same env/Safebox resolution cost twice on the same click.
+    """
+    cached = getattr(request.state, _REQUEST_RUNTIME_DATABASE_URL_ATTR, _REQUEST_RUNTIME_DATABASE_URL_MISSING)
+    if cached is not _REQUEST_RUNTIME_DATABASE_URL_MISSING:
+        return cached
+    try:
+        value: str | None = _resolve_runtime_database_url()
+    except Exception:
+        value = None
+    setattr(request.state, _REQUEST_RUNTIME_DATABASE_URL_ATTR, value)
+    return value
 
 
 def _env_flag(key: str) -> Optional[bool]:
@@ -883,7 +902,7 @@ def _http_path_allowed_for_host_role(*, role: str, host: str, path: str) -> bool
         return False
     if role == _HOST_ROLE_OPERATOR:
         if product_business:
-            return False
+            return _normalize_product_rail_route(path) is not None or _is_app_plane_path(path)
         if path == "/api/product-tls/ask":
             return True
         if _is_app_plane_path(path):
@@ -1212,7 +1231,11 @@ def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
         _log.error("JIT provisioning for dashboard login failed (login still allowed): %s", exc)
 
 
-def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
+def _resolve_dashboard_principal(
+    user: dict[str, Any] | None,
+    *,
+    runtime_database_url: str | None = None,
+) -> Any | None:
     """Resolve the logged-in dashboard user to the canonical PG principal."""
     if not user:
         return None
@@ -1227,7 +1250,7 @@ def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = _resolve_runtime_database_url()
+            url = runtime_database_url or _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             return None
         conn = psycopg.connect(url, autocommit=True)
@@ -1244,7 +1267,7 @@ def _resolve_dashboard_principal(user: dict[str, Any] | None) -> Any | None:
         return None
 
 
-def _resolve_local_dashboard_principal() -> Any | None:
+def _resolve_local_dashboard_principal(*, runtime_database_url: str | None = None) -> Any | None:
     """Return the server-side localhost/dashboard principal when Auth0 is not required."""
     try:
         from plugins.takyon.core import _db_backend
@@ -1260,7 +1283,7 @@ def _resolve_local_dashboard_principal() -> Any | None:
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = _resolve_runtime_database_url()
+            url = runtime_database_url or _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             return None
         conn = psycopg.connect(url, autocommit=True)
@@ -1293,12 +1316,16 @@ def _resolve_dashboard_headers_principal(headers: Any) -> Any | None:
 
 
 def _resolve_dashboard_request_principal(request: Request) -> Any | None:
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    runtime_database_url = _request_runtime_database_url(request)
+    principal = _resolve_dashboard_principal(
+        getattr(request.state, "auth0_user", None),
+        runtime_database_url=runtime_database_url,
+    )
     if principal is not None:
         return principal
     if _auth0_required_for_host(request.headers):
         return None
-    return _resolve_local_dashboard_principal()
+    return _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
 
 
 def _tui_turn_session_id(reservation_key: str) -> str:
@@ -1640,6 +1667,108 @@ def _takyon_app_set_session_cookie(response: Response, request: Request, token: 
     )
 
 
+def _takyon_test_checkout_receipt_path(business: str, intent_id: str) -> Path:
+    safe_business = re.sub(r"[^a-z0-9-]", "", str(business or "").strip().lower())
+    safe_intent = re.sub(r"[^a-z0-9]", "", str(intent_id or "").strip().lower())
+    return get_takyon_home() / "businesses" / safe_business / "metrics" / "receipts" / "app-checkout" / f"{safe_intent}.json"
+
+
+def _takyon_render_test_checkout_page(*, business: str, receipt: dict[str, Any]) -> HTMLResponse:
+    plan_key = html.escape(str(receipt.get("plan_key") or "monthly"))
+    app_name = html.escape(str(receipt.get("business") or business))
+    success_url = str(receipt.get("success_url") or "/app").strip() or "/app"
+    cancel_url = str(receipt.get("cancel_url") or "/pricing").strip() or "/pricing"
+    customer_email = str(receipt.get("customer_email") or "").strip()
+    customer_line = (
+        f"<p class='muted'>Prepared for <strong>{html.escape(customer_email)}</strong>.</p>"
+        if customer_email
+        else ""
+    )
+    body = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{app_name} checkout</title>
+    <style>
+      :root {{
+        color-scheme: light;
+        --bg: #f6f3ea;
+        --card: #fffdf8;
+        --ink: #17130d;
+        --muted: #6e665c;
+        --accent: #0d8f79;
+        --border: #ded6ca;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: radial-gradient(circle at top, #fffaf0 0%, var(--bg) 58%);
+        color: var(--ink);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }}
+      .card {{
+        width: min(560px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 24px;
+        box-shadow: 0 24px 80px rgba(23, 19, 13, 0.08);
+        padding: 28px;
+      }}
+      .eyebrow {{
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(13, 143, 121, 0.10);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }}
+      h1 {{ margin: 16px 0 12px; font-size: clamp(28px, 5vw, 40px); line-height: 1.05; }}
+      p {{ margin: 0 0 14px; font-size: 16px; line-height: 1.55; }}
+      .muted {{ color: var(--muted); }}
+      .actions {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }}
+      .button {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 46px;
+        padding: 0 18px;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        text-decoration: none;
+        font-weight: 700;
+      }}
+      .button-primary {{ background: var(--accent); color: white; }}
+      .button-secondary {{ border-color: var(--border); color: var(--ink); background: transparent; }}
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="eyebrow">Test checkout</div>
+      <h1>Subscription flow is wired.</h1>
+      <p>This business is currently running in test mode, so no real charge was created for the <strong>{plan_key}</strong> plan.</p>
+      {customer_line}
+      <p class="muted">You can continue back into the product and keep testing the paid flow without touching real billing.</p>
+      <div class="actions">
+        <a class="button button-primary" href="{html.escape(success_url, quote=True)}">Continue to app</a>
+        <a class="button button-secondary" href="{html.escape(cancel_url, quote=True)}">Back to pricing</a>
+      </div>
+    </main>
+  </body>
+</html>
+"""
+    return HTMLResponse(body, status_code=int(HTTPStatus.OK))
+
+
 async def _takyon_app_read_json(request: Request) -> dict[str, Any]:
     raw = await request.body()
     if not raw.strip():
@@ -1797,6 +1926,26 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         }))
         return _takyon_app_json(status, payload)
 
+    if parts == ["checkout"]:
+        intent_id = str(
+            request.query_params.get("checkout_intent_id")
+            or request.query_params.get("intent_id")
+            or request.query_params.get("intent")
+            or ""
+        ).strip()
+        if not intent_id:
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+        receipt_path = _takyon_test_checkout_receipt_path(business, intent_id)
+        if not receipt_path.exists():
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "checkout intent not found"})
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except Exception:
+            return _takyon_app_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"success": False, "error": "checkout receipt unreadable"})
+        if str(receipt.get("mode") or "") != "test":
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "checkout intent not found"})
+        return _takyon_render_test_checkout_page(business=business, receipt=receipt)
+
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
@@ -1841,6 +1990,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "cancel_url": body.get("cancel_url") or body.get("cancelUrl"),
             "customer_email": body.get("customer_email") or body.get("customerEmail") or (account.get("user") or {}).get("email"),
             "app_user_id": (account.get("user") or {}).get("id"),
+            "origin": _takyon_app_origin(request, body),
             "metadata": body.get("metadata") or {},
         }))
         return _takyon_app_json(status, payload)
@@ -2351,10 +2501,15 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "reason": "operator_principal_unavailable",
         }
 
+    return _takyon_operator_account_payload(request, principal)
+
+
+def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon import billing
         from plugins.takyon.control_api import get_operator_payout_state
         from plugins.takyon.core import _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         if _db_backend() != "postgres":
             return {
@@ -2365,12 +2520,10 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
                 "user_id": str(principal.user_id),
             }
 
-        import psycopg
-
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
         try:
-            url = _resolve_runtime_database_url()
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
         except RuntimeNotConfigured:
             return {
                 "available": False,
@@ -2379,6 +2532,8 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
                 "status": principal.status,
                 "user_id": str(principal.user_id),
             }
+
+        import psycopg
 
         conn = psycopg.connect(url, autocommit=True)
         try:
@@ -2427,6 +2582,388 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
             "status": principal.status,
             "user_id": str(principal.user_id),
         }
+
+
+def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        with store._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM businesses WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (str(principal.user_id), 200),
+            ).fetchall()
+        items = [store._row_to_dict(row) for row in rows]
+        return {
+            "available": True,
+            "businesses": items,
+            "owned_business_count": len(items),
+            "user_id": str(principal.user_id),
+        }
+    except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
+        _log.warning("dashboard operator businesses read failed: %s", exc)
+        return {
+            "available": False,
+            "businesses": [],
+            "owned_business_count": len(principal.business_slugs),
+            "reason": "read_failed",
+            "user_id": str(principal.user_id),
+        }
+
+
+def _takyon_job_label(kind: Any) -> str:
+    value = str(kind or "").strip().lower()
+    if value == "ceo_bootstrap":
+        return "CEO bootstrap"
+    if value == "ceo_wake":
+        return "CEO wake"
+    if value == "ceo_turn":
+        return "CEO turn"
+    if value == "product.deploy":
+        return "Publish product site"
+    if value == "product.build":
+        return "Build product surface"
+    if value.startswith("distribution.") or value.startswith("outreach."):
+        return "Publish or test outreach"
+    if "creative" in value or "ad" in value:
+        return "Generate ad creative"
+    if not value:
+        return "Recorded work"
+    value = re.sub(r"[._-]+", " ", value)
+    return " ".join(part.capitalize() for part in value.split())
+
+
+def _takyon_job_status(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if re.search(r"blocked|fail|error", text):
+        return "blocked"
+    if re.search(r"queued|scheduled|waiting|pending", text):
+        return "scheduled"
+    if re.search(r"running|active|working", text):
+        return "running"
+    if re.search(r"done|complete|completed|success|succeeded|passed", text):
+        return "done"
+    return text or "idle"
+
+
+def _takyon_status_tone(value: Any) -> str:
+    status = _takyon_job_status(value)
+    if status == "blocked":
+        return "blocked"
+    if status == "scheduled":
+        return "waiting"
+    if status == "running":
+        return "active"
+    if status == "done":
+        return "done"
+    return "neutral"
+
+
+def _takyon_blank_outreach_channels() -> dict[str, Any]:
+    return {
+        "x": {
+            "channel": "x",
+            "label": "X",
+            "status": "missing",
+            "updated_at": "",
+            "draft_path": "",
+            "items": [],
+            "campaigns": [],
+            "latest_job": None,
+            "published_count": 0,
+            "campaign_count": 0,
+            "metrics_count": 0,
+        },
+        "reddit": {
+            "channel": "reddit",
+            "label": "Reddit",
+            "status": "missing",
+            "updated_at": "",
+            "items": [],
+            "campaigns": [],
+            "latest_job": None,
+            "published_count": 0,
+            "campaign_count": 0,
+            "metrics_count": 0,
+        },
+        "meta": {
+            "channel": "meta",
+            "label": "Meta",
+            "status": "missing",
+            "updated_at": "",
+            "items": [],
+            "campaigns": [],
+            "latest_job": None,
+            "published_count": 0,
+            "campaign_count": 0,
+            "metrics_count": 0,
+        },
+    }
+
+
+def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[str, Any]:
+    from plugins.takyon.core import TakyonStore
+
+    slug = str(business or "").strip().lower()
+    store = TakyonStore(operator_user_id=operator_user_id)
+    with store._connect() as conn:
+        store._enforce_operator_business_access(conn, slug)
+        current = store._ensure_business(conn, slug)
+        surface = store._app_surface_contract(conn, slug)
+
+        latest_jobs: list[dict[str, Any]] = []
+        for table_name, source_name in (
+            (store._work_requests_table(), "job"),
+            ("jobs", "worker"),
+        ):
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {table_name}
+                    WHERE business_slug = ?
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT 6
+                    """,
+                    (slug,),
+                ).fetchall()
+            except Exception:
+                continue
+            for row in rows:
+                item = store._row_to_dict(row)
+                if not item:
+                    continue
+                item["source"] = source_name
+                latest_jobs.append(item)
+
+    latest_jobs.sort(
+        key=lambda item: (
+            str(item.get("updated_at") or item.get("created_at") or ""),
+            str(item.get("id") or ""),
+        ),
+        reverse=True,
+    )
+    latest_jobs = latest_jobs[:8]
+
+    product_blocker = str(surface.get("publish_blocker") or "").strip()
+    current_action = {
+        "source": "idle",
+        "label": "Business is synced.",
+        "status": "idle",
+        "detail": "",
+        "blocker": product_blocker,
+    }
+    if latest_jobs:
+        preferred = next(
+            (
+                item
+                for item in latest_jobs
+                if _takyon_job_status(item.get("status")) in {"running", "scheduled", "blocked"}
+            ),
+            latest_jobs[0],
+        )
+        preferred_status = _takyon_job_status(preferred.get("status"))
+        current_action = {
+            "source": str(preferred.get("source") or "job").strip(),
+            "label": _takyon_job_label(preferred.get("kind")),
+            "status": preferred_status,
+            "detail": str(
+                (
+                    preferred.get("payload")
+                    if isinstance(preferred.get("payload"), dict)
+                    else {}
+                ).get("detail")
+                or preferred.get("detail")
+                or ""
+            ).strip(),
+            "blocker": product_blocker,
+        }
+    elif product_blocker:
+        current_action = {
+            "source": "product",
+            "label": "Product publish blocker",
+            "status": "blocked",
+            "detail": product_blocker,
+            "blocker": product_blocker,
+        }
+
+    task_cards = [
+        {
+            "id": f"{str(item.get('source') or 'job')}:{str(item.get('id') or index)}",
+            "source": str(item.get("source") or "job").strip(),
+            "label": _takyon_job_label(item.get("kind")),
+            "status": _takyon_job_status(item.get("status")),
+            "detail": str(
+                (
+                    item.get("payload")
+                    if isinstance(item.get("payload"), dict)
+                    else {}
+                ).get("detail")
+                or item.get("detail")
+                or ""
+            ).strip(),
+            "tone": _takyon_status_tone(item.get("status")),
+            "updated_at": str(item.get("updated_at") or item.get("created_at") or "").strip(),
+        }
+        for index, item in enumerate(latest_jobs[:8])
+    ]
+
+    public_url = str(surface.get("public_url") or "").strip()
+    publish_status = str(surface.get("publish_status") or "").strip()
+    website_status = "published" if public_url else ("publish_blocked" if product_blocker else "missing")
+
+    return {
+        "business_slug": slug,
+        "current": {
+            "slug": slug,
+            "name": str(current.get("name") or slug).strip() or slug,
+            "goal": str(current.get("goal") or "").strip(),
+            "mode": str(current.get("mode") or current.get("status") or "test").strip().lower() or "test",
+        },
+        "overview": {
+            "product": {
+                "status": str(surface.get("status") or "missing").strip() or "missing",
+                "publish_status": publish_status,
+                "public_url": public_url,
+                "publish_blocker": product_blocker,
+                "publish_receipt_path": str(surface.get("publish_receipt_path") or "").strip(),
+                "source_path": str(surface.get("source_path") or "").strip(),
+            },
+            "metrics": {
+                "users": 0,
+                "paid_customers": 0,
+                "mrr_cents": 0,
+                "revenue_cents": 0,
+                "checkout_intents": 0,
+                "usage_events": 0,
+                "unresolved_inbound": 0,
+                "queued_jobs": sum(1 for item in latest_jobs if _takyon_job_status(item.get("status")) == "scheduled"),
+            },
+            "budget": {
+                "business_amount": None,
+                "business_status": "",
+                "app_status": "",
+                "app_limit_microusd": 0,
+                "app_spent_microusd": 0,
+                "app_remaining_microusd": 0,
+            },
+            "cron": [],
+            "files": [],
+            "jobs": [
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "updated_at": str(item.get("updated_at") or "").strip(),
+                    "created_at": str(item.get("created_at") or "").strip(),
+                    "label": _takyon_job_label(item.get("kind")),
+                    "detail": str(
+                        (
+                            item.get("payload")
+                            if isinstance(item.get("payload"), dict)
+                            else {}
+                        ).get("detail")
+                        or item.get("detail")
+                        or ""
+                    ).strip(),
+                    "tone": _takyon_status_tone(item.get("status")),
+                }
+                for item in latest_jobs
+            ],
+            "agent_runs": [],
+            "workers": [],
+            "trace": [],
+            "tasks": task_cards,
+            "status_cards": [
+                {
+                    "label": "Current action",
+                    "status": current_action["status"],
+                    "detail": current_action["label"],
+                    "tone": _takyon_status_tone(current_action["status"]),
+                },
+                {
+                    "label": "Product publish",
+                    "status": website_status,
+                    "detail": product_blocker or publish_status or "Not published yet.",
+                    "tone": "blocked" if product_blocker else ("done" if public_url else "waiting"),
+                },
+            ],
+            "current_action": current_action,
+            "ceo_loop": {
+                "status": current_action["status"],
+                "headline": current_action["label"],
+                "detail": current_action["detail"],
+                "next_action": current_action["detail"] or current_action["label"],
+            },
+            "wake_health": {},
+            "research": {"status": "needed", "latest_path": "", "count": 0, "outputs": []},
+            "research_outputs": [],
+            "posts": [],
+            "artifacts": {
+                "website": {
+                    "status": website_status,
+                    "path": "",
+                    "updated_at": "",
+                    "deploy_status": "",
+                    "source_path": str(surface.get("source_path") or "").strip(),
+                    "public_url": public_url,
+                    "publish_target": str(surface.get("publish_target") or "").strip(),
+                    "publish_policy": str(surface.get("publish_policy") or "").strip(),
+                    "publish_status": publish_status,
+                    "publish_blocker": product_blocker,
+                    "publish_receipt_path": str(surface.get("publish_receipt_path") or "").strip(),
+                },
+                "outreach": {
+                    "status": "missing",
+                    "path": "",
+                    "receipt": "",
+                    "updated_at": "",
+                    "published_count": 0,
+                    "items": [],
+                    "receipts": [],
+                    "channels": _takyon_blank_outreach_channels(),
+                },
+                "creative_assets": {
+                    "status": "missing",
+                    "path": "",
+                    "receipt": "",
+                    "updated_at": "",
+                    "count": 0,
+                },
+            },
+            "conversations": {
+                "active_threads": 0,
+                "unresolved_messages": 0,
+                "latest_message_at": "",
+            },
+            "generated_at": "",
+            "pulse_warning": "",
+        },
+        "outputs": [],
+        "background_run": None,
+    }
+
+
+@app.get("/api/takyon/operator/home")
+async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        return {
+            "available": False,
+            "businesses": [],
+            "account": {"available": False, "reason": "operator_principal_unavailable"},
+            "reason": "operator_principal_unavailable",
+        }
+    businesses = _takyon_operator_businesses_payload(principal)
+    account = _takyon_operator_account_payload(request, principal)
+    return {
+        "available": bool(businesses.get("available") or account.get("available")),
+        "businesses": businesses.get("businesses", []),
+        "account": account,
+        "owned_business_count": businesses.get("owned_business_count", len(principal.business_slugs)),
+        "user_id": str(principal.user_id),
+    }
 
 
 @app.post("/api/takyon/operator/topup/checkout")
@@ -2479,15 +3016,16 @@ async def create_takyon_operator_payout_connect(request: Request) -> dict[str, A
     refresh_qs = urllib.parse.urlencode({"return_to": return_path})
     refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
     try:
-        import psycopg
-
         from plugins.takyon.control_api import create_operator_payout_connect_link
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = _resolve_runtime_database_url()
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
         except RuntimeNotConfigured as exc:
             raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        import psycopg
         conn = psycopg.connect(url, autocommit=True)
         try:
             link = create_operator_payout_connect_link(
@@ -2527,15 +3065,16 @@ async def refresh_takyon_operator_payout_connect(
     refresh_qs = urllib.parse.urlencode({"return_to": safe_return})
     refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
     try:
-        import psycopg
-
         from plugins.takyon.control_api import create_operator_payout_connect_link
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         try:
-            url = _resolve_runtime_database_url()
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
         except RuntimeNotConfigured as exc:
             raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        import psycopg
         conn = psycopg.connect(url, autocommit=True)
         try:
             link = create_operator_payout_connect_link(
@@ -2575,28 +3114,7 @@ async def get_takyon_operator_businesses(request: Request) -> dict[str, Any]:
             "businesses": [],
             "reason": "operator_principal_unavailable",
         }
-    try:
-        from plugins.takyon.core import TakyonStore
-
-        store = TakyonStore(operator_user_id=str(principal.user_id))
-        data = store.read(scope="global", query="list_businesses", limit=200)
-        businesses = data.get("businesses") if isinstance(data, dict) else []
-        items = [item for item in businesses if isinstance(item, dict)] if isinstance(businesses, list) else []
-        return {
-            "available": True,
-            "businesses": items,
-            "owned_business_count": len(items),
-            "user_id": str(principal.user_id),
-        }
-    except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
-        _log.warning("dashboard operator businesses read failed: %s", exc)
-        return {
-            "available": False,
-            "businesses": [],
-            "owned_business_count": len(principal.business_slugs),
-            "reason": "read_failed",
-            "user_id": str(principal.user_id),
-        }
+    return _takyon_operator_businesses_payload(principal)
 
 
 @app.get("/api/takyon/businesses/{slug}/file")
@@ -2790,6 +3308,29 @@ async def get_takyon_business_workspace(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/takyon/businesses/{slug}/home")
+async def get_takyon_business_home(
+    request: Request,
+    slug: str,
+) -> dict[str, Any]:
+    """Cheap first-paint business shell payload for the dashboard UI."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        return _takyon_business_home_payload(str(principal.user_id), business)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - shell should fail honestly
+        _log.warning("dashboard business home read failed for %s: %s", business, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/takyon/businesses/{slug}/creative-credits")
 async def get_takyon_business_creative_credits(request: Request, slug: str) -> dict[str, Any]:
     """Read-only business creative-credit snapshot for the dashboard UI."""
@@ -2809,6 +3350,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
     try:
         from plugins.takyon import business_credits
         from plugins.takyon.core import _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         if _db_backend() != "postgres":
             return {
@@ -2817,12 +3359,10 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
                 "reason": "postgres_required",
             }
 
-        import psycopg
-
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
         try:
-            url = _resolve_runtime_database_url()
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
         except RuntimeNotConfigured:
             return {
                 "available": False,
@@ -2830,15 +3370,10 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
                 "reason": "database_unconfigured",
             }
 
+        import psycopg
+
         conn = psycopg.connect(url, autocommit=True)
         try:
-            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
-            if row is None:
-                return {
-                    "available": False,
-                    "business_slug": slug,
-                    "reason": "not_found",
-                }
             balances = business_credits.get_business_credit_balances(conn, slug)
         finally:
             conn.close()
@@ -2906,23 +3441,6 @@ async def get_takyon_business_creative_credit_packs(
 
         if _db_backend() != "postgres":
             raise HTTPException(status_code=503, detail="postgres_required")
-
-        import psycopg
-
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
-        try:
-            url = _resolve_runtime_database_url()
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="not_found")
-        finally:
-            conn.close()
         return {
             "business_slug": slug,
             "packs": configured_creative_credit_packs(),
@@ -2939,7 +3457,7 @@ async def create_takyon_business_creative_credit_checkout(
     request: Request, slug: str
 ) -> dict[str, Any]:
     """Dashboard wrapper for the existing creative-credit Stripe checkout rail."""
-    principal = _resolve_dashboard_principal(getattr(request.state, "auth0_user", None))
+    principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     if slug not in principal.business_slugs:
@@ -2948,9 +3466,13 @@ async def create_takyon_business_creative_credit_checkout(
         body = await request.json()
     except Exception:
         body = {}
-    pack_id = str(body.get("pack_id") or "").strip()
-    if not pack_id:
-        raise HTTPException(status_code=400, detail="pack_id is required")
+    try:
+        credits = int(body.get("credits") or 0)
+    except (TypeError, ValueError):
+        credits = 0
+    pack_id = str(body.get("pack_id") or "").strip() or None
+    if credits <= 0 and not pack_id:
+        raise HTTPException(status_code=400, detail="credits must be > 0")
     success_path = _same_origin_path(str(body.get("success_path") or "/"))
     cancel_path = _same_origin_path(str(body.get("cancel_path") or success_path))
     try:
@@ -2961,26 +3483,10 @@ async def create_takyon_business_creative_credit_checkout(
         if _db_backend() != "postgres":
             raise HTTPException(status_code=503, detail="postgres_required")
 
-        import psycopg
-
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
-        try:
-            url = _resolve_runtime_database_url()
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="not_found")
-        finally:
-            conn.close()
-
-        session, pack = create_creative_credit_checkout_session(
+        session, charge = create_creative_credit_checkout_session(
             str(principal.user_id),
             slug,
+            credits=credits if credits > 0 else None,
             pack_id=pack_id,
             success_url=_dashboard_absolute_url(request, success_path),
             cancel_url=_dashboard_absolute_url(request, cancel_path),
@@ -2989,6 +3495,8 @@ async def create_takyon_business_creative_credit_checkout(
         raise
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="unknown_credit_pack") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except stripe_util.StripeError as exc:
         message = str(exc)
         if "STRIPE_SECRET_KEY" in message:
@@ -3003,9 +3511,10 @@ async def create_takyon_business_creative_credit_checkout(
         "checkout_url": session.get("url"),
         "session_id": session.get("id"),
         "business_slug": slug,
-        "pack_id": pack["id"],
-        "credits": pack["credits"],
-        "amount_cents": pack["amount_cents"],
+        "pack_id": charge.get("pack_id"),
+        "credits": charge["credits"],
+        "amount_cents": charge["amount_cents"],
+        "price_cents_per_credit": charge.get("price_cents_per_credit"),
     }
 
 

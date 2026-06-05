@@ -149,6 +149,23 @@ def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
     assert seen == ["postgres://from-dashboard-env"]
 
 
+def test_request_runtime_database_url_is_cached_per_request(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace())
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_runtime_database_url",
+        lambda: seen.append("resolved") or "postgres://cached-once",
+    )
+
+    assert web_server._request_runtime_database_url(request) == "postgres://cached-once"
+    assert web_server._request_runtime_database_url(request) == "postgres://cached-once"
+    assert seen == ["resolved"]
+
+
 def test_dashboard_embedded_worker_defaults_off(monkeypatch):
     import plugins.takyon.core as core
     import takyon_cli.web_server as web_server
@@ -261,6 +278,23 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     assert mounted == ["control-router", "gateway-router", "creative-router"]
     assert control_api.get_control_conn in overrides
     assert ai_gateway.get_gateway_conn in overrides
+
+
+def test_meta_campaign_payload_explicitly_disables_adset_budget_sharing():
+    import plugins.takyon.creative_gateway as creative_gateway
+
+    payload = creative_gateway._meta_campaign_create_payload(
+        {
+            "campaign_name": "Meta Smoke",
+            "objective": "OUTCOME_TRAFFIC",
+        }
+    )
+
+    assert payload["name"] == "Meta Smoke"
+    assert payload["objective"] == "OUTCOME_TRAFFIC"
+    assert payload["status"] == "PAUSED"
+    assert payload["special_ad_categories"] == "[]"
+    assert payload["is_adset_budget_sharing_enabled"] is False
 
 
 def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
@@ -505,6 +539,129 @@ def test_operator_businesses_endpoint_returns_owned_businesses(tmp_path, monkeyp
     assert body["owned_business_count"] == 2
 
 
+def test_operator_home_endpoint_combines_businesses_and_account(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_businesses(_principal):
+        captured["businesses_principal"] = _principal
+        return {
+            "available": True,
+            "businesses": [{"slug": "alpha", "name": "Alpha"}],
+            "owned_business_count": 1,
+        }
+
+    def _fake_account(_request, _principal):
+        captured["account_principal"] = _principal
+        return {"available": True, "balance_cents": 1234}
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(web_server, "_takyon_operator_businesses_payload", _fake_businesses)
+    monkeypatch.setattr(web_server, "_takyon_operator_account_payload", _fake_account)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/operator/home")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "available": True,
+        "businesses": [{"slug": "alpha", "name": "Alpha"}],
+        "account": {"available": True, "balance_cents": 1234},
+        "owned_business_count": 1,
+        "user_id": "user-123",
+    }
+    assert captured["businesses_principal"] is principal
+    assert captured["account_principal"] is principal
+
+
+def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.control_api as control_api
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_runtime_database_url",
+        lambda: (_ for _ in ()).throw(AssertionError("creative checkout should not resolve DB URL")),
+    )
+    monkeypatch.setattr(takyon_core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(
+        web_server,
+        "_dashboard_absolute_url",
+        lambda _request, path: f"https://app.example.com{path}",
+    )
+
+    def _fake_checkout(user_id, slug, *, credits=None, pack_id=None, success_url, cancel_url):
+        captured.update(
+            {
+                "user_id": user_id,
+                "slug": slug,
+                "credits": credits,
+                "pack_id": pack_id,
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+            }
+        )
+        return (
+            {"id": "cs_credit_fast", "url": "https://checkout.stripe.com/c/cs_credit_fast"},
+            {
+                "credits": int(credits or 0),
+                "amount_cents": int(credits or 0),
+                "price_cents_per_credit": 1,
+            },
+        )
+
+    monkeypatch.setattr(control_api, "create_creative_credit_checkout_session", _fake_checkout)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.post(
+        "/api/takyon/businesses/alpha/creative-credits/checkout",
+        json={"credits": 125, "success_path": "/wallet", "cancel_path": "/wallet"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "checkout_url": "https://checkout.stripe.com/c/cs_credit_fast",
+        "session_id": "cs_credit_fast",
+        "business_slug": "alpha",
+        "pack_id": None,
+        "credits": 125,
+        "amount_cents": 125,
+        "price_cents_per_credit": 1,
+    }
+    assert captured == {
+        "user_id": "user-123",
+        "slug": "alpha",
+        "credits": 125,
+        "pack_id": None,
+        "success_url": "https://app.example.com/wallet",
+        "cancel_url": "https://app.example.com/wallet",
+    }
+
+
 def test_business_file_endpoint_reads_owned_file_directly(tmp_path, monkeypatch, pg_store_dsn):
     from starlette.testclient import TestClient
 
@@ -604,6 +761,45 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert body["current"]["name"] == "Alpha"
     assert isinstance(body["overview"], dict)
     assert isinstance(body["outputs"], list)
+
+
+def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, str] = {}
+
+    def _fake_home_payload(operator_user_id: str, business: str):
+        captured["operator_user_id"] = operator_user_id
+        captured["business"] = business
+        return {
+            "business_slug": business,
+            "current": {"slug": business, "name": "Alpha"},
+            "overview": {"product": {"public_url": "https://alpha.example.com"}},
+            "outputs": [],
+            "background_run": None,
+        }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(web_server, "_takyon_business_home_payload", _fake_home_payload)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/businesses/alpha/home")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["business_slug"] == "alpha"
+    assert body["current"]["name"] == "Alpha"
+    assert body["overview"]["product"]["public_url"] == "https://alpha.example.com"
+    assert captured == {"operator_user_id": "user-123", "business": "alpha"}
 
 
 def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch):
@@ -840,6 +1036,46 @@ def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monk
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
 
 
+def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    receipt_dir = tmp_path / "businesses" / "mathflow" / "metrics" / "receipts" / "app-checkout"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    (receipt_dir / "abc123.json").write_text(
+        json.dumps(
+            {
+                "id": "abc123",
+                "business": "mathflow",
+                "mode": "test",
+                "plan_key": "monthly",
+                "customer_email": "student@example.com",
+                "success_url": "/app?checkout=success",
+                "cancel_url": "/pricing",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get(
+            "/api/takyon/apps/mathflow/checkout?checkout_intent_id=abc123",
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "Subscription flow is wired." in response.text
+    assert "student@example.com" in response.text
+    assert 'href="/app?checkout=success"' in response.text
+
+
 def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
@@ -901,6 +1137,21 @@ def test_http_path_allowed_for_host_roles():
         host="app.fourmanifold.com",
         path="/api/takyon/apps/latexflow/account",
     ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="latexflow.fourmanifold.com",
+        path="/api/checkout",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="latexflow.fourmanifold.com",
+        path="/api/takyon/apps/latexflow/account",
+    ) is True
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_OPERATOR,
+        host="latexflow.fourmanifold.com",
+        path="/checkout",
+    ) is True
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.fourmanifold.com",

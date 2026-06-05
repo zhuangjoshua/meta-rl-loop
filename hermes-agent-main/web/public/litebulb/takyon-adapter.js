@@ -27,6 +27,8 @@
   const WAKE_SCHEDULE_PATTERN = /^every\s+(\d+)\s*([mhd])$/i;
   const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm", "m4v"]);
   const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+  const BUSINESS_CACHE_KEY = "takyon.operator.businesses.v1";
+  const OPERATOR_SHELL_TIMEOUT_MS = 8000;
   const LIVE = {
     activeBusiness: "",
     sessionId: "",
@@ -42,6 +44,8 @@
     assistantTypingTimer: null,
     businesses: [],
     businessIndex: new Map(),
+    businessesLoading: false,
+    businessesNotice: "",
     operatorAccount: null,
     creativeCredits: null,
     bootedBusiness: "",
@@ -61,6 +65,7 @@
     historySeen: new Set(),
     historyRunning: false,
     refreshTimer: null,
+    refreshController: null,
   };
 
   function endpoint(path) {
@@ -109,6 +114,25 @@
       throw new Error(`${res.status}: ${text}`);
     }
     return res.json();
+  }
+
+  async function fetchJSONWithTimeout(path, init, timeoutMs) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs || OPERATOR_SHELL_TIMEOUT_MS);
+    try {
+      return await fetchJSON(path, { ...(init || {}), signal: controller.signal });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        throw new Error(`request timed out after ${timeoutMs || OPERATOR_SHELL_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function isAbortError(err) {
+    return !!(err && typeof err === "object" && err.name === "AbortError");
   }
 
   async function rpc(method, params, timeoutMs) {
@@ -260,14 +284,90 @@
     };
   }
 
-  function rememberBusinesses(items) {
-    LIVE.businesses = Array.isArray(items) ? items.filter(Boolean) : [];
+  function normalizeBusinessSummary(item) {
+    if (!item || typeof item !== "object") return null;
+    const slug = String(item.slug || "").trim().toLowerCase();
+    if (!slug) return null;
+    return {
+      ...item,
+      slug,
+      name: String(item.name || slug).trim() || slug,
+      goal: String(item.goal || "").trim(),
+      mode: String(item.mode || "").trim().toLowerCase(),
+    };
+  }
+
+  function businessStorage() {
+    const candidates = [owner, window];
+    for (const candidate of candidates) {
+      try {
+        if (candidate && candidate.sessionStorage) return candidate.sessionStorage;
+      } catch (_err) {
+        /* storage access is best effort */
+      }
+    }
+    return null;
+  }
+
+  function writeCachedBusinesses(items) {
+    const storage = businessStorage();
+    if (!storage) return;
+    try {
+      if (!Array.isArray(items) || !items.length) {
+        storage.removeItem(BUSINESS_CACHE_KEY);
+        return;
+      }
+      storage.setItem(BUSINESS_CACHE_KEY, JSON.stringify(
+        items.map((item) => ({
+          slug: String(item.slug || "").trim().toLowerCase(),
+          name: String(item.name || item.slug || "").trim(),
+          goal: String(item.goal || "").trim(),
+          mode: String(item.mode || "").trim().toLowerCase(),
+        })),
+      ));
+    } catch (_err) {
+      /* cache writes are best effort */
+    }
+  }
+
+  function readCachedBusinesses() {
+    const storage = businessStorage();
+    if (!storage) return [];
+    try {
+      const raw = storage.getItem(BUSINESS_CACHE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(normalizeBusinessSummary).filter(Boolean);
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function rememberBusinesses(items, options) {
+    LIVE.businesses = Array.isArray(items)
+      ? items.map(normalizeBusinessSummary).filter(Boolean)
+      : [];
     LIVE.businessIndex = new Map(
       LIVE.businesses
         .filter((item) => item && item.slug)
         .map((item) => [String(item.slug).trim().toLowerCase(), item]),
     );
+    LIVE.businessesLoading = false;
+    LIVE.businessesNotice = "";
+    if (!(options && options.persist === false)) writeCachedBusinesses(LIVE.businesses);
     renderLauncherBusinesses();
+  }
+
+  function applyOperatorHome(home) {
+    const payload = home && typeof home === "object" ? home : {};
+    rememberBusinesses(Array.isArray(payload.businesses) ? payload.businesses : []);
+    if (payload.account && typeof payload.account === "object") {
+      LIVE.operatorAccount = payload.account;
+    }
+    RT.credits = dollarFromAccount();
+    updateMenu();
+    renderWalletRail();
   }
 
   function dollarFromAccount() {
@@ -886,56 +986,36 @@
     const queuedJobs = Number.isFinite(Number(metrics.queued_jobs))
       ? Math.max(0, Math.trunc(Number(metrics.queued_jobs)))
       : 0;
-    const stagesReached = [signups, checkouts, paying].filter((value) => value > 0).length;
-    const tiers = {
-      mrr: { hero: `${formatBudgetCents(mrrCents)}/mo`, pill: mrrCents > 0 ? `${formatBudgetCents(mrrCents)}/mo` : "$0" },
-      signups: { hero: formatMetricCount(signups), pill: formatMetricCount(signups) },
-      progress: { hero: `${stagesReached}/3`, pill: `${stagesReached}/3` },
-    };
     const tierLabels = { mrr: "MRR", signups: "Sign-ups", progress: "Progress" };
     const tierOrder = ["mrr", "signups", "progress"];
     const adaptiveTier = mrrCents > 0 ? "mrr" : signups > 0 ? "signups" : "progress";
-    const activeTier = LIVE.northStarTab && tiers[LIVE.northStarTab] ? LIVE.northStarTab : adaptiveTier;
-    const northStar = tiers[activeTier];
-    function northStarBars(items) {
-      const maxValue = Math.max(...items.map((bar) => bar.value), 1);
-      return `<div class="board-bars">${items.map((bar) => {
-        const height = bar.value > 0 ? Math.max(14, Math.round((bar.value / maxValue) * 100)) : 10;
-        const fillColor = bar.value > 0 ? bar.color : "var(--paper-2)";
-        return `<div class="board-bar">
-          <div class="board-bar-v">${esc(bar.display)}</div>
-          <div class="board-bar-track"><div class="board-bar-fill" style="height:${height}%;background:${fillColor}"></div></div>
-          <div class="board-bar-l">${esc(bar.label)}</div>
-        </div>`;
-      }).join("")}</div>`;
-    }
-    let graphHtml;
-    if (activeTier === "progress") {
-      const pct = Math.round((stagesReached / 3) * 100);
-      const stage = (label, on) => `<span class="${on ? "on" : ""}">${esc(label)}</span>`;
-      graphHtml = `<div class="board-prog">
-        <div class="board-prog-track"><div class="board-prog-fill" style="width:${pct}%${pct ? "" : ";border-right-width:0"}"></div></div>
-        <div class="board-prog-stages">${stage("sign-ups", signups > 0)}${stage("checkout", checkouts > 0)}${stage("paying", paying > 0)}</div>
-      </div>`;
-    } else if (activeTier === "mrr") {
-      graphHtml = northStarBars([
-        { label: "mrr / mo", value: mrrCents, display: formatBudgetCents(mrrCents), color: "var(--green)" },
-        { label: "lifetime", value: revenueCents, display: formatBudgetCents(revenueCents), color: "var(--blue)" },
-      ]);
+    const activeTier = LIVE.northStarTab && tierLabels[LIVE.northStarTab] ? LIVE.northStarTab : adaptiveTier;
+    let displayHtml;
+    if (activeTier === "mrr") {
+      displayHtml = `<div class="board-star-v">${esc(formatBudgetCents(mrrCents))}</div>`;
+    } else if (activeTier === "signups") {
+      displayHtml = `<div class="board-star-v">${esc(formatMetricCount(signups))}</div>`;
     } else {
-      graphHtml = northStarBars([
-        { label: "sign-ups", value: signups, display: formatMetricCount(signups), color: "var(--blue)" },
-        { label: "checkout", value: checkouts, display: formatMetricCount(checkouts), color: "var(--amber)" },
-        { label: "paying", value: paying, display: formatMetricCount(paying), color: "var(--green)" },
-      ]);
+      const action = currentActionFromSnapshot(LIVE.workspaceSnapshot || { overview });
+      const tasks = Array.isArray(RT.tasks) ? RT.tasks : [];
+      const done = tasks.filter((t) => String(t.status) === "done").length;
+      const total = tasks.length;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      const status = String(action.status || "").trim().toLowerCase();
+      const taskLabel = String(action.label || "").trim() || (status === "running" ? "Working…" : "Idle");
+      displayHtml = `
+        <div class="board-prog-task">${esc(taskLabel)}</div>
+        <div class="board-prog">
+          <div class="board-prog-track"><div class="board-prog-fill" style="width:${pct}%${pct ? "" : ";border-right-width:0"}"></div></div>
+          <div class="board-prog-cap">${total ? `${done} / ${total} tasks done` : "no tasks queued"}</div>
+        </div>`;
     }
     return `
       <section class="board-graph">
-        <div class="board-star"><div class="board-star-v">${esc(northStar.hero)}</div></div>
-        <div class="board-tabs">${tierOrder.map((key) => {
-          return `<button class="board-tab${key === activeTier ? " on" : ""}" data-tab="${key}" type="button"><span class="board-tab-k">${esc(tierLabels[key])}</span><span class="board-tab-v">${esc(tiers[key].pill)}</span></button>`;
-        }).join("")}</div>
-        ${graphHtml}
+        <div class="board-tabs">${tierOrder.map((key) =>
+          `<button class="board-tab${key === activeTier ? " on" : ""}" data-tab="${key}" type="button"><span class="board-tab-k">${esc(tierLabels[key])}</span></button>`
+        ).join("")}</div>
+        <div class="board-display">${displayHtml}</div>
       </section>
     `;
   }
@@ -976,7 +1056,7 @@
     });
   }
 
-  const LIVE_WORKSPACE_VIEW = "full";
+  const LIVE_WORKSPACE_VIEW = "home";
 
   function restartLivePollTimer(ms) {
     const nextMs = Number(ms);
@@ -1115,13 +1195,6 @@
     body(win).innerHTML = html;
     focusWin(win);
     return win;
-  }
-
-  function previewPathForLive() {
-    const overview = LIVE.workspaceOverview || {};
-    const website = overview.artifacts && overview.artifacts.website || {};
-    const product = overview.product || {};
-    return String(website.path || website.source_path || product.source_path || "").trim();
   }
 
   async function openSitePreview(path, label) {
@@ -1368,19 +1441,8 @@
   }
 
   async function refreshOperatorShellData() {
-    const settled = await Promise.allSettled([
-      fetchJSON("/api/takyon/operator/businesses"),
-      fetchJSON("/api/takyon/operator/account"),
-    ]);
-    if (settled[0].status === "fulfilled") {
-      const res = settled[0].value;
-      rememberBusinesses(Array.isArray(res && res.businesses) ? res.businesses : []);
-    }
-    if (settled[1].status === "fulfilled") {
-      LIVE.operatorAccount = settled[1].value;
-      RT.credits = dollarFromAccount();
-      updateMenu();
-    }
+    const res = await fetchJSON("/api/takyon/operator/home");
+    applyOperatorHome(res);
     if (document.getElementById("w-operator")) renderOperatorWindow();
     if (document.getElementById("w-wallet")) renderWalletWindow();
   }
@@ -1489,13 +1551,26 @@
     return win;
   }
 
+  function payoutButtonHtml(status) {
+    if (status === "loading") {
+      return '<span class="stripe-spin" aria-hidden="true"></span><span>Opening Stripe...</span>';
+    }
+    const label = status === "active" ? "Manage in Stripe" : "Connect with Stripe";
+    return `<span class="stripe-mark" aria-hidden="true">S</span><span>${esc(label)}</span>`;
+  }
+
+  function payoutHelperText(status) {
+    return status === "active"
+      ? "Opens your Stripe dashboard in a secure redirect."
+      : "Securely connect payouts and onboarding with Stripe.";
+  }
+
   function renderWalletWindow() {
     const w = document.getElementById("w-wallet");
     if (!w) return;
     const account = LIVE.operatorAccount;
     const spendableCents = operatorSpendableCents(account);
     const payoutStatus = account && account.available ? String(account.stripe_connect_status || "none") : "none";
-    const payoutButtonLabel = payoutStatus === "active" ? "Open payouts" : "Connect payouts";
     const creativeAvailable = !!(LIVE.creativeCredits && LIVE.creativeCredits.available);
     const creativeBalance = creativeAvailable ? wholeCredits(LIVE.creativeCredits.balance_credits) : null;
     const creativeReserved = creativeAvailable ? wholeCredits(LIVE.creativeCredits.reserved_credits) : null;
@@ -1528,12 +1603,14 @@
           <div class="stat-row"><span class="k">balance</span><span class="v">${creativeBalance === null ? "—" : String(creativeBalance)}</span></div>
           <div class="stat-row"><span class="k">reserved</span><span class="v">${creativeReserved === null ? "—" : String(creativeReserved)}</span></div>
           <div class="wallet-note">${activeName
-            ? `<span class="wallet-business">${esc(activeName)}</span> buys fixed-price creative actions.`
+            ? `<span class="wallet-business">${esc(activeName)}</span> tops up scoped credits at 1 cent each.`
             : "Select a business to manage creative credits."}</div>
-          <div class="wallet-inline">
-            <button class="cbtn" id="wallet-buy-credits" type="button"${activeName ? "" : " disabled"}>Buy credits</button>
-            <span class="wallet-note" id="wallet-business-error"></span>
+          <div class="wallet-actions">
+            <input id="wallet-credit-amount" inputmode="numeric" placeholder="100" type="text"${activeName ? "" : " disabled"} />
+            <button class="cbtn" id="wallet-buy-credits" type="button"${activeName ? "" : " disabled"}>Top up credits</button>
           </div>
+          <div class="wallet-note">${activeName ? "1 credit = $0.01. Minimum 50 credits per Stripe charge." : ""}</div>
+          <div class="wallet-note" id="wallet-business-error"></div>
         </div>
 
         <div class="chan">
@@ -1541,8 +1618,9 @@
           <div class="stat-row"><span class="k">owed</span><span class="v">${account && account.available ? formatBudgetCents(account.owed_balance_cents) : "—"}</span></div>
           <div class="stat-row"><span class="k">connect status</span><span class="v">${account && account.available ? esc(payoutStatus) : "—"}</span></div>
           <div class="wallet-inline">
-            <button class="cbtn" id="wallet-payouts" type="button">${esc(payoutButtonLabel)}</button>
+            <button class="cbtn stripe-action" id="wallet-payouts" type="button">${payoutButtonHtml(payoutStatus)}</button>
           </div>
+          <div class="wallet-note wallet-note--stripe" id="wallet-payout-help">${esc(payoutHelperText(payoutStatus))}</div>
         </div>
 
         <div class="chan">
@@ -1567,7 +1645,8 @@
     const buyButton = $("#wallet-buy-credits", w);
     if (buyButton) {
       buyButton.addEventListener("click", () => {
-        void startCreativeCreditsCheckoutFromWallet();
+        const credits = String($("#wallet-credit-amount", w).value || "").trim();
+        void startCreativeCreditsCheckoutFromWallet(credits);
       });
     }
   }
@@ -1595,24 +1674,35 @@
     }
   }
 
-  async function startCreativeCreditsCheckoutFromWallet(providedErrorEl) {
+  async function startCreativeCreditsCheckoutFromWallet(rawCredits, providedErrorEl) {
     const w = document.getElementById("w-wallet");
     const errorEl = providedErrorEl || (w ? $("#wallet-business-error", w) : null);
+    const buttonEl = w ? $("#wallet-buy-credits", w) : null;
     if (errorEl) errorEl.textContent = "";
     const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
     if (!business) {
       if (errorEl) errorEl.textContent = "Select a business to buy credits.";
       return;
     }
+    const credits = Number.parseInt(String(rawCredits || "").trim(), 10);
+    if (!Number.isFinite(credits) || credits <= 0) {
+      if (errorEl) errorEl.textContent = "Enter whole credits to top up.";
+      return;
+    }
+    if (credits < 50) {
+      if (errorEl) errorEl.textContent = "Minimum 50 credits ($0.50) because Stripe's USD minimum charge applies.";
+      return;
+    }
     try {
-      const packs = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits/packs`);
-      const pack = Array.isArray(packs && packs.packs) ? packs.packs[0] : null;
-      if (!pack || !pack.id) throw new Error("No creative credit packs are configured.");
+      if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.textContent = "Opening Stripe...";
+      }
       const res = await fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits/checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          pack_id: pack.id,
+          credits,
           success_path: currentReturnPath(),
           cancel_path: currentReturnPath(),
         }),
@@ -1621,14 +1711,27 @@
       navigateOwner(res.checkout_url);
     } catch (err) {
       if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+      if (buttonEl) {
+        buttonEl.disabled = false;
+        buttonEl.textContent = "Top up credits";
+      }
     }
   }
 
   async function startOperatorPayoutConnectFromWallet() {
     const w = document.getElementById("w-wallet");
     const errorEl = w ? $("#wallet-billing-error", w) : null;
+    const buttonEl = w ? $("#wallet-payouts", w) : null;
+    const helpEl = w ? $("#wallet-payout-help", w) : null;
     if (errorEl) errorEl.textContent = "";
     try {
+      if (buttonEl) {
+        buttonEl.disabled = true;
+        buttonEl.innerHTML = payoutButtonHtml("loading");
+      }
+      if (helpEl) {
+        helpEl.textContent = "Redirecting you to Stripe...";
+      }
       const res = await fetchJSON("/api/takyon/operator/payouts/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1638,6 +1741,16 @@
       navigateOwner(res.connect_url);
     } catch (err) {
       if (errorEl) errorEl.textContent = err instanceof Error ? err.message : String(err);
+      const payoutStatus = LIVE.operatorAccount && LIVE.operatorAccount.available
+        ? String(LIVE.operatorAccount.stripe_connect_status || "none")
+        : "none";
+      if (buttonEl) {
+        buttonEl.disabled = false;
+        buttonEl.innerHTML = payoutButtonHtml(payoutStatus);
+      }
+      if (helpEl) {
+        helpEl.textContent = payoutHelperText(payoutStatus);
+      }
       await refreshOperatorShellData().catch(() => {
         /* best effort */
       });
@@ -1747,74 +1860,9 @@
     if (!w || !RT.biz) return;
     const overview = LIVE.workspaceOverview || {};
     const product = overview.product || {};
-    const website = overview.artifacts && overview.artifacts.website || {};
-    const currentAction = currentActionFromSnapshot(LIVE.workspaceSnapshot || { overview });
-    const blocker = String(product.publish_blocker || website.publish_blocker || currentAction.blocker || "").trim();
-    const currentStatus = String(currentAction.status || "").trim().toLowerCase();
-    const live = String(product.publish_status || RT.biz.publishStatus || "").trim().toLowerCase() === "published" || !!RT.biz.publicUrl;
-    const previewPath = previewPathForLive();
-    const hasLocalPreview = !!previewPath;
-    const directUrl = live ? normalizeOpenableUrl(RT.biz.publicUrl) : "";
-    const hostLabel = live
-      ? (prettyHost(RT.biz.publicUrl) || "live site")
-      : hasLocalPreview
-        ? compactPath(previewPath) || "local preview"
-        : "product workspace";
-    const hasSite = live || hasLocalPreview;
-    const frameworkSummary = Array.isArray(product.detected_frameworks) && product.detected_frameworks.length
-      ? product.detected_frameworks.join(", ")
-      : "";
-    const factLine = [
-      product.publish_mode ? `publish ${String(product.publish_mode).replace(/_/g, " ")}` : "",
-      frameworkSummary ? `framework ${frameworkSummary}` : "",
-      product.latest_check_status ? `check ${String(product.latest_check_status).replace(/_/g, " ")}` : "",
-    ].filter(Boolean).join(" · ");
-    const commandLine = String(product.latest_check_command || "").trim();
-    const errorLine = String(product.latest_check_error || "").trim();
-    const summaryTitle = currentAction.label
-      || (live ? "Public site is live." : hasLocalPreview ? "Preview is ready." : "Product is still taking shape.");
-    const summaryDetail = blocker || currentAction.detail || "";
-    const summaryTone = blocker || currentStatus === "blocked"
-      ? "var(--alert)"
-      : currentStatus === "running"
-        ? "var(--amber)"
-        : currentStatus === "scheduled"
-          ? "var(--blue)"
-          : "var(--green)";
-    const summaryBadge = blocker
-      ? "blocked"
-      : currentStatus === "running" || currentStatus === "scheduled"
-        ? currentStatus
-        : live
-          ? "published"
-          : hasLocalPreview
-            ? "preview"
-            : "waiting";
-    const summaryPanel = `
-      <div style="padding:10px 12px;border-bottom:2px solid var(--ink);background:var(--paper)">
-        <div class="chan-top">
-          <span class="chan-nm">${esc(summaryTitle)}</span>
-          <span class="chan-st${summaryBadge === "published" ? " live" : ""}" style="border-color:${summaryTone};color:${summaryTone}">${esc(summaryBadge)}</span>
-        </div>
-        ${summaryDetail ? `<div class="meta" style="${blocker ? "color:var(--alert);" : ""}margin-top:6px">${esc(summaryDetail)}</div>` : ""}
-        ${factLine ? `<div class="meta" style="margin-top:6px">${esc(factLine)}</div>` : ""}
-        ${commandLine ? `<div class="meta" style="margin-top:6px"><strong>command</strong> ${esc(commandLine)}</div>` : ""}
-        ${errorLine && errorLine !== summaryDetail ? `<div class="meta" style="margin-top:6px;color:var(--alert)">${esc(errorLine)}</div>` : ""}
-      </div>`;
-    // Avoid rebuilding (and reloading the iframe) when nothing material changed.
-    const sig = JSON.stringify([
-      live,
-      directUrl,
-      hasLocalPreview,
-      previewPath,
-      hostLabel,
-      summaryTitle,
-      summaryDetail,
-      factLine,
-      commandLine,
-      errorLine,
-      summaryBadge,
-    ]);
+    const directUrl = normalizeOpenableUrl(product.public_url || "");
+    const hostLabel = directUrl ? (prettyHost(directUrl) || "live site") : "product workspace";
+    const sig = JSON.stringify([directUrl, hostLabel]);
     if (w.dataset.productSig === sig) return;
     if (typeof w._productPreviewCleanup === "function") {
       try { w._productPreviewCleanup(); } catch (_) {}
@@ -1823,11 +1871,10 @@
     w.dataset.productSig = sig;
     const frameTitle = `${RT.biz.name || RT.biz.slug || "product"} preview`;
     body(w).innerHTML = `<div class="mini">
-      <div class="mini__bar"${hasSite ? ' id="product-bar" title="open the site in a new tab" style="cursor:pointer"' : ""}><i></i><i></i><i></i><span>${esc(hostLabel)}</span>${hasSite ? '<span style="margin-left:auto;font-size:9px;letter-spacing:.1em;opacity:.7">↗ open</span>' : ""}</div>
-      ${summaryPanel}
-      ${hasSite
-        ? `<div class="mini__viewport" id="product-viewport"><iframe class="mini__frame mini__frame--scaled" id="product-frame" title="${esc(frameTitle)}"${directUrl ? ` src="${esc(directUrl)}"` : ""}></iframe></div>`
-        : `<div class="mini__page"><div class="lab">product workspace</div><p class="mini__sub">${esc(RT.biz.idea || "Takyon business workspace")}</p><div class="meta">${esc(blocker || currentAction.detail || "Takyon is still bootstrapping the product surface.")}</div></div>`}
+      <div class="mini__bar"${directUrl ? ' id="product-bar" title="open the site in a new tab" style="cursor:pointer"' : ""}><i></i><i></i><i></i><span>${esc(hostLabel)}</span>${directUrl ? '<span style="margin-left:auto;font-size:9px;letter-spacing:.1em;opacity:.7">↗ open</span>' : ""}</div>
+      ${directUrl
+        ? `<div class="mini__viewport" id="product-viewport"><iframe class="mini__frame mini__frame--scaled" id="product-frame" title="${esc(frameTitle)}" src="${esc(directUrl)}"></iframe></div>`
+        : `<div class="mini__page"></div>`}
     </div>`;
     const viewport = body(w).querySelector("#product-viewport");
     const frame = body(w).querySelector("#product-frame");
@@ -1860,20 +1907,7 @@
         const activeFrame = document.getElementById("product-frame");
         const target = directUrl || (activeFrame && activeFrame.getAttribute("src")) || "";
         if (target) openUrlInNewTab(target);
-        else if (previewPath) void openSitePreview(previewPath, frameTitle);
       });
-    }
-    if (hasSite && !directUrl && previewPath) {
-      const business = String(LIVE.activeBusiness || "").trim().toLowerCase();
-      if (business) {
-        fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/site-preview?path=${encodeURIComponent(previewPath)}`)
-          .then((res) => {
-            const url = normalizeOpenableUrl(res && res.url);
-            const frame = document.getElementById("product-frame");
-            if (url && frame && frame.getAttribute("src") !== url) frame.src = url;
-          })
-          .catch(() => {});
-      }
     }
   };
 
@@ -2233,6 +2267,7 @@
   const originalRenderBoard = renderBoard;
   renderBoard = function renderBoardLiveAware() {
     if (!RT.live) return originalRenderBoard();
+    renderGraphWindow();
     const w = document.getElementById("w-board");
     if (!w) return;
     const cols = ["running", "blocked", "scheduled", "done"];
@@ -2253,7 +2288,6 @@
         }
       });
     });
-    renderGraphWindow();
   };
 
   const originalLayoutMain = layoutMain;
@@ -2377,6 +2411,14 @@
   function teardownLive() {
     stopLiveTimers();
     closeLiveSocket();
+    if (LIVE.refreshController) {
+      try {
+        LIVE.refreshController.abort();
+      } catch (_err) {
+        /* best effort */
+      }
+      LIVE.refreshController = null;
+    }
     LIVE.sessionId = "";
     LIVE.sessionBusiness = "";
     LIVE.activeBusiness = "";
@@ -2769,11 +2811,13 @@
       if (hint && hint.parentNode) hint.parentNode.insertBefore(host, hint.nextSibling);
       else launcher.appendChild(host);
     }
+    const notice = LIVE.businessesLoading ? "refreshing..." : LIVE.businessesNotice;
+    const noteHtml = notice ? `<span class="meta">${esc(notice)}</span>` : "";
     if (!LIVE.businesses.length) {
-      host.innerHTML = "";
+      host.innerHTML = noteHtml;
       return;
     }
-    host.innerHTML = `<span style="font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase">resume existing:</span>${LIVE.businesses.map(launcherResumeButton).join("")}`;
+    host.innerHTML = `<span style="font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase">resume existing:</span>${LIVE.businesses.map(launcherResumeButton).join("")}${noteHtml}`;
     host.querySelectorAll("button[data-business]").forEach((btn) => {
       btn.addEventListener("click", (event) => {
         event.preventDefault();
@@ -2785,28 +2829,39 @@
 
   async function refreshBusinessData(slug, options) {
     const business = String(slug || "").trim().toLowerCase();
-    if (!business || LIVE.refreshBusy) return;
-    LIVE.refreshBusy = true;
+    if (!business) return;
+    const view = String(options && options.view || LIVE_WORKSPACE_VIEW).trim().toLowerCase() === "full" ? "full" : "home";
+    const useHomePayload = view !== "full";
+    const skipBoard = options && Object.prototype.hasOwnProperty.call(options, "skipBoard")
+      ? !!options.skipBoard
+      : true;
+    const skipCredits = !!(options && options.skipCredits);
+    const skipAccount = !!(options && options.skipAccount);
+    const skipDashboardState = !!(options && options.skipDashboardState);
+    if (LIVE.refreshController) {
+      try {
+        LIVE.refreshController.abort();
+      } catch (_err) {
+        /* best effort */
+      }
+    }
+    const controller = new AbortController();
+    LIVE.refreshController = controller;
     try {
-      const view = String(options && options.view || LIVE_WORKSPACE_VIEW).trim().toLowerCase() === "full" ? "full" : "boot";
-      const skipBoard = options && Object.prototype.hasOwnProperty.call(options, "skipBoard")
-        ? !!options.skipBoard
-        : true;
-      const skipCredits = !!(options && options.skipCredits);
-      const skipAccount = !!(options && options.skipAccount);
-      const skipDashboardState = !!(options && options.skipDashboardState);
       const activeSessionId =
-        !skipDashboardState && view === "full" && LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
-      const workspacePromise = fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50&view=${encodeURIComponent(view)}`);
+        !skipDashboardState && !useHomePayload && LIVE.sessionId && LIVE.sessionBusiness === business ? LIVE.sessionId : "";
+      const workspacePromise = useHomePayload
+        ? fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/home`, { signal: controller.signal })
+        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50&view=${encodeURIComponent(view)}`, { signal: controller.signal });
       const boardPromise = skipBoard
         ? Promise.resolve(null)
-        : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`);
+        : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`, { signal: controller.signal });
       const creditsPromise = skipCredits
         ? Promise.resolve(LIVE.creativeCredits)
-        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`);
+        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`, { signal: controller.signal });
       const accountPromise = skipAccount
         ? Promise.resolve(LIVE.operatorAccount)
-        : fetchJSON("/api/takyon/operator/account");
+        : fetchJSON("/api/takyon/operator/account", { signal: controller.signal });
       const dashboardPromise = activeSessionId
         ? rpc("takyon.dashboard.state", {
           session_id: activeSessionId,
@@ -2821,7 +2876,8 @@
       ]);
       const workspace = workspaceSettled.status === "fulfilled" ? workspaceSettled.value : null;
       const dashboardState = dashboardSettled.status === "fulfilled" ? dashboardSettled.value : null;
-      const snapshot = mergeLiveSnapshots(workspace, dashboardState);
+      if (LIVE.refreshController !== controller || LIVE.activeBusiness !== business) return;
+      const snapshot = useHomePayload ? normalizeLiveSnapshot(workspace) : mergeLiveSnapshots(workspace, dashboardState);
       if (snapshot) {
         LIVE.workspaceOverview = snapshot.overview || {};
         applyWorkspace(snapshot, businessSummary(business));
@@ -2830,6 +2886,7 @@
       }
       if (!snapshot) setStatus("idle", "idle");
       const settled = await Promise.allSettled([boardPromise, creditsPromise, accountPromise]);
+      if (LIVE.refreshController !== controller || LIVE.activeBusiness !== business) return;
       const board = settled[0].status === "fulfilled" ? settled[0].value : null;
       LIVE.creativeCredits = settled[1].status === "fulfilled" ? settled[1].value : LIVE.creativeCredits;
       LIVE.operatorAccount = settled[2].status === "fulfilled" ? settled[2].value : LIVE.operatorAccount;
@@ -2839,10 +2896,11 @@
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
     } catch (err) {
+      if (isAbortError(err)) return;
       setStatus("paused", "paused");
       addCeo(formatRichText(err instanceof Error ? err.message : String(err)));
     } finally {
-      LIVE.refreshBusy = false;
+      if (LIVE.refreshController === controller) LIVE.refreshController = null;
     }
   }
 
@@ -2879,24 +2937,15 @@
     const sessionPromise = ensureSession(business).catch(() => "");
     await refreshBusinessData(business, {
       skipAccount: true,
+      skipCredits: true,
       skipDashboardState: true,
       skipBoard: true,
       view: LIVE_WORKSPACE_VIEW,
     });
-    if (LIVE.activeBusiness === business) {
-      await refreshBusinessData(business, {
-        skipAccount: true,
-        skipCredits: true,
-        skipDashboardState: true,
-        skipBoard: false,
-        view: LIVE_WORKSPACE_VIEW,
-      });
-    }
     const sessionId = await sessionPromise;
     if (sessionId && LIVE.activeBusiness === business) {
       await refreshBusinessData(business, {
         skipAccount: true,
-        skipCredits: true,
         skipBoard: false,
         view: LIVE_WORKSPACE_VIEW,
       });
@@ -2948,7 +2997,6 @@
       desk.querySelectorAll(".win").forEach((win) => win.remove());
       desk.classList.remove("stack");
     }
-    openBoard();
     openGraph();
     openProduct();
     openStatus();
@@ -3159,26 +3207,41 @@
         seedBusinessSnapshot(requestedBusiness, placeholder),
       );
     }
-    const businessesPromise = fetchJSON("/api/takyon/operator/businesses")
-      .then((businesses) => {
-        rememberBusinesses(Array.isArray(businesses && businesses.businesses) ? businesses.businesses : []);
+    const cachedBusinesses = readCachedBusinesses();
+    if (cachedBusinesses.length) {
+      rememberBusinesses(cachedBusinesses, { persist: false });
+      LIVE.businessesLoading = true;
+      LIVE.businessesNotice = "refreshing...";
+      renderLauncherBusinesses();
+    } else {
+      LIVE.businessesLoading = true;
+      LIVE.businessesNotice = "loading existing businesses...";
+      renderLauncherBusinesses();
+    }
+    const homePromise = fetchJSONWithTimeout("/api/takyon/operator/home", null, OPERATOR_SHELL_TIMEOUT_MS)
+      .then((home) => {
+        if (home && home.available === false) {
+          LIVE.businessesLoading = false;
+          LIVE.businessesNotice = LIVE.businesses.length
+            ? "showing recent list"
+            : "existing businesses are taking longer than expected.";
+          renderLauncherBusinesses();
+          return;
+        }
+        applyOperatorHome(home);
         if (!requestedBusiness) {
           const initialBusiness = LIVE.businesses.length === 1 ? String(LIVE.businesses[0].slug || "") : "";
           if (initialBusiness) void mountLiveBusiness(initialBusiness);
         }
       })
       .catch(() => {
+        LIVE.businessesLoading = false;
+        LIVE.businessesNotice = LIVE.businesses.length
+          ? "showing recent list"
+          : "existing businesses are taking longer than expected.";
         if (!LIVE.activeBusiness) renderLauncherBusinesses();
       });
-    const accountPromise = fetchJSON("/api/takyon/operator/account")
-      .then((account) => {
-        LIVE.operatorAccount = account;
-        renderWalletRail();
-      })
-      .catch(() => {
-        renderWalletRail();
-      });
-    await Promise.allSettled([businessesPromise, accountPromise]);
+    await Promise.allSettled([homePromise]);
   }
 
   void bootstrapLive();
