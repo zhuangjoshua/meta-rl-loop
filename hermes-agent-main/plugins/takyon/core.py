@@ -2703,6 +2703,17 @@ def _subuser_app_starter_pages_js() -> str:
               return interval ? `${amount} / ${interval}` : amount;
             }
 
+            function formatDate(value) {
+              if (!value) return "—";
+              const date = new Date(value);
+              if (Number.isNaN(date.getTime())) return "—";
+              return new Intl.DateTimeFormat("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              }).format(date);
+            }
+
             function subscriptionTone(state) {
               if (state === "ready" || state === "active" || state === "trialing") return "starter-pill-success";
               if (state === "past_due" || state === "subscription_required") return "starter-pill-warn";
@@ -3411,86 +3422,152 @@ def _subuser_app_starter_pages_js() -> str:
                 );
               }
 
+              const plan = currentPlan();
+              const usage = appState.account?.usage_this_period || {};
+              const revenue = appState.account?.revenue || {};
+              const statusState = appState.subscription?.state || "none";
+              const accessState = appState.access?.state || "unknown";
+              const currentPeriodEnd = appState.subscription?.currentPeriodEnd || "";
+              const paidLabel = formatMoney(revenue.amount_paid_cents || 0, "usd");
+              const profileName =
+                String(
+                  profile?.display_name ||
+                  profile?.displayName ||
+                  appState.user?.name ||
+                  ""
+                ).trim() || "Not set yet";
+              const bannerTitle = appState.entitled ? "Membership active." : "Membership needs attention.";
+              const bannerBody = appState.entitled
+                ? "Your account, billing state, and profile live here. Changes should show up as soon as the runtime confirms them."
+                : statusState === "past_due"
+                  ? "Billing looks interrupted right now. Refresh your membership to restore access."
+                  : "Finish subscription to unlock the private app experience.";
+              const primaryCtaLabel = statusState === "past_due" ? "Refresh membership" : "Subscribe";
+
               return (
-                <div className="starter-profile-grid">
-                  <section className="starter-profile-card">
-                    <p className="starter-kicker">Account</p>
-                    <h2 className="starter-profile-title">Subscription and details</h2>
-                    <p className="starter-profile-copy">Manage your plan and account information.</p>
-                    <div className="starter-pill-row">
-                      <StarterStatePill label="Membership" state={appState.subscription.state} />
-                    </div>
-                    <dl className="starter-key-value">
-                      <div>
-                        <dt>Email</dt>
-                        <dd>{String(appState.user?.email || "—")}</dd>
+                <div className="starter-shell-stack">
+                  <StarterStatusBanner
+                    title={bannerTitle}
+                    body={bannerBody}
+                    actions={
+                      <Link className="starter-link-button starter-link-quiet" href="/app">
+                        Open app
+                      </Link>
+                    }
+                  />
+                  <div className="starter-profile-grid">
+                    <section className="starter-profile-card">
+                      <p className="starter-kicker">Account</p>
+                      <h2 className="starter-profile-title">Membership overview</h2>
+                      <p className="starter-profile-copy">
+                        Everything tied to your membership should reconcile here: access, billing state, and plan details.
+                      </p>
+                      <div className="starter-pill-row">
+                        <StarterStatePill label="Membership" state={statusState} />
+                        <StarterStatePill label="Access" state={accessState} />
                       </div>
-                      <div>
-                        <dt>Plan</dt>
-                        <dd>{appState.subscription.planKey ? humanize(appState.subscription.planKey) : "No paid plan yet"}</dd>
-                      </div>
-                    </dl>
-                    {!appState.entitled ? (
+                      <dl className="starter-key-value">
+                        <div>
+                          <dt>Email</dt>
+                          <dd>{String(appState.user?.email || "—")}</dd>
+                        </div>
+                        <div>
+                          <dt>Plan</dt>
+                          <dd>{plan ? planSummary(plan) : (appState.subscription.planKey ? humanize(appState.subscription.planKey) : "No paid plan yet")}</dd>
+                        </div>
+                        <div>
+                          <dt>Usage this period</dt>
+                          <dd>{Number(usage.events || 0)} events</dd>
+                        </div>
+                        <div>
+                          <dt>Paid so far</dt>
+                          <dd>{paidLabel}</dd>
+                        </div>
+                        <div>
+                          <dt>Billing cadence</dt>
+                          <dd>{plan ? humanize(plan.billingInterval || "month") : "Monthly"}</dd>
+                        </div>
+                        <div>
+                          <dt>Current period end</dt>
+                          <dd>{formatDate(currentPeriodEnd)}</dd>
+                        </div>
+                      </dl>
                       <div className="starter-inline-actions">
-                        <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                          Subscribe
+                        {!appState.entitled ? (
+                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                            {primaryCtaLabel}
+                          </Link>
+                        ) : null}
+                        <Link className="starter-link-button starter-link-quiet" href="/app">
+                          Back to app
                         </Link>
                       </div>
-                    ) : null}
-                  </section>
-                  <section className="starter-profile-card">
-                    <p className="starter-kicker">Profile</p>
-                    <h2 className="starter-profile-title">Profile details</h2>
-                    <p className="starter-profile-copy">Update the information tied to your account.</p>
-                    {appState.canManageProfile ? (
-                      <form className="starter-form" onSubmit={handleSave}>
-                        <div className="starter-field">
-                          <label htmlFor="starter-display-name">Display name</label>
-                          <input
-                            id="starter-display-name"
-                            className="starter-input"
-                            value={displayName}
-                            onChange={(event) => setDisplayName(event.target.value)}
-                          />
+                    </section>
+                    <section className="starter-profile-card">
+                      <p className="starter-kicker">Profile</p>
+                      <h2 className="starter-profile-title">Profile details</h2>
+                      <p className="starter-profile-copy">
+                        Keep the identity on your account up to date. This is the information the app can reuse across the private product experience.
+                      </p>
+                      <dl className="starter-key-value">
+                        <div>
+                          <dt>Display name</dt>
+                          <dd>{profileName}</dd>
                         </div>
-                        <div className="starter-field">
-                          <label htmlFor="starter-headline">Headline</label>
-                          <input
-                            id="starter-headline"
-                            className="starter-input"
-                            value={headline}
-                            onChange={(event) => setHeadline(event.target.value)}
-                          />
+                        <div>
+                          <dt>Headline</dt>
+                          <dd>{String(profile?.headline || headline || "Not set yet") || "Not set yet"}</dd>
                         </div>
-                        <div className="starter-field">
-                          <label htmlFor="starter-bio">Bio</label>
-                          <textarea
-                            id="starter-bio"
-                            className="starter-textarea"
-                            value={bio}
-                            onChange={(event) => setBio(event.target.value)}
-                          />
+                      </dl>
+                      {appState.canManageProfile ? (
+                        <form className="starter-form" onSubmit={handleSave}>
+                          <div className="starter-field">
+                            <label htmlFor="starter-display-name">Display name</label>
+                            <input
+                              id="starter-display-name"
+                              className="starter-input"
+                              value={displayName}
+                              onChange={(event) => setDisplayName(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-field">
+                            <label htmlFor="starter-headline">Headline</label>
+                            <input
+                              id="starter-headline"
+                              className="starter-input"
+                              value={headline}
+                              onChange={(event) => setHeadline(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-field">
+                            <label htmlFor="starter-bio">Bio</label>
+                            <textarea
+                              id="starter-bio"
+                              className="starter-textarea"
+                              value={bio}
+                              onChange={(event) => setBio(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-inline-actions">
+                            <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
+                              {pending ? "Saving..." : "Save profile"}
+                            </button>
+                          </div>
+                          {message ? <div className="starter-alert">{message}</div> : null}
+                          {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                        </form>
+                      ) : (
+                        <div className="starter-panel">
+                          <p className="starter-card-copy">
+                            Profile editing is not live on this surface yet, but your membership and account state are.
+                          </p>
+                          {profile?.bio || bio ? (
+                            <pre className="starter-response">{String(profile?.bio || bio || "").trim()}</pre>
+                          ) : null}
                         </div>
-                        <div className="starter-inline-actions">
-                          <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
-                            {pending ? "Saving..." : "Save profile"}
-                          </button>
-                          <Link className="starter-link-button starter-link-quiet" href="/app">
-                            Back to app
-                          </Link>
-                        </div>
-                        {message ? <div className="starter-alert">{message}</div> : null}
-                        {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                      </form>
-                    ) : (
-                      <div className="starter-panel">
-                        <p className="starter-card-copy">
-                          Profile editing is not available right now.
-                        </p>
-                        {profile ? <pre className="starter-response">{JSON.stringify(profile, null, 2)}</pre> : null}
-                      </div>
-                    )}
-                  </section>
+                      )}
+                    </section>
+                  </div>
                 </div>
               );
             }

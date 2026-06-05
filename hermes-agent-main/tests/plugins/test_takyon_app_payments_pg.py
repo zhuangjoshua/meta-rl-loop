@@ -349,6 +349,38 @@ def test_webhook_idempotent_on_replay(pg_conn):
     assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net(2000)
 
 
+def test_checkout_recovery_then_webhook_records_payment_once(pg_conn):
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    intent = app_payments.create_checkout_intent(
+        pg_conn, slug, plan_key="pro", client_reference_id="ref-recover", customer_email="recover@x.com"
+    )
+    event = _checkout_event(
+        event_id="evt_recover",
+        session_id="cs_recover",
+        intent_id=intent.id,
+        email="recover@x.com",
+        amount_total=2100,
+        subscription="sub_recover",
+        mode="subscription",
+    )
+    recovered = app_payments.reconcile_checkout_session(
+        pg_conn,
+        event["data"]["object"],
+        event_created=event["created"],
+    )
+    webhook = app_payments.record_webhook_and_process(pg_conn, event)
+
+    assert recovered["recorded"] is True
+    assert recovered["already_recorded"] is False
+    assert webhook["deduplicated"] is False
+    assert webhook["processed"]["recorded"] is True
+    assert webhook["processed"]["already_recorded"] is True
+    assert app_payments.get_revenue_summary(pg_conn, slug)["events"] == 1
+    assert len(app_entitlements.list_entitlements(pg_conn, slug)) == 1
+    assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net(2100)
+
+
 def test_paid_checkout_without_email_accrues_but_no_entitlement(pg_conn):
     owner = _owner(pg_conn)
     slug = _business(pg_conn, owner)

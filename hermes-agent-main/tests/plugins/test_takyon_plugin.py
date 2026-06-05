@@ -3283,6 +3283,120 @@ def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
     )
 
 
+def test_pg_account_read_recovers_paid_checkout_without_webhook(tmp_path, monkeypatch):
+    from plugins.takyon import stripe_util
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:recoveracct",
+        [{"action": "business.upsert", "business": "recoveracct", "name": "Recoveracct", "mode": "live"}],
+        "init-recoveracct",
+    )
+
+    request = json.loads(
+        handle_business_request_app_magic_link(
+            {
+                "business": "recoveracct",
+                "email": "recover@example.com",
+                "name": "Recover User",
+                "origin": "https://recoveracct.example.com",
+                "send_email": False,
+            }
+        )
+    )
+    verify = json.loads(
+        handle_business_verify_app_magic_link(
+            {
+                "business": "recoveracct",
+                "token": request["token"],
+            }
+        )
+    )
+    account_before = json.loads(
+        handle_business_read_app_account(
+            {
+                "business": "recoveracct",
+                "session_token": verify["session_token"],
+            }
+        )
+    )
+
+    leaves = store._app_leaves()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as leaf:
+            intent = leaves["payments"].create_checkout_intent(
+                leaf,
+                "recoveracct",
+                plan_key="monthly",
+                client_reference_id="recoveracct-ref",
+                app_user_id=account_before["user"]["id"],
+                customer_email="recover@example.com",
+                status="pending",
+            )
+            leaves["payments"].attach_checkout_session(
+                leaf,
+                intent_id=intent.id,
+                stripe_checkout_session_id="cs_recoveracct",
+                checkout_url="https://stripe.test/cs_recoveracct",
+                status="pending",
+            )
+
+    def fake_stripe_request(path, params, *, method="POST"):
+        assert method == "GET"
+        if path == "checkout/sessions/cs_recoveracct":
+            return {
+                "id": "cs_recoveracct",
+                "object": "checkout.session",
+                "mode": "subscription",
+                "status": "complete",
+                "payment_status": "paid",
+                "currency": "usd",
+                "amount_subtotal": 1900,
+                "amount_total": 1900,
+                "customer": "cus_recoveracct",
+                "subscription": "sub_recoveracct",
+                "customer_details": {"email": "recover@example.com"},
+                "customer_email": "recover@example.com",
+                "client_reference_id": "recoveracct-ref",
+                "metadata": {"checkout_intent_id": intent.id},
+                "created": 1_700_000_123,
+            }
+        if path == "subscriptions/sub_recoveracct":
+            return {
+                "id": "sub_recoveracct",
+                "object": "subscription",
+                "status": "active",
+                "customer": "cus_recoveracct",
+                "current_period_end": 1_700_600_000,
+                "cancel_at_period_end": False,
+            }
+        raise AssertionError(f"unexpected Stripe request: {path}")
+
+    monkeypatch.setattr(stripe_util, "stripe_request", fake_stripe_request)
+
+    account_after = json.loads(
+        handle_business_read_app_account(
+            {
+                "business": "recoveracct",
+                "session_token": verify["session_token"],
+            }
+        )
+    )
+
+    assert account_after["success"] is True
+    assert account_after["user"]["tier"] == "paid"
+    assert account_after["revenue"]["amount_paid_cents"] == 1900
+    assert any(
+        ent["tier"] == "paid"
+        and ent["status"] == "active"
+        and ent["plan_key"] == "monthly"
+        and ent["stripe_subscription_id"] == "sub_recoveracct"
+        for ent in account_after["entitlements"]
+    )
+
+
 def test_test_outreach_local_publish_does_not_require_provider_credentials(tmp_path, monkeypatch):
     monkeypatch.setitem(_API_ENV_ALIASES, "reddit", ("TAKYON_TEST_REDDIT_TOKEN",))
     monkeypatch.delenv("TAKYON_TEST_REDDIT_TOKEN", raising=False)

@@ -373,10 +373,24 @@ def _find_intent_row(conn, event_metadata: dict, session: dict):
     return None
 
 
-def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
-    """Port of core.py:6844 + the net-new owner accrual. Runs inside the caller's transaction
-    (does not open its own); the entitlement grant and custody accrual it delegates to open
-    savepoints under that transaction."""
+def reconcile_checkout_session(
+    conn,
+    session: dict,
+    *,
+    provider_event_id: str | None = None,
+    event_created: int | float | None = None,
+) -> dict:
+    """Reconcile a settled Stripe Checkout Session by the session object itself.
+
+    This is the cross-path idempotent entry used both by webhooks and by recovery flows that can
+    prove a checkout reached Stripe but missed the webhook rail. The unique
+    `app_checkout_sessions.stripe_checkout_session_id` row is the authoritative gate: the first
+    transaction to insert that row owns the downstream side effects (entitlement grant, revenue
+    ledger, owner custody accrual). Any later replay or alternate path updates the stored session
+    facts but skips those side effects, so a late webhook cannot double-record a recovered payment.
+    """
+    if not isinstance(session, dict):
+        raise ValueError("session payload must be an object")
     metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
     intent = _find_intent_row(conn, metadata, session)
     if intent is None:
@@ -397,12 +411,12 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
     session_id = str(session.get("id") or "")
     if not session_id:
         return {"recorded": False, "reason": "missing_session_id"}
-    occurred = _epoch_to_dt(event.get("created"))
+    occurred = _epoch_to_dt(event_created)
     payment_status = session.get("payment_status")
     currency = session.get("currency")
     amount_total = int(session.get("amount_total") or 0)
 
-    conn.execute(
+    inserted = conn.execute(
         "insert into app_checkout_sessions "
         "(business_slug, checkout_intent_id, plan_key, stripe_checkout_session_id, "
         " stripe_customer_id, stripe_payment_intent_id, stripe_subscription_id, "
@@ -411,11 +425,8 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
         " completed_at) "
         "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, "
         " coalesce(%s, now())) "
-        "on conflict (stripe_checkout_session_id) do update set "
-        " payment_status = excluded.payment_status, status = excluded.status, "
-        " stripe_subscription_id = excluded.stripe_subscription_id, "
-        " stripe_invoice_id = excluded.stripe_invoice_id, "
-        " completed_at = excluded.completed_at, updated_at = now()",
+        "on conflict (stripe_checkout_session_id) do nothing "
+        "returning id",
         (
             business,
             intent_id,
@@ -433,20 +444,76 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
             session.get("amount_total"),
             session.get("client_reference_id"),
             customer_email,
-            event.get("id"),
+            provider_event_id,
             _json_dumps(metadata),
             occurred,
         ),
-    )
+    ).fetchone()
+    if inserted is None:
+        conn.execute(
+            "update app_checkout_sessions set "
+            " checkout_intent_id = coalesce(app_checkout_sessions.checkout_intent_id, %s), "
+            " plan_key = coalesce(app_checkout_sessions.plan_key, %s), "
+            " stripe_customer_id = coalesce(%s, app_checkout_sessions.stripe_customer_id), "
+            " stripe_payment_intent_id = coalesce(%s, app_checkout_sessions.stripe_payment_intent_id), "
+            " stripe_subscription_id = coalesce(%s, app_checkout_sessions.stripe_subscription_id), "
+            " stripe_invoice_id = coalesce(%s, app_checkout_sessions.stripe_invoice_id), "
+            " mode = coalesce(%s, app_checkout_sessions.mode), "
+            " payment_status = coalesce(%s, app_checkout_sessions.payment_status), "
+            " status = coalesce(%s, app_checkout_sessions.status), "
+            " currency = coalesce(%s, app_checkout_sessions.currency), "
+            " amount_subtotal_cents = coalesce(%s, app_checkout_sessions.amount_subtotal_cents), "
+            " amount_total_cents = coalesce(%s, app_checkout_sessions.amount_total_cents), "
+            " client_reference_id = coalesce(%s, app_checkout_sessions.client_reference_id), "
+            " customer_email = coalesce(%s, app_checkout_sessions.customer_email), "
+            " raw_event_id = coalesce(app_checkout_sessions.raw_event_id, %s), "
+            " metadata = app_checkout_sessions.metadata || %s::jsonb, "
+            " completed_at = coalesce(%s, app_checkout_sessions.completed_at), "
+            " updated_at = now() "
+            "where stripe_checkout_session_id = %s",
+            (
+                intent_id,
+                plan_key,
+                customer_id,
+                payment_intent_id,
+                subscription_id,
+                invoice_id,
+                session.get("mode"),
+                payment_status,
+                session.get("status"),
+                currency,
+                session.get("amount_subtotal"),
+                session.get("amount_total"),
+                session.get("client_reference_id"),
+                customer_email,
+                provider_event_id,
+                _json_dumps(metadata),
+                occurred,
+                session_id,
+            ),
+        )
     conn.execute(
         "update app_checkout_intents set status = 'completed', "
         "completed_at = coalesce(%s, now()), updated_at = now() where id = %s",
         (occurred, intent_id),
     )
+    if inserted is None:
+        return {
+            "recorded": True,
+            "business_slug": business,
+            "app_user_id": intent_app_user_id,
+            "revenue_recorded": False,
+            "accrued_to_owner": False,
+            "owner_user_id": None,
+            "owner_owed_balance_cents": None,
+            "already_recorded": True,
+        }
 
     app_user_id = None
     if (intent_app_user_id or customer_email) and (subscription_id or payment_status == "paid"):
-        entitlement_metadata = {"raw_event_id": event.get("id")}
+        entitlement_metadata = {}
+        if provider_event_id:
+            entitlement_metadata["raw_event_id"] = provider_event_id
         if intent_app_user_id and customer_email and intent_email and customer_email.lower() != str(intent_email).lower():
             entitlement_metadata["checkout_email_mismatch"] = {
                 "intent_customer_email": intent_email,
@@ -473,7 +540,7 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
     owner_user_id = None
     owed_balance_cents = None
     if currency and payment_status == "paid":
-        inserted = conn.execute(
+        inserted_revenue = conn.execute(
             "insert into app_revenue_events "
             "(business_slug, provider_event_id, stripe_object_type, stripe_object_id, "
             " stripe_checkout_session_id, stripe_customer_id, revenue_type, status, currency, "
@@ -484,7 +551,7 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
             "returning id",
             (
                 business,
-                event.get("id"),
+                provider_event_id,
                 session_id,
                 session_id,
                 customer_id,
@@ -496,19 +563,21 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
                 _json_dumps(metadata),
             ),
         ).fetchone()
-        revenue_recorded = inserted is not None
-        # ADD (flow B): accrue the gross to the OWNER's custody minus the app fee. Keyed
-        # deterministically on the revenue identity, so custody.accrue dedups even if the
-        # revenue row pre-existed from a partial run (belt-and-suspenders with the webhook gate).
+        revenue_recorded = inserted_revenue is not None
         if amount_total > 0:
             owner_user_id = _resolve_owner(conn, business)
             custody.open_custody_account(conn, owner_user_id)
+            custody_key = (
+                f"app_revenue:{business}:{provider_event_id}:{session_id}"
+                if provider_event_id
+                else f"app_revenue_session:{business}:{session_id}"
+            )
             owed_balance_cents = custody.accrue(
                 conn,
                 owner_user_id,
                 business,
                 amount_total,
-                f"app_revenue:{business}:{event.get('id')}:{session_id}",
+                custody_key,
                 stripe_ref=session_id,
             )
             accrued_to_owner = True
@@ -521,7 +590,27 @@ def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
         "accrued_to_owner": accrued_to_owner,
         "owner_user_id": owner_user_id,
         "owner_owed_balance_cents": owed_balance_cents,
+        "already_recorded": False,
     }
+
+
+def reconcile_subscription(conn, subscription: dict) -> dict:
+    """Apply a Stripe subscription object to the canonical entitlement rows."""
+    if not isinstance(subscription, dict):
+        raise ValueError("subscription payload must be an object")
+    return _process_subscription_event(conn, subscription)
+
+
+def _process_checkout_completed(conn, event: dict, session: dict) -> dict:
+    """Port of core.py:6844 + the net-new owner accrual. Runs inside the caller's transaction
+    (does not open its own); the entitlement grant and custody accrual it delegates to open
+    savepoints under that transaction."""
+    return reconcile_checkout_session(
+        conn,
+        session,
+        provider_event_id=str(event.get("id") or "") or None,
+        event_created=event.get("created"),
+    )
 
 
 def _process_subscription_event(conn, subscription: dict) -> dict:

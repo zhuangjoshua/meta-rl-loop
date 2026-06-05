@@ -184,6 +184,8 @@ Before adding a new store, command, prompt rule, metric file, or workflow, check
 
 Do not answer diagnosis with artifact edits. If the operator asks why something happened, whether behavior is correct, or how to improve it, inspect the relevant source of truth and answer. Do not patch a generated business website, outreach file, app copy, or local artifact unless the operator explicitly asks to change that artifact. If the fix is systemic, make the smallest Hermes-native change in the relevant skill, tool, harness metadata, or AGENTS instruction.
 
+When a bug shows up on a specific subuser app, default to fixing the canonical shared AppKit/runtime/publish path that future apps inherit. Do not spend normal diagnosis/fix time polishing or hand-repairing one existing subuser app surface unless the operator explicitly asks for a one-off rescue, validation requires a minimal business-surface adjustment, or the canonical path cannot express the needed fix.
+
 `AGENTS.md` is not a CEO runtime prompt. Do not put business strategy, wake-loop policy, product judgment, outreach policy, or per-business operating instructions here. Runtime behavior belongs in the CEO prompt, Takyon skills, guarded business tools, harness command metadata, cron prompts, and per-business `research/`, `product/`, `distribution/`, and `metrics/` state.
 
 Hardcode only durable rails and safety primitives: business isolation, path containment, idempotency, credential gates, budget caps, audit events, pause/resume/kill controls, conservative cleanup, and the shared Hermes app runtime APIs. Strategy, prioritization, product direction, outreach motion, design, and learning belong in per-business `research/`, `product/`, `distribution/`, and `metrics/` state plus active Takyon skills.
