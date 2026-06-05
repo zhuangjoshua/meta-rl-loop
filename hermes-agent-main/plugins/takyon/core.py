@@ -1235,20 +1235,9 @@ def _humanize_business_slug(slug: str) -> str:
 
 
 def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
-    customer_experience = _surface_customer_experience_shape(surface)
     title = _humanize_business_slug(slug)
-    surface_goal = str(customer_experience.get("surface_goal") or "").strip()
-    conversion_model = str(customer_experience.get("conversion_model") or "").strip()
-    required_tabs = [str(tab).strip() for tab in (customer_experience.get("required_app_tabs") or []) if str(tab).strip()]
-    if not required_tabs:
-        required_tabs = ["Workspace", "Account", "Billing"]
-    hero = surface_goal or f"{title} turns customer intent into a clean monthly workflow."
-    supporting = conversion_model or "Monthly subscription access"
     return {
         "title": title,
-        "hero": hero,
-        "supporting": supporting,
-        "tabs": required_tabs[:5],
     }
 
 
@@ -1262,9 +1251,6 @@ def _write_text_if_missing(path: Path, content: str) -> None:
 def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
     copy = _subuser_app_starter_strings(surface, slug=slug)
     title_literal = json.dumps(copy["title"], ensure_ascii=False)
-    hero_literal = json.dumps(copy["hero"], ensure_ascii=False)
-    supporting_literal = json.dumps(copy["supporting"], ensure_ascii=False)
-    tabs_literal = json.dumps(copy["tabs"], ensure_ascii=False)
     package_name = re.sub(r"[^a-z0-9-]+", "-", str(slug or "workspace").strip().lower()).strip("-") or "workspace"
     return {
         "package.json": json.dumps(
@@ -1295,7 +1281,7 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
             export const metadata = {{
               title: {title_literal},
-              description: {supporting_literal},
+              description: "",
             }};
 
             export default function RootLayout({{ children }}) {{
@@ -1311,13 +1297,13 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         "src/app/globals.css": dedent(
             """
             :root {
-              --starter-bg: #f6f2e8;
-              --starter-panel: rgba(255, 255, 255, 0.92);
-              --starter-border: rgba(25, 23, 19, 0.14);
-              --starter-ink: #191713;
-              --starter-muted: #625b4e;
-              --starter-accent: #0f766e;
-              --starter-accent-strong: #0a5d57;
+              --starter-bg: #f5f5f5;
+              --starter-panel: #ffffff;
+              --starter-border: #d9d9d9;
+              --starter-ink: #111111;
+              --starter-muted: #666666;
+              --starter-accent: #111111;
+              --starter-accent-ink: #ffffff;
             }
 
             * {
@@ -1328,11 +1314,9 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             body {
               margin: 0;
               min-height: 100%;
-              background:
-                radial-gradient(circle at top, rgba(15, 118, 110, 0.12), transparent 38%),
-                linear-gradient(180deg, #faf6ee 0%, #f2ecdf 100%);
+              background: var(--starter-bg);
               color: var(--starter-ink);
-              font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+              font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             }
 
             a {
@@ -1341,257 +1325,146 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             }
 
             button,
-            input {
+            input,
+            textarea {
               font: inherit;
             }
 
-            .starter-shell {
+            .starter-root {
               min-height: 100vh;
-              padding: 32px 20px 56px;
+              padding: 24px 16px 40px;
             }
 
             .starter-frame {
-              max-width: 1120px;
+              max-width: 1040px;
               margin: 0 auto;
               display: grid;
-              gap: 24px;
+              gap: 16px;
             }
 
-            .starter-nav,
-            .starter-panel,
-            .starter-card,
-            .starter-sidebar {
+            .starter-header,
+            .starter-card {
               background: var(--starter-panel);
               border: 1px solid var(--starter-border);
-              border-radius: 28px;
-              box-shadow: 0 18px 60px rgba(34, 29, 22, 0.08);
+              border-radius: 16px;
             }
 
-            .starter-nav {
+            .starter-header {
               display: flex;
-              align-items: center;
               justify-content: space-between;
-              gap: 16px;
-              padding: 18px 22px;
-            }
-
-            .starter-brand {
-              display: flex;
               align-items: center;
               gap: 12px;
-            }
-
-            .starter-brand-mark {
-              width: 42px;
-              height: 42px;
-              display: inline-flex;
-              align-items: center;
-              justify-content: center;
-              border-radius: 14px;
-              background: linear-gradient(135deg, rgba(15, 118, 110, 0.2), rgba(15, 118, 110, 0.05));
-              color: var(--starter-accent-strong);
-              font-weight: 700;
-            }
-
-            .starter-brand-copy {
-              display: grid;
-              gap: 2px;
-            }
-
-            .starter-brand-copy strong {
-              font-size: 0.95rem;
-              letter-spacing: 0.04em;
-              text-transform: uppercase;
-            }
-
-            .starter-brand-copy span,
-            .starter-meta,
-            .starter-muted {
-              color: var(--starter-muted);
-            }
-
-            .starter-links {
-              display: flex;
+              padding: 14px 16px;
               flex-wrap: wrap;
-              gap: 10px;
+            }
+
+            .starter-title {
+              font-size: 1rem;
+              font-weight: 600;
+              letter-spacing: 0.01em;
+            }
+
+            .starter-routes,
+            .starter-actions,
+            .starter-rail-list {
+              display: flex;
+              gap: 8px;
+              flex-wrap: wrap;
+            }
+
+            .starter-route,
+            .starter-pill,
+            .starter-link,
+            .starter-button {
+              border: 1px solid var(--starter-border);
+              border-radius: 999px;
+              padding: 8px 12px;
+              background: #fff;
             }
 
             .starter-link,
-            .starter-chip {
-              display: inline-flex;
-              align-items: center;
-              gap: 8px;
-              border-radius: 999px;
-              border: 1px solid rgba(25, 23, 19, 0.12);
-              padding: 10px 14px;
-              font-size: 0.92rem;
-              background: rgba(255, 255, 255, 0.76);
-            }
-
-            .starter-link-primary,
-            .starter-button {
-              background: var(--starter-accent);
-              border-color: var(--starter-accent);
-              color: #f8fffe;
-            }
-
             .starter-button {
               cursor: pointer;
-              padding: 13px 18px;
-              border-radius: 14px;
-              font-weight: 600;
             }
 
-            .starter-button:disabled {
-              opacity: 0.7;
-              cursor: progress;
-            }
-
-            .starter-hero {
-              display: grid;
-              gap: 20px;
-              padding: 34px;
-            }
-
-            .starter-eyebrow {
-              letter-spacing: 0.18em;
-              text-transform: uppercase;
-              font-size: 0.74rem;
-              color: var(--starter-accent-strong);
-            }
-
-            .starter-hero h1,
-            .starter-app-copy h1 {
-              margin: 0;
-              font-size: clamp(2.5rem, 5vw, 4.7rem);
-              line-height: 0.98;
-              font-weight: 500;
-            }
-
-            .starter-hero p,
-            .starter-app-copy p,
-            .starter-list,
-            .starter-kv dd {
-              margin: 0;
-              color: var(--starter-muted);
-              font-size: 1.04rem;
-              line-height: 1.7;
+            .starter-button-primary {
+              background: var(--starter-accent);
+              border-color: var(--starter-accent);
+              color: var(--starter-accent-ink);
             }
 
             .starter-grid {
               display: grid;
-              gap: 24px;
-              grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.9fr);
+              gap: 16px;
+              grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             }
 
-            .starter-card,
-            .starter-sidebar {
-              padding: 24px;
+            .starter-card {
+              display: grid;
+              gap: 12px;
+              padding: 16px;
             }
 
-            .starter-card h2,
-            .starter-sidebar h2,
-            .starter-card h3 {
-              margin: 0 0 10px;
-              font-size: 1.18rem;
+            .starter-card h2 {
+              margin: 0;
+              font-size: 0.82rem;
+              letter-spacing: 0.12em;
+              text-transform: uppercase;
+              color: var(--starter-muted);
             }
 
+            .starter-stack,
             .starter-form {
               display: grid;
               gap: 12px;
-              margin-top: 16px;
             }
 
-            .starter-input {
+            .starter-field {
+              display: grid;
+              gap: 6px;
+            }
+
+            .starter-field label {
+              font-size: 0.82rem;
+              color: var(--starter-muted);
+            }
+
+            .starter-input,
+            .starter-textarea {
               width: 100%;
-              border-radius: 14px;
-              border: 1px solid rgba(25, 23, 19, 0.16);
-              padding: 14px 16px;
+              border-radius: 12px;
+              border: 1px solid var(--starter-border);
+              padding: 12px 14px;
               background: #fff;
             }
 
-            .starter-note {
-              border-radius: 18px;
-              padding: 14px 16px;
-              background: rgba(15, 118, 110, 0.08);
-              color: var(--starter-ink);
+            .starter-textarea {
+              min-height: 180px;
+              resize: vertical;
+              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             }
 
-            .starter-note.warn {
-              background: rgba(157, 87, 12, 0.1);
-            }
-
-            .starter-list {
-              display: grid;
-              gap: 10px;
-              padding: 0;
-              list-style: none;
-            }
-
-            .starter-kv {
+            .starter-note,
+            .starter-pre {
               margin: 0;
-              display: grid;
-              gap: 12px;
+              border-radius: 12px;
+              border: 1px solid var(--starter-border);
+              background: #fafafa;
+              padding: 12px 14px;
+              overflow: auto;
             }
 
-            .starter-kv div {
-              display: grid;
-              gap: 2px;
-            }
-
-            .starter-kv dt {
-              color: var(--starter-muted);
-              font-size: 0.82rem;
-              text-transform: uppercase;
-              letter-spacing: 0.12em;
-            }
-
-            .starter-app-shell {
-              display: grid;
-              gap: 24px;
-              grid-template-columns: minmax(0, 280px) minmax(0, 1fr);
-            }
-
-            .starter-sidebar {
-              align-self: start;
-            }
-
-            .starter-tablist {
-              display: grid;
-              gap: 10px;
-              margin-top: 18px;
-            }
-
-            .starter-app-main {
-              display: grid;
-              gap: 18px;
-            }
-
-            .starter-app-copy {
-              padding: 30px;
-            }
-
-            .starter-actions {
-              display: flex;
-              flex-wrap: wrap;
-              gap: 12px;
-              margin-top: 12px;
-            }
-
-            .starter-outline {
-              background: transparent;
-              color: var(--starter-ink);
+            .starter-pre {
+              white-space: pre-wrap;
+              word-break: break-word;
+              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+              font-size: 0.84rem;
+              line-height: 1.5;
             }
 
             @media (max-width: 920px) {
-              .starter-grid,
-              .starter-app-shell {
+              .starter-grid {
                 grid-template-columns: 1fr;
-              }
-
-              .starter-nav {
-                align-items: flex-start;
-                flex-direction: column;
               }
             }
             """
@@ -1633,16 +1506,123 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             }});
 
             export const starterTitle = {title_literal};
-            export const starterHero = {hero_literal};
-            export const starterSupporting = {supporting_literal};
-            export const starterTabs = {tabs_literal};
+            export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
+              ? surfaceContext.runtimeFeatures.map((value) => String(value || "").trim()).filter(Boolean)
+              : [];
+            export const starterRoutes = Array.from(
+              new Set([
+                ...(Array.isArray(surfaceContext.customerExperience?.requiredRoutes)
+                  ? surfaceContext.customerExperience.requiredRoutes
+                  : []),
+                ...(Array.isArray(surfaceContext.routes)
+                  ? surfaceContext.routes.map((route) => String((route && route.path) || "").trim())
+                  : []),
+              ].filter(Boolean)),
+            );
 
-            export function authRailIsLive() {{
-              return starterRuntime.isRailCallable("auth");
+            function defaultLocation() {{
+              if (typeof window !== "undefined" && window.location) {{
+                return window.location;
+              }}
+              return {{
+                origin: "http://localhost",
+                href: "http://localhost/",
+                pathname: "/",
+              }};
             }}
 
-            export function checkoutRailIsLive() {{
-              return starterRuntime.isRailCallable("checkout");
+            async function starterJsonRequest(url, init = {{}}) {{
+              const response = await fetch(url, {{
+                credentials: "same-origin",
+                headers: {{
+                  Accept: "application/json",
+                  ...(init.body ? {{ "Content-Type": "application/json" }} : {{}}),
+                  ...(init.headers || {{}}),
+                }},
+                ...init,
+              }});
+              const text = await response.text();
+              let data = {{}};
+              if (text) {{
+                try {{
+                  data = JSON.parse(text);
+                }} catch (_error) {{
+                  data = {{ raw: text }};
+                }}
+              }}
+              if (!response.ok) {{
+                const message = typeof data?.error === "string"
+                  ? data.error
+                  : `Request failed (${{response.status}})`;
+                const error = new Error(message);
+                error.status = response.status;
+                error.data = data;
+                throw error;
+              }}
+              return data;
+            }}
+
+            export function railDeclared(rail) {{
+              return starterFeatures.includes(String(rail || "").trim());
+            }}
+
+            export function railCallable(rail) {{
+              return starterRuntime.isRailCallable(String(rail || "").trim());
+            }}
+
+            export async function starterRequestAuth(payload = {{}}) {{
+              if (railCallable("auth")) {{
+                return starterRuntime.requestAuth(payload);
+              }}
+              return starterJsonRequest(starterRuntime.routeUrl("auth/request"), {{
+                method: "POST",
+                body: JSON.stringify(payload),
+              }});
+            }}
+
+            export async function starterSession() {{
+              if (railCallable("auth")) {{
+                return starterRuntime.session();
+              }}
+              return starterJsonRequest(starterRuntime.routeUrl("session"), {{ method: "GET" }});
+            }}
+
+            export async function starterAccount() {{
+              if (railCallable("account")) {{
+                return starterRuntime.account();
+              }}
+              return starterJsonRequest(starterRuntime.routeUrl("account"), {{ method: "GET" }});
+            }}
+
+            export async function starterCheckout(payload = {{}}) {{
+              const location = defaultLocation();
+              const success_url = payload.success_url || payload.successUrl || `${{location.origin}}/app?checkout=success`;
+              const cancel_url = payload.cancel_url || payload.cancelUrl || `${{location.origin}}/app?checkout=cancel`;
+              if (railCallable("checkout")) {{
+                return starterRuntime.checkout({{
+                  ...payload,
+                  success_url,
+                  cancel_url,
+                }});
+              }}
+              return starterJsonRequest(starterRuntime.routeUrl("checkout"), {{
+                method: "POST",
+                body: JSON.stringify({{
+                  ...payload,
+                  success_url,
+                  cancel_url,
+                }}),
+              }});
+            }}
+
+            export async function starterGenerate(payload = {{}}) {{
+              if (railCallable("generate")) {{
+                return starterRuntime.generate(payload);
+              }}
+              return starterJsonRequest(starterRuntime.routeUrl("generate"), {{
+                method: "POST",
+                body: JSON.stringify(payload),
+              }});
             }}
             """
         ).strip()
@@ -1653,9 +1633,9 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
             import { useState } from "react";
 
-            import { starterRuntime } from "./starter-context.js";
+            import { starterRequestAuth } from "./starter-context.js";
 
-            export default function StarterAuthForm({ title, subtitle, buttonLabel = "Email me a sign-in link" }) {
+            export default function StarterAuthForm({ buttonLabel = "Request link" }) {
               const [email, setEmail] = useState("");
               const [busy, setBusy] = useState(false);
               const [notice, setNotice] = useState("");
@@ -1671,21 +1651,21 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 setNotice("");
                 setLink("");
                 try {
-                  const response = await starterRuntime.requestAuth({
+                  const response = await starterRequestAuth({
                     email: email.trim(),
-                    product_name: title,
+                    product_name: "",
                     send_email: true,
                   });
                   setNotice(
                     response?.email_sent
-                      ? "Check your inbox for your sign-in link."
-                      : "Your sign-in link is ready."
+                      ? "Email sent."
+                      : "Link ready."
                   );
                   if (response?.verify_url) {
                     setLink(String(response.verify_url));
                   }
                 } catch (error) {
-                  setNotice("We couldn't send the sign-in link right now. Please try again.");
+                  setNotice("Request failed.");
                 } finally {
                   setBusy(false);
                 }
@@ -1693,30 +1673,156 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
               return (
                 <section className="starter-card">
-                  <h2>{title}</h2>
-                  <p>{subtitle}</p>
+                  <h2>Sign in</h2>
                   <form className="starter-form" onSubmit={handleSubmit}>
-                    <input
-                      className="starter-input"
-                      type="email"
-                      inputMode="email"
-                      autoComplete="email"
-                      placeholder="name@company.com"
-                      value={email}
-                      onChange={(event) => setEmail(event.target.value)}
-                    />
-                    <button className="starter-button" type="submit" disabled={busy}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-auth-email">Email</label>
+                      <input
+                        id="starter-auth-email"
+                        className="starter-input"
+                        type="email"
+                        inputMode="email"
+                        autoComplete="email"
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                      />
+                    </div>
+                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
                       {busy ? "Sending..." : buttonLabel}
                     </button>
                   </form>
                   {notice ? <p className="starter-note">{notice}</p> : null}
                   {link ? (
                     <div className="starter-actions">
-                      <a className="starter-link starter-link-primary" href={link}>
-                        Continue with your sign-in link
+                      <a className="starter-link" href={link}>
+                        Open link
                       </a>
                     </div>
                   ) : null}
+                </section>
+              );
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/components/StarterCheckoutForm.js": dedent(
+            """
+            "use client";
+
+            import { useState } from "react";
+
+            import { starterCheckout } from "./starter-context.js";
+
+            export default function StarterCheckoutForm() {
+              const [planKey, setPlanKey] = useState("");
+              const [busy, setBusy] = useState(false);
+              const [notice, setNotice] = useState("");
+              const [link, setLink] = useState("");
+
+              async function handleSubmit(event) {
+                event.preventDefault();
+                if (!planKey.trim()) {
+                  setNotice("Enter a plan key.");
+                  return;
+                }
+                setBusy(true);
+                setNotice("");
+                setLink("");
+                try {
+                  const response = await starterCheckout({ plan_key: planKey.trim() });
+                  const checkoutUrl = String(response?.checkout_url || response?.url || "");
+                  if (checkoutUrl) {
+                    setLink(checkoutUrl);
+                    setNotice("Checkout ready.");
+                    if (/^https?:/i.test(checkoutUrl) && typeof window !== "undefined") {
+                      window.location.assign(checkoutUrl);
+                    }
+                  } else {
+                    setNotice("Checkout created.");
+                  }
+                } catch (_error) {
+                  setNotice("Checkout failed.");
+                } finally {
+                  setBusy(false);
+                }
+              }
+
+              return (
+                <section className="starter-card">
+                  <h2>Checkout</h2>
+                  <form className="starter-form" onSubmit={handleSubmit}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-plan-key">Plan key</label>
+                      <input
+                        id="starter-plan-key"
+                        className="starter-input"
+                        value={planKey}
+                        onChange={(event) => setPlanKey(event.target.value)}
+                      />
+                    </div>
+                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
+                      {busy ? "Starting..." : "Start checkout"}
+                    </button>
+                  </form>
+                  {notice ? <p className="starter-note">{notice}</p> : null}
+                  {link ? <pre className="starter-pre">{link}</pre> : null}
+                </section>
+              );
+            }
+            """
+        ).strip()
+        + "\n",
+        "src/components/StarterGenerateForm.js": dedent(
+            """
+            "use client";
+
+            import { useState } from "react";
+
+            import { starterGenerate } from "./starter-context.js";
+
+            const DEFAULT_PAYLOAD = "{\\n  \\"prompt\\": \\"\\"\\n}";
+
+            export default function StarterGenerateForm() {
+              const [payloadText, setPayloadText] = useState(DEFAULT_PAYLOAD);
+              const [busy, setBusy] = useState(false);
+              const [notice, setNotice] = useState("");
+              const [resultText, setResultText] = useState("");
+
+              async function handleSubmit(event) {
+                event.preventDefault();
+                setBusy(true);
+                setNotice("");
+                setResultText("");
+                try {
+                  const payload = JSON.parse(payloadText);
+                  const response = await starterGenerate(payload);
+                  setResultText(JSON.stringify(response, null, 2));
+                } catch (error) {
+                  setNotice(error instanceof Error ? error.message : "Generate failed.");
+                } finally {
+                  setBusy(false);
+                }
+              }
+
+              return (
+                <section className="starter-card">
+                  <h2>Generate</h2>
+                  <form className="starter-form" onSubmit={handleSubmit}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-generate-payload">Payload</label>
+                      <textarea
+                        id="starter-generate-payload"
+                        className="starter-textarea"
+                        value={payloadText}
+                        onChange={(event) => setPayloadText(event.target.value)}
+                      />
+                    </div>
+                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
+                      {busy ? "Running..." : "Run generate"}
+                    </button>
+                  </form>
+                  {notice ? <p className="starter-note">{notice}</p> : null}
+                  {resultText ? <pre className="starter-pre">{resultText}</pre> : null}
                 </section>
               );
             }
@@ -1730,94 +1836,37 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             import Link from "next/link";
 
             import StarterAuthForm from "./StarterAuthForm.js";
-            import {
-              authRailIsLive,
-              starterHero,
-              starterSupporting,
-              starterSurfaceContext,
-              starterTabs,
-              starterTitle,
-            } from "./starter-context.js";
+            import { railDeclared, starterRoutes, starterTitle } from "./starter-context.js";
 
             export default function StarterLanding() {
-              const monthlyLabel = starterSurfaceContext.subscriptionStyle === "monthly" ? "Monthly access" : "Customer access";
-
               return (
-                <main className="starter-shell">
+                <main className="starter-root">
                   <div className="starter-frame">
-                    <nav className="starter-nav">
-                      <div className="starter-brand">
-                        <span className="starter-brand-mark">{starterTitle.slice(0, 1)}</span>
-                        <div className="starter-brand-copy">
-                          <strong>{starterTitle}</strong>
-                          <span>{starterSupporting}</span>
-                        </div>
-                      </div>
-                      <div className="starter-links">
-                        <Link className="starter-link" href="/app">
-                          Open app
-                        </Link>
-                        <a className="starter-link starter-link-primary" href="#pricing">
-                          See pricing
-                        </a>
-                      </div>
-                    </nav>
-
-                    <section className="starter-panel starter-hero">
-                      <span className="starter-eyebrow">{monthlyLabel}</span>
-                      <h1>{starterHero}</h1>
-                      <p>
-                        Start on the public surface, sign in with your email, and continue into the full product
-                        workspace without losing your place.
-                      </p>
-                      <div className="starter-links">
-                        {starterTabs.map((tab) => (
-                          <span className="starter-chip" key={tab}>
-                            {tab}
-                          </span>
+                    <header className="starter-header">
+                      <div className="starter-title">{starterTitle}</div>
+                      <div className="starter-routes">
+                        {starterRoutes.map((route) => (
+                          <Link className="starter-route" key={route} href={route}>
+                            {route}
+                          </Link>
                         ))}
                       </div>
-                    </section>
+                    </header>
 
-                    <div className="starter-grid">
-                      {authRailIsLive() ? (
-                        <StarterAuthForm
-                          title={`Join ${starterTitle}`}
-                          subtitle="Start with your email and we’ll send a secure sign-in link."
-                        />
+                    <section className="starter-grid">
+                      {railDeclared("auth") ? (
+                        <StarterAuthForm />
                       ) : (
                         <section className="starter-card">
-                          <h2>Open the app</h2>
-                          <p>
-                            Open the main app route to continue into the guided product workflow for this business.
-                          </p>
+                          <h2>Routes</h2>
                           <div className="starter-actions">
-                            <Link className="starter-link starter-link-primary" href="/app">
-                              Open workspace
+                            <Link className="starter-link" href="/app">
+                              /app
                             </Link>
                           </div>
                         </section>
                       )}
-
-                      <aside className="starter-sidebar" id="pricing">
-                        <h2>Pricing</h2>
-                        <p>Choose a monthly subscription to keep access active for your team.</p>
-                        <dl className="starter-kv">
-                          <div>
-                            <dt>Access</dt>
-                            <dd>Email sign-in, account continuity, and a dedicated workspace.</dd>
-                          </div>
-                          <div>
-                            <dt>Billing</dt>
-                            <dd>Monthly subscription access.</dd>
-                          </div>
-                          <div>
-                            <dt>Next step</dt>
-                            <dd>Open the workspace and continue where you left off.</dd>
-                          </div>
-                        </dl>
-                      </aside>
-                    </div>
+                    </section>
                   </div>
                 </main>
               );
@@ -1834,16 +1883,18 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
             import StarterAuthForm from "./StarterAuthForm.js";
             import {
-              authRailIsLive,
-              checkoutRailIsLive,
-              starterRuntime,
-              starterSupporting,
-              starterTabs,
+              railDeclared,
+              starterAccount,
+              starterSession,
+              starterRoutes,
               starterTitle,
             } from "./starter-context.js";
+            import StarterCheckoutForm from "./StarterCheckoutForm.js";
+            import StarterGenerateForm from "./StarterGenerateForm.js";
 
             export default function StarterWorkspace() {
               const [account, setAccount] = useState(null);
+              const [session, setSession] = useState(null);
               const [loading, setLoading] = useState(true);
               const [authNeeded, setAuthNeeded] = useState(false);
 
@@ -1851,21 +1902,29 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 let active = true;
 
                 async function loadAccount() {
-                  if (!authRailIsLive()) {
+                  if (!railDeclared("auth") && !railDeclared("account")) {
                     if (!active) return;
                     setAuthNeeded(false);
                     setLoading(false);
                     return;
                   }
                   try {
-                    const payload = await starterRuntime.account();
+                    if (railDeclared("account")) {
+                      const payload = await starterAccount();
+                      if (!active) return;
+                      setAccount(payload);
+                    } else {
+                      const payload = await starterSession();
+                      if (!active) return;
+                      setSession(payload);
+                    }
                     if (!active) return;
-                    setAccount(payload);
                     setAuthNeeded(false);
-                  } catch (error) {
+                  } catch (_error) {
                     if (!active) return;
                     setAuthNeeded(true);
                     setAccount(null);
+                    setSession(null);
                   } finally {
                     if (active) {
                       setLoading(false);
@@ -1879,93 +1938,59 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 };
               }, []);
 
-              const signedInEmail = account?.user?.email || "";
-              const signedInTier = account?.user?.tier || "free";
-              const entitlementCount = Array.isArray(account?.entitlements) ? account.entitlements.length : 0;
+              const payloadText = account
+                ? JSON.stringify(account, null, 2)
+                : session
+                  ? JSON.stringify(session, null, 2)
+                  : "";
 
               return (
-                <main className="starter-shell">
+                <main className="starter-root">
                   <div className="starter-frame">
-                    <nav className="starter-nav">
-                      <div className="starter-brand">
-                        <span className="starter-brand-mark">{starterTitle.slice(0, 1)}</span>
-                        <div className="starter-brand-copy">
-                          <strong>{starterTitle}</strong>
-                          <span>{starterSupporting}</span>
-                        </div>
+                    <header className="starter-header">
+                      <div className="starter-title">{starterTitle}</div>
+                      <div className="starter-routes">
+                        {starterRoutes.map((route) => (
+                          <Link className="starter-route" key={route} href={route}>
+                            {route}
+                          </Link>
+                        ))}
                       </div>
-                      <div className="starter-links">
+                    </header>
+
+                    <section className="starter-card">
+                      <h2>Routes</h2>
+                      <div className="starter-actions">
                         <Link className="starter-link" href="/">
-                          Back home
+                          /
                         </Link>
-                        {checkoutRailIsLive() ? <a className="starter-link" href="/#pricing">Manage subscription</a> : null}
+                        <Link className="starter-link" href="/app">
+                          /app
+                        </Link>
                       </div>
-                    </nav>
+                    </section>
 
-                    <div className="starter-app-shell">
-                      <aside className="starter-sidebar">
-                        <h2>App areas</h2>
-                        <div className="starter-tablist">
-                          {starterTabs.map((tab) => (
-                            <span className="starter-chip" key={tab}>
-                              {tab}
-                            </span>
-                          ))}
-                        </div>
-                      </aside>
+                    <section className="starter-grid">
+                      {loading ? (
+                        <section className="starter-card">
+                          <h2>Status</h2>
+                          <p className="starter-note">loading</p>
+                        </section>
+                      ) : null}
 
-                      <section className="starter-app-main">
-                        <article className="starter-panel starter-app-copy">
-                          <span className="starter-eyebrow">Workspace</span>
-                          <h1>{starterTitle}</h1>
-                          <p>
-                            Continue with your account, pick up where you left off, and move through the main
-                            workflow for this product.
-                          </p>
-                          <div className="starter-actions">
-                            <Link className="starter-link starter-link-primary" href="/">
-                              Review the landing surface
-                            </Link>
-                            {checkoutRailIsLive() ? <a className="starter-link" href="/#pricing">Upgrade path</a> : null}
-                          </div>
-                        </article>
+                      {!loading && authNeeded ? <StarterAuthForm buttonLabel="Request link" /> : null}
 
-                        {loading ? (
-                          <section className="starter-card">
-                            <h2>Checking your session</h2>
-                            <p>We’re loading your account state now.</p>
-                          </section>
-                        ) : null}
+                      {!loading && payloadText ? (
+                        <section className="starter-card">
+                          <h2>Account</h2>
+                          <pre className="starter-pre">{payloadText}</pre>
+                        </section>
+                      ) : null}
 
-                        {!loading && authNeeded ? (
-                          <StarterAuthForm
-                            title={`Sign in to ${starterTitle}`}
-                            subtitle="Use your email to continue into the monthly workspace."
-                            buttonLabel="Send my sign-in link"
-                          />
-                        ) : null}
+                      {!loading && !authNeeded && railDeclared("checkout") ? <StarterCheckoutForm /> : null}
 
-                        {!loading && !authNeeded && account ? (
-                          <section className="starter-card">
-                            <h2>Account</h2>
-                            <dl className="starter-kv">
-                              <div>
-                                <dt>Email</dt>
-                                <dd>{signedInEmail || "Signed in"}</dd>
-                              </div>
-                              <div>
-                                <dt>Tier</dt>
-                                <dd>{signedInTier}</dd>
-                              </div>
-                              <div>
-                                <dt>Entitlements</dt>
-                                <dd>{String(entitlementCount)}</dd>
-                              </div>
-                            </dl>
-                          </section>
-                        ) : null}
-                      </section>
-                    </div>
+                      {!loading && !authNeeded && railDeclared("generate") ? <StarterGenerateForm /> : null}
+                    </section>
                   </div>
                 </main>
               );
@@ -2131,6 +2156,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
+        "- Any starter source already present in `src/` is plumbing only: package/runtime wiring, route shell, and generic rail forms. Replace or restyle that starter structure freely; do not treat its layout, labels, or copy as the product.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Preserve runtime semantics, but redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
     ]
@@ -15944,7 +15970,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 
         max_turns = _clamp_int(
             args.get("max_turns"),
-            default=16 if customer_facing_product_workspace else 12,
+            default=24 if customer_facing_product_workspace else 12,
             minimum=1,
             maximum=40,
         )
@@ -16226,26 +16252,33 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
 
-        return tool_result(
-            {
-                "success": bool(sdk_result.get("success")),
-                "business": business,
-                "workspace": workspace_rel,
-                "source": "claude-agent-sdk",
-                "model": model,
-                "guidance_skills": resolved_guidance_skills,
-                "blocked": bool(sdk_result.get("blocked")),
-                "budget": operator_budget,
-                "operator_budget": operator_budget,
-                "agent_record": agent_record,
-                "surface_refresh": surface_refresh,
-                "worker_attempts": worker_attempts,
-                "local_repair_retries": local_repair_retries,
-                "summary": sdk_result.get("summary") or "",
-                "error": sdk_result.get("error"),
-                "pretend_product_findings": pretend_findings,
-            }
-        )
+        result_payload = {
+            "success": bool(sdk_result.get("success")) and status == "completed",
+            "business": business,
+            "workspace": workspace_rel,
+            "source": "claude-agent-sdk",
+            "model": model,
+            "guidance_skills": resolved_guidance_skills,
+            "blocked": bool(sdk_result.get("blocked")) or status == "blocked",
+            "budget": operator_budget,
+            "operator_budget": operator_budget,
+            "agent_record": agent_record,
+            "surface_refresh": surface_refresh,
+            "worker_attempts": worker_attempts,
+            "local_repair_retries": local_repair_retries,
+            "summary": sdk_result.get("summary") or "",
+            "error": sdk_result.get("error"),
+            "pretend_product_findings": pretend_findings,
+        }
+        if status != "completed":
+            error_text = str(
+                sdk_result.get("error")
+                or (surface_refresh or {}).get("blocker")
+                or _surface_refresh_exact_blocker(surface_refresh or {})
+                or "Claude Agent SDK task failed"
+            ).strip() or "Claude Agent SDK task failed"
+            return tool_error(error_text, **result_payload)
+        return tool_result(result_payload)
     except subprocess.TimeoutExpired as exc:
         try:
             operator_budget = _finalize_operator_task_budget(
@@ -17109,7 +17142,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
-                "max_turns": {"type": "integer", "description": "SDK turn cap, default 16 for product/site work and 12 otherwise"},
+                "max_turns": {"type": "integer", "description": "SDK turn cap, default 24 for product/site work and 12 otherwise"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000 for product/site work and 300000 otherwise"},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},

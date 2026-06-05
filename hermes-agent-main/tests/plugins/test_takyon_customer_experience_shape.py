@@ -93,6 +93,13 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "app" / "globals.css").exists()
     assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
     assert (workspace_root / "src" / "components" / "StarterAuthForm.js").exists()
+    assert (workspace_root / "src" / "components" / "StarterCheckoutForm.js").exists()
+    assert (workspace_root / "src" / "components" / "StarterGenerateForm.js").exists()
+    starter_landing = (workspace_root / "src" / "components" / "StarterLanding.js").read_text()
+    starter_workspace = (workspace_root / "src" / "components" / "StarterWorkspace.js").read_text()
+    assert "See pricing" not in starter_landing
+    assert "Monthly access" not in starter_landing
+    assert "Continue with your account" not in starter_workspace
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

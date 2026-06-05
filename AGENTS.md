@@ -66,6 +66,8 @@ When the operator asks to push or deploy Takyon, keep the rails distinct:
 
 Default deployment rule: if the change is code, tracked config, routing, UI, service units, or any other repo-owned artifact, push it through the outer git repo and the tracked deploy workflow first. Do not treat direct VPS edits, ad hoc `rsync`, hand-written host files, or any other untracked-on-host mutation as the normal deployment path. The narrow exceptions are secrets/env/provider-console state that intentionally lives outside git, plus explicit emergency rollback/hotfix requests from the operator; even then, backport the tracked change into the repo immediately and describe the out-of-band step plainly.
 
+When the operator explicitly asks for the production workflow, a live Hermes/UI-agent path, or an end-to-end browser proof on `app.fourmanifold.com` / `slug.fourmanifold.com`, do not substitute localhost demos, lab homes, manual scaffolds, or local-only publish loops as the main path. Use the tracked production/business workflow first: the real Takyon worker path, the real business refresh/publish rails, the real VPS deploy path for the touched planes, and the visible in-app browser against the live host. If a production rail is blocked, say so plainly before using any fallback, and do not present a local proof as if it satisfied the requested production workflow.
+
 The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now multi-host aware when the corresponding GitHub secrets are configured. It should:
 
 - always build the dashboard bundle and compile Python
@@ -109,6 +111,10 @@ Do not conflate Takyon users with product subusers.
 The shared Hermes app runtime owns backend rails only: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates.
 
 Do not hardcode the final product's look, layout, copy, theme, or information architecture in the runtime. Store that per business with the `business_upsert_app_surface_contract` tool, mirrored at `product/surface.md`, and point it at the business design brief/source path that the CEO and skills should inspect.
+
+Do not leak internal Takyon/runtime ontology into shipped product copy unless the operator explicitly asks for that language. Customer-facing sites and apps should not ship headings or labels such as `What is real`, `What is local`, `shared Takyon runtime`, raw rail names, `browser-local`, or similar internal-explainer phrasing just to satisfy the no-pretend contract. Keep those distinctions in worker guidance, verification, blockers, receipts, and operator-facing diagnostics; express customer-facing limitations in normal product language instead of surfacing framework internals.
+
+**Do not ship, publish, or present a runtime starter shell, fallback shell, scaffold shell, placeholder app, or recovery UI as if it were the product. If the real customer surface is missing, incomplete, or failing build/publish, keep the product blocked and report the exact blocker instead of serving a fallback page on the public slug.**
 
 Backend rails for a product app should be declared once on the surface contract as `runtime_features`, not rediscovered separately in UI code or copied across skills. The canonical registry of known rails lives in `hermes-agent-main/plugins/takyon/core.py` (`PRODUCT_RUNTIME_RAILS`). Claude product-site work should receive the selected rails as injected worker contract guidance, and backend-owning skills should read the same selected rails from `product/surface.md` under `Runtime Rails`. When adding a new rail, extend the registry, then select it through `runtime_features`; do not create a second per-skill rail list.
 
