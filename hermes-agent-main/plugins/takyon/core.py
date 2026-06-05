@@ -4504,6 +4504,58 @@ def _product_public_asset_site_relpath(asset_slug: str, filename: str) -> str:
     return f"_takyon/assets/{safe_slug}/{safe_name}"
 
 
+def _product_public_asset_publish_roots(store: "TakyonStore", business: str) -> list[Path]:
+    slug = _slugify(business)
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(root: Path | None) -> None:
+        if root is None:
+            return
+        resolved = Path(root).expanduser().resolve()
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(resolved)
+
+    add(_product_public_asset_site_root(slug))
+
+    surface: dict[str, Any] = {}
+    try:
+        with store._connect() as conn:
+            loaded_surface = store._app_surface_contract(conn, slug)
+        if isinstance(loaded_surface, dict):
+            surface = loaded_surface
+    except Exception:
+        surface = {}
+
+    publish_receipt_path = str(surface.get("publish_receipt_path") or "").strip()
+    publish_receipt = _read_product_surface_receipt(store._business_root(slug), publish_receipt_path)
+    publish = publish_receipt.get("publish") if isinstance(publish_receipt.get("publish"), dict) else {}
+    publish_mode = str(publish.get("publish_mode") or publish.get("deploy_kind") or "").strip().lower()
+    publish_root_text = str(publish.get("publish_root") or "").strip()
+    if publish_root_text:
+        add(Path(publish_root_text))
+    elif publish_mode == "next_systemd_caddy":
+        try:
+            add(_product_service_publish_root(slug))
+        except Exception:
+            pass
+
+    # Some older live businesses still have their publish receipt mirrored
+    # incompletely. If the product-service root already exists on disk, mirror
+    # assets there too so public probes hit the actually served rail.
+    try:
+        service_root = _product_service_publish_root(slug)
+    except Exception:
+        service_root = None
+    if service_root is not None and service_root.exists():
+        add(service_root)
+
+    return roots
+
+
 def _copy_product_public_asset(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
@@ -4620,11 +4672,12 @@ def _stage_business_public_asset(
     _copy_product_public_asset(source_abs, business_asset_abs)
 
     site_rel = _product_public_asset_site_relpath(staged_slug, filename)
-    site_root = _product_public_asset_site_root(business)
-    site_abs = (site_root / site_rel).resolve()
-    if site_root not in (site_abs, *site_abs.parents):
-        raise TakyonError("public asset target escaped product publish root")
-    _copy_product_public_asset(source_abs, site_abs)
+    publish_roots = _product_public_asset_publish_roots(store, business)
+    for publish_root in publish_roots:
+        site_abs = (publish_root / site_rel).resolve()
+        if publish_root not in (site_abs, *site_abs.parents):
+            raise TakyonError("public asset target escaped product publish root")
+        _copy_product_public_asset(source_abs, site_abs)
 
     public_url = _product_public_asset_url(
         business,
@@ -4644,6 +4697,7 @@ def _stage_business_public_asset(
         "source_path": source_rel,
         "business_asset_path": business_asset_rel,
         "site_asset_path": site_rel,
+        "publish_roots": [str(root) for root in publish_roots],
         "public_url": public_url,
         "mime_type": mime_type,
         "size_bytes": size_bytes,
@@ -5138,10 +5192,10 @@ def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
     return target_root
 
 
-def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, asset_root: Path | None = None) -> tuple[Path | None, str]:
+def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, publish_root: Path | None = None) -> tuple[Path | None, str]:
     caddyfile = _product_service_caddyfile()
     host = urllib.parse.urlparse(publish_target).netloc
-    asset_root = (asset_root or (_product_public_asset_site_root(slug) / "_takyon" / "assets")).resolve()
+    publish_root = (publish_root or _product_public_asset_site_root(slug)).resolve()
     if not host:
         return None, "publish target has no host"
     if not _product_deploy_dry_run():
@@ -5159,7 +5213,7 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, as
         f"{host} {{\n"
         f"    @takyon_public_assets path /_takyon/assets/*\n"
         f"    handle @takyon_public_assets {{\n"
-        f"        root * {asset_root}\n"
+        f"        root * {publish_root}\n"
         "        file_server\n"
         "    }\n"
         f"    @takyon_app_runtime path {_product_runtime_caddy_paths()}\n"
@@ -5321,7 +5375,7 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
         slug=slug,
         publish_target=publish_target,
         port=port,
-        asset_root=service_root / "_takyon" / "assets",
+        publish_root=service_root,
     )
     result["caddyfile"] = str(caddyfile or "")
     if blocker:

@@ -2467,6 +2467,8 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert str(service_root) in service_text
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert "latexflow.fourmanifold.com" in caddyfile
+    assert f"root * {service_root}" in caddyfile
+    assert f"root * {service_root / '_takyon' / 'assets'}" not in caddyfile
     assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /checkout /usage /generate" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
 
@@ -5186,6 +5188,76 @@ def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_publi
     asset_receipt = json.loads(asset_receipt_abs.read_text(encoding="utf-8"))
     assert asset_receipt["status"] == "blocked_public_url_unreachable"
     assert asset_receipt["blocker"] == "dns-miss"
+
+
+def test_stage_business_public_asset_mirrors_into_product_service_publish_root(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
+    publish_target = "https://clipbook.fourmanifold.com/"
+    publish_receipt_rel = "metrics/receipts/product-surface/test.json"
+    service_root = tmp_path / "product-services" / "clipbook"
+    receipt_abs = tmp_path / "businesses" / "clipbook" / publish_receipt_rel
+    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+    receipt_abs.write_text(
+        json.dumps(
+            {
+                "publish": {
+                    "status": "published",
+                    "deploy_kind": "next_systemd_caddy",
+                    "publish_root": str(service_root),
+                    "public_url": publish_target,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _commit(
+        store,
+        "business:clipbook",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "clipbook",
+                "status": "active",
+                "source_path": "product/site",
+                "routes": ["/"],
+                "publish_target": publish_target,
+            },
+            {
+                "action": "app.surface.publish_result",
+                "business": "clipbook",
+                "publish_status": "published",
+                "publish_target": publish_target,
+                "public_url": publish_target,
+                "published_at": "2026-06-05T16:00:00+00:00",
+                "receipt_path": publish_receipt_rel,
+                "publish_source_path": "product/site",
+                "blocker": "",
+            },
+        ],
+        "clipbook-surface-publish-state",
+    )
+    image_rel = "product/static-ads/demo-reddit/banner.png"
+    image_abs = tmp_path / "businesses" / "clipbook" / image_rel
+    image_abs.parent.mkdir(parents=True, exist_ok=True)
+    image_abs.write_bytes(b"fake png bytes")
+
+    staged = takyon_core._stage_business_public_asset(
+        store,
+        "clipbook",
+        source_path=image_rel,
+        asset_slug="demo-reddit-image",
+        verify_public_url=False,
+    )
+
+    shared_asset = tmp_path / "product-sites" / "clipbook" / "_takyon" / "assets" / "demo-reddit-image" / "banner.png"
+    service_asset = service_root / "_takyon" / "assets" / "demo-reddit-image" / "banner.png"
+    assert shared_asset.is_file()
+    assert service_asset.is_file()
+    assert str(service_root) in staged["publish_roots"]
 
 
 def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
