@@ -2395,6 +2395,12 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     site.mkdir(parents=True)
     (site / ".next").mkdir()
     (site / ".next" / "BUILD_ID").write_text("build-1\n", encoding="utf-8")
+    next_bin = site / "node_modules" / "next" / "dist" / "bin"
+    next_bin.mkdir(parents=True)
+    (next_bin / "next").write_text("#!/usr/bin/env node\nconsole.log('next');\n", encoding="utf-8")
+    (next_bin / "next").chmod(0o755)
+    (site / "node_modules" / ".bin").mkdir(parents=True)
+    (site / "node_modules" / ".bin" / "next").symlink_to("../next/dist/bin/next")
     (site / "out").mkdir()
     (site / "out" / "index.html").write_text("<h1>Static export also exists</h1>\n", encoding="utf-8")
     (site / "package.json").write_text(
@@ -2435,6 +2441,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert (service_root / ".next" / "BUILD_ID").read_text(encoding="utf-8").strip() == "build-1"
     assert (service_root / "package.json").is_file()
     assert os.access(service_root / "node_modules" / ".bin" / "next", os.X_OK)
+    assert (service_root / "node_modules" / ".bin" / "next").is_symlink()
     service = tmp_path / "systemd" / "takyon-product-latexflow.service"
     assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
     assert str(service_root) in service.read_text(encoding="utf-8")

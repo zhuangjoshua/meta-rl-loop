@@ -4764,7 +4764,7 @@ def _replace_directory_tree_atomic(
     staged_target = stage_root / target.name
     backup_target = stage_root / f"{target.name}.previous"
     try:
-        shutil.copytree(src, staged_target, ignore=ignore)
+        shutil.copytree(src, staged_target, ignore=ignore, symlinks=True)
         for overlay_source, overlay_rel in overlay_paths:
             source_path = Path(overlay_source).resolve()
             rel_text = _safe_relpath(overlay_rel, field="overlay_relpath").as_posix()
