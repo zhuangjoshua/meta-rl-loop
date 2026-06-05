@@ -126,7 +126,7 @@ RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
 - If a declared shared AppKit rail is present, treat its canonical helper path as callable by default unless that rail is explicitly marked `blocked` or `broken`, or an actual request fails.
-- If a declared runtime feature is explicitly `blocked` or `broken`, keep the customer UI honest without exposing runtime/debug ontology and leave the exact runtime reason to operator-facing state.
+- If a declared runtime feature is explicitly `blocked` or `broken`, keep the customer UI normal without exposing runtime/debug ontology and leave the exact runtime reason to operator-facing state.
 - Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
 - Do not claim undeclared runtime-backed or authority-backed features without first updating the app surface contract.
 """
@@ -296,6 +296,7 @@ DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
+DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout")
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "declared", "blocked", "broken"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "declared", "unknown": "declared"}
@@ -874,6 +875,24 @@ def _canonical_bootstrap_conversion_model(
     if not text or _BOOTSTRAP_FREE_OR_TRIAL_PATTERN.search(text):
         return "monthly subscription"
     return text
+
+
+def _canonical_bootstrap_access_runtime_features(
+    runtime_features: list[str],
+    *,
+    bootstrap_seed: bool,
+    app_shell_required: bool,
+    app_mode: str,
+    subscription_style: str,
+) -> list[str]:
+    if not (bootstrap_seed and app_shell_required):
+        return runtime_features
+    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
+    if normalized_app_mode not in SUBUSER_APP_MODE_CHOICES:
+        return runtime_features
+    if subscription_style != DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+        return runtime_features
+    return list(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
 
 
 def _canonical_bootstrap_surface_notes(
@@ -2697,7 +2716,7 @@ def _subuser_app_starter_pages_js() -> str:
             }
 
             function planSummary(plan = null) {
-              if (!plan) return "Subscription details appear here once a real plan is configured.";
+              if (!plan) return "Membership pricing";
               const amount = formatMoney(plan.priceCents, plan.currency);
               const interval = String(plan.billingInterval || "").trim();
               return interval ? `${amount} / ${interval}` : amount;
@@ -2726,7 +2745,7 @@ def _subuser_app_starter_pages_js() -> str:
                 ? starterSurfaceContext.customerExperience.requiredAppTabs
                 : [];
               if (declared.length) return declared;
-              return ["Workspace", "Progress", "Account"];
+              return ["Membership", "Billing", "Account"];
             }
 
             function featureCards() {
@@ -2754,7 +2773,7 @@ def _subuser_app_starter_pages_js() -> str:
               return [
                 "See the offer and understand what makes the product worth starting.",
                 "Sign in once and preserve subscription intent all the way into the app.",
-                tabs.length ? `Land in a real product shell with room for ${tabs.slice(0, 2).join(" and ")}.` : "Land in a real product shell instead of a blank screen.",
+                tabs.length ? `Continue into a private member area with room for ${tabs.slice(0, 2).join(" and ")}.` : "Continue into a private member area instead of a blank screen.",
               ];
             }
 
@@ -3116,7 +3135,7 @@ def _subuser_app_starter_pages_js() -> str:
                     <div className="starter-wrap">
                       <div className="starter-price-card">
                         <p className="starter-kicker">Pricing</p>
-                        <h2>{plan ? planSummary(plan) : "Connect a real plan before launch."}</h2>
+                        <h2>{plan ? planSummary(plan) : "Membership pricing"}</h2>
                         <p className="starter-price-copy">
                           Show the plan clearly up front so people know exactly what they are joining.
                         </p>
@@ -3151,7 +3170,7 @@ def _subuser_app_starter_pages_js() -> str:
                         </div>
                         <div className="starter-inline-actions">
                           <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            Open /app
+                            Open app
                           </Link>
                           <Link className="starter-link-button starter-link-quiet" href="/app/profile">
                             Open profile
@@ -3171,7 +3190,7 @@ def _subuser_app_starter_pages_js() -> str:
                         </p>
                         <div className="starter-inline-actions">
                           <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            Start in AppKit
+                            Continue to app
                           </Link>
                         </div>
                       </div>
@@ -3209,6 +3228,9 @@ def _subuser_app_starter_pages_js() -> str:
             }
 
             function StarterGeneratePanel({ appState }) {
+              if (!appState?.canGenerate) {
+                return null;
+              }
               const [prompt, setPrompt] = useState("");
               const [responseText, setResponseText] = useState("");
               const [error, setError] = useState("");
@@ -3238,36 +3260,28 @@ def _subuser_app_starter_pages_js() -> str:
                     </div>
                     <StarterStatePill label="Access" state={appState.access.state} />
                   </div>
-                  {appState.canGenerate ? (
-                    <form className="starter-form" onSubmit={handleGenerate}>
-                      <div className="starter-field">
-                        <label htmlFor="starter-prompt">Prompt</label>
-                        <textarea
-                          id="starter-prompt"
-                          className="starter-textarea"
-                          value={prompt}
-                          onChange={(event) => setPrompt(event.target.value)}
-                          placeholder="Describe the first product action this business should support."
-                        />
-                      </div>
-                      <div className="starter-inline-actions">
-                        <button className="starter-button starter-button-primary" type="submit" disabled={pending || !prompt.trim()}>
-                          {pending ? "Working..." : "Continue"}
-                        </button>
-                        <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                          Account
-                        </Link>
-                      </div>
-                      {responseText ? <pre className="starter-response">{responseText}</pre> : null}
-                      {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
-                    </form>
-                  ) : (
-                    <div className="starter-panel">
-                      <p className="starter-card-copy">
-                        This action is not available yet.
-                      </p>
+                  <form className="starter-form" onSubmit={handleGenerate}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-prompt">Prompt</label>
+                      <textarea
+                        id="starter-prompt"
+                        className="starter-textarea"
+                        value={prompt}
+                        onChange={(event) => setPrompt(event.target.value)}
+                        placeholder="Describe the main action you want this experience to handle."
+                      />
                     </div>
-                  )}
+                    <div className="starter-inline-actions">
+                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !prompt.trim()}>
+                        {pending ? "Working..." : "Continue"}
+                      </button>
+                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
+                        Account
+                      </Link>
+                    </div>
+                    {responseText ? <pre className="starter-response">{responseText}</pre> : null}
+                    {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                  </form>
                 </section>
               );
             }
@@ -3294,16 +3308,16 @@ def _subuser_app_starter_pages_js() -> str:
                     <div className="starter-shell-stack">
                       <div className="starter-stat-grid">
                         <article className="starter-card starter-stat-card">
-                          <p className="starter-stat-value">{humanize(appState.viewer.state)}</p>
-                          <span className="starter-stat-label">viewer state</span>
+                          <p className="starter-stat-value">{humanize(appState.subscription?.state || "active")}</p>
+                          <span className="starter-stat-label">membership</span>
                         </article>
                         <article className="starter-card starter-stat-card">
                           <p className="starter-stat-value">{plan ? planSummary(plan) : "No plan"}</p>
                           <span className="starter-stat-label">current plan</span>
                         </article>
                         <article className="starter-card starter-stat-card">
-                          <p className="starter-stat-value">{Number(usage.events || 0)}</p>
-                          <span className="starter-stat-label">usage events</span>
+                          <p className="starter-stat-value">{String(appState.user?.email || "Ready")}</p>
+                          <span className="starter-stat-label">account</span>
                         </article>
                       </div>
                       <StarterGeneratePanel appState={appState} />
@@ -3438,7 +3452,7 @@ def _subuser_app_starter_pages_js() -> str:
                 ).trim() || "Not set yet";
               const bannerTitle = appState.entitled ? "Membership active." : "Membership needs attention.";
               const bannerBody = appState.entitled
-                ? "Your account, billing state, and profile live here. Changes should show up as soon as the runtime confirms them."
+                ? "Your account, billing state, and profile live here. Changes should show up here after they save."
                 : statusState === "past_due"
                   ? "Billing looks interrupted right now. Refresh your membership to restore access."
                   : "Finish subscription to unlock the private app experience.";
@@ -3755,6 +3769,7 @@ def _subuser_app_worker_contract_block(
             "- This surface is app-like and must ship a real `/app` route in source. "
             f"Required routes for this contract are `{', '.join(required_routes or ['/', '/app'])}`."
         )
+        lines.append("- On a first monthly bootstrap, `/app` may stop at sign-in, subscribe, and account access. Do not invent product tabs, generators, or extra in-app workflow until the contract explicitly asks for them.")
         lines.append("- If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
 
     if "auth" in runtime_features:
@@ -3792,6 +3807,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
 
     lines.append("- Do not use localStorage or hardcoded browser state as the source of truth for auth, account, usage, billing, or generated results.")
+    lines.append("- Do not ship customer-facing copy that frames the surface as a stub, demo, placeholder, scaffold, or developer preview. Keep operator/runtime explanations out of customer-facing UI.")
     return "\n".join(lines).strip()
 
 
@@ -3810,6 +3826,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         "- AppKit now seeds canonical starter shells for `/`, `/app`, and `/app/profile`. Reuse those route intentions and access boundaries by default, but redesign their layout, hierarchy, copy, and styling freely when the business calls for it.",
+        "- For a first monthly bootstrap, treat the seeded `/app` route as a polished access shell for sign-in, subscribe, and account management unless the contract explicitly requires more product workflow.",
+        "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
         f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account gating when the seeded shells already cover the route.",
     ]
     return "\n".join(lines).strip()
@@ -5619,6 +5637,27 @@ def _surface_contract_kind(surface: dict[str, Any] | None) -> dict[str, bool]:
     }
 
 
+def _surface_is_bootstrap_access_shell(surface: dict[str, Any] | None) -> bool:
+    if not isinstance(surface, dict) or _surface_allows_landing_only(surface):
+        return False
+    customer_experience = _surface_customer_experience_shape(surface)
+    if customer_experience.get("required_app_tabs"):
+        return False
+    declared_runtime_features = set(_surface_runtime_features(surface))
+    if not declared_runtime_features:
+        return False
+    if not declared_runtime_features.issubset(set(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)):
+        return False
+    if not {"auth", "account", "checkout"}.issubset(declared_runtime_features):
+        return False
+    declared_app_routes = {
+        route
+        for route in _surface_routes(surface)
+        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) and not _is_shared_runtime_route_path(route)
+    }
+    return declared_app_routes.issubset({"/app", "/app/profile"})
+
+
 def _validate_product_surface_contract(
     inventory: dict[str, Any],
     surface: dict[str, Any] | None,
@@ -5655,6 +5694,12 @@ def _validate_product_surface_contract(
 
     integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
     base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
+    if _surface_is_bootstrap_access_shell(surface):
+        if not ({"auth", "session", "account"} & integrations):
+            return False, f"bootstrap access shell must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
+        if "checkout" not in integrations:
+            return False, f"bootstrap access shell must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
+        return True, ""
     session_backed_surface = bool(
         kind["auth"]
         or kind["checkout"]
@@ -10489,11 +10534,19 @@ class TakyonStore:
                 op.get("api_mode") if op.get("api_mode") is not None else existing_shape.get("api_mode"),
                 allowed=SUBUSER_API_MODE_CHOICES,
             )
+            bootstrap_seed = not existing_has_source_files
             runtime_features = _canonical_runtime_features_for_surface_shape(
                 runtime_features,
                 app_mode=app_mode,
                 subscription_style=subscription_style,
                 api_mode=api_mode,
+            )
+            runtime_features = _canonical_bootstrap_access_runtime_features(
+                runtime_features,
+                bootstrap_seed=bootstrap_seed,
+                app_shell_required=bool(app_mode) and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
+                app_mode=app_mode,
+                subscription_style=subscription_style,
             )
             routes = op.get("routes") if op.get("routes") is not None else []
             theme = op.get("theme") if op.get("theme") is not None else (existing.get("theme") or {"source": "business product workspace"})
@@ -10535,7 +10588,6 @@ class TakyonStore:
                 required_app_tabs=op.get("required_app_tabs"),
                 research_sources=op.get("research_sources"),
             )
-            bootstrap_seed = not existing_has_source_files
             customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
             surface_requires_app_shell = _surface_shape_requires_app_shell(
                 app_mode=app_mode,
@@ -10577,7 +10629,7 @@ class TakyonStore:
                 if not existing_monthly_plan:
                     bootstrap_plan_metadata = {
                         "takyon_seed": {
-                            "kind": "monthly_app_shell",
+                            "kind": "monthly_access_shell",
                             "price_status": "unset",
                         }
                     }

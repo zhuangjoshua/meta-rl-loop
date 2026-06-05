@@ -143,6 +143,13 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "Use the rails. Redesign everything else." not in starter_pages
     assert "This shell is already behind the real app gate." not in starter_pages
     assert "Anonymous visitors can see the landing page" not in starter_pages
+    assert "Open /app" not in starter_pages
+    assert "Start in AppKit" not in starter_pages
+    assert "This action is not available yet." not in starter_pages
+    assert "viewer state" not in starter_pages
+    assert "Connect a real plan before launch." not in starter_pages
+    assert "Subscription details appear here once a real plan is configured." not in starter_pages
+    assert "Land in a real product shell" not in starter_pages
     assert "Sign in to view your account." in starter_pages
     assert "Use your email to manage your subscription and profile." in starter_pages
     starter_server = (workspace_root / "src" / "components" / "starter-server.js").read_text()
@@ -188,6 +195,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "starterLoadViewer()" in block
     assert "starterLoadAppState()" in block
     assert "canonical starter shells for `/`, `/app`, and `/app/profile`" in block
+    assert "Keep customer-facing copy free of developer framing." in block
 
 
 def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
@@ -214,6 +222,8 @@ def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
     assert "signed-up/account-holder" in block
     assert "subscribed/unsubscribed" in block
     assert "src/app/app/(product)/" in block
+    assert "first monthly bootstrap" in block
+    assert "Do not ship customer-facing copy" in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

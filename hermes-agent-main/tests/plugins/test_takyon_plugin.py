@@ -1462,6 +1462,7 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert shape["required_routes"] == ["/", "/app"]
     assert shape["required_app_tabs"] == []
     assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
+    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
     assert len(app["plans"]) == 1
     plan = app["plans"][0]
@@ -1478,9 +1479,85 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert plan["source"] == "takyon_starter"
     assert plan["notes"] == ""
     assert plan["metadata"]["takyon_seed"] == {
-        "kind": "monthly_app_shell",
+        "kind": "monthly_access_shell",
         "price_status": "unset",
     }
+
+
+def test_bootstrap_access_shell_surface_passes_without_generate_workflow(tmp_path):
+    site = tmp_path / "product" / "site"
+    app_dir = site / "app"
+    profile_dir = app_dir / "profile"
+    profile_dir.mkdir(parents=True)
+    (site / "index.html").write_text(
+        """
+        <main>
+          <a href="/app">Enter</a>
+          <a href="/app/profile">Profile</a>
+        </main>
+        """,
+        encoding="utf-8",
+    )
+    (app_dir / "index.html").write_text(
+        """
+        <section>
+          <form id="signin">
+            <input name="email" type="email" />
+            <button type="submit">Sign in</button>
+          </form>
+          <form id="subscribe">
+            <input name="plan" value="monthly" />
+            <button type="submit">Subscribe</button>
+          </form>
+        </section>
+        <script>
+          fetch('/api/takyon/apps/coachyard/session');
+          fetch('/api/takyon/apps/coachyard/account');
+          document.getElementById('signin').addEventListener('submit', function (event) {
+            event.preventDefault();
+            fetch('/api/takyon/apps/coachyard/auth/request', { method: 'POST' });
+          });
+          document.getElementById('subscribe').addEventListener('submit', function (event) {
+            event.preventDefault();
+            fetch('/api/takyon/apps/coachyard/checkout', { method: 'POST' });
+          });
+        </script>
+        """,
+        encoding="utf-8",
+    )
+    (profile_dir / "index.html").write_text(
+        """
+        <section>
+          <h1>Membership</h1>
+          <form id="profile">
+            <input name="display_name" type="text" />
+            <button type="submit">Save</button>
+          </form>
+        </section>
+        <script>
+          fetch('/api/takyon/apps/coachyard/profile');
+        </script>
+        """,
+        encoding="utf-8",
+    )
+    surface = {
+        "runtime_features": ["auth", "account", "profile", "checkout"],
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool", "subscription_style": "monthly"},
+            "customer_experience": {
+                "required_routes": ["/", "/app"],
+                "required_app_tabs": [],
+            },
+        },
+        "routes": [{"path": "/"}, {"path": "/app"}, {"path": "/app/profile"}],
+        "notes": "Private coaching membership.",
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is True
+    assert blocker == ""
 
 
 def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):
