@@ -854,7 +854,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     business = summary.get("business") if isinstance(summary.get("business"), dict) else {}
     active_mode = "live"
     goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
-    user_prompt = _business_bootstrap_instruction(slug, goal, active_mode)
+    business_name = str((business or {}).get("name") or "").strip()
+    user_prompt = _business_bootstrap_instruction(
+        slug,
+        goal,
+        active_mode,
+        business_name=business_name,
+    )
     system_prompt = _load_ceo_prompt()
     owner_user_id = _business_owner_user_id(slug)
     payload = job.payload or {}
@@ -1067,11 +1073,6 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         raise
 
 
-
-# ── the drain loop ──────────────────────────────────────────────────────────────────────────────
-
-
-def drain_tick(
 # The kind→handler registry the drain consults. New job kinds register here.
 HANDLERS: dict[str, jobs.Handler] = {
     "ceo_bootstrap": ceo_bootstrap_handler,
@@ -1079,6 +1080,11 @@ HANDLERS: dict[str, jobs.Handler] = {
     "x.publish_outreach": x_publish_outreach_handler,
 }
 
+
+# ── the drain loop ──────────────────────────────────────────────────────────────────────────────
+
+
+def drain_tick(
     conn,
     *,
     worker_id: str,
