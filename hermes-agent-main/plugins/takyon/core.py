@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -5485,7 +5486,9 @@ def _make_static_publish_tree_readable(root: Path) -> None:
             if path.is_dir():
                 path.chmod(0o755)
             elif path.is_file():
-                path.chmod(0o644)
+                mode = path.stat().st_mode
+                has_exec_bit = bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+                path.chmod(0o755 if has_exec_bit else 0o644)
         except OSError:
             continue
 

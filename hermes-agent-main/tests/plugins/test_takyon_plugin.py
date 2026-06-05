@@ -2434,6 +2434,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert result["publish_root"] == str(service_root)
     assert (service_root / ".next" / "BUILD_ID").read_text(encoding="utf-8").strip() == "build-1"
     assert (service_root / "package.json").is_file()
+    assert os.access(service_root / "node_modules" / ".bin" / "next", os.X_OK)
     service = tmp_path / "systemd" / "takyon-product-latexflow.service"
     assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
     assert str(service_root) in service.read_text(encoding="utf-8")
