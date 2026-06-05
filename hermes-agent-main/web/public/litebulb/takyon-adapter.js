@@ -370,6 +370,19 @@
     renderWalletRail();
   }
 
+  function operatorHomeUnavailableNotice(home) {
+    const payload = home && typeof home === "object" ? home : {};
+    const reason = String(payload.reason || (payload.account && payload.account.reason) || "").trim().toLowerCase();
+    if (reason === "auth0_login_required") {
+      return LIVE.businesses.length
+        ? "sign in to refresh businesses."
+        : "sign in to resume businesses.";
+    }
+    return LIVE.businesses.length
+      ? "showing recent list"
+      : "existing businesses are unavailable right now.";
+  }
+
   function dollarFromAccount() {
     const cents = Number((LIVE.operatorAccount && LIVE.operatorAccount.spendable_cents) || 0);
     return Number.isFinite(cents) ? Math.max(0, cents / 100) : 0;
@@ -1442,6 +1455,13 @@
 
   async function refreshOperatorShellData() {
     const res = await fetchJSON("/api/takyon/operator/home");
+    if (res && res.available === false) {
+      LIVE.businessesLoading = false;
+      LIVE.businessesNotice = operatorHomeUnavailableNotice(res);
+      renderLauncherBusinesses();
+      if (document.getElementById("w-wallet")) renderWalletWindow();
+      return;
+    }
     applyOperatorHome(res);
     if (document.getElementById("w-operator")) renderOperatorWindow();
     if (document.getElementById("w-wallet")) renderWalletWindow();
@@ -3222,9 +3242,7 @@
       .then((home) => {
         if (home && home.available === false) {
           LIVE.businessesLoading = false;
-          LIVE.businessesNotice = LIVE.businesses.length
-            ? "showing recent list"
-            : "existing businesses are taking longer than expected.";
+          LIVE.businessesNotice = operatorHomeUnavailableNotice(home);
           renderLauncherBusinesses();
           return;
         }

@@ -166,6 +166,37 @@ def test_request_runtime_database_url_is_cached_per_request(monkeypatch):
     assert seen == ["resolved"]
 
 
+def test_auth0_config_caches_remote_secret_reads(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    calls: list[str] = []
+    secrets = {
+        "AUTH0_CLIENT_SECRET": "client-secret",
+        "AUTH0_SECRET": "cookie-secret",
+    }
+
+    web_server._clear_auth0_config_cache()
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda key: calls.append(str(key)) or secrets[str(key)],
+    )
+
+    first = web_server._auth0_config()
+    second = web_server._auth0_config()
+
+    assert first is not None
+    assert second is not None
+    assert first.client_secret == "client-secret"
+    assert second.secret == "cookie-secret"
+    assert calls == ["AUTH0_CLIENT_SECRET", "AUTH0_SECRET"]
+    web_server._clear_auth0_config_cache()
+
+
 def test_dashboard_embedded_worker_defaults_off(monkeypatch):
     import plugins.takyon.core as core
     import takyon_cli.web_server as web_server
@@ -537,6 +568,43 @@ def test_operator_businesses_endpoint_returns_owned_businesses(tmp_path, monkeyp
     assert body["available"] is True
     assert [item["slug"] for item in body["businesses"]] == ["beta", "alpha"]
     assert body["owned_business_count"] == 2
+
+
+def test_operator_home_public_path_skips_auth0_lookup_without_cookie(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    original_bound_host = getattr(web_server.app.state, "bound_host", None)
+    web_server._clear_auth0_config_cache()
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setattr(web_server.app.state, "bound_host", "127.0.0.1", raising=False)
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: None)
+    monkeypatch.setattr(
+        web_server,
+        "_auth0_config",
+        lambda: (_ for _ in ()).throw(AssertionError("_auth0_config should not run for anonymous operator home")),
+    )
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    try:
+        resp = client.get("/api/takyon/operator/home", headers={"host": "app.example.com"})
+    finally:
+        monkeypatch.setattr(web_server.app.state, "bound_host", original_bound_host, raising=False)
+        web_server._clear_auth0_config_cache()
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "available": False,
+        "businesses": [],
+        "account": {"available": False, "reason": "auth0_login_required"},
+        "reason": "auth0_login_required",
+    }
 
 
 def test_operator_home_endpoint_combines_businesses_and_account(monkeypatch):

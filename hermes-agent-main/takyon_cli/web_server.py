@@ -387,6 +387,9 @@ _AUTH0_NONCE_COOKIE = "takyon_auth0_nonce"
 _AUTH0_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60
 _AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
 _AUTH0_JWKS_CLIENTS: dict[str, Any] = {}
+_AUTH0_CONFIG_CACHE_MISSING = object()
+_AUTH0_CONFIG_CACHE_KEY: tuple[str, ...] | None = None
+_AUTH0_CONFIG_CACHE_VALUE: object = _AUTH0_CONFIG_CACHE_MISSING
 _RUNTIME_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
 _POSTGRES_RUNTIME_ROUTES_MOUNTED = False
 _REQUEST_RUNTIME_DATABASE_URL_ATTR = "_takyon_runtime_database_url"
@@ -489,6 +492,35 @@ def _default_public_base_url() -> str:
     ).rstrip("/")
 
 
+def _auth0_config_cache_key() -> tuple[str, ...]:
+    return (
+        str(os.environ.get("TAKYON_DASHBOARD_AUTH0") or ""),
+        _normalise_auth0_domain(_env_value("AUTH0_DOMAIN")),
+        _env_value("AUTH0_CLIENT_ID"),
+        _default_public_base_url(),
+        str(os.environ.get("TAKYON_SAFEBOX_URL") or ""),
+    )
+
+
+def _clear_auth0_config_cache() -> None:
+    global _AUTH0_CONFIG_CACHE_KEY, _AUTH0_CONFIG_CACHE_VALUE
+    _AUTH0_CONFIG_CACHE_KEY = None
+    _AUTH0_CONFIG_CACHE_VALUE = _AUTH0_CONFIG_CACHE_MISSING
+
+
+def _auth0_locally_enabled() -> bool:
+    force = _env_flag("TAKYON_DASHBOARD_AUTH0")
+    if force is False:
+        return False
+    domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
+    client_id = _env_value("AUTH0_CLIENT_ID")
+    if not domain or not client_id:
+        return False
+    if force is True:
+        return True
+    return bool(_configured_public_host())
+
+
 def _auth0_config() -> Optional[Auth0DashboardConfig]:
     """Return Auth0 settings when configured.
 
@@ -496,8 +528,16 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
     says so. This lets a machine keep using the localhost dashboard even when
     the shared Fourmanifold deployment secrets are present.
     """
+    global _AUTH0_CONFIG_CACHE_KEY, _AUTH0_CONFIG_CACHE_VALUE
+    cache_key = _auth0_config_cache_key()
+    if cache_key == _AUTH0_CONFIG_CACHE_KEY and _AUTH0_CONFIG_CACHE_VALUE is not _AUTH0_CONFIG_CACHE_MISSING:
+        cached = _AUTH0_CONFIG_CACHE_VALUE
+        return cached if isinstance(cached, Auth0DashboardConfig) else None
+
     force = _env_flag("TAKYON_DASHBOARD_AUTH0")
     if force is False:
+        _AUTH0_CONFIG_CACHE_KEY = cache_key
+        _AUTH0_CONFIG_CACHE_VALUE = None
         return None
 
     domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
@@ -519,9 +559,11 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
                 "Auth0 dashboard auth is enabled but missing: "
                 + ", ".join(sorted(missing))
             )
+        _AUTH0_CONFIG_CACHE_KEY = cache_key
+        _AUTH0_CONFIG_CACHE_VALUE = None
         return None
 
-    return Auth0DashboardConfig(
+    cfg = Auth0DashboardConfig(
         domain=domain,
         client_id=client_id,
         client_secret=client_secret,
@@ -538,6 +580,9 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
         ),
         force=force is True,
     )
+    _AUTH0_CONFIG_CACHE_KEY = cache_key
+    _AUTH0_CONFIG_CACHE_VALUE = cfg
+    return cfg
 
 
 def _host_without_port(host_header: str) -> str:
@@ -567,10 +612,10 @@ def _request_host(headers: Any) -> str:
 
 
 def _auth0_required_for_host(headers: Any) -> bool:
-    cfg = _auth0_config()
-    if not cfg:
+    if not _auth0_locally_enabled():
         return False
-    if cfg.force:
+    force = _env_flag("TAKYON_DASHBOARD_AUTH0")
+    if force is True:
         return True
     public_host = _configured_public_host()
     return bool(public_host and _request_host(headers) == public_host)
@@ -705,7 +750,7 @@ def _auth0_public_path(path: str) -> bool:
         return True
     if path == "/api/product-tls/ask":
         return True
-    if path in {"/favicon.ico", "/robots.txt"}:
+    if path in {"/", "/index.html", "/favicon.ico", "/robots.txt"}:
         return True
     return path.startswith((
         "/assets/",
@@ -839,6 +884,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/config/schema",
     "/api/model/info",
     "/api/product-tls/ask",
+    "/api/takyon/operator/home",
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
@@ -992,10 +1038,7 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        try:
-            public_host = _configured_public_host() if _auth0_config() else ""
-        except Auth0ConfigError:
-            public_host = ""
+        public_host = _configured_public_host() if _auth0_locally_enabled() else ""
         if public_host and host_only == public_host:
             return True
         return host_only in _LOOPBACK_HOST_VALUES
@@ -1052,20 +1095,35 @@ async def auth0_middleware(request: Request, call_next):
     """Optional Auth0 gate for the public dashboard host."""
     if _business_slug_from_product_host(_host_without_port(request.headers.get("host", ""))):
         return await call_next(request)
-    try:
-        cfg = _auth0_config()
-    except Auth0ConfigError as exc:
-        return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-    if not cfg or not _auth0_required_for_host(request.headers):
+    if not _auth0_required_for_host(request.headers):
         return await call_next(request)
 
     path = request.url.path
     if _auth0_public_path(path):
         return await call_next(request)
 
+    cookie_header = request.headers.get("cookie", "")
+    has_auth0_session = bool(_cookie_value(cookie_header, _AUTH0_SESSION_COOKIE))
+    if not has_auth0_session:
+        if path == "/api/takyon/operator/home":
+            return await call_next(request)
+        if path.startswith("/api/"):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Auth0 login required"},
+            )
+        return RedirectResponse(_auth0_login_path(request), status_code=302)
+
+    try:
+        cfg = _auth0_config()
+    except Auth0ConfigError as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    if not cfg:
+        return await call_next(request)
+
     session = _session_from_cookie_header(
-        request.headers.get("cookie", ""),
+        cookie_header,
         cfg,
     )
     if session:
@@ -2949,11 +3007,12 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
 async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
+        reason = "auth0_login_required" if _auth0_required_for_host(request.headers) else "operator_principal_unavailable"
         return {
             "available": False,
             "businesses": [],
-            "account": {"available": False, "reason": "operator_principal_unavailable"},
-            "reason": "operator_principal_unavailable",
+            "account": {"available": False, "reason": reason},
+            "reason": reason,
         }
     businesses = _takyon_operator_businesses_payload(principal)
     account = _takyon_operator_account_payload(request, principal)
