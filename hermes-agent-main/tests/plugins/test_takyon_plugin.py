@@ -1462,6 +1462,26 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert shape["required_app_tabs"] == []
     assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
+    assert app["plans"] == [
+        {
+            "plan_key": "monthly",
+            "tier": "paid",
+            "price_cents": 0,
+            "currency": "usd",
+            "billing_interval": "month",
+            "included_ai_budget_microusd": 0,
+            "included_action_quota": 25,
+            "allow_overage": False,
+            "stripe_product_id": None,
+            "stripe_price_id": None,
+            "metadata": {
+                "takyon_seed": {
+                    "kind": "monthly_app_shell",
+                    "price_status": "unset",
+                }
+            },
+        }
+    ]
 
 
 def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):

@@ -289,6 +289,8 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
 SUBUSER_APP_MODE_CHOICES = frozenset({"standard_saas", "ai_tool", "api_product"})
 DEFAULT_SUBUSER_SUBSCRIPTION_STYLE = "monthly"
 SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset({DEFAULT_SUBUSER_SUBSCRIPTION_STYLE})
+DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY = "monthly"
+DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
@@ -1505,6 +1507,10 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
               apiMode: surfaceContext.apiMode,
               routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
             }});
+            export const starterDefaultPlanKey =
+              String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
+                ? "monthly"
+                : "";
 
             export const starterTitle = {title_literal};
             export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
@@ -1712,18 +1718,19 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
 
             import { useState } from "react";
 
-            import { starterCheckout } from "./starter-context.js";
+            import { starterCheckout, starterDefaultPlanKey } from "./starter-context.js";
 
             export default function StarterCheckoutForm() {
-              const [planKey, setPlanKey] = useState("");
+              const [planKey, setPlanKey] = useState(starterDefaultPlanKey);
               const [busy, setBusy] = useState(false);
               const [notice, setNotice] = useState("");
               const [link, setLink] = useState("");
+              const fixedMonthlyPlan = planKey === "monthly";
 
               async function handleSubmit(event) {
                 event.preventDefault();
                 if (!planKey.trim()) {
-                  setNotice("Enter a plan key.");
+                  setNotice("Plan setup is not ready yet.");
                   return;
                 }
                 setBusy(true);
@@ -1752,17 +1759,19 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 <section className="starter-card">
                   <h2>Checkout</h2>
                   <form className="starter-form" onSubmit={handleSubmit}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-plan-key">Plan key</label>
-                      <input
-                        id="starter-plan-key"
-                        className="starter-input"
-                        value={planKey}
-                        onChange={(event) => setPlanKey(event.target.value)}
-                      />
-                    </div>
+                    {!fixedMonthlyPlan ? (
+                      <div className="starter-field">
+                        <label htmlFor="starter-plan-key">Plan key</label>
+                        <input
+                          id="starter-plan-key"
+                          className="starter-input"
+                          value={planKey}
+                          onChange={(event) => setPlanKey(event.target.value)}
+                        />
+                      </div>
+                    ) : null}
                     <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
-                      {busy ? "Starting..." : "Start checkout"}
+                      {busy ? "Starting..." : fixedMonthlyPlan ? "Subscribe" : "Start checkout"}
                     </button>
                   </form>
                   {notice ? <p className="starter-note">{notice}</p> : null}
@@ -8683,6 +8692,78 @@ class TakyonStore:
                 metadata["customer_experience"] = customer_experience_metadata
                 customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
                 routes = [{"path": route} for route in (customer_experience.get("required_routes") or ["/", "/app"])]
+            seeded_bootstrap_monthly_plan = False
+            if bootstrap_seed and surface_requires_app_shell and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+                existing_monthly_plan = self._row_to_dict(
+                    conn.execute(
+                        "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
+                        (slug, DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY),
+                    ).fetchone()
+                )
+                if not existing_monthly_plan:
+                    bootstrap_plan_metadata = {
+                        "takyon_seed": {
+                            "kind": "monthly_app_shell",
+                            "price_status": "unset",
+                        }
+                    }
+                    if _db_backend() == "postgres":
+                        leaves = self._app_leaves()
+                        try:
+                            with self._leaf_conn(conn) as raw:
+                                leaves["entitlements"].upsert_plan_policy(
+                                    raw,
+                                    slug,
+                                    DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
+                                    tier=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
+                                    price_cents=0,
+                                    currency="usd",
+                                    billing_interval="month",
+                                    included_ai_budget_microusd=0,
+                                    included_action_quota=25,
+                                    allow_overage=False,
+                                    source="takyon_starter",
+                                    notes="",
+                                    metadata=bootstrap_plan_metadata,
+                                )
+                        except leaves["entitlements"].EntitlementError as exc:
+                            raise TakyonError(str(exc)) from exc
+                    else:
+                        now = _now()
+                        conn.execute(
+                            """
+                            INSERT INTO app_plan_policies (
+                              id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
+                              included_ai_budget_microusd, included_action_quota, allow_overage,
+                              stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
+                              source, notes, metadata_json, created_at, updated_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(business_slug, plan_key) DO NOTHING
+                            """,
+                            (
+                                uuid.uuid4().hex,
+                                slug,
+                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
+                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
+                                0,
+                                "usd",
+                                "month",
+                                0,
+                                25,
+                                0,
+                                None,
+                                None,
+                                None,
+                                None,
+                                "takyon_starter",
+                                "",
+                                _json_dumps(bootstrap_plan_metadata),
+                                now,
+                                now,
+                            ),
+                        )
+                    seeded_bootstrap_monthly_plan = True
             surface_preview = {
                 "metadata": metadata,
                 "constraints": constraints,
@@ -8777,6 +8858,18 @@ class TakyonStore:
                     "metadata": metadata,
                 },
             )
+            if seeded_bootstrap_monthly_plan:
+                self._record_event(
+                    conn,
+                    scope=f"business:{slug}/app",
+                    business_slug=slug,
+                    event_type="app.plan.upsert",
+                    payload={
+                        "plan_key": DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
+                        "price_cents": 0,
+                        "source": "takyon_starter",
+                    },
+                )
             return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
 
         if action == "app.surface.publish_result":

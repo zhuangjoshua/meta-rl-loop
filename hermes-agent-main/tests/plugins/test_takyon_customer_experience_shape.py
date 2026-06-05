@@ -95,8 +95,13 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "components" / "StarterAuthForm.js").exists()
     assert (workspace_root / "src" / "components" / "StarterCheckoutForm.js").exists()
     assert (workspace_root / "src" / "components" / "StarterGenerateForm.js").exists()
+    starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
+    starter_checkout = (workspace_root / "src" / "components" / "StarterCheckoutForm.js").read_text()
     starter_landing = (workspace_root / "src" / "components" / "StarterLanding.js").read_text()
     starter_workspace = (workspace_root / "src" / "components" / "StarterWorkspace.js").read_text()
+    assert 'export const starterDefaultPlanKey =' in starter_context
+    assert 'useState(starterDefaultPlanKey)' in starter_checkout
+    assert 'fixedMonthlyPlan ? "Subscribe" : "Start checkout"' in starter_checkout
     assert "See pricing" not in starter_landing
     assert "Monthly access" not in starter_landing
     assert "Continue with your account" not in starter_workspace
