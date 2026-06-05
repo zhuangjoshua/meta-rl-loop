@@ -5098,6 +5098,27 @@ def _product_service_name(slug: str) -> str:
     return f"takyon-product-{_slugify(slug)}"
 
 
+def _test_app_checkout_url(*, business: str, intent_id: str, origin: str | None = None) -> str:
+    raw_origin = str(origin or "").strip().rstrip("/")
+    if raw_origin and re.match(r"^https?://", raw_origin, re.IGNORECASE):
+        quoted_business = urllib.parse.quote(_slugify(business), safe="")
+        quoted_intent = urllib.parse.quote(str(intent_id), safe="")
+        return (
+            f"{raw_origin}/api/takyon/apps/{quoted_business}/checkout"
+            f"?checkout_intent_id={quoted_intent}&mode=test"
+        )
+    return f"local://takyon/checkout/{business}/{intent_id}"
+
+
+def _product_service_publish_root(slug: str) -> Path:
+    raw = os.getenv("TAKYON_PRODUCT_SERVICE_ROOT", "").strip()
+    base = Path(raw).expanduser().resolve() if raw else (get_takyon_home() / "product-services").resolve()
+    target = (base / _slugify(slug)).resolve()
+    if base not in (target, *target.parents):
+        raise TakyonError("product service publish root escaped service base")
+    return target
+
+
 def _product_service_systemd_dir() -> Path:
     raw = os.getenv("TAKYON_PRODUCT_SYSTEMD_DIR", "").strip()
     return Path(raw).expanduser().resolve() if raw else Path("/etc/systemd/system")
@@ -5114,6 +5135,20 @@ def _product_deploy_dry_run() -> bool:
 
 def _product_public_probe_enabled() -> bool:
     return str(os.getenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "")).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _product_runtime_caddy_paths() -> str:
+    return " ".join([
+        "/api/*",
+        "/auth/request",
+        "/auth/verify",
+        "/session",
+        "/account",
+        "/profile",
+        "/checkout",
+        "/usage",
+        "/generate",
+    ])
 
 
 def _read_product_package(source_root: Path) -> tuple[dict[str, Any] | None, str]:
@@ -5316,10 +5351,26 @@ def _write_product_service_file(*, slug: str, source_root: Path, port: int, meta
     return service_file, ""
 
 
-def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) -> tuple[Path | None, str]:
+def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
+    target_root = _product_service_publish_root(slug)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+
+    def ignore(_directory: str, names: list[str]) -> set[str]:
+        return {
+            name
+            for name in names
+            if name in {".git", ".cache", "__pycache__"} or name.endswith(".pyc")
+        }
+
+    _replace_directory_tree_atomic(source_root, target_root, ignore=ignore)
+    _make_static_publish_tree_readable(target_root)
+    return target_root
+
+
+def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, asset_root: Path | None = None) -> tuple[Path | None, str]:
     caddyfile = _product_service_caddyfile()
     host = urllib.parse.urlparse(publish_target).netloc
-    asset_root = (_product_public_asset_site_root(slug) / "_takyon" / "assets").resolve()
+    asset_root = (asset_root or (_product_public_asset_site_root(slug) / "_takyon" / "assets")).resolve()
     if not host:
         return None, "publish target has no host"
     if not _product_deploy_dry_run():
@@ -5329,13 +5380,10 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
             return None, "caddy is unavailable; cannot validate product route"
     caddyfile.parent.mkdir(parents=True, exist_ok=True)
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
-    # Reserve the whole /api/* namespace on the product host for the shared
-    # Hermes app runtime. The hostname identifies the business, so the runtime
-    # resolves any rail call (auth/session/account/checkout/usage/generate) to
-    # this host's business regardless of the exact path the generated
-    # front-end used. This removes the recurring "rail not wired" 404 when a
-    # site calls /api/auth/request instead of /api/takyon/apps/<slug>/...; a
-    # static product export never serves real pages under /api/.
+    # Reserve both the /api/* namespace and the bare shared runtime rails on
+    # product hosts. Existing generated apps still call bare paths like
+    # /checkout or /auth/request on same-origin product hosts, while newer
+    # surfaces may choose /api/*.
     block = (
         f"{host} {{\n"
         f"    @takyon_public_assets path /_takyon/assets/*\n"
@@ -5343,7 +5391,7 @@ def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int) ->
         f"        root * {asset_root}\n"
         "        file_server\n"
         "    }\n"
-        "    @takyon_app_runtime path /api/*\n"
+        f"    @takyon_app_runtime path {_product_runtime_caddy_paths()}\n"
         "    handle @takyon_app_runtime {\n"
         "        reverse_proxy 127.0.0.1:9119 {\n"
         "            header_up Host {host}\n"
@@ -5394,7 +5442,7 @@ def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static
     existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
     block = (
         f"{host} {{\n"
-        "    @takyon_app_runtime path /api/*\n"
+        f"    @takyon_app_runtime path {_product_runtime_caddy_paths()}\n"
         "    handle @takyon_app_runtime {\n"
         "        reverse_proxy 127.0.0.1:9119 {\n"
         "            header_up Host {host}\n"
@@ -5485,12 +5533,22 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
     except Exception as exc:
         result["blocker"] = str(exc)
         return result
-    service_file, blocker = _write_product_service_file(slug=slug, source_root=source_root, port=port, metadata=metadata)
+    try:
+        service_root = _stage_product_service_tree(slug=slug, source_root=source_root)
+    except Exception as exc:
+        result["blocker"] = f"failed to stage durable product service tree: {exc}"
+        return result
+    service_file, blocker = _write_product_service_file(slug=slug, source_root=service_root, port=port, metadata=metadata)
     result.update({"port": port, "service_file": str(service_file or "")})
     if blocker:
         result["blocker"] = blocker
         return result
-    caddyfile, blocker = _ensure_product_caddy_route(slug=slug, publish_target=publish_target, port=port)
+    caddyfile, blocker = _ensure_product_caddy_route(
+        slug=slug,
+        publish_target=publish_target,
+        port=port,
+        asset_root=service_root / "_takyon" / "assets",
+    )
     result["caddyfile"] = str(caddyfile or "")
     if blocker:
         result["blocker"] = blocker
@@ -5504,7 +5562,7 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
             "status": "published",
             "public_url": publish_target,
             "published_at": _now(),
-            "publish_root": str(source_root),
+            "publish_root": str(service_root),
             "publish_source_path": str(source_root.name),
             "blocker": "",
         }
@@ -11259,7 +11317,11 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                 params["payment_intent_data[metadata][plan_key]"] = plan_key
                 params["payment_intent_data[metadata][checkout_intent_id]"] = intent_id
             if test_mode:
-                checkout_url = f"local://takyon/checkout/{business}/{intent_id}"
+                checkout_url = _test_app_checkout_url(
+                    business=business,
+                    intent_id=intent_id,
+                    origin=args.get("origin"),
+                )
                 conn.execute(
                     "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = ? WHERE id = ?",
                     (checkout_url, _now(), intent_id),
@@ -11274,6 +11336,8 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     "external_side_effects": "suppressed",
                     "stripe_called": False,
                     "checkout_url": checkout_url,
+                    "success_url": success_url,
+                    "cancel_url": cancel_url,
                     "client_reference_id": client_reference_id,
                     "created_at": now,
                 }) + "\n")

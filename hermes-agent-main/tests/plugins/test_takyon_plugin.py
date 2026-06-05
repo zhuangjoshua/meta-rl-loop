@@ -26,6 +26,7 @@ from plugins.takyon.core import (
     _product_publish_target,
     _scan_for_pretend_product_state,
     _refresh_product_surface_path,
+    _test_app_checkout_url,
     _surface_subuser_app_shape,
     _surface_customer_experience_shape,
     _meta_load_launch_receipt,
@@ -2411,6 +2412,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     monkeypatch.setenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "1")
     monkeypatch.setenv("TAKYON_PRODUCT_SYSTEMD_DIR", str(tmp_path / "systemd"))
     monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
+    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
     monkeypatch.setattr(
         takyon_core,
         "_javascript_package_manager_command",
@@ -2428,11 +2430,16 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert result["deploy_kind"] == "next_systemd_caddy"
     assert result["public_url"] == "https://latexflow.fourmanifold.com/"
     assert result["publish_source_path"] == "product/site"
+    service_root = tmp_path / "product-services" / "latexflow"
+    assert result["publish_root"] == str(service_root)
+    assert (service_root / ".next" / "BUILD_ID").read_text(encoding="utf-8").strip() == "build-1"
+    assert (service_root / "package.json").is_file()
     service = tmp_path / "systemd" / "takyon-product-latexflow.service"
     assert "npm run start -- -H 127.0.0.1 -p" in service.read_text(encoding="utf-8")
+    assert str(service_root) in service.read_text(encoding="utf-8")
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert "latexflow.fourmanifold.com" in caddyfile
-    assert "@takyon_app_runtime path /api/*" in caddyfile
+    assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /checkout /usage /generate" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
 
 
@@ -3026,6 +3033,69 @@ def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch)
     assert checkout["success"] is True
     assert checkout["mode"] == "test"
     assert checkout["checkout_url"].startswith("local://takyon/checkout/checkoutrail/")
+
+
+def test_test_app_checkout_url_prefers_same_origin_http_url():
+    assert _test_app_checkout_url(
+        business="checkoutrailweb",
+        intent_id="abc123",
+        origin="https://checkoutrailweb.example.com",
+    ) == (
+        "https://checkoutrailweb.example.com/api/takyon/apps/checkoutrailweb/checkout"
+        "?checkout_intent_id=abc123&mode=test"
+    )
+    assert _test_app_checkout_url(
+        business="checkoutrailweb",
+        intent_id="abc123",
+        origin="not-a-url",
+    ) == "local://takyon/checkout/checkoutrailweb/abc123"
+
+
+def test_pg_test_mode_checkout_uses_same_origin_receipt_url_when_origin_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:checkoutrailweb",
+        [{"action": "business.upsert", "business": "checkoutrailweb", "name": "Checkoutrailweb", "mode": "test"}],
+        "init-checkoutrailweb",
+    )
+    _commit(
+        store,
+        "business:checkoutrailweb",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "checkoutrailweb",
+                "plan_key": "monthly",
+                "tier": "pro",
+                "price_cents": 1400,
+                "currency": "usd",
+                "billing_interval": "month",
+            }
+        ],
+        "init-checkoutrailweb-plan",
+    )
+
+    checkout = json.loads(
+        handle_business_create_app_checkout(
+            {
+                "business": "checkoutrailweb",
+                "plan_key": "monthly",
+                "customer_email": "tester@example.com",
+                "success_url": "https://checkoutrailweb.example.com/app?checkout=success",
+                "cancel_url": "https://checkoutrailweb.example.com/pricing",
+                "origin": "https://checkoutrailweb.example.com",
+            }
+        )
+    )
+
+    assert checkout["success"] is True
+    assert checkout["mode"] == "test"
+    assert checkout["checkout_url"] == (
+        "https://checkoutrailweb.example.com/api/takyon/apps/checkoutrailweb/checkout"
+        f"?checkout_intent_id={checkout['checkout_intent_id']}&mode=test"
+    )
 
 
 def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
