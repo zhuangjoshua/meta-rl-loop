@@ -5607,7 +5607,8 @@ def _probe_product_public_url(url: str) -> tuple[bool, str]:
     if _product_deploy_dry_run() or not _product_public_probe_enabled():
         return True, ""
     last_error = ""
-    for attempt in range(3):
+    probe_backoff_seconds = (2, 4, 8, 16, 32, 0)
+    for attempt, delay_seconds in enumerate(probe_backoff_seconds):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Takyon product publish verifier"})
             with urllib.request.urlopen(request, timeout=12) as response:
@@ -5617,8 +5618,8 @@ def _probe_product_public_url(url: str) -> tuple[bool, str]:
                 last_error = f"HTTP {status}"
         except Exception as exc:
             last_error = str(exc)
-        if attempt < 2:
-            time.sleep(2)
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
     return False, f"public URL probe failed for {url}: {last_error}"
 
 

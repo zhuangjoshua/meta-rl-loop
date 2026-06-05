@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.error import URLError
 
 from plugins.takyon import core as takyon_core
 
@@ -144,3 +145,35 @@ def test_default_surface_contract_omits_design_brief(tmp_path: Path):
     surface = store._stored_app_surface_contract(_FakeConn(), "plannerly")  # type: ignore[attr-defined]
 
     assert "design_brief_path" not in surface
+
+
+def test_probe_product_public_url_retries_transient_tls_bootstrap(monkeypatch):
+    sleeps: list[int] = []
+    attempts = {"count": 0}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def _fake_urlopen(_request, timeout=0):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise URLError("[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1000)")
+        return _Response()
+
+    monkeypatch.setattr(takyon_core, "_product_deploy_dry_run", lambda: False)
+    monkeypatch.setattr(takyon_core, "_product_public_probe_enabled", lambda: True)
+    monkeypatch.setattr(takyon_core.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(takyon_core.time, "sleep", sleeps.append)
+
+    ok, blocker = takyon_core._probe_product_public_url("https://example.fourmanifold.com/")  # type: ignore[attr-defined]
+
+    assert ok is True
+    assert blocker == ""
+    assert attempts["count"] == 3
+    assert sleeps == [2, 4]
