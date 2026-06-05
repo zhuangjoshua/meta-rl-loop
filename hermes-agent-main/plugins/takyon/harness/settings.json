@@ -29,7 +29,6 @@
   "selfHelp": [
     {"whenAll": ["create", "business"], "command": "create"},
     {"whenAll": ["delete", "business"], "command": "delete"},
-    {"whenAll": ["test", "mode"], "command": "test"},
     {"whenAll": ["work", "focus"], "command": "focus"}
   ],
   "controlCommands": [
@@ -42,7 +41,7 @@
       "requiresBusiness": false,
       "priorityBand": "p1_ceo",
       "palette": "default",
-      "usage": "/create [--test|--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
+      "usage": "/create [--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
       "summary": "Use one shell command: `/create`. By default it creates the business, schedules the CEO, and starts one bootstrap turn.",
       "examples": [
         {
@@ -50,8 +49,8 @@
           "command": "/create latexflow \"Build a SaaS that helps researchers turn LaTeX notes into polished PDF handouts and study packs.\""
         },
         {
-          "label": "Test mode with wakeups",
-          "command": "/create --test --schedule \"every 6h\" latexflow \"Build this business end to end in test mode.\""
+          "label": "Live mode with wakeups",
+          "command": "/create --live --schedule \"every 6h\" latexflow \"Build this business end to end.\""
         },
         {
           "label": "Record only",
@@ -59,7 +58,7 @@
         }
       ],
       "flags": [
-        {"name": "--test", "description": "allow product/website publish; suppress outreach, spend, and money movement"},
+        {"name": "--live", "description": "accepted for compatibility; live is already the default"},
         {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
         {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
         {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
@@ -69,22 +68,6 @@
     {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
     {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
     {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
-    {
-      "name": "test",
-      "description": "Set current business test mode",
-      "requiresBusiness": true,
-      "priorityBand": "p0_control",
-      "palette": "advanced",
-      "usage": "/test on|off|status",
-      "summary": "Test mode is per business: product/website work can publish, outreach and spend stay suppressed.",
-      "examples": [
-        {"label": "Create directly in test mode", "command": "/create --test <name> \"<goal>\""},
-        {"label": "Create, start the CEO, and schedule wakeups in test mode", "command": "/create --test --schedule \"every 6h\" <name> \"<goal>\""},
-        {"label": "Switch the current business later", "command": "/test on"},
-        {"label": "Return the current business to live mode", "command": "/test off"},
-        {"label": "Check mode", "command": "/test status"}
-      ]
-    },
     {
       "name": "focus",
       "description": "Set current business work focus",

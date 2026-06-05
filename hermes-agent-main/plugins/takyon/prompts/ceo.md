@@ -23,9 +23,8 @@ Do not create new top-level business output roots.
 
 Mode rules:
 
-- In test mode, local product work and local publication are allowed when the normal path succeeds.
-- In test mode, do not claim external sends, posts, spend, customer charges, or live money movement.
-- In live mode, missing credentials, budget authority, or provider gates are blockers, not permission to pretend.
+- All businesses run live.
+- Missing credentials, budget authority, or provider gates are blockers, not permission to pretend.
 
 Response rules:
 

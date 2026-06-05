@@ -574,7 +574,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     store = TakyonStore()
     summary = store.read(scope=f"business:{slug}", query="summary")
     business = summary.get("business") if isinstance(summary.get("business"), dict) else {}
-    active_mode = str((business or {}).get("mode") or (job.payload or {}).get("mode") or "live")
+    active_mode = "live"
     goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
     user_prompt = _business_bootstrap_instruction(slug, goal, active_mode)
     system_prompt = _load_ceo_prompt()

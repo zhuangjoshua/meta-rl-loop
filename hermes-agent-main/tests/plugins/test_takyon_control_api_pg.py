@@ -70,10 +70,19 @@ def _creative_credit_event(
     user_id="user-test",
     amount=5000,
     credits=50,
+    purpose="creative_credit_topup",
     pack_id="starter",
     event_id=None,
     payment_status="paid",
 ) -> dict:
+    metadata = {
+        "purpose": purpose,
+        "user_id": user_id,
+        "business_slug": business_slug,
+        "credits": str(credits),
+    }
+    if pack_id:
+        metadata["pack_id"] = pack_id
     return {
         "id": event_id or f"evt_{uuid.uuid4().hex}",
         "type": "checkout.session.completed",
@@ -83,13 +92,7 @@ def _creative_credit_event(
                 "client_reference_id": business_slug,
                 "amount_total": amount,
                 "payment_status": payment_status,
-                "metadata": {
-                    "purpose": "creative_credit_pack",
-                    "user_id": user_id,
-                    "business_slug": business_slug,
-                    "pack_id": pack_id,
-                    "credits": str(credits),
-                },
+                "metadata": metadata,
             }
         },
     }
@@ -236,6 +239,39 @@ def test_payout_connect_creates_account_and_onboarding_link(client, pg_conn, mon
     assert tuple(row) == ("acct_connect_1", "pending")
 
 
+def test_payout_connect_active_account_skips_refresh_lookup(client, pg_conn, monkeypatch):
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub(), "owner@example.com")
+    pg_conn.execute(
+        "update users set stripe_connect_account_id = %s, stripe_connect_status = %s where id = %s",
+        ("acct_live_123", "active", uid),
+    )
+    captured: list[tuple[str, dict, str]] = []
+
+    def _fake_request(path, params, *, method="POST"):
+        captured.append((path, dict(params), method))
+        if path == "accounts/acct_live_123/login_links":
+            return {"url": "https://connect.stripe.com/login/acct_live_123"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        "/v1/me/payouts/connect",
+        headers=_auth(raw),
+        json={
+            "return_url": "https://app.example.com/return",
+            "refresh_url": "https://app.example.com/refresh",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "connect_url": "https://connect.stripe.com/login/acct_live_123",
+        "link_type": "login_link",
+        "stripe_connect_account_id": "acct_live_123",
+        "stripe_connect_status": "active",
+    }
+    assert captured == [("accounts/acct_live_123/login_links", {}, "POST")]
+
+
 def test_businesses_lists_only_owned(client, pg_conn):
     uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
     mine = {_add_business(pg_conn, uid), _add_business(pg_conn, uid)}
@@ -317,6 +353,41 @@ def test_creative_credit_packs_list_configured_catalog(client, pg_conn, monkeypa
                 "amount_cents": 10000,
                 "currency": "usd",
             },
+        ],
+    }
+
+
+def test_creative_credit_packs_list_reads_takyon_home_env_when_process_env_missing(
+    client, pg_conn, monkeypatch
+):
+    import takyon_cli.config as takyon_config
+
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    monkeypatch.delenv("TAKYON_CREATIVE_CREDIT_PACKS_JSON", raising=False)
+    monkeypatch.setattr(
+        takyon_config,
+        "load_env",
+        lambda: {
+            "TAKYON_CREATIVE_CREDIT_PACKS_JSON": json.dumps(
+                [{"id": "starter", "credits": 10, "amount_cents": 2500}]
+            )
+        },
+    )
+
+    resp = client.get(f"/v1/businesses/{slug}/creative-credits/packs", headers=_auth(raw))
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "business_slug": slug,
+        "packs": [
+            {
+                "id": "starter",
+                "name": "starter",
+                "description": "",
+                "credits": 10,
+                "amount_cents": 2500,
+                "currency": "usd",
+            }
         ],
     }
 
@@ -422,10 +493,6 @@ def test_topup_checkout_returns_url_and_tags_user(client, pg_conn, monkeypatch):
 
 def test_creative_credit_checkout_returns_url_and_tags_business(client, pg_conn, monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
-    monkeypatch.setenv(
-        "TAKYON_CREATIVE_CREDIT_PACKS_JSON",
-        json.dumps([{"id": "starter", "credits": 10, "amount_cents": 2500}]),
-    )
     uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
     slug = _add_business(pg_conn, uid)
     captured: dict = {}
@@ -440,7 +507,7 @@ def test_creative_credit_checkout_returns_url_and_tags_business(client, pg_conn,
         f"/v1/businesses/{slug}/creative-credits/checkout",
         headers=_auth(raw),
         json={
-            "pack_id": "starter",
+            "credits": 125,
             "success_url": "https://app.example.com/ok",
             "cancel_url": "https://app.example.com/no",
         },
@@ -450,18 +517,38 @@ def test_creative_credit_checkout_returns_url_and_tags_business(client, pg_conn,
         "checkout_url": "https://checkout.stripe.com/c/cs_credit_1",
         "session_id": "cs_credit_1",
         "business_slug": slug,
-        "pack_id": "starter",
-        "credits": 10,
-        "amount_cents": 2500,
+        "pack_id": None,
+        "credits": 125,
+        "amount_cents": 125,
+        "price_cents_per_credit": 1,
     }
     p = captured["params"]
     assert captured["path"] == "checkout/sessions"
     assert p["client_reference_id"] == slug
-    assert p["metadata[purpose]"] == "creative_credit_pack"
+    assert p["line_items[0][price_data][unit_amount]"] == 125
+    assert p["metadata[purpose]"] == "creative_credit_topup"
     assert p["metadata[business_slug]"] == slug
     assert p["metadata[user_id]"] == uid
-    assert p["metadata[pack_id]"] == "starter"
-    assert p["metadata[credits]"] == 10
+    assert p["metadata[credits]"] == 125
+    assert p["metadata[price_cents_per_credit]"] == 1
+
+
+def test_creative_credit_checkout_rejects_below_stripe_minimum(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+
+    resp = client.post(
+        f"/v1/businesses/{slug}/creative-credits/checkout",
+        headers=_auth(raw),
+        json={
+            "credits": 25,
+            "success_url": "https://app.example.com/ok",
+            "cancel_url": "https://app.example.com/no",
+        },
+    )
+    assert resp.status_code == 400
+    assert "minimum creative credit purchase is 50 credits ($0.50)" in resp.json()["detail"]
 
 
 def test_billing_webhook_blocked_without_secret(client, monkeypatch):
@@ -503,29 +590,50 @@ def test_billing_webhook_credits_user_and_is_idempotent(client, pg_conn, monkeyp
     assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
 
 
-def test_billing_webhook_credits_business_creative_pack_and_is_idempotent(
+def test_billing_webhook_credits_business_creative_topup_and_is_idempotent(
     client, pg_conn, monkeypatch
 ):
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
     uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
     slug = _add_business(pg_conn, uid)
-    event = _creative_credit_event(slug, user_id=uid, credits=25, amount=7500)
+    event = _creative_credit_event(slug, user_id=uid, credits=75, amount=75)
 
     resp = _post_webhook(client, event, "whsec_test_xyz")
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
         "ok": True,
         "business_slug": slug,
-        "credited_credits": 25,
-        "balance_credits": 25,
+        "credited_credits": 75,
+        "balance_credits": 75,
         "reserved_credits": 0,
         "event_id": event["id"],
     }
     balances = business_credits.get_business_credit_balances(pg_conn, slug)
-    assert balances.balance_credits == 25
+    assert balances.balance_credits == 75
 
     resp2 = _post_webhook(client, event, "whsec_test_xyz")
     assert resp2.status_code == 200
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 75
+
+
+def test_billing_webhook_still_accepts_legacy_creative_credit_pack_events(
+    client, pg_conn, monkeypatch
+):
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    event = _creative_credit_event(
+        slug,
+        user_id=uid,
+        credits=25,
+        amount=2500,
+        purpose="creative_credit_pack",
+        pack_id="starter",
+    )
+
+    resp = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["credited_credits"] == 25
     assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 25
 
 

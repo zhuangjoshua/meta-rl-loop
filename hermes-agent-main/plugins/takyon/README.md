@@ -7,7 +7,7 @@ Takyon is a terminal-first CEO operator layer on top of Hermes. It keeps one sta
 ```bash
 takyon shell
 takyon create latexflow "Build a LaTeX workflow product for students"
-takyon create --test --schedule "every 6h" latexflow "Build this business end to end in test mode."
+takyon create --live --schedule "every 6h" latexflow "Build this business end to end."
 takyon read latexflow research/index.md
 takyon show latexflow
 takyon files latexflow
@@ -20,7 +20,7 @@ takyon "for latexflow, improve the pricing strategy and create the next distribu
 In the interactive shell:
 
 ```text
-/create --test --schedule "every 6h" latexflow Build this business end to end in test mode.
+/create --live --schedule "every 6h" latexflow Build this business end to end.
 /wake
 /status
 /files
@@ -175,15 +175,14 @@ Related product mirrors and app-runtime outputs live in `product/`.
 
 The runtime should not hardcode final product design, layout, or copy.
 
-## Test Mode
+## Business Mode
 
 `businesses.mode` in the Postgres control plane is the source of truth.
 
-In test mode:
+Takyon now runs businesses in live mode only.
 
-- local product work and local publication are allowed
-- external sends, posts, ad spend, and money movement stay suppressed
-- suppressed side effects still produce receipts under `metrics/receipts/`
+- missing credentials, provider access, budget authority, or spend gates are blockers
+- provider-backed sends, posts, checkout, and ad actions hard-fail instead of falling back to suppressed test receipts
 
 ## Wakes and Metrics
 

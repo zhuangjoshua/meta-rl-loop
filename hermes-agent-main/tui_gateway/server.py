@@ -2542,7 +2542,7 @@ def _content_display_text(content: Any) -> str:
     return str(content)
 
 
-_TAKYON_CREATE_TEST_MODE_PREFIX = (
+_TAKYON_LEGACY_CREATE_TEST_MODE_PREFIX = (
     "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode."
 )
 _TAKYON_BUDGET_GUARD_PREFIX = (
@@ -2563,8 +2563,8 @@ def _sanitize_user_history_display_text(text: str) -> str:
     changed = True
     while changed:
         changed = False
-        if value.startswith(_TAKYON_CREATE_TEST_MODE_PREFIX + "\n\n"):
-            value = value[len(_TAKYON_CREATE_TEST_MODE_PREFIX + "\n\n") :]
+        if value.startswith(_TAKYON_LEGACY_CREATE_TEST_MODE_PREFIX + "\n\n"):
+            value = value[len(_TAKYON_LEGACY_CREATE_TEST_MODE_PREFIX + "\n\n") :]
             changed = True
             continue
         if value.startswith(_TAKYON_BUDGET_GUARD_PREFIX):
@@ -5710,7 +5710,9 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
         "current": {
             "name": as_text(business.get("name")) or business_slug,
             "goal": as_text(business.get("goal")),
-            "mode": as_text(business.get("mode") or business.get("status") or business.get("state")) or "test",
+            "mode": "live"
+            if as_text(business.get("mode") or business.get("status") or business.get("state")).strip().lower() != "live"
+            else "live",
         },
         "overview": {
             "product": {
@@ -5872,13 +5874,6 @@ def _build_takyon_prompt_text(
 
     current_business = str(session.get("takyon_current_business") or "") or None
     prompt_text = _operator_context_message(text, current_business)
-    if create_in_test_mode:
-        prompt_text = "\n\n".join(
-            [
-                "Operator UI preference: create any new business in test mode unless the operator explicitly asks for live mode.",
-                prompt_text,
-            ]
-        )
     if _takyon_prompt_may_create_business(text):
         try:
             data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
@@ -6996,7 +6991,9 @@ def _takyon_business_overview_payload(
     business_budget = as_dict(current_state.get("business_budget"))
     return {
         "goal": brief_text(business.get("goal")),
-        "mode": brief_text(business.get("mode") or business.get("status") or business.get("state")),
+        "mode": "live"
+        if brief_text(business.get("mode") or business.get("status") or business.get("state")).strip().lower() != "live"
+        else "live",
         "product": {
             "status": brief_text(surface.get("status") or "missing"),
             "source_path": source_path,
@@ -7338,7 +7335,7 @@ def _takyon_detached_shell_target(line: str, current_business: str | None) -> tu
             # through the canonical /create parser before running the business start.
             slug, _raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
                 ["create", *tokens[1:]],
-                usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+                    usage='usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
                 auto_default=True,
             )
         except Exception:
@@ -8221,9 +8218,11 @@ def _(rid, params: dict) -> dict:
             or ""
         ).strip()
         requested_goal = str(params.get("goal") or "").strip()
-        requested_mode = str(params.get("mode") or "test").strip().lower()
-        if requested_mode not in {"test", "live"}:
-            return _err(rid, 4004, "mode must be test or live")
+        requested_mode = str(params.get("mode") or "live").strip().lower()
+        if requested_mode == "test":
+            return _err(rid, 4004, "test mode is disabled; all businesses run live")
+        if requested_mode != "live":
+            return _err(rid, 4004, "mode must be live")
         slug_source = requested_name or requested_goal
         slug = _slugify(str(params.get("slug") or slug_source or "").strip())
         if not slug:
@@ -8232,7 +8231,7 @@ def _(rid, params: dict) -> dict:
         operator_user_id = _takyon_operator_user_id(session) or None
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
-        command_argv = ["create", f"--{requested_mode}"]
+        command_argv = ["create", "--live"]
         if requested_name:
             command_argv.extend(["--name", requested_name])
         command_argv.append(slug)
@@ -8248,11 +8247,7 @@ def _(rid, params: dict) -> dict:
             operator_user_id=operator_user_id,
         )
         bootstrap_job = (result.get("bootstrap_job") or {}) if isinstance(result, dict) else {}
-        active_mode = str(
-            (result.get("mode") if isinstance(result, dict) else "")
-            or requested_mode
-            or "test"
-        )
+        active_mode = "live"
         _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
         session["takyon_pending_business_create"] = True
@@ -8569,7 +8564,7 @@ def _(rid, params: dict) -> dict:
 
                 slug, raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
                     ["create", *tokens[1:]],
-                    usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] [--name "Display name"] <business> [goal]',
+                    usage='usage: /create [--live] [--no-auto] [--schedule "every 6h"] [--name "Display name"] <business> [goal]',
                     auto_default=True,
                 )
                 create_bootstrap_requested = bool(auto_start and not no_auto)

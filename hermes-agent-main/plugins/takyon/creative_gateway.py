@@ -62,6 +62,19 @@ def _require_internal_session(
         )
 
 
+def _meta_campaign_create_payload(plan: dict[str, Any]) -> dict[str, Any]:
+    # Meta now requires an explicit ad-set budget sharing toggle when the
+    # campaign itself is not budget-managed. This launch rail always stages
+    # a non-CBO campaign and assigns budget at the ad set level.
+    return {
+        "name": plan["campaign_name"],
+        "objective": plan["objective"],
+        "status": "PAUSED",
+        "special_ad_categories": "[]",
+        "is_adset_budget_sharing_enabled": False,
+    }
+
+
 def build_creative_gateway_router() -> APIRouter:
     router = APIRouter(prefix="/internal/creative-gateway")
 
@@ -614,12 +627,12 @@ def build_creative_gateway_router() -> APIRouter:
             }, cfg)
             created["creative_id"] = str(creative.get("id") or "").strip()
 
-            campaign = core._meta_graph("POST", f"{acct}/campaigns", {
-                "name": plan["campaign_name"],
-                "objective": plan["objective"],
-                "status": "PAUSED",
-                "special_ad_categories": "[]",
-            }, cfg)
+            campaign = core._meta_graph(
+                "POST",
+                f"{acct}/campaigns",
+                _meta_campaign_create_payload(plan),
+                cfg,
+            )
             created["campaign_id"] = str(campaign.get("id") or "").strip()
 
             adset = core._meta_graph("POST", f"{acct}/adsets", {
@@ -941,6 +954,7 @@ def build_creative_gateway_router() -> APIRouter:
         preview_url = None
         preview_expiry = None
         post_url = None
+        post_creation_mode = ""
         finalized = False
         try:
             campaign_payload = json.loads(json.dumps(plan.get("campaign_payload") or {}))

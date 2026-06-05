@@ -16,6 +16,7 @@ SQLite dashboard runtime.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,7 +45,8 @@ class TopupCheckoutRequest(BaseModel):
 class CreativeCreditCheckoutRequest(BaseModel):
     """Body for POST /v1/businesses/{slug}/creative-credits/checkout."""
 
-    pack_id: str = Field(..., min_length=1)
+    credits: int | None = Field(default=None, gt=0)
+    pack_id: str | None = Field(default=None, min_length=1)
     success_url: str = Field(..., min_length=1)
     cancel_url: str = Field(..., min_length=1)
 
@@ -69,7 +71,7 @@ class OperatorPayoutState:
 
 
 def _stripe_connect_country() -> str:
-    raw = str(os.environ.get("TAKYON_STRIPE_CONNECT_COUNTRY") or "US").strip().upper()
+    raw = str(_env_value("TAKYON_STRIPE_CONNECT_COUNTRY") or "US").strip().upper()
     if len(raw) == 2 and raw.isalpha():
         return raw
     return "US"
@@ -185,57 +187,47 @@ def create_operator_payout_connect_link(
         raise ValueError("return_url is required")
     if not str(refresh_url or "").strip():
         raise ValueError("refresh_url is required")
-    with conn.transaction():
-        row = _read_operator_payout_row(conn, user_id, for_update=True)
-        account_id = None if row[0] is None else str(row[0])
-        cached_status = str(row[1] or "none")
-        payout_currency = str(row[2] or "usd").lower()
-        email = str(row[3] or "").strip() or None
+    row = _read_operator_payout_row(conn, user_id, for_update=False)
+    account_id = None if row[0] is None else str(row[0])
+    cached_status = str(row[1] or "none")
+    payout_currency = str(row[2] or "usd").lower()
+    email = str(row[3] or "").strip() or None
 
-        account_payload: dict[str, Any] | None = None
-        if account_id:
-            account_payload = stripe_util.stripe_request(
-                f"accounts/{account_id}", {}, method="GET"
-            )
-            cached_status, _payouts_enabled, _details_submitted = _classify_connect_status(
-                account_payload
-            )
-            payout_currency = str(
-                account_payload.get("default_currency") or payout_currency or "usd"
-            ).lower()
-            conn.execute(
-                "update users set stripe_connect_status = %s, payout_currency = %s where id = %s",
-                (cached_status, payout_currency, user_id),
-            )
-
-        if not account_id:
-            params = {
-                "type": "express",
-                "country": _stripe_connect_country(),
-                "default_currency": payout_currency or "usd",
-                "capabilities[transfers][requested]": "true",
-                "metadata[takyon_user_id]": user_id,
-                "metadata[purpose]": "operator_payouts",
-            }
-            if email:
-                params["email"] = email
-            account_payload = stripe_util.stripe_request("accounts", params)
-            account_id = str(account_payload.get("id") or "").strip()
+    if not account_id:
+        with conn.transaction():
+            row = _read_operator_payout_row(conn, user_id, for_update=True)
+            account_id = None if row[0] is None else str(row[0])
+            cached_status = str(row[1] or "none")
+            payout_currency = str(row[2] or "usd").lower()
+            email = str(row[3] or "").strip() or None
             if not account_id:
-                raise stripe_util.StripeError("Stripe account creation returned no account id")
-            cached_status, _payouts_enabled, _details_submitted = _classify_connect_status(
-                account_payload
-            )
-            payout_currency = str(
-                account_payload.get("default_currency") or payout_currency or "usd"
-            ).lower()
-            conn.execute(
-                "update users set stripe_connect_account_id = %s, stripe_connect_status = %s, "
-                "payout_currency = %s where id = %s",
-                (account_id, cached_status, payout_currency, user_id),
-            )
+                params = {
+                    "type": "express",
+                    "country": _stripe_connect_country(),
+                    "default_currency": payout_currency or "usd",
+                    "capabilities[transfers][requested]": "true",
+                    "metadata[takyon_user_id]": user_id,
+                    "metadata[purpose]": "operator_payouts",
+                }
+                if email:
+                    params["email"] = email
+                account_payload = stripe_util.stripe_request("accounts", params)
+                account_id = str(account_payload.get("id") or "").strip()
+                if not account_id:
+                    raise stripe_util.StripeError("Stripe account creation returned no account id")
+                cached_status, _payouts_enabled, _details_submitted = _classify_connect_status(
+                    account_payload
+                )
+                payout_currency = str(
+                    account_payload.get("default_currency") or payout_currency or "usd"
+                ).lower()
+                conn.execute(
+                    "update users set stripe_connect_account_id = %s, stripe_connect_status = %s, "
+                    "payout_currency = %s where id = %s",
+                    (account_id, cached_status, payout_currency, user_id),
+                )
 
-    if cached_status == "active":
+    if account_id and cached_status == "active":
         link = stripe_util.stripe_request(f"accounts/{account_id}/login_links", {})
         return {
             "url": link.get("url"),
@@ -294,9 +286,9 @@ def _resolve_principal(
 
 def _positive_int_env(name: str, default: int) -> int:
     """Read a positive-int knob from the environment, falling back to `default` when
-    unset, empty, non-integer, or non-positive. Config (not a secret), so it is read
-    straight from os.environ like the rest of the control plane."""
-    raw = os.environ.get(name)
+    unset, empty, non-integer, or non-positive. Control-plane config may come from
+    the live process env or `TAKYON_HOME/.env`, so read both."""
+    raw = _env_value(name)
     if not raw or not raw.strip():
         return default
     try:
@@ -304,6 +296,25 @@ def _positive_int_env(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _env_value(name: str) -> str:
+    """Read non-secret config from process env first, then `TAKYON_HOME/.env`.
+
+    The dashboard already resolves config from both places, and the creative-credit
+    checkout rail is operator-facing dashboard functionality. Falling back to
+    `load_env()` keeps env-backed dashboard config truthful even when the current
+    Python process was not launched with every non-secret knob exported.
+    """
+    value = os.environ.get(name)
+    if value is not None:
+        return value.strip()
+    try:
+        from takyon_cli.config import load_env
+
+        return str(load_env().get(name) or "").strip()
+    except Exception:
+        return ""
 
 
 def _rate_limit_config() -> tuple[int, int]:
@@ -323,7 +334,7 @@ def _creative_credit_packs() -> list[dict[str, Any]]:
     optional `name` / `description`. Invalid or missing config yields an empty catalog
     rather than crashing the whole boundary.
     """
-    raw = os.environ.get("TAKYON_CREATIVE_CREDIT_PACKS_JSON", "").strip()
+    raw = _env_value("TAKYON_CREATIVE_CREDIT_PACKS_JSON")
     if not raw:
         return []
     try:
@@ -375,42 +386,102 @@ def configured_creative_credit_packs() -> list[dict[str, Any]]:
     return _creative_credit_packs()
 
 
+def _creative_credit_price_cents() -> int:
+    """Price one creative credit in cents. Defaults to 1 cent per credit."""
+    return _positive_int_env("TAKYON_CREATIVE_CREDIT_PRICE_CENTS", 1)
+
+
+def _creative_credit_min_checkout_amount_cents() -> int:
+    """Minimum USD checkout amount for Stripe-hosted creative-credit purchases.
+
+    Stripe's current USD minimum charge is $0.50, so the default is 50 cents.
+    This stays env-overridable in case the account/currency policy changes.
+    """
+    return _positive_int_env("TAKYON_CREATIVE_CREDIT_MIN_CHARGE_CENTS", 50)
+
+
+def _creative_credit_min_checkout_credits() -> int:
+    unit_price = max(1, _creative_credit_price_cents())
+    minimum_amount = max(1, _creative_credit_min_checkout_amount_cents())
+    return (minimum_amount + unit_price - 1) // unit_price
+
+
 def create_creative_credit_checkout_session(
     user_id: str,
     slug: str,
     *,
-    pack_id: str,
+    credits: int | None = None,
+    pack_id: str | None = None,
     success_url: str,
     cancel_url: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create a Stripe Checkout session for one business creative-credit pack."""
-    pack = _creative_credit_pack(pack_id)
-    if pack is None:
-        raise LookupError(f"unknown_credit_pack:{pack_id}")
+    """Create a Stripe Checkout session for business creative-credit topups.
+
+    The canonical path is direct credit topup (`credits`) at 1 cent per credit by
+    default. `pack_id` remains as a compatibility fallback for older callers.
+    """
+    charge: dict[str, Any]
+    if credits is not None:
+        credit_count = int(credits)
+        if credit_count <= 0:
+            raise ValueError("credits must be > 0")
+        minimum_credits = _creative_credit_min_checkout_credits()
+        minimum_amount_cents = _creative_credit_min_checkout_amount_cents()
+        if credit_count < minimum_credits:
+            raise ValueError(
+                "minimum creative credit purchase is "
+                f"{minimum_credits} credits (${minimum_amount_cents / 100:.2f})"
+            )
+        unit_price = _creative_credit_price_cents()
+        amount_cents = credit_count * unit_price
+        charge = {
+            "credits": credit_count,
+            "amount_cents": amount_cents,
+            "currency": "usd",
+            "price_cents_per_credit": unit_price,
+            "purpose": "creative_credit_topup",
+        }
+    else:
+        pack = _creative_credit_pack(str(pack_id or ""))
+        if pack is None:
+            raise LookupError(f"unknown_credit_pack:{pack_id}")
+        charge = {
+            "pack_id": pack["id"],
+            "credits": int(pack["credits"]),
+            "amount_cents": int(pack["amount_cents"]),
+            "currency": str(pack["currency"] or "usd"),
+            "purpose": "creative_credit_pack",
+        }
     params = {
         "mode": "payment",
         "client_reference_id": slug,
         "success_url": success_url,
         "cancel_url": cancel_url,
         "line_items[0][quantity]": 1,
-        "line_items[0][price_data][currency]": pack["currency"],
-        "line_items[0][price_data][unit_amount]": pack["amount_cents"],
+        "line_items[0][price_data][currency]": charge["currency"],
+        "line_items[0][price_data][unit_amount]": charge["amount_cents"],
         "line_items[0][price_data][product_data][name]": (
-            f"Takyon creative credit pack ({pack['credits']} credits)"
+            f"Takyon creative credits ({charge['credits']} credits)"
         ),
-        "metadata[purpose]": "creative_credit_pack",
+        "metadata[purpose]": charge["purpose"],
         "metadata[user_id]": user_id,
         "metadata[business_slug]": slug,
-        "metadata[pack_id]": pack["id"],
-        "metadata[credits]": pack["credits"],
-        "payment_intent_data[metadata][purpose]": "creative_credit_pack",
+        "metadata[credits]": charge["credits"],
+        "payment_intent_data[metadata][purpose]": charge["purpose"],
         "payment_intent_data[metadata][user_id]": user_id,
         "payment_intent_data[metadata][business_slug]": slug,
-        "payment_intent_data[metadata][pack_id]": pack["id"],
-        "payment_intent_data[metadata][credits]": pack["credits"],
+        "payment_intent_data[metadata][credits]": charge["credits"],
     }
+    if charge.get("pack_id"):
+        params["metadata[pack_id]"] = charge["pack_id"]
+        params["payment_intent_data[metadata][pack_id]"] = charge["pack_id"]
+    if charge.get("price_cents_per_credit"):
+        params["metadata[price_cents_per_credit]"] = charge["price_cents_per_credit"]
+        params["payment_intent_data[metadata][price_cents_per_credit]"] = charge[
+            "price_cents_per_credit"
+        ]
     session = stripe_util.stripe_request("checkout/sessions", params)
-    return session, pack
+    return session, charge
 
 
 def _rate_limited_principal(
@@ -575,15 +646,18 @@ def build_control_router() -> APIRouter:
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
         try:
-            session, pack = create_creative_credit_checkout_session(
+            session, charge = create_creative_credit_checkout_session(
                 principal.user_id,
                 slug,
+                credits=body.credits,
                 pack_id=body.pack_id,
                 success_url=body.success_url,
                 cancel_url=body.cancel_url,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail="unknown_credit_pack") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except stripe_util.StripeError as exc:
             msg = str(exc)
             if "STRIPE_SECRET_KEY" in msg:
@@ -595,9 +669,10 @@ def build_control_router() -> APIRouter:
             "checkout_url": session.get("url"),
             "session_id": session.get("id"),
             "business_slug": slug,
-            "pack_id": pack["id"],
-            "credits": pack["credits"],
-            "amount_cents": pack["amount_cents"],
+            "credits": charge["credits"],
+            "amount_cents": charge["amount_cents"],
+            "price_cents_per_credit": charge.get("price_cents_per_credit"),
+            "pack_id": charge.get("pack_id"),
         }
 
     @router.post("/billing/topup/checkout")
@@ -657,7 +732,7 @@ def build_control_router() -> APIRouter:
         if session.get("payment_status") not in ("paid", "no_payment_required"):
             return {"ok": True, "ignored": "unpaid"}
         purpose = str(metadata.get("purpose") or "")
-        if purpose == "creative_credit_pack":
+        if purpose in {"creative_credit_pack", "creative_credit_topup"}:
             business_slug = str(
                 metadata.get("business_slug") or session.get("client_reference_id") or ""
             ).strip()
@@ -666,20 +741,27 @@ def build_control_router() -> APIRouter:
                 credits = int(metadata.get("credits") or 0)
             except (TypeError, ValueError):
                 credits = 0
+            try:
+                price_cents_per_credit = int(metadata.get("price_cents_per_credit") or 0)
+            except (TypeError, ValueError):
+                price_cents_per_credit = 0
             if not business_slug or credits <= 0 or not event_id:
                 return {"ok": True, "ignored": "incomplete_session"}
+            grant_metadata = {
+                "purpose": purpose,
+                "user_id": metadata.get("user_id"),
+                "stripe_checkout_session_id": session.get("id"),
+                "amount_cents": int(session.get("amount_total") or 0),
+                "price_cents_per_credit": price_cents_per_credit,
+            }
+            if pack_id:
+                grant_metadata["pack_id"] = pack_id
             balances = business_credits.grant_credits(
                 conn,
                 business_slug,
                 credits,
                 idempotency_key=event_id,
-                metadata={
-                    "purpose": purpose,
-                    "pack_id": pack_id,
-                    "user_id": metadata.get("user_id"),
-                    "stripe_checkout_session_id": session.get("id"),
-                    "amount_cents": int(session.get("amount_total") or 0),
-                },
+                metadata=grant_metadata,
                 stripe_ref=str(session.get("id") or ""),
             )
             return {

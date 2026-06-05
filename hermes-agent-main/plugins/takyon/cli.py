@@ -379,10 +379,12 @@ def _format_cli_value(value: Any) -> str:
         business = value.get("business") or {}
         if isinstance(business, dict):
             slug = business.get("slug") or business.get("business") or "<unknown>"
-            mode = value.get("mode") or business.get("mode") or "live"
+            raw_mode = value.get("mode") or business.get("mode") or "live"
+            mode = "live" if str(raw_mode).strip().lower() != "live" else "live"
         else:
             slug = str(business or "<unknown>")
-            mode = value.get("mode") or "live"
+            raw_mode = value.get("mode") or "live"
+            mode = "live" if str(raw_mode).strip().lower() != "live" else "live"
         return f"business:{slug} mode -> {mode}"
 
     if "business" in value and "work_focus" in value:
@@ -405,7 +407,8 @@ def _format_cli_value(value: Any) -> str:
             name = item.get("name") or slug
             goal = item.get("goal") or ""
             status = item.get("status") or "active"
-            mode = item.get("mode") or "live"
+            raw_mode = item.get("mode") or "live"
+            mode = "live" if str(raw_mode).strip().lower() != "live" else "live"
             focus = item.get("work_focus") or "all"
             focus_text = f"/{focus}" if focus != "all" else ""
             lines.append(f"  {slug} [{status}/{mode}{focus_text}] {name}{f' - {goal}' if goal else ''}")
@@ -423,7 +426,7 @@ def _format_cli_value(value: Any) -> str:
         if slug and slug != "<business>":
             lines.append(f"Filesystem: {_business_root(str(slug))}")
         if business.get("mode"):
-            lines.append(f"Mode: {business.get('mode')}")
+            lines.append("Mode: live")
         if business.get("work_focus"):
             lines.append(f"Work focus: {business.get('work_focus')}")
         if business.get("goal"):
@@ -497,7 +500,7 @@ def _format_operation_result(item: Any) -> str:
         root = _business_root(business) if business else item.get("path")
         return f"business:{business or item.get('business')} filesystem -> {root}"
     if action == "business.mode.set":
-        return f"business:{business or item.get('business')} mode -> {item.get('mode')}"
+        return f"business:{business or item.get('business')} mode -> live"
     if action == "business.focus.set":
         return f"business:{business or item.get('business')} work focus -> {item.get('work_focus') or 'all'}"
     if action == "business.delete":
@@ -630,7 +633,7 @@ def _parse_business_start_args(
     while index < len(tokens):
         token = tokens[index]
         if token == "--test":
-            mode = "test"
+            raise SystemExit("test mode is disabled; remove --test. All businesses run live.")
         elif token == "--live":
             mode = "live"
         elif token == "--auto":
@@ -893,6 +896,7 @@ def _operator_budget_finalize(
 
 def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
+    effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
     lines = [
         f"Bootstrap business:{slug} now.",
         "",
@@ -900,7 +904,7 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "a checklist for the operator, or 'want me to start?'. Use Takyon skills and concrete business_* tools now.",
         "",
         f"Business goal: {goal_text}",
-        f"Mode: {active_mode or 'live'}",
+        f"Mode: {effective_mode}",
         "",
         "On a true fresh create, assume metrics and most business workspaces may be empty.",
         "If relevant durable assets already exist, advance them instead of recreating them.",
@@ -913,26 +917,16 @@ def _business_bootstrap_instruction(slug: str, goal: str, active_mode: str) -> s
         "Do only enough research to keep strategy, product, and X claims truthful.",
         "For channel-native public execution, prefer takyon-x for X; keep broader non-X discussion-thread execution in takyon-distribution.",
         "Keep work business-scoped and truthful.",
-        "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider.",
+        "If something is blocked, record the blocker and continue with other real business work that does not require that provider.",
         "If the chosen artifact has a first-class business tool, use that tool or report the exact missing gate; do not replace websites, outreach publication, checkout, deploys, or provider-backed work with Markdown summaries.",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable instead of inventing demo localStorage, hardcoded users, fake checkout, fake billing, or customer-visible debug banners.",
         "For the first app surface, seed the minimal honest monthly app shell only: `product/site`, required routes `/` and `/app`, no free tier/trial copy, and no speculative extra routes or tabs unless the operator explicitly asked for them.",
+        "Missing credentials, budget authority, or provider gates are blockers; hard-fail provider-backed work instead of creating suppressed/test receipts.",
         "",
         "Final response: concise status only. Include business filesystem root, research/strategy updated,",
         "files changed, jobs/wakeups, the next CEO action, and what is still blocked or missing.",
     ]
-    if active_mode == "test":
-        lines.extend([
-            "",
-            "Test mode rules: product and website build/publication/deploy are allowed when they are the business-owned",
-            "product surface and the normal path, budget, credential, and receipt/job gates pass. Product deploy is Vercel-gated.",
-            "Do not send outreach, post to social/forums, buy ads, charge customers, or send marketing emails externally.",
-            "For the X move, call business_publish_outreach. If provider posting is unavailable, use local suppressed/mock publication",
-            "with the intended destination when known. Successful test-mode publication must create distribution/local-published/",
-            "and conversation mirrors; the tool writes",
-            "metrics/receipts/outreach/ as hidden audit/debug state, not as deliverables. Otherwise record the exact blocker.",
-        ])
     return "\n".join(lines)
 
 
@@ -2176,11 +2170,11 @@ def _handle_shell_line(
 
     if command in {"create", "build", "init"}:
         if len(tokens) < 2:
-            raise SystemExit('usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
+            raise SystemExit('usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
         command_argv = ["create", *tokens[1:]]
         slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -2788,15 +2782,17 @@ def run_takyon_command(
         if mode_arg in {"status", "show"}:
             data = store.read(scope=_scope_for_business(slug), query="summary")
             business = data.get("business") or {}
-            return {"success": True, "business": business, "mode": business.get("mode") or "live"}
-        mode = "test" if mode_arg in {"on", "test"} else "live" if mode_arg in {"off", "live"} else ""
+            return {"success": True, "business": business, "mode": "live"}
+        if mode_arg in {"on", "test"}:
+            raise SystemExit("test mode is disabled; all businesses run live.")
+        mode = "live" if mode_arg in {"off", "live"} else ""
         if not mode:
             raise SystemExit("usage: takyon test <business> on|off|status")
         return store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "business.mode.set", "business": slug, "mode": mode}],
             idempotency_key=_idempotency_key("operator-test-mode", slug, mode),
-            reason="operator set business test mode",
+            reason="operator normalized business mode to live",
             actor="operator",
         )
 
@@ -2819,7 +2815,7 @@ def run_takyon_command(
         )
 
     if command == "auto":
-        raise SystemExit('takyon auto was folded into creation. Use: takyon create [--test] [--schedule "every 6h"] <business> <goal>')
+        raise SystemExit('takyon auto was folded into creation. Use: takyon create [--live] [--schedule "every 6h"] <business> <goal>')
 
     if command in {"files", "workspace"}:
         if len(argv) < 2:
@@ -2958,7 +2954,7 @@ def run_takyon_command(
         auto_default = command in {"create", "build"}
         slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--test|--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         config = _read_model_config(store)
@@ -2979,7 +2975,7 @@ def run_takyon_command(
         business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
         if str(business_record.get("slug") or "").strip() != slug:
             raise RuntimeError(f"business creation did not persist for {slug}")
-        active_mode = str(business_record.get("mode") or mode or "live")
+        active_mode = "live"
         if auto_start:
             bootstrap_job = _enqueue_pg_ceo_bootstrap(
                 store,

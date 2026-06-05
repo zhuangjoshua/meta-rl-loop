@@ -422,7 +422,7 @@ atexit.register(_close_postgres_pools)
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
-_BUSINESS_MODES = {"live", "test"}
+_BUSINESS_MODES = {"live"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
 _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
 _RESERVED_PUBLIC_SUBDOMAINS = frozenset(
@@ -435,7 +435,7 @@ _RESERVED_PUBLIC_SUBDOMAINS = frozenset(
     }
 )
 _DEFAULT_PRODUCT_PUBLISH_POLICY = "publish_after_refresh"
-_DEFAULT_PRODUCT_MODE_BEHAVIOR = "test_mode_publishes_product_surface"
+_DEFAULT_PRODUCT_MODE_BEHAVIOR = "live_only_hard_fail_missing_gates"
 _DEFAULT_PRODUCT_DONE_GATE = "business_refresh_product_surface:published_or_exact_blocker"
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
 _PRODUCT_SERVICE_PORT_MIN = 9200
@@ -525,6 +525,24 @@ _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
 
 class TakyonError(RuntimeError):
     pass
+
+
+def _effective_business_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return "live" if mode != "live" else mode
+
+
+def _requested_business_mode(value: Any, *, allow_empty: bool = False) -> str:
+    mode = str(value or "").strip().lower()
+    if not mode:
+        return "" if allow_empty else "live"
+    if mode == "test":
+        raise TakyonError(
+            "test mode is disabled; all businesses run live and missing providers hard-fail"
+        )
+    if mode not in _BUSINESS_MODES:
+        raise TakyonError(f"business mode must be one of {sorted(_BUSINESS_MODES)}")
+    return mode
 
 
 def _now() -> str:
@@ -1398,29 +1416,12 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
               gap: 16px;
             }
 
-            .starter-header,
             .starter-card {
               background: var(--starter-panel);
               border: 1px solid var(--starter-border);
               border-radius: 16px;
             }
 
-            .starter-header {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              gap: 12px;
-              padding: 14px 16px;
-              flex-wrap: wrap;
-            }
-
-            .starter-title {
-              font-size: 1rem;
-              font-weight: 600;
-              letter-spacing: 0.01em;
-            }
-
-            .starter-routes,
             .starter-actions,
             .starter-rail-list {
               display: flex;
@@ -1428,7 +1429,6 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
               flex-wrap: wrap;
             }
 
-            .starter-route,
             .starter-pill,
             .starter-link,
             .starter-button {
@@ -1528,20 +1528,16 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         + "\n",
         "src/app/page.js": dedent(
             """
-            import StarterLanding from "../components/StarterLanding.js";
-
             export default function HomePage() {
-              return <StarterLanding />;
+              return <main className="starter-root" />;
             }
             """
         ).strip()
         + "\n",
         "src/app/app/page.js": dedent(
             """
-            import StarterWorkspace from "../../components/StarterWorkspace.js";
-
             export default function AppPage() {
-              return <StarterWorkspace />;
+              return <main className="starter-root" />;
             }
             """
         ).strip()
@@ -1574,20 +1570,9 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                   ? "monthly"
                 : "";
 
-            export const starterTitle = {title_literal};
             export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
               ? surfaceContext.runtimeFeatures.map((value) => String(value || "").trim()).filter(Boolean)
               : [];
-            export const starterRoutes = Array.from(
-              new Set([
-                ...(Array.isArray(surfaceContext.customerExperience?.requiredRoutes)
-                  ? surfaceContext.customerExperience.requiredRoutes
-                  : []),
-                ...(Array.isArray(surfaceContext.routes)
-                  ? surfaceContext.routes.map((route) => String((route && route.path) || "").trim())
-                  : []),
-              ].filter(Boolean)),
-            );
 
             function defaultLocation() {{
               if (typeof window !== "undefined" && window.location) {{
@@ -1693,392 +1678,6 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
                 body: JSON.stringify(payload),
               }});
             }}
-            """
-        ).strip()
-        + "\n",
-        "src/components/StarterAuthForm.js": dedent(
-            """
-            "use client";
-
-            import { useState } from "react";
-
-            import { starterRequestAuth } from "./starter-context.js";
-
-            export default function StarterAuthForm({ buttonLabel = "Request link" }) {
-              const [email, setEmail] = useState("");
-              const [busy, setBusy] = useState(false);
-              const [notice, setNotice] = useState("");
-              const [link, setLink] = useState("");
-
-              async function handleSubmit(event) {
-                event.preventDefault();
-                if (!email.trim()) {
-                  setNotice("Enter your email to continue.");
-                  return;
-                }
-                setBusy(true);
-                setNotice("");
-                setLink("");
-                try {
-                  const response = await starterRequestAuth({
-                    email: email.trim(),
-                    origin: typeof window !== "undefined" ? window.location.origin : "",
-                    product_name: "",
-                    send_email: true,
-                  });
-                  setNotice(
-                    response?.email_sent
-                      ? "Email sent."
-                      : "Link ready."
-                  );
-                  if (response?.verify_url) {
-                    setLink(String(response.verify_url));
-                  }
-                } catch (error) {
-                  setNotice("Request failed.");
-                } finally {
-                  setBusy(false);
-                }
-              }
-
-              return (
-                <section className="starter-card">
-                  <h2>Sign in</h2>
-                  <form className="starter-form" onSubmit={handleSubmit}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-auth-email">Email</label>
-                      <input
-                        id="starter-auth-email"
-                        className="starter-input"
-                        type="email"
-                        inputMode="email"
-                        autoComplete="email"
-                        value={email}
-                        onChange={(event) => setEmail(event.target.value)}
-                      />
-                    </div>
-                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
-                      {busy ? "Sending..." : buttonLabel}
-                    </button>
-                  </form>
-                  {notice ? <p className="starter-note">{notice}</p> : null}
-                  {link ? (
-                    <div className="starter-actions">
-                      <a className="starter-link" href={link}>
-                        Open link
-                      </a>
-                    </div>
-                  ) : null}
-                </section>
-              );
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/components/StarterCheckoutForm.js": dedent(
-            """
-            "use client";
-
-            import { useState } from "react";
-
-            import { starterCheckout, starterDefaultPlanKey } from "./starter-context.js";
-
-            export default function StarterCheckoutForm() {
-              const [planKey, setPlanKey] = useState(starterDefaultPlanKey);
-              const [busy, setBusy] = useState(false);
-              const [notice, setNotice] = useState("");
-              const [link, setLink] = useState("");
-              const fixedMonthlyPlan = planKey === "monthly";
-
-              async function handleSubmit(event) {
-                event.preventDefault();
-                if (!planKey.trim()) {
-                  setNotice("Plan setup is not ready yet.");
-                  return;
-                }
-                setBusy(true);
-                setNotice("");
-                setLink("");
-                try {
-                  const response = await starterCheckout({ plan_key: planKey.trim() });
-                  const checkoutUrl = String(response?.checkout_url || response?.url || "");
-                  if (checkoutUrl) {
-                    setLink(checkoutUrl);
-                    setNotice("Checkout ready.");
-                    if (/^https?:/i.test(checkoutUrl) && typeof window !== "undefined") {
-                      window.location.assign(checkoutUrl);
-                    }
-                  } else {
-                    setNotice("Checkout created.");
-                  }
-                } catch (_error) {
-                  setNotice("Checkout failed.");
-                } finally {
-                  setBusy(false);
-                }
-              }
-
-              return (
-                <section className="starter-card">
-                  <h2>Checkout</h2>
-                  <form className="starter-form" onSubmit={handleSubmit}>
-                    {!fixedMonthlyPlan ? (
-                      <div className="starter-field">
-                        <label htmlFor="starter-plan-key">Plan key</label>
-                        <input
-                          id="starter-plan-key"
-                          className="starter-input"
-                          value={planKey}
-                          onChange={(event) => setPlanKey(event.target.value)}
-                        />
-                      </div>
-                    ) : null}
-                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
-                      {busy ? "Starting..." : fixedMonthlyPlan ? "Subscribe" : "Start checkout"}
-                    </button>
-                  </form>
-                  {notice ? <p className="starter-note">{notice}</p> : null}
-                  {link ? <pre className="starter-pre">{link}</pre> : null}
-                </section>
-              );
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/components/StarterGenerateForm.js": dedent(
-            """
-            "use client";
-
-            import { useState } from "react";
-
-            import { starterGenerate } from "./starter-context.js";
-
-            const DEFAULT_PAYLOAD = "{\\n  \\"prompt\\": \\"\\"\\n}";
-
-            export default function StarterGenerateForm() {
-              const [payloadText, setPayloadText] = useState(DEFAULT_PAYLOAD);
-              const [busy, setBusy] = useState(false);
-              const [notice, setNotice] = useState("");
-              const [resultText, setResultText] = useState("");
-
-              async function handleSubmit(event) {
-                event.preventDefault();
-                setBusy(true);
-                setNotice("");
-                setResultText("");
-                try {
-                  const payload = JSON.parse(payloadText);
-                  const response = await starterGenerate(payload);
-                  setResultText(JSON.stringify(response, null, 2));
-                } catch (error) {
-                  setNotice(error instanceof Error ? error.message : "Generate failed.");
-                } finally {
-                  setBusy(false);
-                }
-              }
-
-              return (
-                <section className="starter-card">
-                  <h2>Generate</h2>
-                  <form className="starter-form" onSubmit={handleSubmit}>
-                    <div className="starter-field">
-                      <label htmlFor="starter-generate-payload">Payload</label>
-                      <textarea
-                        id="starter-generate-payload"
-                        className="starter-textarea"
-                        value={payloadText}
-                        onChange={(event) => setPayloadText(event.target.value)}
-                      />
-                    </div>
-                    <button className="starter-button starter-button-primary" type="submit" disabled={busy}>
-                      {busy ? "Running..." : "Run generate"}
-                    </button>
-                  </form>
-                  {notice ? <p className="starter-note">{notice}</p> : null}
-                  {resultText ? <pre className="starter-pre">{resultText}</pre> : null}
-                </section>
-              );
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/components/StarterLanding.js": dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-
-            import StarterAuthForm from "./StarterAuthForm.js";
-            import { railDeclared, starterRoutes, starterTitle } from "./starter-context.js";
-
-            export default function StarterLanding() {
-              return (
-                <main className="starter-root">
-                  <div className="starter-frame">
-                    <header className="starter-header">
-                      <div className="starter-title">{starterTitle}</div>
-                      <div className="starter-routes">
-                        {starterRoutes.map((route) => (
-                          <Link className="starter-route" key={route} href={route}>
-                            {route}
-                          </Link>
-                        ))}
-                      </div>
-                    </header>
-
-                    <section className="starter-grid">
-                      {railDeclared("auth") ? (
-                        <StarterAuthForm />
-                      ) : (
-                        <section className="starter-card">
-                          <h2>Routes</h2>
-                          <div className="starter-actions">
-                            <Link className="starter-link" href="/app">
-                              /app
-                            </Link>
-                          </div>
-                        </section>
-                      )}
-                    </section>
-                  </div>
-                </main>
-              );
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/components/StarterWorkspace.js": dedent(
-            """
-            "use client";
-
-            import Link from "next/link";
-            import { useEffect, useState } from "react";
-
-            import StarterAuthForm from "./StarterAuthForm.js";
-            import {
-              railDeclared,
-              starterAccount,
-              starterSession,
-              starterRoutes,
-              starterTitle,
-            } from "./starter-context.js";
-            import StarterCheckoutForm from "./StarterCheckoutForm.js";
-            import StarterGenerateForm from "./StarterGenerateForm.js";
-
-            export default function StarterWorkspace() {
-              const [account, setAccount] = useState(null);
-              const [session, setSession] = useState(null);
-              const [loading, setLoading] = useState(true);
-              const [authNeeded, setAuthNeeded] = useState(false);
-
-              useEffect(() => {
-                let active = true;
-
-                async function loadAccount() {
-                  if (!railDeclared("auth") && !railDeclared("account")) {
-                    if (!active) return;
-                    setAuthNeeded(false);
-                    setLoading(false);
-                    return;
-                  }
-                  try {
-                    if (railDeclared("account")) {
-                      const payload = await starterAccount();
-                      if (!active) return;
-                      setAccount(payload);
-                    } else {
-                      const payload = await starterSession();
-                      if (!active) return;
-                      setSession(payload);
-                    }
-                    if (!active) return;
-                    setAuthNeeded(false);
-                  } catch (_error) {
-                    if (!active) return;
-                    setAuthNeeded(true);
-                    setAccount(null);
-                    setSession(null);
-                  } finally {
-                    if (active) {
-                      setLoading(false);
-                    }
-                  }
-                }
-
-                loadAccount();
-                return () => {
-                  active = false;
-                };
-              }, []);
-
-              const payloadText = account
-                ? JSON.stringify(account, null, 2)
-                : session
-                  ? JSON.stringify(session, null, 2)
-                  : "";
-              const activeEntitlements = Array.isArray(account?.entitlements)
-                ? account.entitlements.filter((item) => String(item?.status || "active") === "active")
-                : [];
-              const hasPaidAccess = activeEntitlements.some((item) => {
-                const tier = String(item?.tier || "").trim().toLowerCase();
-                const planKey = String(item?.plan_key || "").trim();
-                return Boolean(planKey) || (tier && tier !== "free");
-              });
-              const showGenerate = !loading && !authNeeded && railDeclared("generate") && (
-                !railDeclared("checkout") || hasPaidAccess
-              );
-
-              return (
-                <main className="starter-root">
-                  <div className="starter-frame">
-                    <header className="starter-header">
-                      <div className="starter-title">{starterTitle}</div>
-                      <div className="starter-routes">
-                        {starterRoutes.map((route) => (
-                          <Link className="starter-route" key={route} href={route}>
-                            {route}
-                          </Link>
-                        ))}
-                      </div>
-                    </header>
-
-                    <section className="starter-card">
-                      <h2>Routes</h2>
-                      <div className="starter-actions">
-                        <Link className="starter-link" href="/">
-                          /
-                        </Link>
-                        <Link className="starter-link" href="/app">
-                          /app
-                        </Link>
-                      </div>
-                    </section>
-
-                    <section className="starter-grid">
-                      {loading ? (
-                        <section className="starter-card">
-                          <h2>Status</h2>
-                          <p className="starter-note">loading</p>
-                        </section>
-                      ) : null}
-
-                      {!loading && authNeeded ? <StarterAuthForm buttonLabel="Request link" /> : null}
-
-                      {!loading && payloadText ? (
-                        <section className="starter-card">
-                          <h2>Account</h2>
-                          <pre className="starter-pre">{payloadText}</pre>
-                        </section>
-                      ) : null}
-
-                      {!loading && !authNeeded && railDeclared("checkout") ? <StarterCheckoutForm /> : null}
-
-                      {showGenerate ? <StarterGenerateForm /> : null}
-                    </section>
-                  </div>
-                </main>
-              );
-            }
             """
         ).strip()
         + "\n",
@@ -2200,7 +1799,7 @@ def _subuser_app_worker_contract_block(
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
-        lines.append("- If AppKit already provides a working auth component or helper, keep its sign-in behavior authoritative and only wrap, restyle, reposition, or compose around it unless you are intentionally changing auth rail logic.")
+        lines.append("- If AppKit already provides working auth helpers (for example `starterRequestAuth(...)`, `starterSession()`, or `starterAccount()`), keep that rail behavior authoritative and build your page around those calls instead of rewriting auth logic unless you are intentionally changing the auth rail itself.")
     else:
         lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
 
@@ -2244,10 +1843,10 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        "- Any starter source already present in `src/` is generic layout/copy only. Keep the package/runtime wiring you still need, but do not treat generic labels or structure as the product.",
-        "- AppKit-owned rail components and helpers are canonical behavior, not inspiration. If a shared component already implements a declared rail correctly (for example `StarterAuthForm`, `StarterCheckoutForm`, `StarterGenerateForm`, or helpers in `starter-context.js`), preserve that behavior and only wrap, restyle, reposition, or compose around it unless you are intentionally changing that rail's logic.",
+        "- Any starter source already present in `src/` is generic wiring only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCheckout(...)`, and `starterGenerate(...)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        f"- Preserve runtime semantics, but redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
+        f"- There is intentionally no shared customer-facing page to preserve. Preserve runtime semantics, but build and redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
     ]
     return "\n".join(lines).strip()
 
@@ -6029,8 +5628,12 @@ class _PGConn:
 
     @staticmethod
     def _translate(sql: str) -> str:
-        # Escape literal % BEFORE turning ? into %s so any literal % in the SQL text (none today, but
-        # future-proof) survives psycopg's %-substitution. Only ever applied on the params path.
+        # The store mostly speaks sqlite-style "?" placeholders, but a few leaf helpers already speak
+        # native psycopg "%s". Preserve those verbatim; only translate when sqlite markers are present.
+        if "?" not in sql:
+            return sql
+        # Escape literal % BEFORE turning ? into %s so any literal % in the SQL text survives
+        # psycopg's %-substitution.
         return sql.replace("%", "%%").replace("?", "%s")
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> Any:
@@ -6085,6 +5688,10 @@ class _PGConn:
 
     def close(self) -> None:
         self._return_to_owner(discard=True)
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegated leaf helpers may need native psycopg surfaces such as conn.transaction().
+        return getattr(self._pg, name)
 
     def _return_to_owner(self, *, discard: bool) -> None:
         if self._returned:
@@ -6423,7 +6030,7 @@ class TakyonStore:
               constraints_json TEXT,
               publish_target TEXT,
               publish_policy TEXT NOT NULL DEFAULT 'publish_after_refresh',
-              mode_behavior TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface',
+              mode_behavior TEXT NOT NULL DEFAULT 'live_only_hard_fail_missing_gates',
               done_gate TEXT NOT NULL DEFAULT 'business_refresh_product_surface:published_or_exact_blocker',
               public_url TEXT,
               publish_status TEXT NOT NULL DEFAULT 'not_published',
@@ -6618,9 +6225,9 @@ class TakyonStore:
         business_columns = {row["name"] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
         if "mode" not in business_columns:
             conn.execute("ALTER TABLE businesses ADD COLUMN mode TEXT NOT NULL DEFAULT 'live'")
-            conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode NOT IN ('live', 'test')")
-        elif conn.execute("SELECT 1 FROM businesses WHERE mode IS NULL OR mode NOT IN ('live', 'test') LIMIT 1").fetchone():
-            conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode NOT IN ('live', 'test')")
+            conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode != 'live'")
+        elif conn.execute("SELECT 1 FROM businesses WHERE mode IS NULL OR mode != 'live' LIMIT 1").fetchone():
+            conn.execute("UPDATE businesses SET mode = 'live' WHERE mode IS NULL OR mode != 'live'")
         if "work_focus" not in business_columns:
             conn.execute("ALTER TABLE businesses ADD COLUMN work_focus TEXT NOT NULL DEFAULT 'all'")
             conn.execute("UPDATE businesses SET work_focus = 'all' WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product')")
@@ -6636,7 +6243,7 @@ class TakyonStore:
             "runtime_features_json": "TEXT",
             "publish_target": "TEXT",
             "publish_policy": "TEXT NOT NULL DEFAULT 'publish_after_refresh'",
-            "mode_behavior": "TEXT NOT NULL DEFAULT 'test_mode_publishes_product_surface'",
+            "mode_behavior": "TEXT NOT NULL DEFAULT 'live_only_hard_fail_missing_gates'",
             "done_gate": "TEXT NOT NULL DEFAULT 'business_refresh_product_surface:published_or_exact_blocker'",
             "public_url": "TEXT",
             "publish_status": "TEXT NOT NULL DEFAULT 'not_published'",
@@ -8500,7 +8107,7 @@ class TakyonStore:
         business_mode = "live"
         if business_slug and action != "business.upsert":
             business = self._ensure_business(conn, business_slug)
-            business_mode = str(business.get("mode") or "live")
+            business_mode = _effective_business_mode(business.get("mode"))
             _enforce_business_work_focus(op, str(business.get("work_focus") or "all"))
         if action == "business.upsert" and business_slug:
             existing = self._business(conn, business_slug)
@@ -8545,9 +8152,8 @@ class TakyonStore:
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
-            mode = str(op.get("mode") or "").strip().lower()
-            if mode and mode not in _BUSINESS_MODES:
-                raise TakyonError(f"business mode must be one of {sorted(_BUSINESS_MODES)}")
+            mode = _requested_business_mode(op.get("mode"), allow_empty=True)
+            resolved_mode = mode or "live"
             work_focus = _normalize_work_focus(op.get("work_focus"), default=None)
             now = _now()
             existing = self._business(conn, slug)
@@ -8557,8 +8163,8 @@ class TakyonStore:
                 )
             if existing:
                 conn.execute(
-                    "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = COALESCE(NULLIF(?, ''), mode), work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
-                    (name, goal, mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
+                    "UPDATE businesses SET name = ?, goal = COALESCE(NULLIF(?, ''), goal), mode = ?, work_focus = COALESCE(NULLIF(?, ''), work_focus), budget_json = COALESCE(?, budget_json), metadata_json = ?, updated_at = ? WHERE slug = ?",
+                    (name, goal, resolved_mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
             else:
                 # PG businesses.owner_user_id is NOT NULL (0001 spine; 0011 enrich). The operator store
@@ -8587,7 +8193,7 @@ class TakyonStore:
                         slug,
                         name,
                         goal,
-                        mode or "live",
+                        resolved_mode,
                         work_focus or "all",
                         _json_dumps(budget) if budget is not None else None,
                         _json_dumps(metadata),
@@ -8622,9 +8228,7 @@ class TakyonStore:
             return {"action": action, "business": slug, "work_focus": focus, "cron": cron}
 
         if action == "business.mode.set":
-            mode = str(op.get("mode") or "").strip().lower()
-            if mode not in _BUSINESS_MODES:
-                raise TakyonError(f"business mode must be one of {sorted(_BUSINESS_MODES)}")
+            mode = _requested_business_mode(op.get("mode"))
             now = _now()
             conn.execute("UPDATE businesses SET mode = ?, updated_at = ? WHERE slug = ?", (mode, now, slug))
             self._record_event(
@@ -9708,116 +9312,9 @@ class TakyonStore:
             return result
 
         if action == "outreach.local_publish":
-            business = self._ensure_business(conn, slug)
-            if str(business.get("mode") or "live") != "test":
-                raise TakyonError("outreach.local_publish requires business mode 'test'")
-            body = _normalize_outreach_body(op.get("body"))
-            if not body:
-                raise TakyonError("outreach.local_publish body is required")
-            channel = _file_slug(str(op.get("channel") or op.get("provider") or "outreach"), "outreach")
-            target = str(op.get("target") or op.get("recipient") or "local-target").strip() or "local-target"
-            subject = str(op.get("subject") or op.get("title") or f"Test outreach to {target}").strip()
-            provider = str(op.get("provider") or channel).strip()
-            metadata = op.get("metadata") if isinstance(op.get("metadata"), dict) else {}
-            destination_url = _outreach_destination_url(
-                channel=channel,
-                provider=provider,
-                target=target,
-                destination_url=op.get("destination_url"),
-                metadata=metadata,
+            raise TakyonError(
+                "test mode is disabled; use business_publish_outreach and satisfy the real provider gates"
             )
-            destination_label = str(op.get("destination_label") or metadata.get("destination_label") or "").strip()
-            publish_id = str(op.get("id") or uuid.uuid4().hex)
-            created_at = _now()
-            file_stem = f"{created_at[:10]}-{_file_slug(target, 'target')}-{publish_id[:8]}"
-            rel = f"distribution/local-published/{channel}/{file_stem}.md"
-            receipt_rel = f"metrics/receipts/outreach/{publish_id}.json"
-            _atomic_write_text(
-                self._business_root(slug) / rel,
-                _outreach_artifact_markdown(
-                    subject,
-                    body,
-                    destination_url=destination_url,
-                    destination_label=destination_label,
-                ),
-            )
-            receipt = {
-                "id": publish_id,
-                "business": slug,
-                "mode": "test",
-                "channel": channel,
-                "provider": provider,
-                "target": target,
-                "subject": subject,
-                "artifact_path": rel,
-                "external_side_effects": "suppressed",
-                "sent": False,
-                "created_at": created_at,
-                "metadata": metadata,
-            }
-            if destination_url:
-                receipt["destination_url"] = destination_url
-            if destination_label:
-                receipt["destination_label"] = destination_label
-            _atomic_write_text(self._business_root(slug) / receipt_rel, _json_dumps(receipt) + "\n")
-            self._sync_business_workspace_remote(slug)
-
-            source = _file_slug(f"test-{channel}", "test-outreach")
-            thread_external_id = str(op.get("thread_external_id") or f"{source}:{_file_slug(target, 'target')}")
-            now = created_at
-            thread_id = str(op.get("thread_id") or uuid.uuid4().hex)
-            existing_message = conn.execute(
-                "SELECT 1 FROM conversation_messages WHERE business_slug = ? AND source = ? AND external_id = ?",
-                (slug, source, str(op.get("external_id") or f"{publish_id}:local-outbound")),
-            ).fetchone()
-            conn.execute(
-                "INSERT INTO conversation_threads (id, business_slug, source, external_id, title, url, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?) "
-                "ON CONFLICT(business_slug, source, external_id) DO UPDATE SET title = excluded.title, url = COALESCE(excluded.url, conversation_threads.url), status = 'active', updated_at = excluded.updated_at",
-                (thread_id, slug, source, thread_external_id, subject, rel, now, now),
-            )
-            thread = self._row_to_dict(conn.execute(
-                "SELECT * FROM conversation_threads WHERE business_slug = ? AND source = ? AND external_id = ?",
-                (slug, source, thread_external_id),
-            ).fetchone())
-            message_id = str(op.get("message_id") or uuid.uuid4().hex)
-            message_external_id = str(op.get("external_id") or f"{publish_id}:local-outbound")
-            conn.execute(
-                "INSERT INTO conversation_messages (id, business_slug, thread_id, source, external_id, direction, author_label, body, status, received_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'outbound', 'Takyon local publish', ?, 'responded', ?, ?, ?) "
-                "ON CONFLICT(business_slug, source, external_id) DO UPDATE SET body = excluded.body, status = excluded.status, updated_at = excluded.updated_at",
-                (message_id, slug, thread["id"], source, message_external_id, body, now, now, now),
-            )
-            row = self._row_to_dict(conn.execute(
-                "SELECT * FROM conversation_messages WHERE business_slug = ? AND source = ? AND external_id = ?",
-                (slug, source, message_external_id),
-            ).fetchone())
-            mirror = self._rewrite_conversation_thread_file(conn, slug, str(thread["id"]))
-            corpus = None
-            if not existing_message:
-                corpus = self._append_conversation_message_corpus(slug, thread, row)
-            self._append_conversation_event_corpus(slug, action, {"receipt": receipt_rel, "thread": thread["id"], "message": row["id"]})
-            self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=receipt)
-            result = {
-                "action": action,
-                "business": slug,
-                "mode": "test",
-                "local_publish_id": publish_id,
-                "artifact": rel,
-                "receipt": receipt_rel,
-                "thread": thread["id"],
-                "message": row["id"],
-                "conversation_file": mirror,
-                "conversation_corpus": corpus or "metrics/conversations/corpus/messages.jsonl",
-                "external_side_effects": "suppressed",
-                "sent": False,
-            }
-            if destination_url:
-                result["destination_url"] = destination_url
-            if destination_label:
-                result["destination_label"] = destination_label
-            self._rewrite_distribution_files(conn, slug)
-            return result
 
         if action == "conversation.thread.upsert":
             source = _file_slug(str(op.get("source") or "unknown"), "unknown")
@@ -10034,9 +9531,9 @@ class TakyonStore:
             "the same motion. "
             "Append a compact wake snapshot to metrics/wake-history.md for future comparison. Never delete prior metrics, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
-            "Honor business mode: in test mode, keep product/website build and "
-            "publication, app rails, distribution files, hidden audit receipts, conversations, and follow-up review active. Suppress external outreach, "
-            "acquisition, paid spend, customer charging, and outreach/marketing email delivery."
+            "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
+            "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
+            "or outreach/marketing email delivery."
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
@@ -11150,7 +10647,7 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                 {"action": "app.customer.upsert", "business": business},
                 str(business_row.get("work_focus") or "all"),
             )
-            test_mode = str(business_row.get("mode") or "live") == "test"
+            test_mode = _effective_business_mode(business_row.get("mode")) == "test"
             now = _now()
             link_id = ""
             expires_at = ""
@@ -11497,7 +10994,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                 {"action": "app.entitlement.upsert", "business": business},
                 str(business_row.get("work_focus") or "all"),
             )
-            test_mode = str(business_row.get("mode") or "live") == "test"
+            test_mode = _effective_business_mode(business_row.get("mode")) == "test"
             plan = store._row_to_dict(conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?", (business, plan_key)).fetchone())
             if not plan:
                 raise TakyonError(f"app plan not found: {plan_key}")
@@ -11819,7 +11316,7 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             raise TakyonError("body is required")
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
-            business_mode = str(business_row.get("mode") or "live")
+            business_mode = _effective_business_mode(business_row.get("mode"))
             canonical_product_url = _canonical_product_url(store, conn, business)
             canonical_product_url = _canonical_product_url(store, conn, business)
 
@@ -12189,7 +11686,7 @@ def _finalize_operator_task_budget(
 def _business_mode(store: "TakyonStore", business: str) -> str:
     with store._connect() as conn:
         business_row = store._ensure_business(conn, business)
-        return str(business_row.get("mode") or "live")
+        return _effective_business_mode(business_row.get("mode"))
 
 
 def _read_existing_receipt(path: Path, idempotency_key: str) -> dict[str, Any] | None:
@@ -13388,7 +12885,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
 
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
-            business_mode = str(business_row.get("mode") or "live")
+            business_mode = _effective_business_mode(business_row.get("mode"))
 
         # ── read-only preflight: verify token + list ad accounts, create nothing ──
         if mode == "preflight":
@@ -14250,7 +13747,10 @@ def _reddit_ads_save_state(state: Mapping[str, Any], path: Path | None = None) -
 
 
 def _reddit_ads_state_or_env(state: Mapping[str, Any], env_key: str, state_key: str | None = None) -> str:
-    value = safebox.read_env_backed_value(env_key) or ""
+    if safebox.is_sensitive_env_key(env_key):
+        value = safebox.read_env_backed_value(env_key) or ""
+    else:
+        value = os.getenv(env_key) or ""
     if value:
         return str(value).strip()
     return str(state.get(state_key or env_key.lower()) or "").strip()
@@ -14820,6 +14320,7 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
             "invoice_label": str(campaign.get("invoice_label") or "").strip() or None,
         }
     }
+    default_launch_start = datetime.now(timezone.utc) + timedelta(hours=1)
     campaign_start = _reddit_ads_hour_iso(campaign.get("start_time"), field="campaign.start_time")
     campaign_end = _reddit_ads_hour_iso(campaign.get("end_time"), field="campaign.end_time")
     if campaign_start:
@@ -14842,7 +14343,11 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
             "conversion_pixel_id": pixel_id,
         }
     }
-    ad_group_start = _reddit_ads_hour_iso(ad_group.get("start_time"), field="ad_group.start_time")
+    ad_group_start = _reddit_ads_hour_iso(
+        ad_group.get("start_time"),
+        field="ad_group.start_time",
+        default=default_launch_start,
+    )
     ad_group_end = _reddit_ads_hour_iso(ad_group.get("end_time"), field="ad_group.end_time")
     if ad_group_start:
         ad_group_payload["data"]["start_time"] = ad_group_start
@@ -15025,7 +14530,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
 
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
-            business_mode = str(business_row.get("mode") or "live")
+            business_mode = _effective_business_mode(business_row.get("mode"))
             canonical_product_url = _canonical_product_url(store, conn, business)
 
         if mode == "preflight":
@@ -16687,7 +16192,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_upsert_business",
             "Create or update a business.",
-            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode: live or test"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode; live is the only supported value"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "idempotency_key"],
         ),
     },
@@ -16715,12 +16220,12 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_set_mode",
-        "description": "Set one business to live or test mode. Test mode keeps local work and cron active while suppressing outbound side effects.",
+        "description": "Set one business mode. Test mode is disabled; live is the only supported mode.",
         "handler": handle_business_set_mode,
         "schema": _schema(
             "business_set_mode",
-            "Set business live/test mode.",
-            {"business": _BUSINESS_PROP, "mode": {"type": "string", "description": "live or test"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            "Set business mode.",
+            {"business": _BUSINESS_PROP, "mode": {"type": "string", "description": "live"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "mode", "idempotency_key"],
         ),
     },
@@ -16827,7 +16332,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
-                "mode_behavior": {"type": "string", "description": "Defaults to test_mode_publishes_product_surface"},
+                "mode_behavior": {"type": "string", "description": "Defaults to live_only_hard_fail_missing_gates"},
                 "done_gate": {"type": "string", "description": "Defaults to published, or exact blocker"},
                 "notes": {"type": "string"},
                 "metadata": {"type": "object"},
@@ -16962,22 +16467,22 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_publish_outreach",
-        "description": "Publish outreach through one mode-aware intent using the canonical product URL: test mode creates a local suppressed receipt and conversation mirror; live mode records a gated provider publish job.",
+        "description": "Publish outreach through the canonical product URL with real provider gates. Missing credentials or provider access hard-fail instead of falling back to local suppressed publication.",
         "handler": handle_business_publish_outreach,
         "schema": _schema(
             "business_publish_outreach",
-            "Publish outreach using the business mode bright line.",
+            "Publish outreach using the live provider path.",
             {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },
     {
         "name": "business_publish_test_outreach",
-        "description": "In test mode, publish outreach locally, create a suppressed-side-effect receipt, and mirror it into business conversations without sending externally.",
+        "description": "Disabled compatibility stub for the removed test-mode local outreach path.",
         "handler": handle_business_publish_test_outreach,
         "schema": _schema(
             "business_publish_test_outreach",
-            "Publish test outreach locally without sending.",
+            "Disabled compatibility stub.",
             {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
@@ -17006,7 +16511,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_ugc_ad_generate",
-        "description": "Generate a business-scoped UGC video ad publication under product/ugc-ads/<slug>/ with creative-credit gating on the live path; test mode and dry-run record suppressed receipts without provider spend.",
+        "description": "Generate a business-scoped UGC video ad publication under product/ugc-ads/<slug>/ with creative-credit gating. Dry-run remains available, but business test mode is disabled.",
         "handler": handle_business_ugc_ad_generate,
         "schema": _schema(
             "business_ugc_ad_generate",
@@ -17031,7 +16536,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_static_ad_generate",
-        "description": "Generate business-scoped static ad creative bundles under product/static-ads/<slug>/ with creative-credit gating on the live path; test mode and dry-run use the mock backend and record truthful receipts.",
+        "description": "Generate business-scoped static ad creative bundles under product/static-ads/<slug>/ with creative-credit gating. Dry-run remains available, but business test mode is disabled.",
         "handler": handle_business_static_ad_generate,
         "schema": _schema(
             "business_static_ad_generate",
@@ -17041,7 +16546,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "input_path": {"type": "string", "description": "Business-relative spec JSON, batch JSON, or directory path consumed by the copied static-ad pipeline."},
                 "slug": {"type": "string", "description": "Optional publication slug under product/static-ads/<slug>/."},
                 "dry_run": {"type": "boolean", "description": "Force the mock backend and skip creative-credit charges."},
-                "backend": {"type": "string", "description": "Optional backend override; live mode defaults to openai, suppressed mode uses mock."},
+                "backend": {"type": "string", "description": "Optional backend override; normal runs default to openai, dry-run uses mock."},
                 "quality": {"type": "string", "description": "Optional image quality override (low, medium, high, auto)."},
                 "aspect_ratio": {"type": "string", "description": "Optional comma-separated ratio override such as 1:1,9:16,1.91:1."},
                 "crop": {"type": "boolean", "description": "Center-crop outputs to the exact aspect ratio."},
@@ -17061,8 +16566,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video or static image. "
             "mode=preflight verifies the access token and lists ad accounts (read-only, creates nothing). "
             "mode=launch creates an AdCreative + Campaign + AdSet + Ad, ALWAYS PAUSED (it never serves or spends); "
-            "mode=manual_handoff writes the full launch packet locally and stops before any Meta API post; "
-            "test-mode businesses suppress everything to a local receipt with no Meta calls. "
+            "mode=manual_handoff writes the full launch packet locally and stops before any Meta API post. "
             "Activation is intentionally not supported by this tool."
         ),
         "handler": handle_business_meta_ad_launch,
@@ -17153,8 +16657,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_meta_ad_control",
         "description": (
             "Control a previously launched Meta ad using the canonical distribution/meta-ads/<slug>/receipt.json. "
-            "Supports activate, pause, and set_budget through the guarded authority runtime; "
-            "test-mode businesses suppress to local receipts."
+            "Supports activate, pause, and set_budget through the guarded authority runtime."
         ),
         "handler": handle_business_meta_ad_control,
         "schema": _schema(
@@ -17251,8 +16754,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "When a launch uses business-relative local media files, Takyon stages them onto the business publish target "
             "first and then uses those public asset URLs for Reddit. "
             "mode=preflight verifies auth, businesses, ad accounts, profiles, funding instruments, and pixels "
-            "(read-only, creates nothing). mode=launch creates a Campaign + Ad Group + Post + Ad, ALWAYS PAUSED; "
-            "test-mode businesses suppress everything to a local receipt with no Reddit calls. "
+            "(read-only, creates nothing). mode=launch creates a Campaign + Ad Group + Post + Ad, ALWAYS PAUSED. "
             "Activation is intentionally not supported by this tool."
         ),
         "handler": handle_business_reddit_ad_launch,
@@ -17322,8 +16824,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_reddit_ad_control",
         "description": (
             "Control a previously launched Reddit ad using the canonical distribution/reddit-ads/<slug>/receipt.json. "
-            "Supports activate, pause, and set_budget through the guarded authority runtime; "
-            "test-mode businesses suppress to local receipts."
+            "Supports activate, pause, and set_budget through the guarded authority runtime."
         ),
         "handler": handle_business_reddit_ad_control,
         "schema": _schema(

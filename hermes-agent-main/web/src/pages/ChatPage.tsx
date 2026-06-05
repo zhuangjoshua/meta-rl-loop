@@ -445,7 +445,6 @@ const EMPTY_SCOPE_STATE: ScopeState = {
   businesses: [],
 };
 
-const CREATE_MODE_STORAGE_KEY = "takyon.chat.create_new_businesses_in_test_mode";
 const MEDIA_EXTENSIONS = "mp4|mov|webm|m4v|png|jpg|jpeg|webp|gif";
 const TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql";
 const PATH_EXTENSIONS = `${TEXT_EXTENSIONS}|${MEDIA_EXTENSIONS}`;
@@ -658,11 +657,6 @@ function openUrlInNewTab(url: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-}
-
-function loadCreateInTestModeDefault(): boolean {
-  if (typeof window === "undefined") return false;
-  return window.localStorage.getItem(CREATE_MODE_STORAGE_KEY) === "1";
 }
 
 function wait(ms: number): Promise<void> {
@@ -1028,7 +1022,6 @@ function channelLabel(source?: string): string {
 function modeDotClass(item: BusinessSummary): "td-live" | "td-test" | "td-idle" {
   const mode = (item.mode || "").toLowerCase();
   if (mode === "live") return "td-live";
-  if (mode === "test") return "td-test";
   return "td-idle";
 }
 
@@ -1063,6 +1056,16 @@ function businessFromLocationSearch(): string {
   return normalizeBusinessLookup(params.get("business") || params.get("scope") || "");
 }
 
+function syncBusinessSearchParams(params: URLSearchParams, business: string): URLSearchParams {
+  if (business) {
+    params.set("business", business);
+  } else {
+    params.delete("business");
+  }
+  params.delete("scope");
+  return params;
+}
+
 function takyonBootMessage(boot?: SessionCreateResponse["takyon_boot"] | null): string {
   const requested = normalizeBusinessLookup(boot?.requested_business || "");
   if (!requested || boot?.accepted) return "";
@@ -1094,14 +1097,6 @@ function naturalScopeChange(text: string, scope: ScopeState): string | undefined
     return slug === normalized || name === normalized;
   });
   return match?.slug || undefined;
-}
-
-function applyCreateModeDefault(line: string, createInTestMode: boolean): string {
-  if (!createInTestMode) return line;
-  const trimmed = line.trimStart();
-  if (!/^\/(?:create|build|init)(?:\s|$)/i.test(trimmed)) return line;
-  if (/(?:^|\s)--(?:test|live)(?:\s|$)/i.test(trimmed)) return line;
-  return line.replace(/^(\s*\/(?:create|build|init))(?:\s|$)/i, "$1 --test ");
 }
 
 function isSlashCommandPrefix(value: string): boolean {
@@ -1153,7 +1148,6 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [slashItems, setSlashItems] = useState<SlashCompletionItem[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
-  const [createInTestMode] = useState(loadCreateInTestModeDefault);
   const [running, setRunning] = useState(false);
   const [cronOpen, setCronOpen] = useState(false);
   const [cronSchedule, setCronSchedule] = useState("every 6h");
@@ -1241,8 +1235,9 @@ export default function ChatPage() {
       sessionRecoveryInFlightRef.current = true;
       const params = new URLSearchParams(searchParams);
       if (options?.clearResume) params.delete("resume");
-      if (requestedBusiness === "") params.delete("business");
-      else if (requestedBusiness) params.set("business", requestedBusiness);
+      if (requestedBusiness !== undefined) {
+        syncBusinessSearchParams(params, normalizeBusinessLookup(requestedBusiness));
+      }
       setSearchParams(params, { replace: true });
       scopeHydrationInFlightRef.current = false;
       sessionIdRef.current = null;
@@ -1364,7 +1359,7 @@ export default function ChatPage() {
       );
       if (options?.syncUrl) {
         const params = new URLSearchParams(searchParams);
-        params.set("business", slug);
+        syncBusinessSearchParams(params, slug);
         setSearchParams(params, { replace: true });
       }
       return nextScope;
@@ -1412,10 +1407,6 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshOperatorBusinesses();
   }, [refreshOperatorBusinesses]);
-
-  useEffect(() => {
-    window.localStorage.setItem(CREATE_MODE_STORAGE_KEY, createInTestMode ? "1" : "0");
-  }, [createInTestMode]);
 
   const ensureDashboardSession = useCallback(
     async (requestedBusiness?: string): Promise<string | null> => {
@@ -1576,7 +1567,7 @@ export default function ChatPage() {
         if (business && !nextScope.business && existingSnapshot && existingSnapshotBusiness === business) {
           if (options?.syncUrl) {
             const params = new URLSearchParams(searchParams);
-            params.set("business", business);
+            syncBusinessSearchParams(params, business);
             setSearchParams(params, { replace: true });
           }
           return normalizeScopeState({
@@ -1609,10 +1600,8 @@ export default function ChatPage() {
         setPendingBusinessSlug(null);
         if (options?.syncUrl) {
           const params = new URLSearchParams(searchParams);
-          if (nextScope.business) {
-            params.set("business", nextScope.business);
-          } else if (requestedBusiness !== undefined && !business) {
-            params.delete("business");
+          if (nextScope.business || requestedBusiness !== undefined) {
+            syncBusinessSearchParams(params, nextScope.business || "");
           }
           setSearchParams(params, { replace: true });
         }
@@ -2363,13 +2352,17 @@ export default function ChatPage() {
   const setTakyonScope = useCallback(
     async (business: string) => {
       if (!sessionId) return;
-      if (business) {
-        const optimistic = optimisticBusinessSummary(visibleBusinesses, business);
-        setPendingBusinessSlug(business);
+      const requestedBusiness = normalizeBusinessLookup(business);
+      const params = new URLSearchParams(searchParams);
+      syncBusinessSearchParams(params, requestedBusiness);
+      setSearchParams(params, { replace: true });
+      if (requestedBusiness) {
+        const optimistic = optimisticBusinessSummary(visibleBusinesses, requestedBusiness);
+        setPendingBusinessSlug(requestedBusiness);
         setScopeState((prev) =>
           normalizeScopeState({
             ...prev,
-            business,
+            business: requestedBusiness,
             current: optimistic,
             overview: undefined,
           }),
@@ -2388,7 +2381,15 @@ export default function ChatPage() {
       }
       requestAnimationFrame(() => inputRef.current?.focus());
       try {
-        const nextScope = await loadDashboardState(business, { syncUrl: true });
+        await gw.request(
+          "takyon.scope.set",
+          {
+            session_id: sessionId,
+            business: requestedBusiness || "global",
+          },
+          10_000,
+        );
+        const nextScope = await loadDashboardState(requestedBusiness, { syncUrl: true });
         if (!nextScope) return;
         setPendingBusinessSlug(null);
         if (nextScope.business) {
@@ -2406,7 +2407,7 @@ export default function ChatPage() {
         );
       } catch (err) {
         if (isMissingSessionError(err)) {
-          recoverMissingSession(business);
+          recoverMissingSession(requestedBusiness);
           return;
         }
         throw err;
@@ -2414,9 +2415,12 @@ export default function ChatPage() {
     },
     [
       appendSystem,
+      gw,
       loadDashboardState,
       recoverMissingSession,
+      searchParams,
       sessionId,
+      setSearchParams,
       visibleBusinesses,
     ],
   );
@@ -2441,7 +2445,7 @@ export default function ChatPage() {
         try {
           await gw.request(
             "prompt.submit",
-            { session_id: sessionId, text, create_in_test_mode: createInTestMode },
+            { session_id: sessionId, text },
             30_000,
           );
           return;
@@ -2454,7 +2458,7 @@ export default function ChatPage() {
         }
       }
     },
-    [createInTestMode, gw, sessionId],
+    [gw, sessionId],
   );
 
   const submitPrompt = useCallback(
@@ -2478,13 +2482,9 @@ export default function ChatPage() {
   const executeTakyonSlash = useCallback(
     async (text: string) => {
       if (!sessionId) throw new Error("Chat is still connecting.");
-      const effectiveText = applyCreateModeDefault(text, createInTestMode);
-      if (effectiveText !== text) {
-        appendSystem(`New-business default applied: \`${effectiveText.trim()}\``);
-      }
       const res = await gw.request<TakyonShellResponse>(
         "takyon.shell.exec",
-        { session_id: sessionId, line: effectiveText },
+        { session_id: sessionId, line: text },
         600_000,
       );
       const nextScope = normalizeScopeState(res);
@@ -2495,10 +2495,10 @@ export default function ChatPage() {
         setWorkspaceSnapshot(null);
       }
       void refreshOperatorAccount();
-      if (/^\s*\/?(?:create|build|init)(?:\s|$)/i.test(effectiveText) && nextScope.business) {
+      if (/^\s*\/?(?:create|build|init)(?:\s|$)/i.test(text) && nextScope.business) {
         setPendingBusinessSlug(nextScope.business);
         const params = new URLSearchParams(searchParams);
-        params.set("business", nextScope.business);
+        syncBusinessSearchParams(params, nextScope.business);
         setSearchParams(params, { replace: true });
       }
       const output = cleanText(res.output || "").trim();
@@ -2512,7 +2512,6 @@ export default function ChatPage() {
     },
     [
       appendSystem,
-      createInTestMode,
       gw,
       refreshOperatorAccount,
       searchParams,
@@ -2524,12 +2523,10 @@ export default function ChatPage() {
   const createTakyonBusiness = useCallback(
     async ({
       goal,
-      mode,
       name,
       slug,
     }: {
       goal: string;
-      mode: "test" | "live";
       name: string;
       slug: string;
     }) => {
@@ -2541,7 +2538,7 @@ export default function ChatPage() {
           business: slug,
           business_name: name,
           goal,
-          mode,
+          mode: "live",
           limit: 50,
         },
         600_000,
@@ -2581,7 +2578,7 @@ export default function ChatPage() {
         current && current.includes(`business:${createdBusiness}`) ? null : current,
       );
       const params = new URLSearchParams(searchParams);
-      params.set("business", createdBusiness);
+      syncBusinessSearchParams(params, createdBusiness);
       setSearchParams(params, { replace: true });
       if (res.output) {
         setStatusItems((prev) => [cleanText(res.output || ""), ...prev].slice(0, 5));
@@ -2620,7 +2617,6 @@ export default function ChatPage() {
       name: string;
       slug: string;
       goal: string;
-      mode: "test" | "live";
     }) => {
       if (!canUseConnection(state)) return;
       setTools([]);
@@ -3154,16 +3150,13 @@ function BusinessStatusPill({ scope }: { scope: ScopeState }) {
       </span>
     );
   }
-  const mode = (scope.current?.mode || scope.overview?.mode || "").toLowerCase();
   const status = (product?.status || "").toLowerCase();
   const label =
-    mode === "test"
-      ? "Test mode"
-      : status === "building" || status === "in_progress"
-        ? "Building"
-        : status
-          ? status.replace(/_/g, " ")
-          : "Setup";
+    status === "building" || status === "in_progress"
+      ? "Building"
+      : status
+        ? status.replace(/_/g, " ")
+        : "Setup";
   return <span className="td-pill td-soft">{label}</span>;
 }
 
@@ -3317,7 +3310,6 @@ function GlobalLaunchpad({
     name: string;
     slug: string;
     goal: string;
-    mode: "test" | "live";
   }) => Promise<void>;
   operatorAccount: TakyonOperatorAccountResponse | null;
   running: boolean;
@@ -3328,7 +3320,6 @@ function GlobalLaunchpad({
 }) {
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
-  const [mode, setMode] = useState<"test" | "live">("test");
   const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
   const latestStatus =
     latestTakyonProgressLine(takyonProgress) ||
@@ -3352,7 +3343,6 @@ function GlobalLaunchpad({
     if (!slug) return;
     void onCreate({
       goal: goal.trim(),
-      mode,
       name: rawName,
       slug,
     });
@@ -3396,31 +3386,6 @@ function GlobalLaunchpad({
                 value={goal}
               />
             </label>
-          </div>
-
-          <div className="mt-3 grid gap-3 sm:grid-cols-[1.2fr]">
-            <div>
-              <div className="td-meta" style={{ marginBottom: 6 }}>
-                Mode
-              </div>
-              <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-[var(--td-border)] p-1">
-                {(["test", "live"] as const).map((option) => (
-                  <button
-                    className={cn(
-                      "h-8 rounded-md text-xs font-medium transition-colors",
-                      mode === option
-                        ? "bg-[var(--td-fg)] text-[var(--td-bg)]"
-                        : "text-[var(--td-muted)] hover:bg-[var(--td-fg-soft)]",
-                    )}
-                    key={option}
-                    onClick={() => setMode(option)}
-                    type="button"
-                  >
-                    {option}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
           <p className="td-defer-note" style={{ marginTop: 10 }}>
             {operatorBudgetNote}

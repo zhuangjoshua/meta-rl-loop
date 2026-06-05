@@ -14,6 +14,7 @@ the single account row ``for update`` before checking prior effects or writing e
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -74,25 +75,39 @@ def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _row_get(row, key: str, index: int):
+    if isinstance(row, Mapping):
+        return row[key]
+    return row[index]
+
+
 def _entry_from_row(row) -> CreativeCreditEntry:
     return CreativeCreditEntry(
-        id=int(row[0]),
-        business_slug=str(row[1]),
-        kind=str(row[2]),
-        amount_credits=int(row[3]),
-        balance_after_credits=int(row[4]),
-        reservation_key=None if row[5] is None else str(row[5]),
-        idempotency_key=str(row[6]),
-        metadata=row[7] if isinstance(row[7], dict) else {},
-        stripe_ref=None if row[8] is None else str(row[8]),
-        created_at=row[9],
+        id=int(_row_get(row, "id", 0)),
+        business_slug=str(_row_get(row, "business_slug", 1)),
+        kind=str(_row_get(row, "kind", 2)),
+        amount_credits=int(_row_get(row, "amount_credits", 3)),
+        balance_after_credits=int(_row_get(row, "balance_after_credits", 4)),
+        reservation_key=(
+            None
+            if _row_get(row, "reservation_key", 5) is None
+            else str(_row_get(row, "reservation_key", 5))
+        ),
+        idempotency_key=str(_row_get(row, "idempotency_key", 6)),
+        metadata=_row_get(row, "metadata", 7) if isinstance(_row_get(row, "metadata", 7), dict) else {},
+        stripe_ref=(
+            None
+            if _row_get(row, "stripe_ref", 8) is None
+            else str(_row_get(row, "stripe_ref", 8))
+        ),
+        created_at=_row_get(row, "created_at", 9),
     )
 
 
 def _reserved_credits(conn, business_slug: str) -> int:
     row = conn.execute(
         """
-        select coalesce(sum(r.amount_credits), 0)
+        select coalesce(sum(r.amount_credits), 0) as reserved_credits
         from business_creative_credit_entries r
         left join business_creative_credit_entries f
           on f.reservation_key = r.reservation_key
@@ -103,7 +118,7 @@ def _reserved_credits(conn, business_slug: str) -> int:
         """,
         (business_slug,),
     ).fetchone()
-    return int(row[0] or 0)
+    return int(_row_get(row, "reserved_credits", 0) or 0)
 
 
 def _ensure_account_locked(conn, business_slug: str) -> tuple[str, int]:
@@ -124,7 +139,7 @@ def _ensure_account_locked(conn, business_slug: str) -> tuple[str, int]:
         """,
         (business_slug,),
     ).fetchone()
-    return str(row[0]), int(row[1])
+    return str(_row_get(row, "business_slug", 0)), int(_row_get(row, "balance_credits", 1))
 
 
 def open_business_credit_account(conn, business_slug: str) -> None:
@@ -156,8 +171,8 @@ def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBala
             reserved_credits=0,
         )
     return CreativeCreditBalances(
-        business_slug=str(row[0]),
-        balance_credits=int(row[1]),
+        business_slug=str(_row_get(row, "business_slug", 0)),
+        balance_credits=int(_row_get(row, "balance_credits", 1)),
         reserved_credits=_reserved_credits(conn, business_slug),
     )
 

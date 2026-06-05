@@ -29,6 +29,8 @@
   const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
   const BUSINESS_CACHE_KEY = "takyon.operator.businesses.v1";
   const OPERATOR_SHELL_TIMEOUT_MS = 8000;
+  const LIVE_CANONICAL_WORKSPACE_VIEW = "full";
+  const LIVE_CANONICAL_WORKSPACE_REFRESH_MS = 6000;
   const LIVE = {
     activeBusiness: "",
     sessionId: "",
@@ -66,6 +68,8 @@
     historyRunning: false,
     refreshTimer: null,
     refreshController: null,
+    canonicalWorkspaceAt: 0,
+    canonicalWorkspaceController: null,
   };
 
   function endpoint(path) {
@@ -167,10 +171,12 @@
   }
 
   function currentBusinessParam() {
-    const own = new URL(window.location.href).searchParams.get("business");
+    const ownSearch = new URL(window.location.href).searchParams;
+    const own = ownSearch.get("business") || ownSearch.get("scope");
     if (own) return own;
     try {
-      return new URL(owner.location.href).searchParams.get("business") || "";
+      const ownerSearch = new URL(owner.location.href).searchParams;
+      return ownerSearch.get("business") || ownerSearch.get("scope") || "";
     } catch (_err) {
       return "";
     }
@@ -179,8 +185,12 @@
   function replaceSearchParam(targetWindow, slug) {
     try {
       const url = new URL(targetWindow.location.href);
-      if (slug) url.searchParams.set("business", slug);
-      else url.searchParams.delete("business");
+      if (slug) {
+        url.searchParams.set("business", slug);
+      } else {
+        url.searchParams.delete("business");
+      }
+      url.searchParams.delete("scope");
       targetWindow.history.replaceState(targetWindow.history.state, "", url.toString());
     } catch (_err) {
       /* best effort */
@@ -204,7 +214,7 @@
       current: {
         name: String(summary && summary.name || business).trim(),
         goal: String(summary && summary.goal || "").trim(),
-        mode: String(summary && summary.mode || "test").trim().toLowerCase() || "test",
+        mode: String(summary && summary.mode || "live").trim().toLowerCase() || "live",
       },
       overview: {},
       outputs: [],
@@ -1071,6 +1081,57 @@
 
   const LIVE_WORKSPACE_VIEW = "home";
 
+  function shouldHydrateCanonicalWorkspace(business, options, snapshot) {
+    const slug = String(business || "").trim().toLowerCase();
+    if (!slug || LIVE.activeBusiness !== slug || !RT.live) return false;
+    const requestedView = String(options && options.view || LIVE_WORKSPACE_VIEW).trim().toLowerCase();
+    if (requestedView === LIVE_CANONICAL_WORKSPACE_VIEW) return false;
+    if (options && options.skipDashboardState) return false;
+    if (LIVE.canonicalWorkspaceController) return false;
+    const candidate = snapshot || LIVE.workspaceSnapshot;
+    if (!hasLiveProgress(candidate)) return false;
+    return !LIVE.canonicalWorkspaceAt || (Date.now() - LIVE.canonicalWorkspaceAt) >= LIVE_CANONICAL_WORKSPACE_REFRESH_MS;
+  }
+
+  async function hydrateCanonicalWorkspace(business) {
+    const slug = String(business || "").trim().toLowerCase();
+    if (!slug || LIVE.activeBusiness !== slug || LIVE.canonicalWorkspaceController) return;
+    const controller = new AbortController();
+    LIVE.canonicalWorkspaceAt = Date.now();
+    LIVE.canonicalWorkspaceController = controller;
+    try {
+      const activeSessionId = LIVE.sessionId && LIVE.sessionBusiness === slug ? LIVE.sessionId : "";
+      const [workspaceSettled, dashboardSettled] = await Promise.allSettled([
+        fetchJSON(
+          `/api/takyon/businesses/${encodeURIComponent(slug)}/workspace?limit=50&view=${encodeURIComponent(LIVE_CANONICAL_WORKSPACE_VIEW)}`,
+          { signal: controller.signal },
+        ),
+        activeSessionId
+          ? rpc("takyon.dashboard.state", {
+            session_id: activeSessionId,
+            business_slug: slug,
+            view: LIVE_CANONICAL_WORKSPACE_VIEW,
+            limit: 50,
+          }, 10000)
+          : Promise.resolve(null),
+      ]);
+      if (LIVE.canonicalWorkspaceController !== controller || LIVE.activeBusiness !== slug) return;
+      const workspace = workspaceSettled.status === "fulfilled" ? workspaceSettled.value : null;
+      const dashboardState = dashboardSettled.status === "fulfilled" ? dashboardSettled.value : null;
+      const snapshot = mergeLiveSnapshots(workspace, dashboardState);
+      LIVE.canonicalWorkspaceAt = Date.now();
+      if (!snapshot) return;
+      LIVE.workspaceOverview = snapshot.overview || {};
+      applyWorkspace(snapshot, businessSummary(slug));
+      const nextStatus = liveStatusFromSnapshot(snapshot);
+      setStatus(nextStatus.text, nextStatus.state);
+    } catch (err) {
+      if (isAbortError(err)) return;
+    } finally {
+      if (LIVE.canonicalWorkspaceController === controller) LIVE.canonicalWorkspaceController = null;
+    }
+  }
+
   function restartLivePollTimer(ms) {
     const nextMs = Number(ms);
     if (!Number.isFinite(nextMs) || nextMs < 250) return;
@@ -1137,7 +1198,7 @@
   function publishedStateLabel(item) {
     const status = String(item && item.status || "").trim().toLowerCase();
     const mode = String(item && item.mode || "").trim().toLowerCase();
-    if (status === "published_local" || mode === "test" || String(item && item.artifact_path || "").trim()) {
+    if (status === "published_local" || String(item && item.artifact_path || "").trim()) {
       return "locally published";
     }
     if (status === "published" || String(item && item.url || "").trim() || mode === "live") {
@@ -1360,7 +1421,7 @@
       slug: snapshot.business_slug || RT.biz && RT.biz.slug || "",
       name: String(current.name || summary && summary.name || RT.biz && RT.biz.name || snapshot.business_slug || "litebulb").trim(),
       idea: String(current.goal || summary && summary.goal || RT.biz && RT.biz.idea || "").trim(),
-      mode: String(current.mode || summary && summary.mode || RT.biz && RT.biz.mode || "test").trim().toLowerCase() || "test",
+      mode: String(current.mode || summary && summary.mode || RT.biz && RT.biz.mode || "live").trim().toLowerCase() || "live",
       publicUrl: String(product.public_url || "").trim(),
       siteHost: (() => {
         try {
@@ -1387,9 +1448,9 @@
     syncHistoryPollTimer();
     const modeEl = $("#mb-mode");
     if (modeEl) {
-      modeEl.textContent = RT.biz.mode || "test";
+      modeEl.textContent = RT.biz.mode || "live";
       modeEl.classList.toggle("live-mode", RT.biz.mode === "live");
-      modeEl.classList.toggle("test", RT.biz.mode !== "live");
+      modeEl.classList.remove("test");
     }
     $("#mb-biz").textContent = RT.biz.name || RT.biz.slug || "—";
     if (snapshot.business_slug !== LIVE.bootedBusiness) {
@@ -1509,10 +1570,9 @@
       <label class="meta" for="operator-create-goal" style="display:block;margin-bottom:4px">idea</label>
       <textarea id="operator-create-goal" placeholder="Describe the company you want to build…" style="width:100%;min-height:82px;box-sizing:border-box;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.45 'Space Mono',monospace;margin-bottom:8px;resize:vertical"></textarea>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-        <select id="operator-create-mode" style="border:1.5px solid var(--ink);background:#fff;padding:7px 9px;font:12px/1.4 'Space Mono',monospace">
-          <option value="test">test mode</option>
-          <option value="live">live mode</option>
-        </select>
+	        <select id="operator-create-mode" style="border:1.5px solid var(--ink);background:#fff;padding:7px 9px;font:12px/1.4 'Space Mono',monospace">
+	          <option value="live">live mode</option>
+	        </select>
         <button class="cbtn go" id="operator-create" type="button" style="flex:1">create</button>
       </div>
       <div class="meta" id="operator-create-error" style="min-height:16px;margin-bottom:14px"></div>
@@ -1542,7 +1602,7 @@
     $("#operator-create", w).addEventListener("click", () => {
       const goal = String($("#operator-create-goal", w).value || "").trim();
       const name = String($("#operator-create-name", w).value || "").trim();
-      const mode = String($("#operator-create-mode", w).value || "test").trim().toLowerCase();
+      const mode = String($("#operator-create-mode", w).value || "live").trim().toLowerCase();
       const errorEl = $("#operator-create-error", w);
       errorEl.textContent = "";
       if (!goal) {
@@ -2403,6 +2463,7 @@
     LIVE.historyRunning = false;
     LIVE.historySeen = new Set();
     LIVE.historyPollMs = 0;
+    LIVE.canonicalWorkspaceAt = 0;
   }
 
   function stopLiveTimers() {
@@ -2439,9 +2500,18 @@
       }
       LIVE.refreshController = null;
     }
+    if (LIVE.canonicalWorkspaceController) {
+      try {
+        LIVE.canonicalWorkspaceController.abort();
+      } catch (_err) {
+        /* best effort */
+      }
+      LIVE.canonicalWorkspaceController = null;
+    }
     LIVE.sessionId = "";
     LIVE.sessionBusiness = "";
     LIVE.activeBusiness = "";
+    syncBusinessParam("");
     resetLiveState();
   }
 
@@ -2915,6 +2985,9 @@
       if (document.getElementById("w-wallet")) renderWalletWindow();
       if (document.getElementById("w-wake")) renderWakeWindow("");
       if (document.getElementById("w-files")) renderDeliverablesWindow();
+      if (shouldHydrateCanonicalWorkspace(business, options, snapshot)) {
+        void hydrateCanonicalWorkspace(business);
+      }
     } catch (err) {
       if (isAbortError(err)) return;
       setStatus("paused", "paused");
@@ -2929,13 +3002,13 @@
     if (!business) return;
     LIVE.activeBusiness = business;
     syncBusinessParam(business);
-    const summary = providedSummary || businessSummary(business) || { slug: business, name: business, goal: "", mode: "test" };
+    const summary = providedSummary || businessSummary(business) || { slug: business, name: business, goal: "", mode: "live" };
     const brand = deriveBrand(summary.goal || summary.name || business);
     const biz = {
       slug: business,
       name: summary.name || brand.name,
       idea: summary.goal || "",
-      mode: summary.mode || "test",
+      mode: summary.mode || "live",
     };
     RT.live = true;
     mountLiveShell(biz);
@@ -2974,6 +3047,15 @@
 
   function mountLiveShell(biz) {
     stopLiveTimers();
+    if (LIVE.canonicalWorkspaceController) {
+      try {
+        LIVE.canonicalWorkspaceController.abort();
+      } catch (_err) {
+        /* best effort */
+      }
+      LIVE.canonicalWorkspaceController = null;
+    }
+    LIVE.canonicalWorkspaceAt = 0;
     if (RT.ro) {
       try {
         RT.ro.disconnect();
@@ -3007,9 +3089,9 @@
     document.getElementById("mb-ws").classList.add("on");
     document.getElementById("mb-biz").textContent = biz.name || biz.slug || "—";
     const modeEl = document.getElementById("mb-mode");
-    modeEl.textContent = biz.mode || "test";
+    modeEl.textContent = biz.mode || "live";
     modeEl.classList.toggle("live-mode", biz.mode === "live");
-    modeEl.classList.toggle("test", biz.mode !== "live");
+    modeEl.classList.remove("test");
     bulb.classList.add("on");
     setStatus("syncing…", "build");
     desk = $("#desk");
@@ -3043,7 +3125,7 @@
   async function createLiveBusinessWithOptions(options) {
     const goal = String(options && options.goal || "").trim();
     const name = String(options && options.name || "").trim();
-    const mode = String(options && options.mode || "test").trim().toLowerCase() === "live" ? "live" : "test";
+    const mode = "live";
     const errorEl = options && options.errorEl || null;
     if (errorEl) errorEl.textContent = "";
     if (!goal) {
@@ -3095,7 +3177,7 @@
   async function createLiveBusinessFromIdea() {
     const value = (input.value || input.placeholder || "").replace(/…$/, "").trim();
     if (!value) return;
-    await createLiveBusinessWithOptions({ goal: value, mode: "test" });
+    await createLiveBusinessWithOptions({ goal: value, mode: "live" });
   }
 
   async function submitLivePrompt() {
@@ -3121,7 +3203,6 @@
           await rpc("prompt.submit", {
             session_id: sessionId,
             text,
-            create_in_test_mode: String(RT.biz && RT.biz.mode || "test") !== "live",
           }, 30000);
           return;
         } catch (err) {
@@ -3220,7 +3301,7 @@
     interceptClicks();
     const requestedBusiness = String(currentBusinessParam() || "").trim().toLowerCase();
     if (requestedBusiness) {
-      const placeholder = { slug: requestedBusiness, name: requestedBusiness, goal: "", mode: "test" };
+      const placeholder = { slug: requestedBusiness, name: requestedBusiness, goal: "", mode: "live" };
       void mountLiveBusiness(
         requestedBusiness,
         placeholder,

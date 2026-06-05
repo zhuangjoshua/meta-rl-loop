@@ -105,33 +105,26 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "app" / "layout.js").exists()
     assert (workspace_root / "src" / "app" / "globals.css").exists()
     assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
-    assert (workspace_root / "src" / "components" / "StarterAuthForm.js").exists()
-    assert (workspace_root / "src" / "components" / "StarterCheckoutForm.js").exists()
-    assert (workspace_root / "src" / "components" / "StarterGenerateForm.js").exists()
     starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
-    starter_checkout = (workspace_root / "src" / "components" / "StarterCheckoutForm.js").read_text()
-    starter_auth = (workspace_root / "src" / "components" / "StarterAuthForm.js").read_text()
-    starter_landing = (workspace_root / "src" / "components" / "StarterLanding.js").read_text()
     next_config = (workspace_root / "next.config.js").read_text()
-    starter_workspace = (workspace_root / "src" / "components" / "StarterWorkspace.js").read_text()
     assert 'export const starterDefaultPlanKey =' in starter_context
     assert "export const starterConfiguredPlans =" in starter_context
     assert "export const starterDefaultMonthlyPlan =" in starter_context
+    assert "export async function starterRequestAuth" in starter_context
+    assert "export async function starterSession" in starter_context
+    assert "export async function starterAccount" in starter_context
+    assert "export async function starterCheckout" in starter_context
+    assert "export async function starterGenerate" in starter_context
+    assert 'send_email: true' not in starter_context
+    assert (workspace_root / "src" / "app" / "page.js").read_text().strip() == 'export default function HomePage() {\n  return <main className="starter-root" />;\n}'
+    assert (workspace_root / "src" / "app" / "app" / "page.js").read_text().strip() == 'export default function AppPage() {\n  return <main className="starter-root" />;\n}'
     assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert '"includedAiBudgetMicrousd": 5000000' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
-    assert 'useState(starterDefaultPlanKey)' in starter_checkout
-    assert 'fixedMonthlyPlan ? "Subscribe" : "Start checkout"' in starter_checkout
-    assert 'origin: typeof window !== "undefined" ? window.location.origin : ""' in starter_auth
     assert 'TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN' in next_config
     assert 'source: "/api/takyon/:path*"' in next_config
-    assert "See pricing" not in starter_landing
-    assert "Monthly access" not in starter_landing
-    assert "Continue with your account" not in starter_workspace
-    assert "const hasPaidAccess =" in starter_workspace
-    assert "const showGenerate =" in starter_workspace
 
 
-def test_appkit_contract_block_preserves_canonical_rail_components():
+def test_appkit_contract_block_preserves_canonical_rail_helpers():
     block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
         {
             "runtime_features": ["auth", "account", "checkout", "generate"],
@@ -145,8 +138,9 @@ def test_appkit_contract_block_preserves_canonical_rail_components():
         }
     )
 
-    assert "AppKit-owned rail components and helpers are canonical behavior, not inspiration." in block
-    assert "preserve that behavior and only wrap, restyle, reposition, or compose around it" in block
+    assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
+    assert "starterRequestAuth(...)" in block
+    assert "There is intentionally no shared customer-facing page to preserve." in block
 
 
 def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
@@ -167,7 +161,7 @@ def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
         plans_configured=True,
     )
 
-    assert "keep its sign-in behavior authoritative" in block
+    assert "keep that rail behavior authoritative" in block
     assert "do not fake browser-only sessions" in block
 
 

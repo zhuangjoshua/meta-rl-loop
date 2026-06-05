@@ -5349,6 +5349,31 @@ def test_reddit_launch_plan_uses_body_as_structured_copy_fallback(tmp_path, monk
     assert plan["legacy_post_payload"]["data"]["body"] == "Optional long-form copy for Reddit post flows."
 
 
+def test_reddit_launch_plan_defaults_ad_group_start_time_only(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    staged_args, _staged_assets = takyon_core._reddit_stage_launch_args(
+        store,
+        "clipbook",
+        _reddit_launch_args(
+            slug="demo-reddit-default-start",
+            idempotency_key="clipbook-reddit-default-start-v1",
+        ),
+        publish_target=_product_publish_target("clipbook"),
+        verify_public_url=False,
+    )
+
+    plan = takyon_core._reddit_launch_plan(staged_args, {})
+    assert "start_time" not in plan["campaign_payload"]["data"]
+    ad_group_start = plan["ad_group_payload"]["data"]["start_time"]
+    assert ad_group_start.endswith("Z")
+
+    parsed = takyon_core._parse_iso_datetime(ad_group_start)
+    assert parsed is not None
+    assert parsed.minute == 0
+    assert parsed.second == 0
+    assert parsed.microsecond == 0
+
+
 def test_business_reddit_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="test")
     _write_reddit_launch_receipt(tmp_path, mode="test")

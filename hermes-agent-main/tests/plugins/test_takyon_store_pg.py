@@ -55,6 +55,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
+from plugins.takyon import business_credits  # noqa: E402
 from plugins.takyon import control_plane  # noqa: E402
 from plugins.takyon import core as takyon_core  # noqa: E402
 
@@ -72,6 +73,34 @@ def _seed_owned_business(dsn: str, slug: str, *, mode: str = "test") -> None:
             "insert into businesses (slug, name, owner_user_id, mode) values (%s, %s, %s, %s)",
             (slug, slug.title(), uid, mode),
         )
+
+
+def _direct_business_fk_tables(dsn: str) -> set[str]:
+    """Current Postgres tables directly owned by one business via FK to businesses.slug.
+
+    This is intentionally computed from the migrated schema instead of a hardcoded list so the test
+    fails when a new Takyon-owned business table is added without the delete preview/result learning
+    about it.
+    """
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            """
+            select distinct tc.table_name
+            from information_schema.table_constraints tc
+            join information_schema.key_column_usage kcu
+              on tc.constraint_name = kcu.constraint_name
+             and tc.table_schema = kcu.table_schema
+            join information_schema.constraint_column_usage ccu
+              on ccu.constraint_name = tc.constraint_name
+             and ccu.table_schema = tc.table_schema
+            where tc.constraint_type = 'FOREIGN KEY'
+              and tc.table_schema = 'public'
+              and ccu.table_name = 'businesses'
+              and ccu.column_name = 'slug'
+            order by tc.table_name
+            """
+        ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 @pytest.fixture
@@ -94,6 +123,26 @@ def test_default_backend_returns_pg_wrapper_without_bootstrapping(pg_store):
     # Bootstrap really was skipped: the guard table the executescript tried to make is absent.
     with psycopg.connect(pg_store._database_url, autocommit=True) as raw:
         assert raw.execute("select to_regclass('public.should_not_exist')").fetchone()[0] is None
+
+
+def test_pg_wrapper_accepts_native_percent_s_placeholders(pg_store):
+    # Delegated leaf helpers like business_credits already speak native psycopg %s placeholders.
+    # The store wrapper must pass those through instead of escaping them into a literal %%s.
+    with pg_store._connect() as conn:
+        row = conn.execute("SELECT %s::int AS n", (7,)).fetchone()
+        assert row["n"] == 7
+
+
+def test_business_credits_round_trip_through_pg_wrapper(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "creditco", mode="live")
+    with pg_store._connect() as conn:
+        business_credits.open_business_credit_account(conn, "creditco")
+        granted = business_credits.grant_credits(conn, "creditco", 1, "grant-1")
+        assert granted.balance_credits == 1
+        balances = business_credits.get_business_credit_balances(conn, "creditco")
+        assert balances.business_slug == "creditco"
+        assert balances.balance_credits == 1
+        assert balances.reserved_credits == 0
 
 
 def test_stale_sqlite_backend_env_is_rejected(tmp_path, monkeypatch):
@@ -700,6 +749,62 @@ def test_business_delete_detaches_billing_and_custody_history_on_postgres(pg_sto
             "select count(*) from custody_entries where idempotency_key = %s and business_slug is null",
             ("deleteco-custody-1",),
         ).fetchone()[0] == 1
+
+
+def test_business_delete_reports_all_current_business_owned_postgres_tables(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "reportco", mode="test")
+
+    fk_tables = _direct_business_fk_tables(pg_store_dsn)
+    preview = pg_store.commit(
+        scope="global",
+        operations=[{"action": "business.delete", "business": "reportco", "delete_domains": False}],
+        idempotency_key="pg-delete-preview-reportco-1",
+        reason="test",
+        actor="test",
+    )["results"][0]
+
+    candidate_keys = set(preview["database"]["candidates"])
+    assert fk_tables <= candidate_keys
+    assert {
+        "app_business_subsidy_accounts",
+        "app_execution_policies",
+        "app_funding_entries",
+        "app_gateway_keys",
+        "app_user_profiles",
+        "business_creative_credit_accounts",
+        "business_creative_credit_entries",
+        "jobs",
+        "wake_schedules",
+    } <= candidate_keys
+    assert {
+        "business_work_requests",
+        "ledger_entries",
+        "events",
+        "agent_runs",
+        "control_states",
+        "billing_entries",
+        "custody_entries",
+    } <= candidate_keys
+
+    deletion = pg_store.commit(
+        scope="global",
+        operations=[{"action": "business.delete", "business": "reportco", "confirm": True, "delete_domains": False}],
+        idempotency_key="pg-delete-reportco-1",
+        reason="test",
+        actor="test",
+    )["results"][0]
+
+    deleted_keys = set(deletion["database"]["deleted"])
+    assert (fk_tables - {"billing_entries", "custody_entries"}) <= deleted_keys
+    assert {
+        "business_work_requests",
+        "ledger_entries",
+        "events",
+        "agent_runs",
+        "control_states",
+        "billing_entries_detached",
+        "custody_entries_detached",
+    } <= deleted_keys
 
 
 # --------------------------------------------------------------------------- P8.4 serving flip

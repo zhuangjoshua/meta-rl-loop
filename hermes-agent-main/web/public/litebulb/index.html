@@ -221,11 +221,12 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .board-bar-fill{width:100%;border-top:1.5px solid var(--ink)}
 .board-bar-l{font:700 8.5px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;text-align:center;line-height:1.25}
 .board-bar-l small{display:block;font-weight:400;color:var(--muted);letter-spacing:.04em}
-.board-prog{display:flex;flex-direction:column;gap:11px;justify-content:center;flex:1;min-height:118px}
-.board-prog-track{height:32px;border:2px solid var(--ink);background:var(--paper);box-shadow:3px 3px 0 var(--ink);overflow:hidden}
+.board-display{flex:1;display:flex;flex-direction:column;justify-content:center;gap:12px;min-height:0}
+.board-prog-task{font:700 12px 'Space Mono',monospace;letter-spacing:.02em;color:var(--ink);line-height:1.4}
+.board-prog{display:flex;flex-direction:column;gap:8px}
+.board-prog-track{height:30px;border:2px solid var(--ink);background:var(--paper);box-shadow:3px 3px 0 var(--ink);overflow:hidden}
 .board-prog-fill{height:100%;background:var(--green);border-right:2px solid var(--ink)}
-.board-prog-stages{display:flex;justify-content:space-between;font:700 9px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-.board-prog-stages span.on{color:var(--ink)}
+.board-prog-cap{font:700 9px 'Space Mono',monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .board-cols{flex:1;min-height:0;min-width:0}
 .col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;height:100%}
 .col-h{font:700 9.5px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;padding-bottom:6px;margin-bottom:7px;border-bottom:3px solid var(--ink);display:flex;justify-content:space-between;align-items:center}
@@ -282,11 +283,18 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .cbtn.go{flex:1;background:var(--ink);color:var(--paper)}
 .cbtn.go.on{background:var(--green)}
 .cbtn[disabled]{opacity:.4;cursor:not-allowed}
+.cbtn.stripe-action{display:inline-flex;align-items:center;gap:8px;background:#635bff;border-color:#4f46e5;color:#fff;text-transform:none;letter-spacing:0;font:700 11px 'IBM Plex Sans',system-ui,sans-serif;padding:7px 12px;box-shadow:inset 0 -1px 0 rgba(0,0,0,.18)}
+.cbtn.stripe-action:hover{background:#564fe0}
+.cbtn.stripe-action:disabled{opacity:.72}
+.stripe-mark{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;background:rgba(255,255,255,.16);font:700 11px 'IBM Plex Sans',system-ui,sans-serif;line-height:1}
+.stripe-spin{display:inline-block;width:12px;height:12px;border:1.6px solid rgba(255,255,255,.38);border-top-color:#fff;border-radius:999px;animation:stripe-spin .9s linear infinite}
+@keyframes stripe-spin{to{transform:rotate(360deg)}}
 .wallet-stack{display:grid;gap:10px}
 .wallet-actions{display:flex;gap:8px;align-items:center;margin-top:10px}
 .wallet-actions input{flex:1;border:1.5px solid var(--ink);background:#fff;padding:8px 10px;font:12px/1.4 'Space Mono',monospace}
 .wallet-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .wallet-note{font-size:11px;color:var(--muted);line-height:1.45;margin-top:6px}
+.wallet-note--stripe{max-width:220px}
 .wallet-business{font:700 9px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--red)}
 
 /* task detail */
@@ -500,7 +508,7 @@ const LANES={research:{c:'var(--blue)'},product:{c:'var(--teal)'},growth:{c:'var
 const SKILLS=[
   {k:'market-research',lane:'research',t:'Market research — who actually pays',b:'Validate the reachable customer, the pain, alternatives, and a revenue path.',tool:{kind:'fetch',nm:'web_search',ttl:i=>`"${i.root} pricing, competitors"`},receipt:'research/market.md'},
   {k:'business-plan',lane:'research',t:'Refine idea into a build spec',b:'Turn the one-liner into the smallest real micro-SaaS spec.',tool:{kind:'edit',nm:'write_file',ttl:()=>'research/spec.md'},receipt:'research/spec.md'},
-  {k:'site-build',lane:'product',t:'Build the product site',b:'Ship product/site/index.html in test mode.',tool:{kind:'edit',nm:'write_file',ttl:()=>'product/site/index.html'},receipt:'product/site/index.html',ship:'Landing page (test)'},
+  {k:'site-build',lane:'product',t:'Build the product site',b:'Ship product/site/index.html on the live path.',tool:{kind:'edit',nm:'write_file',ttl:()=>'product/site/index.html'},receipt:'product/site/index.html',ship:'Landing page'},
   {k:'app-runtime',lane:'product',t:'Wire auth, checkout & usage',b:'Magic-link auth, Stripe checkout, usage metering.',tool:{kind:'execute',nm:'terminal',ttl:()=>'wire auth + checkout'},receipt:'product/runtime/',ship:'Auth + checkout'},
   {k:'site-improve',lane:'product',t:'Tighten the landing copy',b:'Above-the-fold conversion pass.',tool:{kind:'edit',nm:'patch',ttl:()=>'product/site/index.html'},receipt:'product/site/index.html',ship:'Sharper copy'},
   {k:'find-leads',lane:'growth',t:'Find the first reachable leads',b:'Assemble a list of prospects we can actually reach.',tool:{kind:'fetch',nm:'web_search',ttl:i=>`"${i.root} early adopters"`},receipt:'growth/leads.csv'},
@@ -768,7 +776,7 @@ function secondTick(){
 /* ---------- mount + bootstrap ---------- */
 function openBoard(){makeWin({id:'w-board',title:'the board · autonomous tasks',x:16,y:12,w:560,h:430,html:''});renderBoard();}
 function openGraph(){makeWin({id:'w-graph',title:'north star · metrics',x:560,y:12,w:300,h:430,html:'<div class="board-graph board-graph--empty"><div class="board-star"><div class="board-star-k">north star</div><div class="board-star-v">—</div><div class="board-star-note">Metrics appear once the company is live.</div></div></div>'});}
-function openProduct(){makeWin({id:'w-product',title:'product · live preview',x:600,y:12,w:308,h:282,html:''});renderProduct();}
+function openProduct(){makeWin({id:'w-product',title:'product',x:600,y:12,w:308,h:282,html:''});renderProduct();}
 function openStatus(){makeWin({id:'w-status',title:'outreach · paid channels',x:600,y:316,w:280,h:240,html:''});renderOutreach();}
 function openDeliverables(){makeWin({id:'w-files',title:'deliverables · outputs',x:648,y:84,w:360,h:360,html:''});renderDeliverables();}
 function openCeoLog(){makeWin({id:'w-ceo',title:'ceo.log · wake loop',x:16,y:466,w:560,h:150,crt:true,html:'<div id="ceofeed" aria-live="polite"></div>'});RT.ceoFeed=$('#ceofeed',document.getElementById('w-ceo'));renderLog(RT.ceoFeed);}
@@ -780,19 +788,20 @@ function geo(){
   const Hh=H-2*g;
   const topH=Math.round(Hh*0.60), botH=Math.max(110,Hh-topH-g);
   const Lx=g;
+  const hasBoard=!!document.getElementById('w-board');
   const hasGraph=!!document.getElementById('w-graph');
-  const Bw=Math.max(300,Math.min(360,Math.round(W*0.27)));
+  const Bw=hasBoard?Math.max(300,Math.min(360,Math.round(W*0.27))):0;
   const Gw=hasGraph?Math.max(228,Math.min(288,Math.round(W*0.20))):0;
-  const Gx=Lx+Bw+g;
-  const Px=hasGraph?Gx+Gw+g:Gx;
+  const Gx=Lx+(hasBoard?Bw+g:0);
+  const Px=Gx+(hasGraph?Gw+g:0);
   const Pw=Math.max(320,W-Px-g);
-  const leftW=hasGraph?Bw+g+Gw:Bw;
+  const leftW=(hasBoard?Bw:0)+(hasBoard&&hasGraph?g:0)+(hasGraph?Gw:0)||Pw;
   const grid={
-    'w-board':{x:Lx,y:g,w:Bw,h:hb(topH)},
     'w-product':{x:Px,y:g,w:Pw,h:hb(topH)},
     'w-ceo':{x:Lx,y:g+topH+g,w:leftW,h:hb(botH)},
     'w-status':{x:Px,y:g+topH+g,w:Pw,h:hb(botH)}
   };
+  if(hasBoard)grid['w-board']={x:Lx,y:g,w:Bw,h:hb(topH)};
   if(hasGraph)grid['w-graph']={x:Gx,y:g,w:Gw,h:hb(topH)};
   return grid;
 }
@@ -814,7 +823,7 @@ function mount(idea){
   $('#workspace').classList.add('on'); $('#mb-ws').classList.add('on');
   $('#mb-biz').textContent=RT.biz.name; bulb.classList.add('on'); setStatus('building…','build');
   desk=$('#desk'); RT.moved=new Set();
-  openBoard(); openProduct(); openStatus(); openCeoLog(); syncDock();
+  openProduct(); openStatus(); openCeoLog(); syncDock();
   layoutMain();
   try{RT.ro=new ResizeObserver(layoutMain); RT.ro.observe(desk);}catch(e){}
   setTimeout(layoutMain,60); setTimeout(layoutMain,320);
@@ -842,13 +851,13 @@ function seed(){
 function bootstrap(){
   ceolog('<span class="sys">litebulb runtime</span> — booting CEO');
   setTimeout(()=>addThink('reading the brief. scoping the smallest version that is actually real, not a demo.'),350);
-  setTimeout(()=>addCeo(`Spinning up <b>${esc(RT.biz.name)}</b> in <b>test mode</b>. I build the product first, then run the company on a wake loop. Interrupt me any time — I'll re-plan around you.`),1100);
+  setTimeout(()=>addCeo(`Spinning up <b>${esc(RT.biz.name)}</b> in <b>live mode</b>. I build the product first, then run the company on a wake loop. Interrupt me any time — I'll re-plan around you.`),1100);
   setTimeout(()=>{addTool({kind:'other',nm:'business_upsert_business',ttl:RT.biz.slug,done:true});},1900);
-  setTimeout(()=>{const c=addTool({kind:'edit',nm:'write_file',ttl:'product/site/index.html'});setTimeout(()=>{c.querySelector('.tool').classList.add('done');shipFeature('Landing page (test)');},1400);},2400);
+  setTimeout(()=>{const c=addTool({kind:'edit',nm:'write_file',ttl:'product/site/index.html'});setTimeout(()=>{c.querySelector('.tool').classList.add('done');shipFeature('Landing page');},1400);},2400);
   setTimeout(()=>addPlan([
     {t:'Refine idea → build spec',s:'done'},
     {t:'Market research — who pays',s:'doing'},
-    {t:'Ship product site (test)',s:'doing'},
+    {t:'Ship product site',s:'doing'},
     {t:'Get first paying customer',s:'todo'},
     {t:'Define measurement plan',s:'todo'},
   ]),3200);
