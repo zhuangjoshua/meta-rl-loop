@@ -1303,6 +1303,2193 @@ def _write_text_if_missing(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _subuser_app_starter_root_layout_js(*, title_literal: str) -> str:
+    return (
+        dedent(
+            """
+            import "../../_takyon/tokens.css";
+            import "./globals.css";
+
+            export const metadata = {
+              title: __STARTER_TITLE__,
+              description: "",
+            };
+
+            export default function RootLayout({ children }) {
+              return (
+                <html lang="en">
+                  <body>{children}</body>
+                </html>
+              );
+            }
+            """
+        ).strip().replace("__STARTER_TITLE__", title_literal)
+        + "\n"
+    )
+
+
+def _subuser_app_starter_globals_css() -> str:
+    return (
+        dedent(
+            """
+            :root {
+              --starter-bg: #f7f1e7;
+              --starter-panel: rgba(255, 252, 247, 0.88);
+              --starter-panel-strong: #fffdf9;
+              --starter-border: rgba(28, 38, 58, 0.12);
+              --starter-border-strong: rgba(18, 34, 59, 0.2);
+              --starter-ink: #132139;
+              --starter-muted: #627089;
+              --starter-accent: #10213b;
+              --starter-accent-ink: #fff9f2;
+              --starter-accent-soft: #d7e7df;
+              --starter-highlight: #2f6f68;
+              --starter-shadow: 0 22px 60px rgba(18, 34, 59, 0.08);
+              --starter-radius-xl: 30px;
+              --starter-radius-lg: 22px;
+              --starter-radius-md: 16px;
+              --starter-max: 1180px;
+              --starter-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+            }
+
+            * {
+              box-sizing: border-box;
+            }
+
+            html,
+            body {
+              margin: 0;
+              min-height: 100%;
+              background:
+                radial-gradient(circle at top left, rgba(215, 231, 223, 0.5), transparent 34%),
+                radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.7), transparent 36%),
+                var(--starter-bg);
+              color: var(--starter-ink);
+              font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+
+            body {
+              line-height: 1.55;
+            }
+
+            a {
+              color: inherit;
+              text-decoration: none;
+            }
+
+            button,
+            input,
+            textarea {
+              font: inherit;
+            }
+
+            button {
+              border: 0;
+              background: none;
+            }
+
+            .starter-root {
+              min-height: 100vh;
+            }
+
+            .starter-wrap {
+              width: min(calc(100% - 2rem), var(--starter-max));
+              margin: 0 auto;
+            }
+
+            .starter-page {
+              padding: 1rem 0 4.5rem;
+            }
+
+            .starter-nav {
+              position: sticky;
+              top: 0;
+              z-index: 20;
+              backdrop-filter: blur(18px);
+              background: rgba(247, 241, 231, 0.8);
+              border-bottom: 1px solid rgba(28, 38, 58, 0.08);
+            }
+
+            .starter-nav-inner,
+            .starter-app-bar {
+              min-height: 78px;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 1rem;
+            }
+
+            .starter-brand,
+            .starter-app-brand {
+              display: inline-flex;
+              align-items: center;
+              gap: 0.7rem;
+              font-size: 1.05rem;
+              font-weight: 700;
+              letter-spacing: -0.02em;
+            }
+
+            .starter-brand-mark {
+              width: 12px;
+              height: 12px;
+              border-radius: 999px;
+              background: linear-gradient(135deg, #d9b86b, #f4e8c7);
+              box-shadow: 0 0 0 5px rgba(217, 184, 107, 0.15);
+            }
+
+            .starter-nav-links,
+            .starter-app-links,
+            .starter-actions,
+            .starter-inline-actions,
+            .starter-pill-row,
+            .starter-hero-actions {
+              display: flex;
+              flex-wrap: wrap;
+              align-items: center;
+              gap: 0.8rem;
+            }
+
+            .starter-nav-links a,
+            .starter-app-links a {
+              color: var(--starter-muted);
+              font-size: 0.98rem;
+            }
+
+            .starter-button,
+            .starter-link-button {
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              gap: 0.45rem;
+              min-height: 48px;
+              padding: 0 1.05rem;
+              border-radius: 999px;
+              border: 1px solid var(--starter-border-strong);
+              background: rgba(255, 255, 255, 0.7);
+              color: var(--starter-ink);
+              cursor: pointer;
+              transition:
+                transform 140ms ease,
+                box-shadow 140ms ease,
+                border-color 140ms ease,
+                background 140ms ease;
+            }
+
+            .starter-button:hover,
+            .starter-link-button:hover {
+              transform: translateY(-1px);
+              box-shadow: 0 12px 32px rgba(18, 34, 59, 0.08);
+            }
+
+            .starter-button-primary,
+            .starter-link-primary {
+              background: var(--starter-accent);
+              color: var(--starter-accent-ink);
+              border-color: var(--starter-accent);
+            }
+
+            .starter-button-quiet,
+            .starter-link-quiet {
+              border-color: rgba(28, 38, 58, 0.08);
+              background: rgba(255, 255, 255, 0.42);
+            }
+
+            .starter-button:disabled {
+              opacity: 0.55;
+              cursor: not-allowed;
+              transform: none;
+              box-shadow: none;
+            }
+
+            .starter-hero {
+              padding: 3.5rem 0 2.5rem;
+            }
+
+            .starter-hero-grid {
+              display: grid;
+              grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.72fr);
+              gap: 2rem;
+              align-items: flex-start;
+            }
+
+            .starter-kicker {
+              margin: 0 0 1rem;
+              color: var(--starter-highlight);
+              font-size: 0.92rem;
+              font-weight: 700;
+              letter-spacing: 0.18em;
+              text-transform: uppercase;
+            }
+
+            .starter-headline,
+            .starter-section h2,
+            .starter-price-value,
+            .starter-shell-title {
+              margin: 0;
+              color: var(--starter-ink);
+              font-family: var(--starter-serif);
+              font-weight: 700;
+              letter-spacing: -0.05em;
+            }
+
+            .starter-headline {
+              max-width: 10ch;
+              font-size: clamp(3.4rem, 7vw, 6rem);
+              line-height: 0.95;
+            }
+
+            .starter-lede,
+            .starter-section-copy,
+            .starter-card-copy,
+            .starter-note,
+            .starter-helper,
+            .starter-stat-label {
+              color: var(--starter-muted);
+            }
+
+            .starter-lede {
+              max-width: 32rem;
+              margin: 1.6rem 0 0;
+              font-size: 1.23rem;
+            }
+
+            .starter-hero-meta {
+              margin-top: 1.2rem;
+              color: var(--starter-muted);
+              font-size: 1.02rem;
+            }
+
+            .starter-card,
+            .starter-panel,
+            .starter-shell-card,
+            .starter-price-card,
+            .starter-profile-card {
+              border: 1px solid var(--starter-border);
+              border-radius: var(--starter-radius-lg);
+              background: var(--starter-panel);
+              box-shadow: var(--starter-shadow);
+            }
+
+            .starter-card,
+            .starter-panel,
+            .starter-shell-card,
+            .starter-price-card,
+            .starter-profile-card,
+            .starter-auth-card {
+              padding: 1.4rem;
+            }
+
+            .starter-proof-card {
+              padding: 1.7rem;
+            }
+
+            .starter-proof-card h3,
+            .starter-shell-card h3,
+            .starter-price-card h3,
+            .starter-profile-card h3,
+            .starter-auth-card h3 {
+              margin: 0 0 0.9rem;
+              font-size: 1.08rem;
+              letter-spacing: -0.02em;
+            }
+
+            .starter-proof-list,
+            .starter-feature-list,
+            .starter-step-list,
+            .starter-bullet-list,
+            .starter-detail-list {
+              display: grid;
+              gap: 0.95rem;
+              margin: 0;
+              padding: 0;
+              list-style: none;
+            }
+
+            .starter-proof-list li,
+            .starter-step-list li {
+              display: grid;
+              grid-template-columns: 34px 1fr;
+              gap: 0.85rem;
+              align-items: flex-start;
+              color: var(--starter-ink);
+            }
+
+            .starter-proof-index,
+            .starter-step-index {
+              width: 34px;
+              height: 34px;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 999px;
+              background: var(--starter-accent-soft);
+              color: var(--starter-highlight);
+              font-weight: 700;
+            }
+
+            .starter-proof-footer {
+              margin-top: 1.2rem;
+              padding-top: 1.1rem;
+              border-top: 1px solid rgba(28, 38, 58, 0.1);
+              color: var(--starter-muted);
+            }
+
+            .starter-section {
+              padding: 1.5rem 0;
+            }
+
+            .starter-section-grid {
+              display: grid;
+              grid-template-columns: minmax(0, 0.86fr) minmax(280px, 0.82fr);
+              gap: 2rem;
+              align-items: flex-start;
+            }
+
+            .starter-section h2 {
+              font-size: clamp(2.6rem, 4.4vw, 4.5rem);
+              line-height: 0.96;
+            }
+
+            .starter-card-grid,
+            .starter-stat-grid {
+              display: grid;
+              gap: 1rem;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .starter-feature {
+              display: grid;
+              gap: 0.7rem;
+            }
+
+            .starter-feature-tag,
+            .starter-pill {
+              width: fit-content;
+              display: inline-flex;
+              align-items: center;
+              gap: 0.4rem;
+              min-height: 34px;
+              padding: 0 0.8rem;
+              border-radius: 999px;
+              background: rgba(47, 111, 104, 0.1);
+              color: var(--starter-highlight);
+              font-size: 0.88rem;
+              font-weight: 700;
+            }
+
+            .starter-pill-muted {
+              background: rgba(18, 34, 59, 0.08);
+              color: var(--starter-muted);
+            }
+
+            .starter-pill-warn {
+              background: rgba(182, 119, 0, 0.12);
+              color: #8a5a00;
+            }
+
+            .starter-pill-success {
+              background: rgba(47, 111, 104, 0.14);
+              color: var(--starter-highlight);
+            }
+
+            .starter-pill-danger {
+              background: rgba(145, 32, 32, 0.12);
+              color: #8d1e1e;
+            }
+
+            .starter-price-card {
+              max-width: 620px;
+              margin: 0 auto;
+              padding: 2rem;
+              text-align: center;
+            }
+
+            .starter-price-value {
+              font-size: clamp(3rem, 5vw, 4.5rem);
+              line-height: 0.95;
+            }
+
+            .starter-price-value small {
+              font-size: 1rem;
+              color: var(--starter-muted);
+              font-family: inherit;
+              font-weight: 500;
+              letter-spacing: 0;
+            }
+
+            .starter-price-copy {
+              max-width: 30rem;
+              margin: 0.95rem auto 0;
+            }
+
+            .starter-final {
+              padding: 2rem 0 0;
+            }
+
+            .starter-final-card {
+              padding: 2rem;
+              background: linear-gradient(180deg, rgba(16, 33, 59, 0.95), rgba(25, 42, 68, 0.95));
+              color: var(--starter-accent-ink);
+              border-radius: var(--starter-radius-xl);
+              box-shadow: 0 26px 70px rgba(18, 34, 59, 0.16);
+            }
+
+            .starter-final-card h2 {
+              color: var(--starter-accent-ink);
+            }
+
+            .starter-final-card .starter-section-copy {
+              color: rgba(255, 249, 242, 0.72);
+            }
+
+            .starter-footer {
+              padding: 1.7rem 0 0;
+              color: var(--starter-muted);
+              font-size: 0.95rem;
+            }
+
+            .starter-shell {
+              padding: 1.2rem 0 3rem;
+            }
+
+            .starter-app-header {
+              margin-bottom: 1.25rem;
+              padding: 1rem 0 0.5rem;
+            }
+
+            .starter-shell-title {
+              font-size: clamp(2.4rem, 4vw, 3.6rem);
+              line-height: 0.98;
+            }
+
+            .starter-shell-copy {
+              max-width: 36rem;
+              margin-top: 0.8rem;
+            }
+
+            .starter-shell-grid {
+              display: grid;
+              gap: 1rem;
+              grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+            }
+
+            .starter-shell-stack {
+              display: grid;
+              gap: 1rem;
+            }
+
+            .starter-stat-grid {
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .starter-stat-card {
+              padding: 1rem 1.1rem;
+            }
+
+            .starter-stat-value {
+              margin: 0;
+              font-size: 1.35rem;
+              font-weight: 700;
+              letter-spacing: -0.03em;
+            }
+
+            .starter-shell-card {
+              display: grid;
+              gap: 1rem;
+            }
+
+            .starter-shell-card-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: flex-start;
+              gap: 1rem;
+            }
+
+            .starter-form,
+            .starter-field,
+            .starter-form-actions,
+            .starter-auth-stack,
+            .starter-profile-grid {
+              display: grid;
+              gap: 0.9rem;
+            }
+
+            .starter-field label {
+              font-size: 0.88rem;
+              color: var(--starter-muted);
+            }
+
+            .starter-input,
+            .starter-textarea {
+              width: 100%;
+              border: 1px solid rgba(18, 34, 59, 0.14);
+              border-radius: 16px;
+              padding: 0.95rem 1rem;
+              background: rgba(255, 255, 255, 0.88);
+              color: var(--starter-ink);
+            }
+
+            .starter-textarea {
+              min-height: 150px;
+              resize: vertical;
+            }
+
+            .starter-code,
+            .starter-response {
+              border: 1px solid rgba(18, 34, 59, 0.08);
+              border-radius: 18px;
+              padding: 1rem;
+              background: rgba(255, 255, 255, 0.6);
+              color: var(--starter-ink);
+              white-space: pre-wrap;
+              word-break: break-word;
+              overflow: auto;
+              font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+              font-size: 0.9rem;
+              line-height: 1.5;
+            }
+
+            .starter-divider {
+              height: 1px;
+              border: 0;
+              margin: 0;
+              background: rgba(18, 34, 59, 0.08);
+            }
+
+            .starter-status-banner {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 1rem;
+              padding: 1rem 1.15rem;
+              border: 1px solid rgba(18, 34, 59, 0.08);
+              border-radius: 18px;
+              background: rgba(255, 255, 255, 0.52);
+            }
+
+            .starter-status-copy {
+              display: grid;
+              gap: 0.2rem;
+            }
+
+            .starter-auth-card {
+              max-width: 680px;
+              margin: 0 auto;
+              border: 1px solid var(--starter-border);
+              border-radius: var(--starter-radius-xl);
+              background: var(--starter-panel-strong);
+              box-shadow: var(--starter-shadow);
+            }
+
+            .starter-auth-title,
+            .starter-profile-title {
+              margin: 0;
+              font-size: 1.45rem;
+              letter-spacing: -0.03em;
+            }
+
+            .starter-auth-copy,
+            .starter-profile-copy {
+              margin: 0;
+              color: var(--starter-muted);
+            }
+
+            .starter-alert {
+              padding: 0.9rem 1rem;
+              border-radius: 16px;
+              background: rgba(47, 111, 104, 0.1);
+              color: var(--starter-highlight);
+            }
+
+            .starter-alert-error {
+              background: rgba(145, 32, 32, 0.1);
+              color: #8d1e1e;
+            }
+
+            .starter-profile-grid {
+              grid-template-columns: minmax(0, 1fr) minmax(280px, 0.82fr);
+              align-items: flex-start;
+            }
+
+            .starter-key-value {
+              display: grid;
+              gap: 0.6rem;
+            }
+
+            .starter-key-value div {
+              display: flex;
+              justify-content: space-between;
+              gap: 1rem;
+              padding-bottom: 0.7rem;
+              border-bottom: 1px solid rgba(18, 34, 59, 0.08);
+            }
+
+            .starter-key-value dt,
+            .starter-key-value dd {
+              margin: 0;
+            }
+
+            .starter-key-value dt {
+              color: var(--starter-muted);
+            }
+
+            .starter-profile-card {
+              display: grid;
+              gap: 1rem;
+            }
+
+            @media (max-width: 1080px) {
+              .starter-hero-grid,
+              .starter-section-grid,
+              .starter-shell-grid,
+              .starter-profile-grid {
+                grid-template-columns: 1fr;
+              }
+            }
+
+            @media (max-width: 760px) {
+              .starter-page {
+                padding-top: 0.35rem;
+              }
+
+              .starter-nav-inner,
+              .starter-app-bar {
+                flex-direction: column;
+                align-items: stretch;
+                justify-content: center;
+                padding: 0.75rem 0;
+              }
+
+              .starter-nav-links,
+              .starter-actions,
+              .starter-inline-actions,
+              .starter-app-links,
+              .starter-hero-actions {
+                width: 100%;
+              }
+
+              .starter-nav-links a,
+              .starter-app-links a,
+              .starter-button,
+              .starter-link-button {
+                flex: 1 1 160px;
+                justify-content: center;
+              }
+
+              .starter-stat-grid,
+              .starter-card-grid {
+                grid-template-columns: 1fr;
+              }
+
+              .starter-headline {
+                max-width: none;
+              }
+
+              .starter-final-card,
+              .starter-proof-card,
+              .starter-price-card {
+                padding: 1.5rem;
+              }
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_home_page_js() -> str:
+    return (
+        dedent(
+            """
+            import { StarterLandingPage } from "../components/starter-pages";
+
+            export default function HomePage() {
+              return <StarterLandingPage />;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_app_layout_js() -> str:
+    return (
+        dedent(
+            """
+            import { StarterAppChrome } from "../../components/starter-pages";
+
+            export default function AppLayout({ children }) {
+              return <StarterAppChrome>{children}</StarterAppChrome>;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_app_page_js() -> str:
+    return (
+        dedent(
+            """
+            import { StarterProductAccessGate } from "../../components/starter-pages";
+            import { loadServerAppState } from "../../components/starter-server";
+
+            export const dynamic = "force-dynamic";
+
+            export default async function AppPage() {
+              const initialAppState = await loadServerAppState();
+              return <StarterProductAccessGate initialAppState={initialAppState} />;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_product_layout_js() -> str:
+    return (
+        dedent(
+            """
+            import { redirect } from "next/navigation";
+            import { loadServerAppState } from "../../../components/starter-server";
+
+            export const dynamic = "force-dynamic";
+
+            export default async function ProductLayout({ children }) {
+              const initialAppState = await loadServerAppState();
+              if (initialAppState?.access?.state !== "ready") {
+                redirect("/app");
+              }
+              return children;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_product_page_js() -> str:
+    return (
+        dedent(
+            """
+            export default function ProductRoutePlaceholder() {
+              return null;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_profile_page_js() -> str:
+    return (
+        dedent(
+            """
+            import { StarterProfilePage } from "../../../components/starter-pages";
+            import { loadServerAppState } from "../../../components/starter-server";
+
+            export const dynamic = "force-dynamic";
+
+            export default async function ProfilePage() {
+              const initialAppState = await loadServerAppState();
+              return <StarterProfilePage initialAppState={initialAppState} />;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_server_js() -> str:
+    return (
+        dedent(
+            """
+            import "server-only";
+
+            import { headers } from "next/headers";
+
+            import surfaceContext from "../../_takyon/surface-context.js";
+            import { resolveSubuserRuntimeBase } from "../../_takyon/runtime-client.js";
+            import { starterAppState, starterIsAuthenticated } from "./starter-context.js";
+
+            function joinRoute(base, route) {
+              const cleanRoute = String(route || "").replace(/^\\/+/, "");
+              const cleanBase = String(base || "").trim().replace(/\\/+$/, "");
+              return cleanBase ? `${cleanBase}/${cleanRoute}` : `/${cleanRoute}`;
+            }
+
+            function requestOrigin() {
+              const requestHeaders = headers();
+              const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
+              const proto = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
+              return `${proto}://${host}`;
+            }
+
+            function requestLocation(origin) {
+              const url = new URL(origin);
+              return {
+                hostname: url.hostname,
+                href: `${origin}/app`,
+                pathname: "/app",
+                origin,
+              };
+            }
+
+            function runtimeUrl(route) {
+              const origin = requestOrigin();
+              const base = resolveSubuserRuntimeBase({
+                runtimeApiBase: surfaceContext.runtimeApiBase,
+                frontendApiMode: surfaceContext.frontendApiMode,
+                location: requestLocation(origin),
+              });
+              return new URL(joinRoute(base, route), origin).toString();
+            }
+
+            async function serverJson(route) {
+              const requestHeaders = headers();
+              const response = await fetch(runtimeUrl(route), {
+                method: "GET",
+                cache: "no-store",
+                headers: {
+                  Accept: "application/json",
+                  Cookie: requestHeaders.get("cookie") || "",
+                },
+              });
+              const payload = await response
+                .json()
+                .catch(() => ({ success: false, error: `non_json_response:${response.status}` }));
+              if (!response.ok) {
+                const error = new Error(
+                  String(payload.error || payload.detail || `request_failed:${response.status}`),
+                );
+                error.status = response.status;
+                error.payload = payload;
+                throw error;
+              }
+              return payload;
+            }
+
+            export async function loadServerAppState() {
+              const errors = {};
+              const session = await serverJson("session").catch((error) => {
+                errors.session = String(error?.message || error || "session_unavailable");
+                return {};
+              });
+              let account = null;
+              if (starterIsAuthenticated(session || {}, null)) {
+                account = await serverJson("account").catch((error) => {
+                  errors.account = String(error?.message || error || "account_unavailable");
+                  return null;
+                });
+              }
+              return starterAppState(session || {}, account, { errors });
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_context_js(*, title_literal: str) -> str:
+    return (
+        dedent(
+            """
+            import surfaceContext from "../../_takyon/surface-context.js";
+            import { createSubuserRuntimeClient } from "../../_takyon/runtime-client.js";
+            import { planSubuserSurface } from "../../_takyon/packs.js";
+
+            export const starterBusinessName = __STARTER_BUSINESS_NAME__;
+            export const starterSurfaceContext = surfaceContext;
+            export const starterRuntime = createSubuserRuntimeClient(surfaceContext);
+            export const starterPlan = planSubuserSurface({
+              appMode: surfaceContext.appMode,
+              subscriptionStyle: surfaceContext.subscriptionStyle,
+              apiMode: surfaceContext.apiMode,
+              routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
+            });
+            export const starterConfiguredPlans = Array.isArray(surfaceContext.plans)
+              ? surfaceContext.plans
+                  .filter((plan) => plan && typeof plan === "object" && String(plan.planKey || "").trim())
+                  .map((plan) => ({ ...plan }))
+              : [];
+            export const starterDefaultMonthlyPlan =
+              starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || null;
+            export const starterDefaultPlanKey =
+              starterDefaultMonthlyPlan?.planKey
+                ? String(starterDefaultMonthlyPlan.planKey)
+                : String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
+                  ? "monthly"
+                : "";
+
+            export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
+              ? surfaceContext.runtimeFeatures.map((value) => String(value || "").trim()).filter(Boolean)
+              : [];
+
+            function defaultLocation() {
+              if (typeof window !== "undefined" && window.location) {
+                return window.location;
+              }
+              return {
+                origin: "http://localhost",
+                href: "http://localhost/",
+                pathname: "/",
+              };
+            }
+
+            async function starterJsonRequest(url, init = {}) {
+              const response = await fetch(url, {
+                credentials: "same-origin",
+                headers: {
+                  Accept: "application/json",
+                  ...(init.body ? { "Content-Type": "application/json" } : {}),
+                  ...(init.headers || {}),
+                },
+                ...init,
+              });
+              const text = await response.text();
+              let data = {};
+              if (text) {
+                try {
+                  data = JSON.parse(text);
+                } catch (_error) {
+                  data = { raw: text };
+                }
+              }
+              if (!response.ok) {
+                const message = typeof data?.error === "string"
+                  ? data.error
+                  : `Request failed (${response.status})`;
+                const error = new Error(message);
+                error.status = response.status;
+                error.data = data;
+                throw error;
+              }
+              return data;
+            }
+
+            export function railDeclared(rail) {
+              return starterFeatures.includes(String(rail || "").trim());
+            }
+
+            export function railCallable(rail) {
+              return starterRuntime.isRailCallable(String(rail || "").trim());
+            }
+
+            function lowerText(value) {
+              return String(value || "").trim().toLowerCase();
+            }
+
+            function looksLikeAccountPayload(value) {
+              return !!(
+                value &&
+                typeof value === "object" &&
+                !Array.isArray(value) &&
+                (
+                  Array.isArray(value.entitlements) ||
+                  value.user ||
+                  value.plan ||
+                  value.entitled !== undefined ||
+                  value.revenue ||
+                  value.usage_this_period
+                )
+              );
+            }
+
+            function normalizeViewerInputs(sessionPayload = {}, accountPayload = null) {
+              let session = sessionPayload && typeof sessionPayload === "object" ? sessionPayload : {};
+              let account = accountPayload && typeof accountPayload === "object" ? accountPayload : null;
+              if (account === null && looksLikeAccountPayload(session)) {
+                account = session;
+                session = {};
+              }
+              return { session, account };
+            }
+
+            function accountUser(accountPayload = {}) {
+              return accountPayload && typeof accountPayload === "object" && accountPayload.user && typeof accountPayload.user === "object"
+                ? accountPayload.user
+                : null;
+            }
+
+            function accountEntitlements(accountPayload = {}) {
+              return accountPayload && typeof accountPayload === "object" && Array.isArray(accountPayload.entitlements)
+                ? accountPayload.entitlements.filter((item) => item && typeof item === "object")
+                : [];
+            }
+
+            function isPaidTier(value) {
+              return ["paid", "pro", "trial"].includes(lowerText(value));
+            }
+
+            function entitlementStatus(entitlement = {}) {
+              const status = lowerText(entitlement.status);
+              if (status === "paid") return "active";
+              if (status === "cancelled") return "canceled";
+              return status;
+            }
+
+            function activePaidEntitlement(entitlement = {}) {
+              const status = entitlementStatus(entitlement);
+              const tier = lowerText(entitlement.tier);
+              if (!["active", "trialing", "paid"].includes(status)) return false;
+              if (isPaidTier(tier)) return true;
+              if (String(entitlement.plan_key || entitlement.planKey || "").trim()) return true;
+              if (entitlement.stripe_subscription_id || entitlement.stripeSubscriptionId) return true;
+              return false;
+            }
+
+            function paidEntitlements(accountPayload = {}) {
+              return accountEntitlements(accountPayload)
+                .filter((item) => {
+                  const tier = lowerText(item.tier);
+                  return Boolean(
+                    isPaidTier(tier) ||
+                    String(item.plan_key || item.planKey || "").trim() ||
+                    item.stripe_subscription_id ||
+                    item.stripeSubscriptionId
+                  );
+                })
+                .map((item) => ({
+                  ...item,
+                  status: entitlementStatus(item),
+                }));
+            }
+
+            function subscriptionStatusRank(status) {
+              return {
+                active: 0,
+                trialing: 1,
+                past_due: 2,
+                canceled: 3,
+                revoked: 4,
+              }[status] ?? 9;
+            }
+
+            export function starterIsAuthenticated(sessionPayload = {}, accountPayload = null) {
+              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
+              const user = accountUser(account || {});
+              if (user && String(user.id || "").trim()) return true;
+              if (session && typeof session === "object") {
+                if (session.authenticated === true) return true;
+                if (session.session && typeof session.session === "object") return true;
+                if (String(session.email || "").trim()) return true;
+              }
+              return false;
+            }
+
+            export function starterIsEntitled(accountPayload = {}) {
+              if (!accountPayload || typeof accountPayload !== "object") return false;
+              if (accountPayload.entitled === true) return true;
+              if (accountPayload.plan && typeof accountPayload.plan === "object" && accountPayload.plan.active === true) return true;
+              if (accountEntitlements(accountPayload).some((item) => activePaidEntitlement(item))) return true;
+              const user = accountUser(accountPayload);
+              const userTier = lowerText(user?.tier);
+              if (isPaidTier(userTier)) return true;
+              return false;
+            }
+
+            export function starterSubscriptionState(accountPayload = {}) {
+              const ranked = paidEntitlements(accountPayload).sort((left, right) => {
+                return subscriptionStatusRank(left.status) - subscriptionStatusRank(right.status);
+              });
+              const primary = ranked[0] || null;
+              const fallbackUser = accountUser(accountPayload || {});
+              if (primary) {
+                const state = ["active", "trialing", "past_due", "canceled"].includes(primary.status)
+                  ? primary.status
+                  : activePaidEntitlement(primary)
+                    ? "active"
+                    : "none";
+                const entitled = ["active", "trialing"].includes(state);
+                return {
+                  state,
+                  entitled,
+                  planKey: String(primary.plan_key || primary.planKey || "").trim(),
+                  tier: String(primary.tier || "").trim(),
+                  currentPeriodEnd: String(primary.current_period_end || primary.currentPeriodEnd || "").trim(),
+                  cancelAtPeriodEnd: Boolean(primary.cancel_at_period_end || primary.cancelAtPeriodEnd),
+                  source: primary,
+                  entitlements: ranked,
+                };
+              }
+              if (isPaidTier(fallbackUser?.tier)) {
+                return {
+                  state: lowerText(fallbackUser.tier) === "trial" ? "trialing" : "active",
+                  entitled: true,
+                  planKey: "",
+                  tier: String(fallbackUser.tier || "").trim(),
+                  currentPeriodEnd: "",
+                  cancelAtPeriodEnd: false,
+                  source: null,
+                  entitlements: ranked,
+                };
+              }
+              return {
+                state: "none",
+                entitled: false,
+                planKey: "",
+                tier: "",
+                currentPeriodEnd: "",
+                cancelAtPeriodEnd: false,
+                source: null,
+                entitlements: ranked,
+              };
+            }
+
+            export function starterCanUseApp(sessionPayload = {}, accountPayload = null) {
+              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
+              return starterIsAuthenticated(session, account) && starterIsEntitled(account || {});
+            }
+
+            export function starterCanCheckout(sessionPayload = {}, accountPayload = null) {
+              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
+              return (
+                starterIsAuthenticated(session, account) &&
+                railDeclared("checkout") &&
+                railCallable("checkout") &&
+                !starterIsEntitled(account || {})
+              );
+            }
+
+            export function starterCanGenerate(sessionPayload = {}, accountPayload = null) {
+              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
+              return starterCanUseApp(session, account) && railDeclared("generate") && railCallable("generate");
+            }
+
+            export function starterViewerState(sessionPayload = {}, accountPayload = null) {
+              const { session, account } = normalizeViewerInputs(sessionPayload, accountPayload);
+              const authenticated = starterIsAuthenticated(session, account);
+              const entitled = starterIsEntitled(account || {});
+              const user = accountUser(account || {});
+              const entitlements = accountEntitlements(account || {});
+              const hasAccount = !!(user && String(user.id || "").trim());
+              const signedUp = authenticated && hasAccount;
+              const canCheckout = starterCanCheckout(session, account);
+              const canGenerate = starterCanGenerate(session, account);
+              let state = "anonymous";
+              if (authenticated) {
+                state = entitled ? "authenticated_entitled" : "authenticated_unentitled";
+              }
+              return {
+                state,
+                authenticated,
+                signedUp,
+                entitled,
+                canCheckout,
+                canGenerate,
+                user,
+                entitlements,
+                session: session && typeof session === "object" ? session : null,
+                account: account && typeof account === "object" ? account : null,
+              };
+            }
+
+            export function starterAppState(sessionPayload = {}, accountPayload = null, options = {}) {
+              const viewer = starterViewerState(sessionPayload, accountPayload);
+              const subscription = starterSubscriptionState(viewer.account || {});
+              const canUseApp = starterCanUseApp(viewer.session || {}, viewer.account || null);
+              const canManageProfile = viewer.authenticated && railDeclared("profile") && railCallable("profile");
+              const errors = options && typeof options === "object" && options.errors && typeof options.errors === "object"
+                ? options.errors
+                : {};
+              let accessState = "sign_in_required";
+              if (viewer.authenticated) {
+                accessState = canUseApp ? "ready" : "subscription_required";
+              }
+              if (viewer.authenticated && errors.account) {
+                accessState = "blocked";
+              }
+              return {
+                viewer,
+                subscription,
+                access: {
+                  state: accessState,
+                  requiresAuth: accessState === "sign_in_required",
+                  requiresSubscription: accessState === "subscription_required",
+                  ready: accessState === "ready",
+                  blocked: accessState === "blocked",
+                  reason: accessState === "blocked" ? String(errors.account || errors.session || "account_unavailable") : "",
+                },
+                state: viewer.state,
+                authenticated: viewer.authenticated,
+                signedUp: viewer.signedUp,
+                entitled: viewer.entitled,
+                canCheckout: viewer.canCheckout,
+                canGenerate: viewer.canGenerate,
+                canUseApp,
+                canManageProfile,
+                user: viewer.user,
+                entitlements: viewer.entitlements,
+                session: viewer.session,
+                account: viewer.account,
+                errors,
+              };
+            }
+
+            export async function starterRequestAuth(payload = {}) {
+              if (railCallable("auth")) {
+                return starterRuntime.requestAuth(payload);
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("auth/request"), {
+                method: "POST",
+                body: JSON.stringify(payload),
+              });
+            }
+
+            export async function starterSession() {
+              if (railCallable("auth")) {
+                return starterRuntime.session();
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("session"), { method: "GET" });
+            }
+
+            export async function starterAccount() {
+              if (railCallable("account")) {
+                return starterRuntime.account();
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("account"), { method: "GET" });
+            }
+
+            export async function starterProfile() {
+              if (railCallable("profile")) {
+                return starterRuntime.profile();
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("profile"), { method: "GET" });
+            }
+
+            export async function starterUpdateProfile(payload = {}) {
+              if (railCallable("profile")) {
+                return starterRuntime.updateProfile(payload);
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("profile"), {
+                method: "POST",
+                body: JSON.stringify(payload),
+              });
+            }
+
+            export async function starterCheckout(payload = {}) {
+              const location = defaultLocation();
+              const success_url = payload.success_url || payload.successUrl || `${location.origin}/app?checkout=success`;
+              const cancel_url = payload.cancel_url || payload.cancelUrl || `${location.origin}/app?checkout=cancel`;
+              if (railCallable("checkout")) {
+                return starterRuntime.checkout({
+                  ...payload,
+                  success_url,
+                  cancel_url,
+                });
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("checkout"), {
+                method: "POST",
+                body: JSON.stringify({
+                  ...payload,
+                  success_url,
+                  cancel_url,
+                }),
+              });
+            }
+
+            export async function starterGenerate(payload = {}) {
+              if (railCallable("generate")) {
+                return starterRuntime.generate(payload);
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("generate"), {
+                method: "POST",
+                body: JSON.stringify(payload),
+              });
+            }
+
+            export async function starterLoadViewer() {
+              const appState = await starterLoadAppState();
+              return appState.viewer;
+            }
+
+            export async function starterLoadAppState() {
+              const errors = {};
+              const session = await starterSession().catch((error) => {
+                errors.session = String(error?.message || error || "session_unavailable");
+                return {};
+              });
+              let account = null;
+              if (starterIsAuthenticated(session || {}, null)) {
+                account = await starterAccount().catch((error) => {
+                  errors.account = String(error?.message || error || "account_unavailable");
+                  return null;
+                });
+              }
+              return starterAppState(session || {}, account, { errors });
+            }
+            """
+        ).strip().replace("__STARTER_BUSINESS_NAME__", title_literal)
+        + "\n"
+    )
+
+
+def _subuser_app_starter_pages_js() -> str:
+    return (
+        dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+            import { useEffect, useState, createContext, useContext } from "react";
+
+            import {
+              starterBusinessName,
+              starterSurfaceContext,
+              starterPlan,
+              starterConfiguredPlans,
+              starterDefaultMonthlyPlan,
+              starterDefaultPlanKey,
+              starterLoadAppState,
+              starterRequestAuth,
+              starterCheckout,
+              starterGenerate,
+              starterProfile,
+              starterUpdateProfile,
+            } from "./starter-context.js";
+
+            const StarterAppStateContext = createContext({ appState: null, setAppState: () => {} });
+
+            const DEFAULT_SITE_LINKS = [
+              { href: "#how", label: "How it works" },
+              { href: "#what", label: "What you get" },
+              { href: "#pricing", label: "Pricing" },
+              { href: "#app", label: "Inside the app" },
+            ];
+
+            function humanize(value) {
+              return String(value || "")
+                .replace(/[_-]+/g, " ")
+                .replace(/\\s+/g, " ")
+                .trim()
+                .replace(/\\b\\w/g, (letter) => letter.toUpperCase());
+            }
+
+            function formatMoney(cents = 0, currency = "usd") {
+              return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: String(currency || "usd").toUpperCase(),
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 2,
+              }).format((Number(cents || 0) || 0) / 100);
+            }
+
+            function currentPlan() {
+              return starterDefaultMonthlyPlan || starterConfiguredPlans[0] || null;
+            }
+
+            function planSummary(plan = null) {
+              if (!plan) return "Subscription details appear here once a real plan is configured.";
+              const amount = formatMoney(plan.priceCents, plan.currency);
+              const interval = String(plan.billingInterval || "").trim();
+              return interval ? `${amount} / ${interval}` : amount;
+            }
+
+            function subscriptionTone(state) {
+              if (state === "ready" || state === "active" || state === "trialing") return "starter-pill-success";
+              if (state === "past_due" || state === "subscription_required") return "starter-pill-warn";
+              if (state === "blocked" || state === "canceled") return "starter-pill-danger";
+              return "starter-pill-muted";
+            }
+
+            function appTabs() {
+              const declared = Array.isArray(starterSurfaceContext.customerExperience?.requiredAppTabs)
+                ? starterSurfaceContext.customerExperience.requiredAppTabs
+                : [];
+              if (declared.length) return declared;
+              return ["Workspace", "Progress", "Account"];
+            }
+
+            function featureCards() {
+              const sections = Array.isArray(starterSurfaceContext.customerExperience?.requiredSections)
+                ? starterSurfaceContext.customerExperience.requiredSections
+                : [];
+              const rendered = sections.length ? sections : starterPlan.recommendedSections || [];
+              const picked = rendered.slice(0, 6);
+              if (!picked.length) {
+                return [
+                  { tag: "Offer", title: "What is included", body: "Use this space to show the core offer, the format, and what members actually receive." },
+                  { tag: "Plan", title: "Simple pricing", body: "Keep the plan clear, visible, and easy to understand before anyone starts checkout." },
+                  { tag: "Access", title: "Private app access", body: "Members sign in and continue inside a private account area built for the product." },
+                ];
+              }
+              return picked.map((section, index) => ({
+                tag: ["Offer", "Plan", "Flow", "Access", "Proof", "Account"][index] || "Section",
+                title: humanize(section),
+                body: `Clear details about ${humanize(section).toLowerCase()} belong here.`,
+              }));
+            }
+
+            function stepCards() {
+              const tabs = appTabs();
+              return [
+                "See the offer and understand what makes the product worth starting.",
+                "Sign in once and preserve subscription intent all the way into the app.",
+                tabs.length ? `Land in a real product shell with room for ${tabs.slice(0, 2).join(" and ")}.` : "Land in a real product shell instead of a blank screen.",
+              ];
+            }
+
+            function useStarterAppState() {
+              return useContext(StarterAppStateContext);
+            }
+
+            function StarterAppStateProvider({ initialAppState, children }) {
+              const [appState, setAppState] = useState(initialAppState || null);
+              useEffect(() => {
+                setAppState(initialAppState || null);
+              }, [initialAppState]);
+              return (
+                <StarterAppStateContext.Provider value={{ appState, setAppState }}>
+                  {children}
+                </StarterAppStateContext.Provider>
+              );
+            }
+
+            function StarterStatePill({ label, state }) {
+              return (
+                <span className={`starter-pill ${subscriptionTone(state)}`}>
+                  {label}: {humanize(state || "unknown")}
+                </span>
+              );
+            }
+
+            function StarterStatusBanner({ title, body, actions }) {
+              return (
+                <section className="starter-status-banner">
+                  <div className="starter-status-copy">
+                    <strong>{title}</strong>
+                    <span className="starter-helper">{body}</span>
+                  </div>
+                  {actions ? <div className="starter-inline-actions">{actions}</div> : null}
+                </section>
+              );
+            }
+
+            function StarterAuthCard({
+              intent = "signin",
+              onComplete,
+              title,
+              copy,
+              kicker,
+              backHref = "/",
+              backLabel = "Back",
+            }) {
+              const [email, setEmail] = useState("");
+              const [message, setMessage] = useState("");
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Send magic link";
+              const resolvedTitle =
+                title || (intent === "subscribe" ? "Sign in to continue to checkout." : "Sign in to continue.");
+              const resolvedCopy =
+                copy || "Use your email to continue. We'll send you a secure sign-in link.";
+              const resolvedKicker =
+                kicker || (intent === "subscribe" ? "Continue" : "Sign in");
+
+              async function handleSubmit(event) {
+                event.preventDefault();
+                setPending(true);
+                setMessage("");
+                setError("");
+                try {
+                  const payload = await starterRequestAuth({
+                    email,
+                    origin: window.location.origin,
+                    product_name: starterBusinessName,
+                    app_slug: starterSurfaceContext.business,
+                  });
+                  setMessage(
+                    payload?.success === false
+                      ? "Could not start sign-in."
+                      : "Check your inbox for the magic link."
+                  );
+                  if (onComplete) onComplete();
+                } catch (requestError) {
+                  setError(String(requestError?.message || requestError || "Unable to send magic link."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              return (
+                <section className="starter-auth-card">
+                  <div className="starter-auth-stack">
+                    <p className="starter-kicker">{resolvedKicker}</p>
+                    <h2 className="starter-auth-title">{resolvedTitle}</h2>
+                    <p className="starter-auth-copy">{resolvedCopy}</p>
+                  </div>
+                  <form className="starter-form" onSubmit={handleSubmit}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-email">Email</label>
+                      <input
+                        id="starter-email"
+                        className="starter-input"
+                        type="email"
+                        autoComplete="email"
+                        required
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                        placeholder="you@example.com"
+                      />
+                    </div>
+                    <div className="starter-inline-actions">
+                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !email}>
+                        {pending ? "Sending..." : actionLabel}
+                      </button>
+                      <Link className="starter-link-button starter-link-quiet" href={backHref}>
+                        {backLabel}
+                      </Link>
+                    </div>
+                  </form>
+                  {message ? <div className="starter-alert">{message}</div> : null}
+                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                </section>
+              );
+            }
+
+            function StarterSubscriptionCard({ appState, onCheckoutComplete }) {
+              const plan = currentPlan();
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+
+              async function handleCheckout() {
+                setPending(true);
+                setError("");
+                try {
+                  const payload = await starterCheckout({
+                    plan_key: starterDefaultPlanKey,
+                  });
+                  if (payload?.checkout_url) {
+                    window.location.assign(String(payload.checkout_url));
+                    return;
+                  }
+                  if (onCheckoutComplete) onCheckoutComplete();
+                } catch (checkoutError) {
+                  setError(String(checkoutError?.message || checkoutError || "Unable to start checkout."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              return (
+                <section className="starter-auth-card">
+                  <div className="starter-auth-stack">
+                    <p className="starter-kicker">Membership</p>
+                    <h2 className="starter-auth-title">Choose a plan to continue.</h2>
+                    <p className="starter-auth-copy">Unlock full access to the app with an active subscription.</p>
+                  </div>
+                  <div className="starter-price-card">
+                    <h3>{plan ? humanize(plan.planKey || "plan") : "Plan"}</h3>
+                    <p className="starter-price-value">
+                      {plan ? formatMoney(plan.priceCents, plan.currency) : "Pricing pending"}{" "}
+                      <small>{plan?.billingInterval ? `/ ${plan.billingInterval}` : ""}</small>
+                    </p>
+                    <p className="starter-price-copy">
+                      {appState.subscription.state === "past_due"
+                        ? "Update billing to restore access."
+                        : "Your membership starts as soon as checkout is complete."}
+                    </p>
+                    <div className="starter-inline-actions">
+                      <button
+                        className="starter-button starter-button-primary"
+                        type="button"
+                        disabled={!appState.canCheckout || pending || !starterDefaultPlanKey}
+                        onClick={handleCheckout}
+                      >
+                        {pending ? "Starting checkout..." : "Subscribe"}
+                      </button>
+                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
+                        View account
+                      </Link>
+                    </div>
+                    {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                  </div>
+                </section>
+              );
+            }
+
+            function StarterBlockedCard({ appState }) {
+              return (
+                <section className="starter-auth-card">
+                  <div className="starter-auth-stack">
+                    <p className="starter-kicker">Please try again</p>
+                    <h2 className="starter-auth-title">We couldn't load your account.</h2>
+                    <p className="starter-auth-copy">Refresh the page or try again in a moment.</p>
+                  </div>
+                  <div className="starter-response">
+                    {String(appState?.access?.reason || appState?.errors?.account || "account_unavailable")}
+                  </div>
+                  <div className="starter-inline-actions">
+                    <Link className="starter-link-button starter-link-primary" href="/app/profile">
+                      Open account page
+                    </Link>
+                    <Link className="starter-link-button starter-link-quiet" href="/">
+                      Back to landing page
+                    </Link>
+                  </div>
+                </section>
+              );
+            }
+
+            function StarterProductGateInner() {
+              const { appState } = useStarterAppState();
+              const [intent, setIntent] = useState("signin");
+              useEffect(() => {
+                if (typeof window === "undefined") return;
+                const nextIntent = String(
+                  new URLSearchParams(window.location.search).get("intent") || "signin"
+                )
+                  .trim()
+                  .toLowerCase();
+                setIntent(nextIntent === "subscribe" ? "subscribe" : "signin");
+              }, []);
+              if (!appState) {
+                return (
+                  <section className="starter-auth-card">
+                    <h2 className="starter-auth-title">Loading access state…</h2>
+                  </section>
+                );
+              }
+              if (appState.access.state === "ready") {
+                return <StarterProductHomeInner />;
+              }
+              if (appState.access.state === "blocked") {
+                return <StarterBlockedCard appState={appState} />;
+              }
+              if (appState.access.state === "subscription_required") {
+                return <StarterSubscriptionCard appState={appState} />;
+              }
+              return <StarterAuthCard intent={intent === "subscribe" ? "subscribe" : "signin"} />;
+            }
+
+            export function StarterProductAccessGate({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterProductGateInner />
+                </StarterAppStateProvider>
+              );
+            }
+
+            export function StarterLandingPage() {
+              const plan = currentPlan();
+              const sections = featureCards();
+              const steps = stepCards();
+              return (
+                <main className="starter-root starter-page">
+                  <header className="starter-nav">
+                    <div className="starter-wrap starter-nav-inner">
+                      <Link className="starter-brand" href="/">
+                        <span className="starter-brand-mark" aria-hidden="true" />
+                        {starterBusinessName}
+                      </Link>
+                      <nav className="starter-nav-links" aria-label="Primary">
+                        {DEFAULT_SITE_LINKS.map((link) => (
+                          <a key={link.href} href={link.href}>
+                            {link.label}
+                          </a>
+                        ))}
+                      </nav>
+                      <div className="starter-actions">
+                        <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
+                          Sign in
+                        </Link>
+                        <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                          Subscribe
+                        </Link>
+                      </div>
+                    </div>
+                  </header>
+                  <section className="starter-hero">
+                    <div className="starter-wrap starter-hero-grid">
+                      <div>
+                        <p className="starter-kicker">
+                          {starterSurfaceContext.customerExperience?.surfaceGoal
+                            ? "Membership"
+                            : "Private access"}
+                        </p>
+                        <h1 className="starter-headline">Clear pricing. Simple sign-in. A private member area.</h1>
+                        <p className="starter-lede">
+                          Start with a clear offer, explain what members get, and make it easy to continue into the app.
+                        </p>
+                        <div className="starter-hero-actions">
+                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                            {plan ? "Start subscription flow" : "Enter the app"}
+                          </Link>
+                          <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
+                            Sign in
+                          </Link>
+                        </div>
+                        <p className="starter-hero-meta">
+                          <strong>{planSummary(plan)}</strong> {plan ? "Cancel anytime." : ""}
+                        </p>
+                      </div>
+                      <aside className="starter-card starter-proof-card" aria-label="What happens next">
+                        <h3>What to expect</h3>
+                        <ul className="starter-proof-list">
+                          {steps.map((step, index) => (
+                            <li key={step}>
+                              <span className="starter-proof-index">{index + 1}</span>
+                              <span>{step}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="starter-proof-footer">
+                          Sign in, choose a plan, and continue inside your private member area.
+                        </p>
+                      </aside>
+                    </div>
+                  </section>
+
+                  <section className="starter-section" id="how">
+                    <div className="starter-wrap starter-section-grid">
+                      <div>
+                        <p className="starter-kicker">How it works</p>
+                        <h2>See the offer. Join. Get inside.</h2>
+                      </div>
+                      <div className="starter-step-list">
+                        {steps.map((step, index) => (
+                          <div key={step} className="starter-card starter-feature">
+                            <div className="starter-inline-actions">
+                              <span className="starter-step-index">0{index + 1}</span>
+                              <strong>{["See it", "Sign in", "Use it"][index] || `Step ${index + 1}`}</strong>
+                            </div>
+                            <p className="starter-card-copy">{step}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="starter-section" id="what">
+                    <div className="starter-wrap">
+                      <div className="starter-section-grid">
+                        <div>
+                          <p className="starter-kicker">What you get</p>
+                          <h2>Everything in one place.</h2>
+                        </div>
+                        <p className="starter-section-copy">
+                          Use these sections to show what members receive and why it matters.
+                        </p>
+                      </div>
+                      <div className="starter-card-grid">
+                        {sections.map((feature) => (
+                          <article key={feature.title} className="starter-card starter-feature">
+                            <span className="starter-feature-tag">{feature.tag}</span>
+                            <h3>{feature.title}</h3>
+                            <p className="starter-card-copy">{feature.body}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="starter-section" id="pricing">
+                    <div className="starter-wrap">
+                      <div className="starter-price-card">
+                        <p className="starter-kicker">Pricing</p>
+                        <h2>{plan ? planSummary(plan) : "Connect a real plan before launch."}</h2>
+                        <p className="starter-price-copy">
+                          Show the plan clearly up front so people know exactly what they are joining.
+                        </p>
+                        <div className="starter-inline-actions">
+                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                            Subscribe
+                          </Link>
+                          <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
+                            Sign in
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="starter-section" id="app">
+                    <div className="starter-wrap starter-section-grid">
+                      <div>
+                        <p className="starter-kicker">Inside the app</p>
+                        <h2>Your private member area.</h2>
+                      </div>
+                      <div className="starter-card starter-feature">
+                        <p className="starter-card-copy">
+                          Keep the account area simple, private, and focused on the core member experience.
+                        </p>
+                        <div className="starter-pill-row">
+                          {appTabs().map((tab) => (
+                            <span key={tab} className="starter-pill starter-pill-muted">
+                              {tab}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="starter-inline-actions">
+                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                            Open /app
+                          </Link>
+                          <Link className="starter-link-button starter-link-quiet" href="/app/profile">
+                            Open profile
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="starter-final">
+                    <div className="starter-wrap">
+                      <div className="starter-final-card">
+                        <p className="starter-kicker">Ready to begin?</p>
+                        <h2>Start with a clear offer and a direct next step.</h2>
+                        <p className="starter-section-copy">
+                          Sign in or subscribe to continue into the app.
+                        </p>
+                        <div className="starter-inline-actions">
+                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                            Start in AppKit
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <footer className="starter-footer">
+                    <div className="starter-wrap">
+                      <span>{starterBusinessName}</span>
+                    </div>
+                  </footer>
+                </main>
+              );
+            }
+
+            export function StarterAppChrome({ children }) {
+              return (
+                <div className="starter-root starter-shell">
+                  <header className="starter-nav">
+                    <div className="starter-wrap starter-app-bar">
+                      <Link className="starter-app-brand" href="/">
+                        <span className="starter-brand-mark" aria-hidden="true" />
+                        {starterBusinessName}
+                      </Link>
+                      <nav className="starter-app-links" aria-label="App">
+                        <Link href="/app">App</Link>
+                        <Link href="/app/profile">Profile</Link>
+                        <Link href="/">Landing page</Link>
+                      </nav>
+                    </div>
+                  </header>
+                  <div className="starter-wrap">{children}</div>
+                </div>
+              );
+            }
+
+            function StarterGeneratePanel({ appState }) {
+              const [prompt, setPrompt] = useState("");
+              const [responseText, setResponseText] = useState("");
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+
+              async function handleGenerate(event) {
+                event.preventDefault();
+                setPending(true);
+                setError("");
+                setResponseText("");
+                try {
+                  const payload = await starterGenerate({ prompt });
+                  setResponseText(JSON.stringify(payload, null, 2));
+                } catch (generateError) {
+                  setError(String(generateError?.message || generateError || "Unable to call generate."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              return (
+                <section className="starter-shell-card">
+                  <div className="starter-shell-card-header">
+                    <div>
+                      <h3>Try the first action</h3>
+                      <p className="starter-helper">Use this space for the core action members take inside the app.</p>
+                    </div>
+                    <StarterStatePill label="Access" state={appState.access.state} />
+                  </div>
+                  {appState.canGenerate ? (
+                    <form className="starter-form" onSubmit={handleGenerate}>
+                      <div className="starter-field">
+                        <label htmlFor="starter-prompt">Prompt</label>
+                        <textarea
+                          id="starter-prompt"
+                          className="starter-textarea"
+                          value={prompt}
+                          onChange={(event) => setPrompt(event.target.value)}
+                          placeholder="Describe the first product action this business should support."
+                        />
+                      </div>
+                      <div className="starter-inline-actions">
+                        <button className="starter-button starter-button-primary" type="submit" disabled={pending || !prompt.trim()}>
+                          {pending ? "Working..." : "Continue"}
+                        </button>
+                        <Link className="starter-link-button starter-link-quiet" href="/app/profile">
+                          Account
+                        </Link>
+                      </div>
+                      {responseText ? <pre className="starter-response">{responseText}</pre> : null}
+                      {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                    </form>
+                  ) : (
+                    <div className="starter-panel">
+                      <p className="starter-card-copy">
+                        This action is not available yet.
+                      </p>
+                    </div>
+                  )}
+                </section>
+              );
+            }
+
+            function StarterProductHomeInner() {
+              const { appState } = useStarterAppState();
+              if (!appState) return null;
+              const plan = currentPlan();
+              const tabs = appTabs();
+              const usage = appState.account?.usage_this_period || {};
+              const revenue = appState.account?.revenue || {};
+              return (
+                <div className="starter-shell-stack">
+                  <StarterStatusBanner
+                    title={`Welcome${appState.user?.name ? `, ${appState.user.name}` : ""}.`}
+                    body="Your membership is active."
+                    actions={
+                      <Link className="starter-link-button starter-link-quiet" href="/app/profile">
+                        Account
+                      </Link>
+                    }
+                  />
+                  <div className="starter-shell-grid">
+                    <div className="starter-shell-stack">
+                      <div className="starter-stat-grid">
+                        <article className="starter-card starter-stat-card">
+                          <p className="starter-stat-value">{humanize(appState.viewer.state)}</p>
+                          <span className="starter-stat-label">viewer state</span>
+                        </article>
+                        <article className="starter-card starter-stat-card">
+                          <p className="starter-stat-value">{plan ? planSummary(plan) : "No plan"}</p>
+                          <span className="starter-stat-label">current plan</span>
+                        </article>
+                        <article className="starter-card starter-stat-card">
+                          <p className="starter-stat-value">{Number(usage.events || 0)}</p>
+                          <span className="starter-stat-label">usage events</span>
+                        </article>
+                      </div>
+                      <StarterGeneratePanel appState={appState} />
+                    </div>
+                    <aside className="starter-shell-stack">
+                      <section className="starter-shell-card">
+                        <div className="starter-shell-card-header">
+                          <div>
+                            <h3>Included right now</h3>
+                            <p className="starter-helper">Use these areas for the core member experience.</p>
+                          </div>
+                        </div>
+                        <div className="starter-pill-row">
+                          <StarterStatePill label="Membership" state={appState.subscription.state} />
+                        </div>
+                        <ul className="starter-bullet-list">
+                          {tabs.map((tab) => (
+                            <li key={tab}>{tab}</li>
+                          ))}
+                        </ul>
+                      </section>
+                      <section className="starter-shell-card">
+                        <h3>Plan details</h3>
+                        <div className="starter-key-value">
+                          <div>
+                            <dt>Plan</dt>
+                            <dd>{plan ? planSummary(plan) : "No plan yet"}</dd>
+                          </div>
+                          <div>
+                            <dt>Activity</dt>
+                            <dd>{Number(usage.events || 0)} events</dd>
+                          </div>
+                          <div>
+                            <dt>Paid so far</dt>
+                            <dd>{formatMoney(revenue.amount_paid_cents || 0, "usd")}</dd>
+                          </div>
+                        </div>
+                      </section>
+                    </aside>
+                  </div>
+                </div>
+              );
+            }
+
+            export function StarterProductHome({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterProductHomeInner />
+                </StarterAppStateProvider>
+              );
+            }
+
+            function StarterProfilePageInner() {
+              const { appState } = useStarterAppState();
+              const [profile, setProfile] = useState(null);
+              const [displayName, setDisplayName] = useState("");
+              const [headline, setHeadline] = useState("");
+              const [bio, setBio] = useState("");
+              const [message, setMessage] = useState("");
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+
+              useEffect(() => {
+                if (!appState?.canManageProfile) return;
+                let active = true;
+                starterProfile()
+                  .then((payload) => {
+                    if (!active) return;
+                    const nextProfile = payload?.profile || null;
+                    setProfile(nextProfile);
+                    setDisplayName(String(nextProfile?.display_name || nextProfile?.displayName || ""));
+                    setHeadline(String(nextProfile?.headline || ""));
+                    setBio(String(nextProfile?.bio || ""));
+                  })
+                  .catch((loadError) => {
+                    if (!active) return;
+                    setError(String(loadError?.message || loadError || "Unable to load profile."));
+                  });
+                return () => {
+                  active = false;
+                };
+              }, [appState?.canManageProfile]);
+
+              async function handleSave(event) {
+                event.preventDefault();
+                setPending(true);
+                setMessage("");
+                setError("");
+                try {
+                  const payload = await starterUpdateProfile({
+                    display_name: displayName,
+                    headline,
+                    bio,
+                  });
+                  const nextProfile = payload?.profile || null;
+                  setProfile(nextProfile);
+                  setMessage("Profile saved.");
+                } catch (saveError) {
+                  setError(String(saveError?.message || saveError || "Unable to save profile."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              if (!appState) return null;
+              if (!appState.authenticated) {
+                return (
+                  <StarterAuthCard
+                    intent="signin"
+                    kicker="Account"
+                    title="Sign in to view your account."
+                    copy="Use your email to manage your subscription and profile."
+                    backHref="/"
+                    backLabel="Back to landing page"
+                  />
+                );
+              }
+
+              return (
+                <div className="starter-profile-grid">
+                  <section className="starter-profile-card">
+                    <p className="starter-kicker">Account</p>
+                    <h2 className="starter-profile-title">Subscription and details</h2>
+                    <p className="starter-profile-copy">Manage your plan and account information.</p>
+                    <div className="starter-pill-row">
+                      <StarterStatePill label="Membership" state={appState.subscription.state} />
+                    </div>
+                    <dl className="starter-key-value">
+                      <div>
+                        <dt>Email</dt>
+                        <dd>{String(appState.user?.email || "—")}</dd>
+                      </div>
+                      <div>
+                        <dt>Plan</dt>
+                        <dd>{appState.subscription.planKey ? humanize(appState.subscription.planKey) : "No paid plan yet"}</dd>
+                      </div>
+                    </dl>
+                    {!appState.entitled ? (
+                      <div className="starter-inline-actions">
+                        <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
+                          Subscribe
+                        </Link>
+                      </div>
+                    ) : null}
+                  </section>
+                  <section className="starter-profile-card">
+                    <p className="starter-kicker">Profile</p>
+                    <h2 className="starter-profile-title">Profile details</h2>
+                    <p className="starter-profile-copy">Update the information tied to your account.</p>
+                    {appState.canManageProfile ? (
+                      <form className="starter-form" onSubmit={handleSave}>
+                        <div className="starter-field">
+                          <label htmlFor="starter-display-name">Display name</label>
+                          <input
+                            id="starter-display-name"
+                            className="starter-input"
+                            value={displayName}
+                            onChange={(event) => setDisplayName(event.target.value)}
+                          />
+                        </div>
+                        <div className="starter-field">
+                          <label htmlFor="starter-headline">Headline</label>
+                          <input
+                            id="starter-headline"
+                            className="starter-input"
+                            value={headline}
+                            onChange={(event) => setHeadline(event.target.value)}
+                          />
+                        </div>
+                        <div className="starter-field">
+                          <label htmlFor="starter-bio">Bio</label>
+                          <textarea
+                            id="starter-bio"
+                            className="starter-textarea"
+                            value={bio}
+                            onChange={(event) => setBio(event.target.value)}
+                          />
+                        </div>
+                        <div className="starter-inline-actions">
+                          <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
+                            {pending ? "Saving..." : "Save profile"}
+                          </button>
+                          <Link className="starter-link-button starter-link-quiet" href="/app">
+                            Back to app
+                          </Link>
+                        </div>
+                        {message ? <div className="starter-alert">{message}</div> : null}
+                        {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                      </form>
+                    ) : (
+                      <div className="starter-panel">
+                        <p className="starter-card-copy">
+                          Profile editing is not available right now.
+                        </p>
+                        {profile ? <pre className="starter-response">{JSON.stringify(profile, null, 2)}</pre> : null}
+                      </div>
+                    )}
+                  </section>
+                </div>
+              );
+            }
+
+            export function StarterProfilePage({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterProfilePageInner />
+                </StarterAppStateProvider>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
 def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
     copy = _subuser_app_starter_strings(surface, slug=slug)
     title_literal = json.dumps(copy["title"], ensure_ascii=False)
@@ -1349,395 +3536,16 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
             """
         ).strip()
         + "\n",
-        "src/app/layout.js": dedent(
-            f"""
-            import "../../_takyon/tokens.css";
-            import "./globals.css";
-
-            export const metadata = {{
-              title: {title_literal},
-              description: "",
-            }};
-
-            export default function RootLayout({{ children }}) {{
-              return (
-                <html lang="en">
-                  <body>{{children}}</body>
-                </html>
-              );
-            }}
-            """
-        ).strip()
-        + "\n",
-        "src/app/globals.css": dedent(
-            """
-            :root {
-              --starter-bg: #f5f5f5;
-              --starter-panel: #ffffff;
-              --starter-border: #d9d9d9;
-              --starter-ink: #111111;
-              --starter-muted: #666666;
-              --starter-accent: #111111;
-              --starter-accent-ink: #ffffff;
-            }
-
-            * {
-              box-sizing: border-box;
-            }
-
-            html,
-            body {
-              margin: 0;
-              min-height: 100%;
-              background: var(--starter-bg);
-              color: var(--starter-ink);
-              font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            }
-
-            a {
-              color: inherit;
-              text-decoration: none;
-            }
-
-            button,
-            input,
-            textarea {
-              font: inherit;
-            }
-
-            .starter-root {
-              min-height: 100vh;
-              padding: 24px 16px 40px;
-            }
-
-            .starter-frame {
-              max-width: 1040px;
-              margin: 0 auto;
-              display: grid;
-              gap: 16px;
-            }
-
-            .starter-card {
-              background: var(--starter-panel);
-              border: 1px solid var(--starter-border);
-              border-radius: 16px;
-            }
-
-            .starter-actions,
-            .starter-rail-list {
-              display: flex;
-              gap: 8px;
-              flex-wrap: wrap;
-            }
-
-            .starter-pill,
-            .starter-link,
-            .starter-button {
-              border: 1px solid var(--starter-border);
-              border-radius: 999px;
-              padding: 8px 12px;
-              background: #fff;
-            }
-
-            .starter-link,
-            .starter-button {
-              cursor: pointer;
-            }
-
-            .starter-button-primary {
-              background: var(--starter-accent);
-              border-color: var(--starter-accent);
-              color: var(--starter-accent-ink);
-            }
-
-            .starter-grid {
-              display: grid;
-              gap: 16px;
-              grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            }
-
-            .starter-card {
-              display: grid;
-              gap: 12px;
-              padding: 16px;
-            }
-
-            .starter-card h2 {
-              margin: 0;
-              font-size: 0.82rem;
-              letter-spacing: 0.12em;
-              text-transform: uppercase;
-              color: var(--starter-muted);
-            }
-
-            .starter-stack,
-            .starter-form {
-              display: grid;
-              gap: 12px;
-            }
-
-            .starter-field {
-              display: grid;
-              gap: 6px;
-            }
-
-            .starter-field label {
-              font-size: 0.82rem;
-              color: var(--starter-muted);
-            }
-
-            .starter-input,
-            .starter-textarea {
-              width: 100%;
-              border-radius: 12px;
-              border: 1px solid var(--starter-border);
-              padding: 12px 14px;
-              background: #fff;
-            }
-
-            .starter-textarea {
-              min-height: 180px;
-              resize: vertical;
-              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            }
-
-            .starter-note,
-            .starter-pre {
-              margin: 0;
-              border-radius: 12px;
-              border: 1px solid var(--starter-border);
-              background: #fafafa;
-              padding: 12px 14px;
-              overflow: auto;
-            }
-
-            .starter-pre {
-              white-space: pre-wrap;
-              word-break: break-word;
-              font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-              font-size: 0.84rem;
-              line-height: 1.5;
-            }
-
-            @media (max-width: 920px) {
-              .starter-grid {
-                grid-template-columns: 1fr;
-              }
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/app/page.js": dedent(
-            """
-            export default function HomePage() {
-              return <main className="starter-root" />;
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/app/app/page.js": dedent(
-            """
-            export default function AppPage() {
-              return <main className="starter-root" />;
-            }
-            """
-        ).strip()
-        + "\n",
-        "src/components/starter-context.js": dedent(
-            f"""
-            import surfaceContext from "../../_takyon/surface-context.js";
-            import {{ createSubuserRuntimeClient }} from "../../_takyon/runtime-client.js";
-            import {{ planSubuserSurface }} from "../../_takyon/packs.js";
-
-            export const starterSurfaceContext = surfaceContext;
-            export const starterRuntime = createSubuserRuntimeClient(surfaceContext);
-            export const starterPlan = planSubuserSurface({{
-              appMode: surfaceContext.appMode,
-              subscriptionStyle: surfaceContext.subscriptionStyle,
-              apiMode: surfaceContext.apiMode,
-              routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
-            }});
-            export const starterConfiguredPlans = Array.isArray(surfaceContext.plans)
-              ? surfaceContext.plans
-                  .filter((plan) => plan && typeof plan === "object" && String(plan.planKey || "").trim())
-                  .map((plan) => ({{ ...plan }}))
-              : [];
-            export const starterDefaultMonthlyPlan =
-              starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || null;
-            export const starterDefaultPlanKey =
-              starterDefaultMonthlyPlan?.planKey
-                ? String(starterDefaultMonthlyPlan.planKey)
-                : String(surfaceContext.subscriptionStyle || "").trim() === "monthly"
-                  ? "monthly"
-                : "";
-
-            export const starterFeatures = Array.isArray(surfaceContext.runtimeFeatures)
-              ? surfaceContext.runtimeFeatures.map((value) => String(value || "").trim()).filter(Boolean)
-              : [];
-
-            function defaultLocation() {{
-              if (typeof window !== "undefined" && window.location) {{
-                return window.location;
-              }}
-              return {{
-                origin: "http://localhost",
-                href: "http://localhost/",
-                pathname: "/",
-              }};
-            }}
-
-            async function starterJsonRequest(url, init = {{}}) {{
-              const response = await fetch(url, {{
-                credentials: "same-origin",
-                headers: {{
-                  Accept: "application/json",
-                  ...(init.body ? {{ "Content-Type": "application/json" }} : {{}}),
-                  ...(init.headers || {{}}),
-                }},
-                ...init,
-              }});
-              const text = await response.text();
-              let data = {{}};
-              if (text) {{
-                try {{
-                  data = JSON.parse(text);
-                }} catch (_error) {{
-                  data = {{ raw: text }};
-                }}
-              }}
-              if (!response.ok) {{
-                const message = typeof data?.error === "string"
-                  ? data.error
-                  : `Request failed (${{response.status}})`;
-                const error = new Error(message);
-                error.status = response.status;
-                error.data = data;
-                throw error;
-              }}
-              return data;
-            }}
-
-            export function railDeclared(rail) {{
-              return starterFeatures.includes(String(rail || "").trim());
-            }}
-
-            export function railCallable(rail) {{
-              return starterRuntime.isRailCallable(String(rail || "").trim());
-            }}
-
-            function lowerText(value) {{
-              return String(value || "").trim().toLowerCase();
-            }}
-
-            function accountUser(accountPayload = {{}}) {{
-              return accountPayload && typeof accountPayload === "object" && accountPayload.user && typeof accountPayload.user === "object"
-                ? accountPayload.user
-                : null;
-            }}
-
-            function accountEntitlements(accountPayload = {{}}) {{
-              return accountPayload && typeof accountPayload === "object" && Array.isArray(accountPayload.entitlements)
-                ? accountPayload.entitlements.filter((item) => item && typeof item === "object")
-                : [];
-            }}
-
-            function activePaidEntitlement(entitlement = {{}}) {{
-              const status = lowerText(entitlement.status);
-              const tier = lowerText(entitlement.tier);
-              if (!["active", "trialing", "paid"].includes(status)) return false;
-              if (["paid", "pro", "trial"].includes(tier)) return true;
-              if (String(entitlement.plan_key || entitlement.planKey || "").trim()) return true;
-              if (entitlement.stripe_subscription_id || entitlement.stripeSubscriptionId) return true;
-              return false;
-            }}
-
-            export function starterIsAuthenticated(sessionPayload = {{}}, accountPayload = null) {{
-              const user = accountUser(accountPayload || {{}});
-              if (user && String(user.id || "").trim()) return true;
-              if (sessionPayload && typeof sessionPayload === "object") {{
-                if (sessionPayload.authenticated === true) return true;
-                if (sessionPayload.session && typeof sessionPayload.session === "object") return true;
-                if (String(sessionPayload.email || "").trim()) return true;
-              }}
-              return false;
-            }}
-
-            export function starterIsEntitled(accountPayload = {{}}) {{
-              if (!accountPayload || typeof accountPayload !== "object") return false;
-              if (accountPayload.entitled === true) return true;
-              if (accountPayload.plan && typeof accountPayload.plan === "object" && accountPayload.plan.active === true) return true;
-              if (accountEntitlements(accountPayload).some((item) => activePaidEntitlement(item))) return true;
-              const user = accountUser(accountPayload);
-              const userTier = lowerText(user?.tier);
-              if (["paid", "pro", "trial"].includes(userTier)) return true;
-              return false;
-            }}
-
-            export function starterCanCheckout(accountPayload = {{}}) {{
-              return railDeclared("checkout") && railCallable("checkout") && !starterIsEntitled(accountPayload);
-            }}
-
-            export function starterCanGenerate(accountPayload = {{}}) {{
-              return railDeclared("generate") && railCallable("generate") && starterIsEntitled(accountPayload);
-            }}
-
-            export async function starterRequestAuth(payload = {{}}) {{
-              if (railCallable("auth")) {{
-                return starterRuntime.requestAuth(payload);
-              }}
-              return starterJsonRequest(starterRuntime.routeUrl("auth/request"), {{
-                method: "POST",
-                body: JSON.stringify(payload),
-              }});
-            }}
-
-            export async function starterSession() {{
-              if (railCallable("auth")) {{
-                return starterRuntime.session();
-              }}
-              return starterJsonRequest(starterRuntime.routeUrl("session"), {{ method: "GET" }});
-            }}
-
-            export async function starterAccount() {{
-              if (railCallable("account")) {{
-                return starterRuntime.account();
-              }}
-              return starterJsonRequest(starterRuntime.routeUrl("account"), {{ method: "GET" }});
-            }}
-
-            export async function starterCheckout(payload = {{}}) {{
-              const location = defaultLocation();
-              const success_url = payload.success_url || payload.successUrl || `${{location.origin}}/app?checkout=success`;
-              const cancel_url = payload.cancel_url || payload.cancelUrl || `${{location.origin}}/app?checkout=cancel`;
-              if (railCallable("checkout")) {{
-                return starterRuntime.checkout({{
-                  ...payload,
-                  success_url,
-                  cancel_url,
-                }});
-              }}
-              return starterJsonRequest(starterRuntime.routeUrl("checkout"), {{
-                method: "POST",
-                body: JSON.stringify({{
-                  ...payload,
-                  success_url,
-                  cancel_url,
-                }}),
-              }});
-            }}
-
-            export async function starterGenerate(payload = {{}}) {{
-              if (railCallable("generate")) {{
-                return starterRuntime.generate(payload);
-              }}
-              return starterJsonRequest(starterRuntime.routeUrl("generate"), {{
-                method: "POST",
-                body: JSON.stringify(payload),
-              }});
-            }}
-            """
-        ).strip()
-        + "\n",
+        "src/app/layout.js": _subuser_app_starter_root_layout_js(title_literal=title_literal),
+        "src/app/globals.css": _subuser_app_starter_globals_css(),
+        "src/app/page.js": _subuser_app_starter_home_page_js(),
+        "src/app/app/layout.js": _subuser_app_starter_app_layout_js(),
+        "src/app/app/page.js": _subuser_app_starter_app_page_js(),
+        "src/app/app/(product)/layout.js": _subuser_app_starter_product_layout_js(),
+        "src/app/app/profile/page.js": _subuser_app_starter_profile_page_js(),
+        "src/components/starter-context.js": _subuser_app_starter_context_js(title_literal=title_literal),
+        "src/components/starter-pages.js": _subuser_app_starter_pages_js(),
+        "src/components/starter-server.js": _subuser_app_starter_server_js(),
     }
 
 
@@ -1882,7 +3690,8 @@ def _subuser_app_worker_contract_block(
         lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
     elif shape.get("subscription_style") == "monthly":
         lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
-        lines.append("- Use AppKit semantic helpers for signed-in, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
+        lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
+        lines.append("- Keep product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -1903,9 +3712,10 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- Any starter source already present in `src/` is generic wiring only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
-        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterCanCheckout(...)`, and `starterCanGenerate(...)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        f"- There is intentionally no shared customer-facing page to preserve. Preserve runtime semantics, but build and redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
+        "- AppKit now seeds canonical starter shells for `/`, `/app`, and `/app/profile`. Reuse those route intentions and access boundaries by default, but redesign their layout, hierarchy, copy, and styling freely when the business calls for it.",
+        f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account gating when the seeded shells already cover the route.",
     ]
     return "\n".join(lines).strip()
 
