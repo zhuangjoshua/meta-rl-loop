@@ -115,11 +115,17 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "export async function starterAccount" in starter_context
     assert "export async function starterCheckout" in starter_context
     assert "export async function starterGenerate" in starter_context
+    assert "export function starterIsAuthenticated" in starter_context
+    assert "export function starterIsEntitled" in starter_context
+    assert "export function starterCanCheckout" in starter_context
+    assert "export function starterCanGenerate" in starter_context
     assert 'send_email: true' not in starter_context
     assert (workspace_root / "src" / "app" / "page.js").read_text().strip() == 'export default function HomePage() {\n  return <main className="starter-root" />;\n}'
     assert (workspace_root / "src" / "app" / "app" / "page.js").read_text().strip() == 'export default function AppPage() {\n  return <main className="starter-root" />;\n}'
     assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert '"includedAiBudgetMicrousd": 5000000' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
+    assert '"auth": "declared"' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
+    assert '"checkout": "declared"' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert 'TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN' in next_config
     assert 'source: "/api/takyon/:path*"' in next_config
 
@@ -140,6 +146,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
 
     assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
     assert "starterRequestAuth(...)" in block
+    assert "starterIsEntitled(...)" in block
     assert "There is intentionally no shared customer-facing page to preserve." in block
 
 
@@ -163,6 +170,7 @@ def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
 
     assert "keep that rail behavior authoritative" in block
     assert "do not fake browser-only sessions" in block
+    assert "Do not pre-disable auth UI" in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

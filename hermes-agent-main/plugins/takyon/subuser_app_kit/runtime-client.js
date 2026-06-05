@@ -1,5 +1,5 @@
 const DEFAULT_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback";
-const ALLOW_CALL_STATES = new Set(["live"]);
+const ALLOW_CALL_STATES = new Set(["live", "declared"]);
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -24,7 +24,8 @@ function normalizeRailState(raw) {
   for (const [key, value] of Object.entries(raw)) {
     const rail = String(key || "").trim();
     const rawState = String(value || "").trim().toLowerCase();
-    const state = rawState === "unverified" ? "unknown" : rawState;
+    const state =
+      rawState === "unverified" || rawState === "unknown" ? "declared" : rawState;
     if (!rail || !state) continue;
     out[rail] = state;
   }
@@ -116,7 +117,7 @@ export function createSubuserRuntimeClient(context = {}) {
 
   function railStateFor(rail) {
     if (railState[rail]) return railState[rail];
-    if (runtimeFeatures.includes(rail)) return "unknown";
+    if (runtimeFeatures.includes(rail)) return "declared";
     return "undeclared";
   }
 

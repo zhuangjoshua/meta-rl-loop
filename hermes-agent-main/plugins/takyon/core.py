@@ -124,7 +124,8 @@ RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
 - Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
-- If a declared runtime feature is not wired yet, keep the customer UI honest without exposing runtime/debug ontology; disable or omit the unavailable action and leave the exact runtime reason to operator-facing state.
+- If a declared shared AppKit rail is present, treat its canonical helper path as callable by default unless that rail is explicitly marked `blocked` or `broken`, or an actual request fails.
+- If a declared runtime feature is explicitly `blocked` or `broken`, keep the customer UI honest without exposing runtime/debug ontology and leave the exact runtime reason to operator-facing state.
 - Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
 - Do not claim undeclared runtime-backed or authority-backed features without first updating the app surface contract.
 """
@@ -196,7 +197,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         ],
         "worker_contract": [
             "Use Takyon magic-link and session rails instead of browser-only auth state.",
-            "If auth is not wired yet, keep sign-in blocked and name the missing runtime step.",
+            "If auth is declared, use the canonical auth helpers directly; only block sign-in when the auth rail is explicitly marked blocked/broken or a real auth request fails.",
         ],
     },
     "account": {
@@ -223,7 +224,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "endpoints": [("POST", "checkout")],
         "worker_contract": [
             "Use Takyon checkout rails instead of fake payment links or browser-only purchase state.",
-            "If checkout is not wired yet, keep upgrade or pay actions visibly blocked.",
+            "If checkout is declared, let the product call the canonical checkout helper; only block the pay action when checkout is explicitly marked blocked/broken or a real checkout request fails.",
         ],
     },
     "billing": {
@@ -241,7 +242,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "endpoints": [("GET", "account")],
         "worker_contract": [
             "Feature gating must come from Takyon entitlements, not hardcoded client flags.",
-            "If entitlements are not wired yet, keep gated actions blocked.",
+            "Use the canonical account/entitlement helpers instead of inventing paid-state parsing in page code.",
         ],
     },
     "usage": {
@@ -295,8 +296,8 @@ DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
 SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
-SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "blocked", "broken", "unknown"})
-_LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "unknown"}
+SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "declared", "blocked", "broken"})
+_LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "declared", "unknown": "declared"}
 SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
 SUBUSER_KIT_DIRNAME = "_takyon"
 DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES = ("research/strategy.md",)
@@ -778,7 +779,7 @@ def _normalize_subuser_rail_state(
                 continue
             normalized[item] = state
     for rail in declared_rails:
-        normalized.setdefault(rail, "unknown")
+        normalized.setdefault(rail, "declared")
     return {rail: normalized[rail] for rail in declared_rails if rail in normalized}
 
 
@@ -1624,6 +1625,62 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
               return starterRuntime.isRailCallable(String(rail || "").trim());
             }}
 
+            function lowerText(value) {{
+              return String(value || "").trim().toLowerCase();
+            }}
+
+            function accountUser(accountPayload = {{}}) {{
+              return accountPayload && typeof accountPayload === "object" && accountPayload.user && typeof accountPayload.user === "object"
+                ? accountPayload.user
+                : null;
+            }}
+
+            function accountEntitlements(accountPayload = {{}}) {{
+              return accountPayload && typeof accountPayload === "object" && Array.isArray(accountPayload.entitlements)
+                ? accountPayload.entitlements.filter((item) => item && typeof item === "object")
+                : [];
+            }}
+
+            function activePaidEntitlement(entitlement = {{}}) {{
+              const status = lowerText(entitlement.status);
+              const tier = lowerText(entitlement.tier);
+              if (!["active", "trialing", "paid"].includes(status)) return false;
+              if (["paid", "pro", "trial"].includes(tier)) return true;
+              if (String(entitlement.plan_key || entitlement.planKey || "").trim()) return true;
+              if (entitlement.stripe_subscription_id || entitlement.stripeSubscriptionId) return true;
+              return false;
+            }}
+
+            export function starterIsAuthenticated(sessionPayload = {{}}, accountPayload = null) {{
+              const user = accountUser(accountPayload || {{}});
+              if (user && String(user.id || "").trim()) return true;
+              if (sessionPayload && typeof sessionPayload === "object") {{
+                if (sessionPayload.authenticated === true) return true;
+                if (sessionPayload.session && typeof sessionPayload.session === "object") return true;
+                if (String(sessionPayload.email || "").trim()) return true;
+              }}
+              return false;
+            }}
+
+            export function starterIsEntitled(accountPayload = {{}}) {{
+              if (!accountPayload || typeof accountPayload !== "object") return false;
+              if (accountPayload.entitled === true) return true;
+              if (accountPayload.plan && typeof accountPayload.plan === "object" && accountPayload.plan.active === true) return true;
+              if (accountEntitlements(accountPayload).some((item) => activePaidEntitlement(item))) return true;
+              const user = accountUser(accountPayload);
+              const userTier = lowerText(user?.tier);
+              if (["paid", "pro", "trial"].includes(userTier)) return true;
+              return false;
+            }}
+
+            export function starterCanCheckout(accountPayload = {{}}) {{
+              return railDeclared("checkout") && railCallable("checkout") && !starterIsEntitled(accountPayload);
+            }}
+
+            export function starterCanGenerate(accountPayload = {{}}) {{
+              return railDeclared("generate") && railCallable("generate") && starterIsEntitled(accountPayload);
+            }}
+
             export async function starterRequestAuth(payload = {{}}) {{
               if (railCallable("auth")) {{
                 return starterRuntime.requestAuth(payload);
@@ -1777,7 +1834,7 @@ def _subuser_app_worker_contract_block(
         lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
         if rail_state:
-            lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'unknown'}" for rail in runtime_features))
+            lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'declared'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
     lines.append("- Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app.")
@@ -1800,6 +1857,7 @@ def _subuser_app_worker_contract_block(
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
         lines.append("- If AppKit already provides working auth helpers (for example `starterRequestAuth(...)`, `starterSession()`, or `starterAccount()`), keep that rail behavior authoritative and build your page around those calls instead of rewriting auth logic unless you are intentionally changing the auth rail itself.")
+        lines.append("- Do not pre-disable auth UI just because a declared rail state looks conservative; for shared rails, trust the canonical helper path unless the rail is explicitly marked blocked/broken or the real request fails.")
     else:
         lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
 
@@ -1824,6 +1882,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
     elif shape.get("subscription_style") == "monthly":
         lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
+        lines.append("- Use AppKit semantic helpers for signed-in, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -1844,7 +1903,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- Any starter source already present in `src/` is generic wiring only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
-        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCheckout(...)`, and `starterGenerate(...)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterCanCheckout(...)`, and `starterCanGenerate(...)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- There is intentionally no shared customer-facing page to preserve. Preserve runtime semantics, but build and redesign product UI freely above this substrate. Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit.",
     ]
@@ -6846,7 +6905,7 @@ class TakyonStore:
                     surface_lines.append(f"  - Canonical tools: {', '.join(tools)}")
             surface_lines.extend(["", "## Rail State", ""])
             for rail in selected_runtime_rails:
-                surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'unknown'}")
+                surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'declared'}")
         if inventory:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
@@ -16320,7 +16379,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
                 "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
-                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=live, checkout=blocked, generate=broken, or usage=unknown."},
+                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, generate=broken, or usage=live."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
                 "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path instead of free tiers or trials."},
                 "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},

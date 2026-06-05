@@ -73,7 +73,7 @@ Use this skill to create or materially improve the business-owned product surfac
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially receipts and small source fixes under `product/`.
 - Use `business_claude_agent_task` only when the delegated worker lane is available and the job is meaningfully larger than a direct first-surface build. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
 - For `product/site/`, delegate one bounded worker call and let that worker own the source/build loop. The worker will receive the prepared shared subuser app kit under `product/site/_takyon/`; build the business-specific UI around that substrate instead of reinventing app-plane rails.
-- If starter source already exists under `product/site/src/`, treat it as generic wiring, not product UI. Preserve the AppKit rail helper behavior that already implements declared rails correctly (for example the functions exported from `starter-context.js`), and build your own pages around those calls instead of rewriting their behavior unless you are explicitly changing that rail's logic.
+- If starter source already exists under `product/site/src/`, treat it as generic wiring, not product UI. Preserve the AppKit rail helper behavior that already implements declared rails correctly (for example the functions exported from `starter-context.js`), use the semantic helpers there for auth/entitlement/checkout/generate state, and build your own pages around those calls instead of rewriting their behavior unless you are explicitly changing that rail's logic.
 - When first publish speed matters, prefer the smallest honest, dependency-light source that can verify and publish quickly. Do not default to a heavy framework if a static or minimal app shell is enough for the first truthful surface.
 - Use `business_refresh_product_surface` only when there is real source to publish. Treat its blocker output and receipt as truth.
 - During bootstrap, once `product/site/` exists with real source, complete one honest refresh/publish pass before later auth/customer/outreach follow-on work. If that refresh hits a local source/build blocker, the delegated runtime may retry once with the exact blocker before it returns control.
@@ -86,7 +86,7 @@ Use this skill to create or materially improve the business-owned product surfac
 4. Read `research/` broadly before deciding the customer surface, and explicitly inspect `research/strategy.md` by name plus any other relevant files in `research/`. Use that evidence to choose the customer-maximizing surface shape.
 5. Record that customer experience shape on the surface contract before delegation: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, and `research_sources`. This is the CEO-owned product decision that Claude should implement rather than rediscovering from scratch.
    On the very first app-shell seed, default to the smallest truthful monthly conversion shape instead of pre-seeding free tiers, trials, extra workflow routes, or placeholder tabs.
-6. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `live`, `blocked`, `broken`, or `unknown`. `subscription_style` should currently be `monthly`.
+6. When the app shape is known, set `app_mode`, `subscription_style`, and `api_mode` on that same surface contract, plus any truthful per-rail `rail_state` values such as `declared`, `live`, `blocked`, or `broken`. Shared AppKit rails should normally start as `declared` unless they are explicitly known-bad. `subscription_style` should currently be `monthly`.
 7. If the surface presents a paid monthly CTA or named monthly price, call `business_upsert_app_plan` for plan key `monthly` before final refresh/publish so checkout has a real canonical plan object. Set `price_cents` and `included_ai_budget_microusd` together instead of leaving the included AI budget implicit or hardcoded in UI copy.
 8. If `product/site/` or the expected source directory does not exist, create it with `business_create_workspace` and write the initial structure there before claiming product work is underway.
 9. If the local runtime, package manager, or framework capability is unclear, call `business_check_runtime_capabilities` and only proceed with the stack the runtime actually supports.
@@ -134,7 +134,7 @@ Default to `claude-design-openai` unless the product clearly wants a different t
 
 - [ ] `product/site/` contains usable source, not only notes
 - [ ] Any claimed publication state is backed by `business_refresh_product_surface` output or visible receipts
-- [ ] Any runtime-dependent feature is either routed to `takyon-app-runtime` or left visibly blocked
+- [ ] Any runtime-dependent feature is routed through `takyon-app-runtime`, and declared shared rails are not pre-disabled without an explicit blocked/broken reason or a real request failure
 - [ ] Bootstrap did not substitute extra runtime notes for missing `product/site/` source
 
 ## Rules

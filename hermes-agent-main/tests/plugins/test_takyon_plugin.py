@@ -1761,7 +1761,7 @@ def test_app_surface_contract_normalizes_legacy_billing_to_account_and_checkout(
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["runtime_features"] == ["auth", "account", "checkout"]
     shape = _surface_subuser_app_shape(app["surface_contract"])
-    assert shape["rail_state"] == {"auth": "unknown", "account": "blocked", "checkout": "blocked"}
+    assert shape["rail_state"] == {"auth": "declared", "account": "blocked", "checkout": "blocked"}
 
 
 def test_app_surface_contract_rejects_unknown_runtime_features(tmp_path, monkeypatch):
