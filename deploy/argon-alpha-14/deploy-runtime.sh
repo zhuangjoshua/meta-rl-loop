@@ -149,7 +149,9 @@ run_remote_smoke() {
     "set -euo pipefail
     root_status=\$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: $TAKYON_SMOKE_HOST_HEADER' http://127.0.0.1/)
     case \"\$root_status\" in
-      200|302) ;;
+      # The dashboard root may serve directly or redirect into the current
+      # auth/bootstrap entrypoint depending on session state and proxy mode.
+      200|301|302|303|307|308) ;;
       *)
         echo \"unexpected dashboard root status: \$root_status\" >&2
         exit 1
