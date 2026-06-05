@@ -2464,6 +2464,8 @@ def _run_agent_with_meta(
         "If you do not know a fact from available context or tools, say so briefly. "
         "Default to action for operational business requests. If the operator gives a business slug, goal, or clear choice "
         "and asks to create, make, set up, build, start, run, continue, or operate it, use the business tools now. "
+        "When the operator names the app or business in a create/build request, treat that exact requested name as canonical on the first pass; "
+        "preserve it in business creation and do not invent a different umbrella brand, parent company, or alternate product name unless the operator explicitly asks for a rename or split. "
         "Do not answer with a command recipe, implementation checklist, or 'say X and I will' handoff unless the operator "
         "explicitly asks for explanation only or says not to implement. "
         "Use concrete business_* tools for all durable business state changes. "
