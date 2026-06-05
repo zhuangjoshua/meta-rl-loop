@@ -33,15 +33,19 @@ enabled). Activation is a separate, operator-gated step.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import re
 import socket
+import subprocess
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
-from . import jobs, wakes
+from . import jobs, safebox, wakes
 from .jobs import Job, JobOutcome, JobRunResult
 
 _log = logging.getLogger("takyon.worker")
@@ -56,6 +60,280 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker (matches jobs.requeue_stale's own default).
 _STALE_SECONDS = 900
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate_worker_text(value: str, limit: int = 400) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _xurl_home() -> Path:
+    return Path(os.environ.get("HOME") or str(Path.home())).expanduser()
+
+
+def _xurl_env(home: Path) -> dict[str, str]:
+    from .core import _runtime_env
+
+    return _runtime_env({"HOME": str(home)})
+
+
+def _parse_jsonish_output(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"items": parsed}
+    return {"raw": raw}
+
+
+def _run_xurl_json_command(command: list[str], *, home: Path, timeout: int = 90) -> dict[str, Any]:
+    proc = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=_xurl_env(home),
+    )
+    if proc.returncode != 0:
+        detail = _truncate_worker_text(proc.stderr or proc.stdout or "xurl command failed")
+        raise RuntimeError(detail)
+    return _parse_jsonish_output(proc.stdout or proc.stderr)
+
+
+def _try_run_xurl_json_command(command: list[str], *, home: Path, timeout: int = 30) -> dict[str, Any]:
+    try:
+        return _run_xurl_json_command(command, home=home, timeout=timeout)
+    except Exception:
+        return {}
+
+
+def _extract_x_post_id(payload: Mapping[str, Any] | None) -> str:
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload if isinstance(payload, Mapping) else {}
+    for key in ("id", "rest_id", "post_id", "tweet_id"):
+        value = str(data.get(key) or "").strip() if isinstance(data, Mapping) else ""
+        if value:
+            return value
+    return ""
+
+
+def _extract_x_username(payload: Mapping[str, Any] | None) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+    for key in ("username", "screen_name", "handle"):
+        value = str((data or {}).get(key) or "").strip().lstrip("@")
+        if value:
+            return value
+    return ""
+
+
+def _publish_artifact_title(subject: str, body: str) -> str:
+    title = str(subject or "").strip()
+    if title:
+        return title
+    for line in str(body or "").splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            return cleaned[:80]
+    return "X post"
+
+
+def _safe_x_artifact_stem(post_id: str, *, fallback: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", str(post_id or "").strip()).strip("-")
+    return stem or fallback
+
+
+def _persist_xurl_shared_auth_best_effort(home: Path) -> None:
+    auth_path = home / ".xurl"
+    if not auth_path.exists():
+        return
+    try:
+        encoded = base64.b64encode(auth_path.read_bytes()).decode("ascii")
+        safebox.save_env_backed_value("XURL_SHARED_AUTH_B64_SECRET", encoded)
+    except Exception as exc:  # pragma: no cover - backup persistence should not block posting
+        _log.debug("failed to persist shared xurl auth: %s", exc)
+
+
+def _ensure_local_xurl_auth() -> tuple[str, Path]:
+    from .core import (
+        _decode_xurl_shared_auth_blob,
+        _read_xurl_shared_auth_secret,
+        _resolve_xurl_executable,
+        _xurl_auth_path,
+        _xurl_auth_status_ok,
+    )
+
+    home = _xurl_home()
+    xurl = _resolve_xurl_executable()
+    if not xurl:
+        raise RuntimeError("xurl is not installed on the worker host")
+    auth_path = _xurl_auth_path(home=str(home))
+    if _xurl_auth_status_ok(home=str(home)):
+        return xurl, auth_path
+
+    key, value = _read_xurl_shared_auth_secret()
+    auth_text = _decode_xurl_shared_auth_blob(key, value) if key and value else ""
+    if not auth_text.strip():
+        raise RuntimeError(
+            "shared xurl auth is missing; seed /root/.xurl or configure XURL_SHARED_AUTH_B64_SECRET"
+        )
+
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(auth_text, encoding="utf-8")
+    os.chmod(auth_path, 0o600)
+    if not _xurl_auth_status_ok(home=str(home)):
+        raise RuntimeError("shared xurl auth is present but xurl auth status failed")
+    _persist_xurl_shared_auth_best_effort(home)
+    return xurl, auth_path
+
+
+def _update_outreach_work_request(
+    slug: str,
+    work_request_id: str,
+    *,
+    status: str,
+    payload_updates: Mapping[str, Any] | None = None,
+) -> None:
+    if not work_request_id:
+        return
+    from .core import TakyonStore
+
+    store = TakyonStore()
+    with store._connect() as conn:
+        row = conn.execute(
+            f"SELECT scope, kind, payload_json FROM {store._work_requests_table()} WHERE id = ?",
+            (work_request_id,),
+        ).fetchone()
+        if row is None:
+            return
+        payload = _parse_jsonish_output(str(row["payload_json"] or ""))
+        if isinstance(payload_updates, Mapping):
+            payload.update(
+                {
+                    str(key): value
+                    for key, value in payload_updates.items()
+                    if value not in (None, "", [], {})
+                }
+            )
+        conn.execute(
+            f"UPDATE {store._work_requests_table()} SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?",
+            (status, json.dumps(payload), _utc_now_iso(), work_request_id),
+        )
+        store._rewrite_distribution_files(conn, slug)
+        store._record_event(
+            conn,
+            scope=str(row["scope"] or f"business:{slug}"),
+            business_slug=slug,
+            event_type="job.enqueue.status",
+            payload={
+                "job_id": work_request_id,
+                "kind": str(row["kind"] or ""),
+                "status": status,
+            },
+        )
+
+
+def _record_x_publish_result(
+    slug: str,
+    *,
+    job_id: str,
+    payload: Mapping[str, Any],
+    post_id: str,
+    post_url: str,
+    provider_response: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    from .core import TakyonStore
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stem = _safe_x_artifact_stem(post_id, fallback=str(job_id))
+    artifact_rel = f"distribution/local-published/x/{timestamp}-{stem}.md"
+    receipt_rel = f"metrics/receipts/outreach/{timestamp}-x-{stem}.json"
+    body = str(payload.get("body") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    published_at = _utc_now_iso()
+    title = _publish_artifact_title(subject, body)
+    thread_external_id = str(payload.get("thread_external_id") or post_id).strip() or post_id
+    artifact_lines = [f"# {title}", "", body, "", f"Published: {post_url}"]
+    receipt_payload = {
+        "provider": "x",
+        "channel": str(payload.get("channel") or "x"),
+        "target": payload.get("target"),
+        "recipient": payload.get("recipient"),
+        "subject": subject,
+        "body": body,
+        "destination_url": payload.get("destination_url"),
+        "destination_label": payload.get("destination_label"),
+        "thread_external_id": thread_external_id,
+        "post_id": post_id,
+        "post_url": post_url,
+        "published_at": published_at,
+        "sent": True,
+        "external_side_effects": "sent",
+        "artifact_path": artifact_rel,
+        "metadata": dict(metadata),
+        "provider_response": dict(provider_response or {}),
+    }
+
+    operations: list[dict[str, Any]] = [
+        {
+            "action": "artifact.write",
+            "business": slug,
+            "path": artifact_rel,
+            "content": "\n".join(artifact_lines).rstrip() + "\n",
+        },
+        {
+            "action": "artifact.write",
+            "business": slug,
+            "path": receipt_rel,
+            "content": json.dumps(receipt_payload, indent=2, sort_keys=True) + "\n",
+        },
+        {
+            "action": "conversation.thread.upsert",
+            "business": slug,
+            "source": "x",
+            "external_id": thread_external_id,
+            "title": title,
+            "url": post_url,
+            "status": "active",
+        },
+        {
+            "action": "conversation.message.record",
+            "business": slug,
+            "source": "x",
+            "external_id": post_id,
+            "thread_external_id": thread_external_id,
+            "thread_title": title,
+            "direction": "outbound",
+            "author_label": "business",
+            "body": body,
+            "status": "responded",
+            "received_at": published_at,
+        },
+    ]
+    store = TakyonStore()
+    store.commit(
+        scope=f"business:{slug}",
+        operations=operations,
+        idempotency_key=f"x-publish-artifact:{job_id}:{post_id}",
+        reason="worker recorded live X publish receipt",
+        actor="worker",
+    )
+    return {"artifact": artifact_rel, "receipt": receipt_rel}
 
 
 # ── the ceo_wake handler ────────────────────────────────────────────────────────────────────────
@@ -722,10 +1000,84 @@ HANDLERS: dict[str, jobs.Handler] = {
     "ceo_wake": ceo_wake_handler,
 }
 
+def x_publish_outreach_handler(job: Job) -> JobRunResult:
+    payload = job.payload or {}
+    slug = job.business_slug
+    body = str(payload.get("body") or "").strip()
+    if not body:
+        raise RuntimeError("x publish job is missing a body")
+
+    work_request_id = str(payload.get("work_request_id") or "").strip()
+    reply_to = str(payload.get("thread_external_id") or "").strip()
+    home = _xurl_home()
+    if work_request_id:
+        _update_outreach_work_request(
+            slug,
+            work_request_id,
+            status="running",
+            payload_updates={"worker_job_id": str(job.id)},
+        )
+
+    try:
+        xurl, _auth_path = _ensure_local_xurl_auth()
+        command = [xurl, "reply", reply_to, body] if reply_to else [xurl, "post", body]
+        provider_response = _run_xurl_json_command(command, home=home, timeout=90)
+        post_id = _extract_x_post_id(provider_response) or str(job.id)
+        whoami = _try_run_xurl_json_command([xurl, "whoami"], home=home, timeout=20)
+        username = _extract_x_username(whoami)
+        post_url = (
+            f"https://x.com/{username}/status/{post_id}"
+            if username
+            else f"https://x.com/i/web/status/{post_id}"
+        )
+        artifacts = _record_x_publish_result(
+            slug,
+            job_id=str(job.id),
+            payload=payload,
+            post_id=post_id,
+            post_url=post_url,
+            provider_response=provider_response,
+        )
+        if work_request_id:
+            _update_outreach_work_request(
+                slug,
+                work_request_id,
+                status="completed",
+                payload_updates={
+                    "artifact_path": artifacts["artifact"],
+                    "receipt_path": artifacts["receipt"],
+                    "post_id": post_id,
+                    "post_url": post_url,
+                },
+            )
+        _persist_xurl_shared_auth_best_effort(home)
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "provider": "x",
+                "post_id": post_id,
+                "post_url": post_url,
+                "artifact_path": artifacts["artifact"],
+                "receipt_path": artifacts["receipt"],
+            },
+            actual_cost_cents=0,
+        )
+    except Exception as exc:
+        if work_request_id:
+            _update_outreach_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={"worker_error": str(exc)},
+            )
+        raise
+
+
 
 # ── the drain loop ──────────────────────────────────────────────────────────────────────────────
 
 
+    "x.publish_outreach": x_publish_outreach_handler,
 def drain_tick(
     conn,
     *,

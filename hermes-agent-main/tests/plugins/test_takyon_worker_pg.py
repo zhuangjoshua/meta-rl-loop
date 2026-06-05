@@ -15,6 +15,7 @@ Two layers:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import threading
@@ -22,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -189,6 +191,22 @@ def test_handlers_registry_maps_ceo_bootstrap():
     assert worker.HANDLERS["ceo_bootstrap"] is worker.ceo_bootstrap_handler
 
 
+def test_handlers_registry_maps_x_publish_outreach():
+    assert worker.HANDLERS["x.publish_outreach"] is worker.x_publish_outreach_handler
+
+
+def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
+    for name in ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
+    monkeypatch.setattr(
+        core,
+        "_read_xurl_shared_auth_secret",
+        lambda: ("XURL_SHARED_AUTH_B64_SECRET", base64.b64encode(b"apps: {}\n").decode("ascii")),
+    )
+    assert core._missing_env_for_requirement("x") == []
+
+
 def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     # The handler converts the turn's true USD cost to integer cents for settlement and packages the
     # response. $0.0734 → 7 cents.
@@ -210,6 +228,83 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     # The handler sourced the canonical wake toolsets (not an invented list).
     assert captured["toolsets"] == ["takyon", "web", "skills", "todo"]
     assert captured["max_turns"] == worker._DEFAULT_MAX_TURNS
+
+
+def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+    statuses: list[tuple[str, str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
+
+    def _fake_run(command, *, home, timeout):
+        captured["command"] = command
+        captured["home"] = str(home)
+        captured["timeout"] = timeout
+        return {"data": {"id": "tweet-123"}}
+
+    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
+    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        lambda slug, **kwargs: {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_update_outreach_work_request",
+        lambda slug, work_request_id, *, status, payload_updates=None: statuses.append(
+            (work_request_id, status, dict(payload_updates or {}))
+        ),
+    )
+    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
+
+    job = SimpleNamespace(
+        id="job-123",
+        business_slug="acme",
+        payload={
+            "body": "Ship it",
+            "channel": "x",
+            "provider": "x",
+            "subject": "Ship it",
+            "work_request_id": "wr-123",
+        },
+    )
+    result = worker.x_publish_outreach_handler(job)
+
+    assert captured["command"] == ["/usr/local/bin/xurl", "post", "Ship it"]
+    assert result.actual_cost_cents == 0
+    assert result.result["post_id"] == "tweet-123"
+    assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-123"
+    assert statuses[0][1] == "running"
+    assert statuses[-1][1] == "completed"
+    assert statuses[-1][2]["post_id"] == "tweet-123"
+
+
+def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_path):
+    statuses: list[tuple[str, str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
+    monkeypatch.setattr(worker, "_run_xurl_json_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")))
+    monkeypatch.setattr(
+        worker,
+        "_update_outreach_work_request",
+        lambda slug, work_request_id, *, status, payload_updates=None: statuses.append(
+            (work_request_id, status, dict(payload_updates or {}))
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="auth failed"):
+        worker.x_publish_outreach_handler(
+            SimpleNamespace(
+                id="job-456",
+                business_slug="acme",
+                payload={"body": "Ship it", "provider": "x", "work_request_id": "wr-456"},
+            )
+        )
+
+    assert statuses[0][1] == "running"
+    assert statuses[-1][1] == "failed"
+    assert statuses[-1][2]["worker_error"] == "auth failed"
 
 
 def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):

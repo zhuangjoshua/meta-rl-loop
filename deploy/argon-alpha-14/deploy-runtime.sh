@@ -90,6 +90,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl start docker
   systemctl is-active --quiet docker
   docker version >/dev/null
+  command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   if ! docker image inspect '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' >/dev/null 2>&1; then
     docker pull '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE'
   fi

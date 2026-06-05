@@ -34,6 +34,13 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y ca-certificates curl rsync caddy docker.io
+  if ! command -v xurl >/dev/null 2>&1; then
+    curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
+  fi
+  if ! command -v xurl >/dev/null 2>&1 && [ -x /root/.local/bin/xurl ]; then
+    ln -sf /root/.local/bin/xurl /usr/local/bin/xurl
+  fi
+  command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
   systemctl enable docker >/dev/null
   systemctl start docker

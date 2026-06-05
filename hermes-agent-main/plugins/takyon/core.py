@@ -523,6 +523,10 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "x_social": ("x",),
 }
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
+_XURL_SHARED_AUTH_ENV_KEYS = ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET")
+_X_CREDENTIAL_REQUIREMENT_LABEL = (
+    "X_API_KEY/TWITTER_API_KEY/X_BEARER_TOKEN/TWITTER_BEARER_TOKEN/shared xurl auth"
+)
 
 
 class TakyonError(RuntimeError):
@@ -4519,6 +4523,79 @@ def _resolve_runtime_executable(name: str) -> str | None:
     return shutil.which(name, path=search_path)
 
 
+def _resolve_xurl_executable() -> str | None:
+    path = _resolve_runtime_executable("xurl")
+    if path:
+        return path
+    fallback = Path.home() / ".local" / "bin" / "xurl"
+    if fallback.exists() and os.access(fallback, os.X_OK):
+        return str(fallback)
+    return None
+
+
+def _xurl_auth_path(*, home: str | None = None) -> Path:
+    base = Path(home).expanduser() if home else Path.home()
+    return base / ".xurl"
+
+
+def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
+    xurl = _resolve_xurl_executable()
+    if not xurl:
+        return False
+    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
+    try:
+        proc = subprocess.run(
+            [xurl, "auth", "status"],
+            text=True,
+            capture_output=True,
+            timeout=15,
+            env=_runtime_env({"HOME": resolved_home}),
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
+def _read_xurl_shared_auth_secret() -> tuple[str, str]:
+    for key in _XURL_SHARED_AUTH_ENV_KEYS:
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            return key, value
+        try:
+            value = str(safebox.read_env_backed_value(key) or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            return key, value
+    return "", ""
+
+
+def _decode_xurl_shared_auth_blob(key: str, value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if key.endswith("_B64_SECRET"):
+        try:
+            return base64.b64decode(text.encode("utf-8"), validate=True).decode("utf-8")
+        except Exception:
+            return ""
+    return text.replace("\r\n", "\n")
+
+
+def _xurl_shared_auth_ready() -> bool:
+    key, value = _read_xurl_shared_auth_secret()
+    if not key or not value:
+        return False
+    if key.endswith("_B64_SECRET"):
+        return bool(_decode_xurl_shared_auth_blob(key, value).strip())
+    return True
+
+
+def _is_x_provider_name(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"x", "twitter", "x_social"}
+
+
 def _command_version(command: list[str], *, timeout_seconds: int = 10) -> str | None:
     try:
         proc = subprocess.run(
@@ -4794,6 +4871,13 @@ def _missing_env_for_requirement(requirement: str) -> list[str]:
     key = str(requirement or "").strip()
     if not key:
         return []
+    if key.lower() == "x":
+        alias = _API_ENV_ALIASES.get("x", ())
+        if any(os.getenv(name) for name in alias):
+            return []
+        if _xurl_auth_status_ok() or _xurl_shared_auth_ready():
+            return []
+        return [_X_CREDENTIAL_REQUIREMENT_LABEL]
     alias = _API_ENV_ALIASES.get(key.lower())
     if alias:
         return [] if any(os.getenv(name) for name in alias) else ["/".join(alias)]
@@ -4812,6 +4896,16 @@ def _credential_requirements(op: dict[str, Any]) -> list[str]:
 
 def _allow_missing_credentials_in_test_mode(op: dict[str, Any]) -> bool:
     return str(op.get("action") or "") == "job.enqueue"
+
+
+def _should_mirror_job_to_worker_queue(op: Mapping[str, Any]) -> bool:
+    if not _boolish(op.get("worker_queue"), default=False):
+        return False
+    payload = op.get("payload") if isinstance(op.get("payload"), Mapping) else {}
+    kind = str(op.get("kind") or "").strip().lower()
+    provider = str(payload.get("provider") or op.get("provider") or "").strip()
+    channel = str(payload.get("channel") or "").strip()
+    return kind == "x.publish_outreach" or _is_x_provider_name(provider) or _is_x_provider_name(channel)
 
 
 def _require_api_access(op: dict[str, Any], *, business_mode: str = "live") -> dict[str, Any]:
@@ -11256,19 +11350,45 @@ class TakyonStore:
             payload = dict(op.get("payload") or {})
             credential_gate = op.get("credential_gate") or {}
             suppressed = credential_gate.get("missing_credentials_suppressed") or []
+            worker_job_id: str | None = None
             if suppressed:
                 payload.setdefault("business_mode", op.get("business_mode") or "test")
                 payload.setdefault("external_side_effects", "suppressed")
                 payload.setdefault("missing_credentials_suppressed", suppressed)
                 payload.setdefault("test_mode_note", credential_gate.get("note") or "Recorded locally in test mode.")
+            mirror_to_worker = _should_mirror_job_to_worker_queue(op)
+            if mirror_to_worker:
+                payload.setdefault("work_request_id", job_id)
+                payload.setdefault("business_slug", slug)
             conn.execute(
                 f"INSERT INTO {self._work_requests_table()} (id, scope, business_slug, kind, status, payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, target_scope, slug, str(op.get("kind") or "job"), str(op.get("status") or "queued"), _json_dumps(payload), _now(), _now()),
             )
+            if mirror_to_worker:
+                try:
+                    max_attempts = max(1, int(op.get("worker_max_attempts") or 1))
+                except (TypeError, ValueError):
+                    max_attempts = 1
+                try:
+                    from . import jobs as worker_jobs
+                except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+                    from plugins.takyon import jobs as worker_jobs
+                with self._leaf_conn(conn) as raw:
+                    worker_job = worker_jobs.enqueue(
+                        raw,
+                        slug,
+                        str(op.get("kind") or "job"),
+                        idempotency_key=f"work-request:{job_id}",
+                        payload=payload,
+                        max_attempts=max_attempts,
+                    )
+                worker_job_id = str(worker_job.id)
             event_payload = {"job_id": job_id, "kind": op.get("kind"), "reason": reason}
             if suppressed:
                 event_payload["missing_credentials_suppressed"] = suppressed
                 event_payload["external_side_effects"] = "suppressed"
+            if worker_job_id:
+                event_payload["worker_job_id"] = worker_job_id
             if _job_kind_matches(op.get("kind"), ("ad", "campaign", "distribution", "outreach", "post", "social", "x-social")):
                 self._rewrite_distribution_files(conn, slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload=event_payload)
@@ -11276,6 +11396,8 @@ class TakyonStore:
             if suppressed:
                 result["missing_credentials_suppressed"] = suppressed
                 result["external_side_effects"] = "suppressed"
+            if worker_job_id:
+                result["worker_job"] = worker_job_id
             return result
 
         if action == "outreach.local_publish":
@@ -12842,6 +12964,8 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                 user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, _normalize_email(str(args.get("email"))))).fetchone())
             if not user:
                 raise TakyonError("app account not found")
+            _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
+            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
             entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
             budget = store._ensure_app_budget(conn, business)
             usage = conn.execute(
@@ -12852,6 +12976,86 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
         return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
     except Exception as exc:
         return tool_error(str(exc), success=False)
+
+
+def _maybe_reconcile_pg_completed_checkout(
+    store: "TakyonStore",
+    conn: sqlite3.Connection,
+    business: str,
+    user: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(conn, _PGConn):
+        return None
+    user_id = str(user.get("id") or "").strip()
+    user_email = _normalize_email(str(user.get("email") or "")) if user.get("email") else ""
+    if not user_id and not user_email:
+        return None
+    entitled = conn.execute(
+        "SELECT 1 FROM app_entitlements "
+        "WHERE business_slug = ? AND app_user_id = ? AND status IN ('active', 'trialing') "
+        "AND (tier IN ('paid', 'pro', 'trial') OR plan_key IS NOT NULL "
+        "OR stripe_subscription_id IS NOT NULL OR stripe_checkout_session_id IS NOT NULL) "
+        "LIMIT 1",
+        (business, user_id),
+    ).fetchone()
+    if entitled:
+        return {"attempted": False, "reason": "already_entitled"}
+    pending_rows = conn.execute(
+        "SELECT stripe_checkout_session_id FROM app_checkout_intents "
+        "WHERE business_slug = ? AND stripe_checkout_session_id IS NOT NULL "
+        "AND status IN ('created', 'pending') "
+        "AND ((? <> '' AND app_user_id = ?) OR (? <> '' AND lower(customer_email) = lower(?))) "
+        "ORDER BY updated_at DESC LIMIT 3",
+        (business, user_id, user_id, user_email, user_email),
+    ).fetchall()
+    if not pending_rows:
+        return {"attempted": False, "reason": "no_pending_checkout"}
+    try:
+        from . import stripe_util
+    except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+        from plugins.takyon import stripe_util
+    leaves = store._app_leaves()
+    last_error = ""
+    for row in pending_rows:
+        session_id = str(row["stripe_checkout_session_id"] or "").strip()
+        if not session_id:
+            continue
+        try:
+            session = stripe_util.stripe_request(f"checkout/sessions/{session_id}", {}, method="GET")
+            if not isinstance(session, dict):
+                continue
+            if str(session.get("status") or "").strip().lower() != "complete":
+                continue
+            with store._leaf_conn(conn) as leaf:
+                checkout_result = leaves["payments"].reconcile_checkout_session(
+                    leaf,
+                    session,
+                    event_created=session.get("created"),
+                )
+            subscription_result = None
+            subscription_id = _stripe_object_id(session.get("subscription"))
+            if subscription_id:
+                subscription = stripe_util.stripe_request(
+                    f"subscriptions/{subscription_id}",
+                    {},
+                    method="GET",
+                )
+                if isinstance(subscription, dict):
+                    with store._leaf_conn(conn) as leaf:
+                        subscription_result = leaves["payments"].reconcile_subscription(
+                            leaf,
+                            subscription,
+                        )
+            if checkout_result.get("recorded"):
+                return {
+                    "attempted": True,
+                    "session_id": session_id,
+                    "checkout": checkout_result,
+                    "subscription": subscription_result,
+                }
+        except (stripe_util.StripeError, leaves["payments"].AppPaymentError, ValueError) as exc:
+            last_error = str(exc)
+    return {"attempted": True, "error": last_error or "checkout_not_reconciled"}
 
 
 def handle_business_read_app_profile(args: dict, **_: Any) -> str:
@@ -13346,16 +13550,20 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             "metadata": metadata,
             "requested_external_side_effect": "publish_outreach",
         }
+        is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
         operation = {
             "action": "job.enqueue",
             "business": business,
             "scope": args.get("scope") or f"business:{business}",
-            "kind": args.get("kind") or f"{_file_slug(channel, 'outreach')}.publish_outreach",
+            "kind": "x.publish_outreach" if is_x_outreach else args.get("kind") or f"{_file_slug(channel, 'outreach')}.publish_outreach",
             "status": args.get("status") or "pending",
             "payload": payload,
             "requires_api": sorted(set(requires_api)),
             "requires_env": sorted(set(requires_env)),
         }
+        if is_x_outreach:
+            operation["worker_queue"] = True
+            operation["worker_max_attempts"] = 1
         return _commit_tool(canonical_args, operation, scope=operation["scope"])
     except Exception as exc:
         return tool_error(str(exc), success=False)

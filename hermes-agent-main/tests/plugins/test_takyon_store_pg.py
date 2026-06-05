@@ -301,6 +301,50 @@ def test_operator_job_enqueue_isolates_to_business_work_requests(pg_store, pg_st
     assert [j["kind"] for j in read["jobs"]] == ["research"]
 
 
+def test_operator_job_enqueue_can_mirror_live_x_publish_into_worker_queue(pg_store, pg_store_dsn):
+    import json
+
+    _seed_owned_business(pg_store_dsn, "xco", mode="live")
+    result = pg_store.commit(
+        scope="business:xco",
+        operations=[{
+            "action": "job.enqueue",
+            "business": "xco",
+            "kind": "x.publish_outreach",
+            "status": "pending",
+            "worker_queue": True,
+            "worker_max_attempts": 1,
+            "payload": {"provider": "x", "channel": "x", "body": "hello from takyon"},
+        }],
+        idempotency_key="x-mirror-enqueue-1",
+        reason="mirror live x publish",
+        actor="test",
+    )
+    assert result["success"] is True
+    enqueue = result["results"][0]
+    assert enqueue["job"]
+    assert enqueue["worker_job"]
+
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        work_request = conn.execute(
+            "select status, payload_json from business_work_requests where id = %s",
+            (enqueue["job"],),
+        ).fetchone()
+        assert work_request is not None
+        assert work_request[0] == "pending"
+        assert json.loads(work_request[1])["work_request_id"] == enqueue["job"]
+
+        worker_row = conn.execute(
+            "select kind, status, max_attempts, payload from jobs where id = %s",
+            (enqueue["worker_job"],),
+        ).fetchone()
+        assert worker_row is not None
+        assert worker_row[0] == "x.publish_outreach"
+        assert worker_row[1] == "queued"
+        assert worker_row[2] == 1
+        assert worker_row[3]["work_request_id"] == enqueue["job"]
+
+
 def test_maintenance_gc_prunes_business_work_requests_not_jobs_queue(pg_store, pg_store_dsn):
     # The GC query dict keys the work-request store by its physical name (business_work_requests on PG),
     # and that same key drives DELETE FROM {table}; a confirmed gc prunes completed records there while
