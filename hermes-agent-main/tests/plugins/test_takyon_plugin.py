@@ -5446,6 +5446,25 @@ def test_reddit_launch_plan_defaults_ad_group_start_time_only(tmp_path, monkeypa
     assert parsed.microsecond == 0
 
 
+def test_reddit_launch_plan_defaults_cpc_bid_value_for_non_cbo_launches(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    staged_args, _staged_assets = takyon_core._reddit_stage_launch_args(
+        store,
+        "clipbook",
+        _reddit_launch_args(
+            slug="demo-reddit-default-bid",
+            idempotency_key="clipbook-reddit-default-bid-v1",
+        ),
+        publish_target=_product_publish_target("clipbook"),
+        verify_public_url=False,
+    )
+
+    plan = takyon_core._reddit_launch_plan(staged_args, {})
+    assert plan["ad_group_payload"]["data"]["bid_type"] == "CPC"
+    assert plan["ad_group_payload"]["data"]["bid_value"] == 1_000_000
+    assert plan["ad_group_payload"]["data"]["bid_value"] < plan["ad_group_payload"]["data"]["goal_value"]
+
+
 def test_business_reddit_ad_control_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="test")
     _write_reddit_launch_receipt(tmp_path, mode="test")

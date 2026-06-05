@@ -14155,6 +14155,17 @@ def _reddit_ads_usd_from_micros(value: Any) -> float:
     return float((micros / Decimal("1000000")).quantize(Decimal("0.01")))
 
 
+def _reddit_default_bid_value_micros(*, bid_type: str, daily_budget_micros: int) -> int | None:
+    normalized = str(bid_type or "").strip().upper()
+    if normalized == "CPC":
+        target = _reddit_ads_micros_from_usd("1.00", field="ad_group.bid_value_usd")
+    else:
+        return None
+    if daily_budget_micros > 1:
+        return min(target, daily_budget_micros - 1)
+    return target
+
+
 def _reddit_ads_hour_iso(value: Any, *, field: str, default: datetime | None = None) -> str | None:
     if value in (None, ""):
         if default is None:
@@ -14274,6 +14285,11 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
             bid_value_micros = int(ad_group.get("bid_value"))
         except (TypeError, ValueError) as exc:
             raise TakyonError("ad_group.bid_value must be an integer microcurrency amount") from exc
+    elif bid_value_micros is None:
+        bid_value_micros = _reddit_default_bid_value_micros(
+            bid_type=bid_type,
+            daily_budget_micros=daily_budget_micros,
+        )
 
     profile_id = str(args.get("profile_id") or post.get("profile_id") or cfg.get("profile_id") or "").strip()
     funding_instrument_id = str(
