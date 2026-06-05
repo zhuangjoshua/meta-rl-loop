@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -5258,6 +5259,23 @@ def test_stage_business_public_asset_mirrors_into_product_service_publish_root(t
     assert shared_asset.is_file()
     assert service_asset.is_file()
     assert str(service_root) in staged["publish_roots"]
+
+
+def test_make_product_publish_path_traversable_opens_takyon_home_for_asset_serving(tmp_path, monkeypatch):
+    takyon_home = tmp_path / ".takyon"
+    service_root = takyon_home / "product-services" / "clipbook"
+    service_root.mkdir(parents=True, exist_ok=True)
+    product_services = service_root.parent
+    takyon_home.chmod(0o700)
+    product_services.chmod(0o700)
+    service_root.chmod(0o700)
+    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
+
+    takyon_core._make_product_publish_path_traversable(service_root)
+
+    assert stat.S_IMODE(takyon_home.stat().st_mode) == 0o711
+    assert stat.S_IMODE(product_services.stat().st_mode) == 0o755
+    assert stat.S_IMODE(service_root.stat().st_mode) == 0o755
 
 
 def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):

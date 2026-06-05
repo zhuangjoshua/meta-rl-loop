@@ -4678,6 +4678,7 @@ def _stage_business_public_asset(
         if publish_root not in (site_abs, *site_abs.parents):
             raise TakyonError("public asset target escaped product publish root")
         _copy_product_public_asset(source_abs, site_abs)
+        _make_product_publish_path_traversable(publish_root)
 
     public_url = _product_public_asset_url(
         business,
@@ -5189,6 +5190,7 @@ def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
 
     _replace_directory_tree_atomic(source_root, target_root, ignore=ignore)
     _make_static_publish_tree_readable(target_root)
+    _make_product_publish_path_traversable(target_root)
     return target_root
 
 
@@ -5313,6 +5315,34 @@ def _make_static_publish_tree_readable(root: Path) -> None:
                 mode = path.stat().st_mode
                 has_exec_bit = bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
                 path.chmod(0o755 if has_exec_bit else 0o644)
+        except OSError:
+            continue
+
+
+def _make_product_publish_path_traversable(root: Path) -> None:
+    resolved_root = Path(root).resolve()
+    takyon_home = get_takyon_home().resolve()
+    if takyon_home not in (resolved_root, *resolved_root.parents):
+        return
+
+    try:
+        home_mode = stat.S_IMODE(takyon_home.stat().st_mode)
+        takyon_home.chmod(home_mode | 0o111)
+    except OSError:
+        pass
+
+    current = resolved_root
+    ancestors: list[Path] = []
+    while current != takyon_home:
+        ancestors.append(current)
+        current = current.parent
+        if takyon_home not in (current, *current.parents) and current != takyon_home:
+            break
+
+    for path in reversed(ancestors):
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+            path.chmod(mode | 0o055)
         except OSError:
             continue
 
