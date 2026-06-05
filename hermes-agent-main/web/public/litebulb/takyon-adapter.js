@@ -3369,7 +3369,11 @@
         background_run: result && result.background_run || null,
       });
       await mountLiveBusiness(created, summary, initialSnapshot);
-      if (result && result.output) addCeo(formatRichText(result.output));
+      addYou(goal);
+      const streamSid = LIVE.sessionId || await ensureSession(created);
+      if (streamSid) {
+        rpc("prompt.submit", { session_id: streamSid, text: goal }, 600000).catch(() => {});
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setStatus("paused", "paused");
