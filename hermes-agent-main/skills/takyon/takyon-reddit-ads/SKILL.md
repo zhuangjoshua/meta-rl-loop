@@ -1,7 +1,7 @@
 ---
 name: takyon-reddit-ads
-description: Launch and operate a Reddit ad for one Takyon business through Reddit's open Ads API from an existing promoted post, a public creative URL, or a local business image/video asset that Takyon can stage onto the business publish target first — preflight auth/defaults, create a PAUSED Campaign/Ad Group/Post/Ad, then explicitly activate/pause/update budget and sync ad-platform metrics through guarded tools. Test-mode businesses suppress to local receipts.
-version: 1.0.0
+description: Launch and operate a Reddit ad for one Takyon business through Reddit's open Ads API from a real existing promoted post, a real public creative URL, or a real local business image/video asset that Takyon can stage onto the business publish target first. If the requested image/video asset does not exist yet, route upstream to the static-ad or UGC creative skill first; never substitute placeholder, mock, or stub media URLs just to satisfy launch inputs.
+version: 1.0.1
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -29,6 +29,7 @@ metadata:
         - Reddit delivery metrics need to be synced into Takyon for later tracking
       do_not_use_for:
         - building the image or video asset itself
+        - inventing placeholder, mock, fixture, or stub creative URLs just to force a launch through
         - claiming CAC, ROAS, or conversion attribution Takyon has not joined truthfully
   takyon:
     scope: business
@@ -54,6 +55,9 @@ required_credential_files: []
 Turn an existing promoted post, a public hosted image/video/carousel, or a local business creative file into a **paid Reddit ad** for one business.
 This skill is the **distribution** half of the creative pipeline: upstream creative skills can still produce
 assets under `product/`, and this skill can stage those local files onto the business publish target when needed.
+If the requested launch is `asset_kind: "image"` and no real creative exists yet, route upstream to
+`takyon-static-ad-creative-generator` first and launch from that generated asset bundle; if it is
+`asset_kind: "video"` and no real video exists yet, route upstream to `ugc-video-ad` first.
 Reddit’s live API path still ultimately needs either:
 
 - an existing `post_id`, or
@@ -70,7 +74,7 @@ allowlisting or approval from Reddit to access**. The real live gates are:
 Three hard layers stay separate:
 
 - **Asset / post layer** — the existing promoted post id or the public creative URLs used to create one.
-  Owned by upstream creative work and the business publish target. This skill does not regenerate assets, but it can stage a finished local business asset into a public URL when the publish target is reachable.
+  Owned by upstream creative work and the business publish target. This skill does not regenerate assets, but it can stage a finished local business asset into a public URL when the publish target is reachable. Missing creative is a blocker, not a license to invent `placehold.co`, mock, fixture, or stub media.
 - **Launch/control layer** — the campaign objects + explicit activate/pause/budget changes.
   Owned here, lives under `distribution/`, and runs through the guarded
   **`business_reddit_ad_launch`** and **`business_reddit_ad_control`** tools.
@@ -84,13 +88,13 @@ invent business attribution.
 
 ## When to Use
 
-- A business has a public ad creative URL, a finished local business image/video asset, or an existing `post_id` and wants it staged as a Reddit ad.
+- A business has a real public ad creative URL, a finished local business image/video asset, or an existing `post_id` and wants it staged as a Reddit ad.
 - You need to verify Reddit auth, business/ad-account/profile defaults, funding instruments, or pixels before launch work.
 - You want to stage a campaign safely (`PAUSED`) for review before it ever serves.
 - You need to explicitly activate, pause, or update the daily budget of a launched Reddit campaign.
 - You want to sync delivery metrics from Reddit back into Takyon for future tracking.
 
-**Do not use for:** building the creative asset itself; hiding missing funding/pixel/profile setup; claiming conversions or ROAS without truthful joins.
+**Do not use for:** building the creative asset itself; substituting placeholders, mocks, or stub media for a missing creative; hiding missing funding/pixel/profile setup; claiming conversions or ROAS without truthful joins.
 
 ## Access Model
 
@@ -128,7 +132,7 @@ The smallest truthful end-to-end Reddit path is:
 
 1. **Create a Reddit Ads developer application** and complete OAuth2 so Takyon has a refresh token.
 2. **Run preflight** with `business_reddit_ad_launch` `mode: "preflight"` to discover the business, ad account, profile, funding instrument, and pixel that the token can actually use.
-3. **Prepare the creative upstream** with `ugc-video-ad`, `static-ad-creative-generator`, or an existing promoted post.
+3. **Prepare the creative upstream** with `ugc-video-ad`, `static-ad-creative-generator`, or an existing promoted post. If the requested launch is `asset_kind: "image"` and there is no truthful image asset yet, stop and use `takyon-static-ad-creative-generator` until a real creative bundle exists under `product/static-ads/<slug>/`; do not use `placehold.co`, mock placeholders, or ad hoc fallback URLs as launch creative.
 4. **If reusing an existing post**, launch with `asset_kind: "existing_post"` plus `post_id`.
 5. **If creating a new promoted post**, either provide public media URLs directly or point the `post` block at local business files (`image_path`, `video_path`, `media_path`, `thumbnail_path`) so Takyon can stage them onto the business publish target first.
 6. **Launch PAUSED** through `business_reddit_ad_launch`.
@@ -152,6 +156,7 @@ The smallest truthful end-to-end Reddit path is:
 - **A funded ad account, profile, and pixel** for live delivery. Preflight shows these defaults and blockers.
 - **No separate Ads API allowlist step is assumed.** Live failures should be debugged as auth/permission/setup issues first.
 - **An existing `post_id`, public creative URLs, or local business creative files that can be staged onto a publicly reachable business publish target** for live image/video/carousel post creation.
+- **If `asset_kind: "image"` and no real image asset exists yet, you must route upstream to `takyon-static-ad-creative-generator` first.** A placeholder service URL, mock asset, or fixture image is not a valid live creative input.
 - **A unique Reddit User-Agent string**. Generic user agents are throttled much harder by Reddit.
 - **Test-mode businesses need none of these** — the tool suppresses to a local receipt.
 
@@ -172,6 +177,7 @@ The smallest truthful end-to-end Reddit path is:
   [templates/plan.json](templates/plan.json) with the campaign/ad-group/ad blocks and either:
   - `asset_kind: "existing_post"` plus `post_id`, or
   - `asset_kind: "image" | "video" | "carousel"` plus either public URLs under the `post` block or local business file paths (`image_path`, `video_path`, `media_path`, `thumbnail_path`) that Takyon can stage first.
+  If `asset_kind: "image"` and the business does not already have a truthful creative, route to `takyon-static-ad-creative-generator` first and prefer a generated local file such as `product/static-ads/<slug>/<creative>.png` on `post.image_path`. Do not put `placehold.co`, mock, fixture, or stub URLs into a live launch plan.
   For new promoted posts, the plan can also carry copy fields such as `headline`, `display_url`,
   `call_to_action`, and `supplementary_text`. If `post.destination_url` / `ad.click_url` is omitted,
   Takyon defaults the click destination to the business's canonical product URL.
@@ -195,7 +201,7 @@ The smallest truthful end-to-end Reddit path is:
 
 1. **Read business state** — `business_read_business`. Note the business `mode`. Confirm whether the truthful live source is an existing `post_id`, a public creative URL bundle, or a local business asset under `product/`.
 2. **Preflight the account** — call `business_reddit_ad_launch` `mode: "preflight"`. Verify it returns the right ad account, profile, funding instrument, and pixel. If it errors with a missing-credential or missing-default message, record the blocker and stop.
-3. **Confirm the creative source is actually launchable** — either a real `post_id`, public media URLs, or local business files that the launch tool can stage to a reachable publish target. In live mode, if the publish target is not actually reachable, stop on that blocker.
+3. **Confirm the creative source is actually launchable** — either a real `post_id`, public media URLs, or local business files that the launch tool can stage to a reachable publish target. If `asset_kind: "image"` and no real creative exists yet, stop and route upstream to `takyon-static-ad-creative-generator`; do not fabricate `placehold.co`, mock, fixture, or placeholder image URLs just to get a campaign through. In live mode, if the publish target is not actually reachable, stop on that blocker.
 4. **Draft `plan.json`** under `distribution/reddit-ads/<slug>/` from the template: choose the objective, a `daily_budget_usd` within the cap, targeting, ad copy, and either `post_id`, public media URLs, or local staged-file inputs on the `post` block.
 5. **Launch PAUSED** — call `business_reddit_ad_launch` `mode: "launch"` with the plan fields and a stable `idempotency_key`.
    - **Test mode** → expect `status: "suppressed_test_mode"` and a local `receipt.json`; no Reddit objects exist.
@@ -229,6 +235,7 @@ The smallest truthful end-to-end Reddit path is:
 ## Common Pitfalls
 
 - Treating a private local file path as if Reddit can fetch it without a public URL
+- Using `placehold.co`, mock, fixture, or stub media URLs in a live launch plan instead of a real creative asset
 - Treating `launch` as if it makes the ad live; it only stages `PAUSED`
 - Claiming CAC, ROAS, or conversion attribution from ad-platform delivery metrics alone
 - Ignoring a blocked publish-target receipt and pretending Reddit accepted the creative anyway
@@ -237,6 +244,7 @@ The smallest truthful end-to-end Reddit path is:
 
 - [ ] `business_reddit_ad_launch mode=preflight` returned identity, businesses, ad accounts, profiles, funding instruments, and pixels
 - [ ] `distribution/reddit-ads/<slug>/plan.json` exists and matches the intended launch shape
+- [ ] When `asset_kind=image`, the referenced image is a real external asset or a real business creative bundle under `product/static-ads/<slug>/`, not a placeholder/mock/stub URL
 - [ ] `distribution/reddit-ads/<slug>/receipt.json` exists and truthfully reflects `suppressed_test_mode`, `created_paused`, or `partial_failed`
 - [ ] When local files were used, `product/public-assets/<slug>/receipt.json` exists with the staged public URL or the real blocker
 - [ ] Any activate/pause/budget action has a corresponding `distribution/reddit-ads/<slug>/actions/<idempotency>.json`

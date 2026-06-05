@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "takyon-dashboard",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd /Users/Zygote/Downloads/takyon/hermes-agent-main && TAKYON_HOME=/Users/Zygote/Downloads/takyon/.takyon .venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --tui --skip-build"
+      ],
+      "port": 9119
+    }
+  ]
+}
