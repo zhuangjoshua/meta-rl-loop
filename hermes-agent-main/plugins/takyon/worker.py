@@ -60,6 +60,7 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker (matches jobs.requeue_stale's own default).
 _STALE_SECONDS = 900
+_X_POST_CHAR_LIMIT = 280
 
 
 def _utc_now_iso() -> str:
@@ -71,6 +72,56 @@ def _truncate_worker_text(value: str, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def _split_x_fragment(text: str, *, limit: int = _X_POST_CHAR_LIMIT) -> list[str]:
+    remaining = str(text or "").strip()
+    parts: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            break
+        window = remaining[: limit + 1]
+        split_at = 0
+        for marker, keep in (("\n\n", 0), (". ", 1), ("! ", 1), ("? ", 1), ("; ", 1), (": ", 1), (", ", 1), (" ", 0)):
+            idx = window.rfind(marker)
+            if idx >= max(limit // 2, 32):
+                split_at = idx + keep
+                break
+        if split_at <= 0:
+            split_at = limit
+        part = remaining[:split_at].strip()
+        if not part:
+            part = remaining[:limit].strip()
+            split_at = len(part)
+        parts.append(part)
+        remaining = remaining[split_at:].strip()
+    return parts
+
+
+def _split_x_thread_segments(body: str, *, limit: int = _X_POST_CHAR_LIMIT) -> list[str]:
+    text = str(body or "").strip()
+    if not text:
+        return []
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n{2,}", text) if paragraph.strip()]
+    if not paragraphs:
+        return _split_x_fragment(text, limit=limit)
+    segments: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        for piece in _split_x_fragment(paragraph, limit=limit):
+            if not current:
+                current = piece
+                continue
+            candidate = f"{current}\n\n{piece}"
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                segments.append(current)
+                current = piece
+    if current:
+        segments.append(current)
+    return segments
 
 
 def _xurl_home() -> Path:
@@ -1028,17 +1079,40 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     try:
         xurl, _auth_path = _ensure_local_xurl_auth()
         app_name, username = _xurl_identity_flags(home=home)
-        command = [xurl]
-        if app_name:
-            command.extend(["--app", app_name])
-        if reply_to:
-            command.extend(["reply", reply_to, body])
-        else:
-            command.extend(["post", body])
-        if username:
-            command.extend(["-u", username])
-        provider_response = _run_xurl_json_command(command, home=home, timeout=90)
-        post_id = _extract_x_post_id(provider_response) or str(job.id)
+        segments = _split_x_thread_segments(body)
+        if not segments:
+            raise RuntimeError("x publish job is missing a body")
+        provider_response: dict[str, Any] = {}
+        thread_posts: list[dict[str, Any]] = []
+        current_reply_to = reply_to
+        post_id = ""
+        for index, segment in enumerate(segments):
+            command = [xurl]
+            if app_name:
+                command.extend(["--app", app_name])
+            if current_reply_to:
+                command.extend(["reply", current_reply_to, segment])
+            else:
+                command.extend(["post", segment])
+            if username:
+                command.extend(["-u", username])
+            response = _run_xurl_json_command(command, home=home, timeout=90)
+            current_post_id = _extract_x_post_id(response) or (post_id if post_id else str(job.id))
+            if not post_id:
+                post_id = current_post_id
+                provider_response = dict(response)
+            thread_posts.append(
+                {
+                    "index": index,
+                    "post_id": current_post_id,
+                    "body": segment,
+                    "reply_to": current_reply_to,
+                    "provider_response": dict(response),
+                }
+            )
+            current_reply_to = current_post_id
+        if len(thread_posts) > 1:
+            provider_response["thread_posts"] = thread_posts
         whoami_command = [xurl]
         if app_name:
             whoami_command.extend(["--app", app_name])

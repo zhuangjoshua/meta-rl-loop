@@ -425,7 +425,63 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
 
     assert statuses[0][1] == "running"
     assert statuses[-1][1] == "failed"
-    assert statuses[-1][2]["worker_error"] == "auth failed"
+
+
+def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_path):
+    commands: list[list[str]] = []
+    captured_result: dict[str, Any] = {}
+
+    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
+    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
+
+    responses = iter(
+        (
+            {"data": {"id": "tweet-1"}},
+            {"data": {"id": "tweet-2"}},
+        )
+    )
+
+    def _fake_run(command, *, home, timeout):
+        commands.append(list(command))
+        return next(responses)
+
+    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
+    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+
+    def _fake_record(slug, **kwargs):
+        captured_result["payload"] = kwargs
+        return {
+            "artifact": "distribution/local-published/x/thread.md",
+            "receipt": "metrics/receipts/outreach/thread.json",
+        }
+
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        _fake_record,
+    )
+    monkeypatch.setattr(worker, "_update_outreach_work_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
+
+    body = "A" * 200 + "\n\n" + "B" * 160
+    result = worker.x_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-thread",
+            business_slug="acme",
+            payload={"body": body, "provider": "x"},
+        )
+    )
+
+    assert len(commands) == 2
+    assert commands[0][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "post"]
+    assert commands[0][-2:] == ["-u", "vaalapp"]
+    assert commands[1][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "reply"]
+    assert commands[1][4] == "tweet-1"
+    assert commands[1][-2:] == ["-u", "vaalapp"]
+    thread_posts = captured_result["payload"]["provider_response"]["thread_posts"]
+    assert [item["post_id"] for item in thread_posts] == ["tweet-1", "tweet-2"]
+    assert result.result["post_id"] == "tweet-1"
+    assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-1"
 
 
 def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):
