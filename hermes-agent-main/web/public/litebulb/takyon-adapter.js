@@ -54,8 +54,9 @@
     activityItems: new Map(),
     activityState: "idle",
     activityTurnStartedAt: 0,
-    activityOpen: true,
+    activityOpen: false,
     activityUserToggled: false,
+    activityHasMeaningfulUpdate: false,
     businesses: [],
     businessIndex: new Map(),
     businessesLoading: false,
@@ -1661,7 +1662,7 @@
 
     const backgroundDetail = String(backgroundRun.detail || "").trim();
     if (backgroundDetail && backgroundDetail !== LIVE.lastBackgroundDetail) {
-      if (RT.live && !LIVE.activeTurnTraceId) {
+      if (RT.live && LIVE.activityTurnStartedAt) {
         setActivitySummary({
           phase: "running",
           headline: friendlyActivityHeadline("running", backgroundDetail, ""),
@@ -1694,7 +1695,7 @@
       const summary = currentAction.label || currentAction.detail || "Business is synced.";
       const detail = blocker || currentAction.detail;
       if (RT.live) {
-        if (!LIVE.activeTurnTraceId) {
+        if (LIVE.activityTurnStartedAt) {
           const note = cleanActivityText(detail || summary);
           setActivitySummary({
             phase: /recover|block|fix|error/i.test(statusLabel) ? "fixing" : /done|sync|ready/i.test(statusLabel) ? "done" : "running",
@@ -2874,6 +2875,7 @@
     const toolName = String(name || "").trim();
     const nextPreview = String(preview || "").trim();
     if (!toolName || !nextPreview) return;
+    LIVE.activityHasMeaningfulUpdate = true;
     LIVE.toolEls.forEach((ref) => {
       if (!ref || ref.toolName !== toolName) return;
       upsertActivityItem(String(ref.entryKey || `tool:${toolName}`), {
@@ -2884,6 +2886,30 @@
     });
   }
 
+  function placeActivityCardAfterLatestMessage() {
+    const card = LIVE.activityCard;
+    const stream = msgs();
+    if (!card || !stream || !document.body.contains(card)) return;
+    stream.appendChild(card);
+    scrollChat();
+  }
+
+  function removeActivityCard() {
+    const card = LIVE.activityCard;
+    if (card && card.parentNode) card.parentNode.removeChild(card);
+    LIVE.activityCard = null;
+    LIVE.activityDetails = null;
+    LIVE.activityItems = new Map();
+    LIVE.activityPhase = "thinking";
+    LIVE.activityHeadline = "";
+    LIVE.activityNote = "";
+    LIVE.activityPercent = null;
+    LIVE.activityState = "idle";
+    LIVE.activityOpen = false;
+    LIVE.activityUserToggled = false;
+    LIVE.activityHasMeaningfulUpdate = false;
+  }
+
   function ensureActivityCard(seed) {
     if (LIVE.activityCard && document.body.contains(LIVE.activityCard)) return LIVE.activityCard;
     LIVE.activityItems = new Map();
@@ -2892,7 +2918,7 @@
     LIVE.activityNote = String(seed && seed.note || "").trim();
     LIVE.activityPercent = null;
     LIVE.activityState = "running";
-    LIVE.activityOpen = true;
+    LIVE.activityOpen = false;
     LIVE.activityUserToggled = false;
     const container = document.createElement("div");
     container.className = "m";
@@ -2921,7 +2947,7 @@
       if (caret) caret.textContent = LIVE.activityDetails && LIVE.activityDetails.open ? "▾" : "▸";
     });
     renderActivityCard();
-    scrollChat();
+    placeActivityCardAfterLatestMessage();
     return container;
   }
 
@@ -2969,7 +2995,7 @@
     const countLabel = items.length ? `${items.length} ${items.length === 1 ? "step" : "steps"}` : "";
     const shouldOpen = LIVE.activityUserToggled
       ? !!LIVE.activityOpen
-      : LIVE.activityState === "running";
+      : !!LIVE.activityOpen;
     if (details.open !== shouldOpen) details.open = shouldOpen;
     details.classList.toggle("is-running", LIVE.activityState === "running");
     details.classList.toggle("is-done", LIVE.activityState === "done");
@@ -3023,6 +3049,7 @@
 
   function syncActivityFromTrace(entry) {
     if (!RT.live || !entry) return false;
+    if (!LIVE.activityTurnStartedAt) return false;
     const status = traceStatus(entry);
     const kind = String(entry.kind || "note").trim().toLowerCase();
     const label = String(entry.label || "").trim();
@@ -3037,6 +3064,7 @@
       return false;
     }
     if (kind === "tool" || kind === "skill") {
+      LIVE.activityHasMeaningfulUpdate = true;
       upsertActivityItem(String(entry.entry_key || entry.id || `${kind}:${label}`), {
         label: friendlyToolLabel(entry.tool_name || label, label || kind),
         detail,
@@ -3046,6 +3074,7 @@
       return true;
     }
     if (kind === "turn") {
+      LIVE.activityHasMeaningfulUpdate = true;
       setActivitySummary({
         phase: status === "done" ? "done" : status === "blocked" ? "fixing" : LIVE.activityPhase || "running",
         headline: detail || label || "CEO turn",
@@ -3055,6 +3084,7 @@
       return true;
     }
     if (kind === "note" && detail) {
+      LIVE.activityHasMeaningfulUpdate = true;
       setActivitySummary({
         headline: LIVE.activityHeadline || detail,
         note: detail,
@@ -3090,6 +3120,9 @@
     LIVE.activityNote = "";
     LIVE.activityState = "running";
     LIVE.activityTurnStartedAt = Date.now();
+    LIVE.activityOpen = false;
+    LIVE.activityUserToggled = false;
+    LIVE.activityHasMeaningfulUpdate = false;
     LIVE.traceLogSeen = new Set();
     setActivitySummary({
       phase: "thinking",
@@ -3098,6 +3131,7 @@
       percent: null,
       state: "running",
     });
+    placeActivityCardAfterLatestMessage();
     LIVE.assistantText = "";
     LIVE.assistantDeltaSeen = false;
     setStatus("thinking…", "run");
@@ -3280,6 +3314,7 @@
       return;
     }
     if (ev.type === "message.complete") {
+      const keepActivityRow = LIVE.activityHasMeaningfulUpdate || LIVE.activityItems.size > 0;
       if (LIVE.activeTurnTraceId) {
         const turnStatus = String(payload.status || "").trim().toLowerCase() === "complete" ? "completed" : "failed";
         upsertLiveTrace({
@@ -3292,14 +3327,21 @@
         });
         LIVE.activeTurnTraceId = "";
       }
-      setActivitySummary({
-        phase: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "fixing",
-        headline: String(payload.text || "").trim().slice(0, 120) || "CEO turn completed.",
-        note: LIVE.activityNote || "The CEO finished this turn.",
-        percent: null,
-        state: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "blocked",
-      });
+      if (keepActivityRow) {
+        LIVE.activityOpen = false;
+        LIVE.activityUserToggled = false;
+        setActivitySummary({
+          phase: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "fixing",
+          headline: String(payload.text || "").trim().slice(0, 120) || "CEO turn completed.",
+          note: LIVE.activityNote || "The CEO finished this turn.",
+          percent: null,
+          state: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "blocked",
+        });
+      } else {
+        removeActivityCard();
+      }
       LIVE.activityTurnStartedAt = 0;
+      LIVE.activityHasMeaningfulUpdate = false;
       const finalText = String(payload.text || "");
       if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
       else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
@@ -3338,6 +3380,7 @@
       const target = payload.target ? String(payload.target).trim() : "";
       const percent = payload.percent;
       if (!message) return;
+      LIVE.activityHasMeaningfulUpdate = true;
       const runningTool = cleanActivityText(message).match(/^Running ([a-z0-9_.-]+)/i);
       const nextNote = runningTool
         ? friendlyToolNote(runningTool[1], target || message)
@@ -3365,6 +3408,7 @@
         detail: friendlyToolNote(payload.name || "", payload.context || payload.name || "working"),
         status: "running",
       });
+      LIVE.activityHasMeaningfulUpdate = true;
       setActivitySummaryFromTool(payload.name || "", payload.context || payload.name || "working", "running");
       if (payload.tool_id) upsertLiveTrace(Object.assign({ entry_key: entryKey }, trace || {}));
       return;
@@ -3423,6 +3467,7 @@
         state: "blocked",
       });
       LIVE.activityTurnStartedAt = 0;
+      LIVE.activityHasMeaningfulUpdate = false;
       if (LIVE.assistantBubble) finishAssistantText(text);
       else addCeo(formatRichText(text));
       setStatus("paused", "paused");
