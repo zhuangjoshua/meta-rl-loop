@@ -119,6 +119,17 @@ class TestPluginSkillRegistry:
         pm.remove_plugin_skill("p:x")
 
 
+def test_takyon_x_skill_keeps_campaign_drafts_content_only():
+    skills_root = Path(__file__).resolve().parents[1] / "skills" / "takyon" / "takyon-x"
+
+    skill_text = (skills_root / "SKILL.md").read_text(encoding="utf-8")
+    template_text = (skills_root / "templates" / "x-post.md").read_text(encoding="utf-8")
+
+    assert "Keep X draft files content-only." in skill_text
+    assert "Do not write status headers, blocker prose, missing-credential notes, or hand-written publish claims" in skill_text
+    assert "Return the draft text only: no status headers, blocker notes, credential reminders, or hand-written publish claims." in template_text
+
+
 class TestPluginContextRegisterSkill:
     @pytest.fixture
     def ctx(self, tmp_path, monkeypatch):
