@@ -646,6 +646,80 @@ def test_product_surface_projection_turns_stale_when_source_changes_after_publis
     )
 
 
+def test_publish_result_preserves_existing_live_state_on_blocked_republish(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    publish_target = "https://latexflow.fourmanifold.com/"
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-preserve-live-publish-state",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "active",
+                "source_path": "product/site",
+                "routes": ["/"],
+                "publish_target": publish_target,
+            }
+        ],
+        "surface-preserve-live-publish-state",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "published",
+                "publish_target": publish_target,
+                "public_url": publish_target,
+                "published_at": "2026-06-06T15:54:19+00:00",
+                "receipt_path": "metrics/receipts/product-surface/published.json",
+                "publish_source_path": "product/site",
+                "blocker": "",
+            }
+        ],
+        "publish-live-state",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "blocked",
+                "publish_target": publish_target,
+                "public_url": "",
+                "published_at": "",
+                "receipt_path": "metrics/receipts/product-surface/blocked.json",
+                "publish_source_path": "product/site",
+                "blocker": "npm run build failed: next: not found",
+            }
+        ],
+        "publish-blocked-state",
+    )
+
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    surface = app["surface_contract"]
+
+    assert surface["publish_status"] == "published"
+    assert surface["public_url"] == publish_target
+    assert surface["published_at"] == "2026-06-06T15:54:19+00:00"
+    assert surface["publish_blocker"] == "npm run build failed: next: not found"
+    assert surface["publish_receipt_path"] == "metrics/receipts/product-surface/blocked.json"
+    assert surface["metadata"]["takyon_publish"]["preserved_live_state"] is True
+    assert surface["metadata"]["takyon_publish_last_attempt"]["status"] == "blocked"
+
+
 def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_changes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
@@ -1265,6 +1339,43 @@ def test_business_refresh_product_surface_treats_null_install_as_default_true(mo
     assert captured["install"] is True
 
 
+def test_business_refresh_product_surface_rejects_source_path_drift(monkeypatch):
+    finalize_called = False
+
+    class _FakeStore:
+        def read(self, **_: object) -> dict[str, object]:
+            return {
+                "app": {
+                    "surface": {
+                        "source_path": "product/site",
+                        "publish_target": "https://latexflow.fourmanifold.com/",
+                    }
+                }
+            }
+
+    def fake_finalize(**kwargs: object) -> dict[str, object]:
+        nonlocal finalize_called
+        finalize_called = True
+        return {"status": "passed"}
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore())
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
+
+    result = json.loads(
+        handle_business_refresh_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/longer",
+                "idempotency_key": "verify-source-path-drift",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "anchored to 'product/site'" in str(result.get("error") or "")
+    assert finalize_called is False
+
+
 def test_claude_agent_task_injects_workspace_relative_contract(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -1482,6 +1593,31 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
         "kind": "monthly_access_shell",
         "price_status": "unset",
     }
+
+
+def test_surface_upsert_rejects_source_path_change_after_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-anchor",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "source_path": "product/site"}],
+        "surface-anchor",
+    )
+
+    with pytest.raises(TakyonError, match="anchored to 'product/site' and cannot switch to 'product/longer'"):
+        _commit(
+            store,
+            "business:latexflow",
+            [{"action": "app.surface.upsert", "business": "latexflow", "source_path": "product/longer"}],
+            "surface-source-drift",
+        )
 
 
 def test_bootstrap_access_shell_surface_passes_without_generate_workflow(tmp_path):
@@ -1747,12 +1883,9 @@ def test_claude_agent_task_syncs_isolated_workspace_outputs_before_return(tmp_pa
         workspace_root=str(scratch_home),
     )
 
-    def fake_run(command, *, input=None, **kwargs):
-        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
-            payload = json.loads(input or "{}")
-            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
@@ -2239,12 +2372,9 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
         "init",
     )
 
-    def fake_run(command, *, input=None, **kwargs):
-        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
-            payload = json.loads(input or "{}")
-            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
@@ -2285,12 +2415,9 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refre
 
     captured: dict[str, object] = {}
 
-    def fake_run(command, *, input=None, **kwargs):
-        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
-            payload = json.loads(input or "{}")
-            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
 
     def fake_finalize(**kwargs: object) -> dict[str, object]:
         captured["install"] = kwargs["install"]
@@ -2306,9 +2433,10 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refre
         }
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
     monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
     monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
-    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_finalize)
 
     result = json.loads(
@@ -3936,6 +4064,48 @@ def test_claude_agent_task_rejects_noncanonical_workspace(tmp_path, monkeypatch)
     )
     assert result["success"] is False
     assert "must stay under one of" in str(result.get("error") or "")
+
+
+def test_claude_agent_task_rejects_surface_source_path_drift_before_worker_launch(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "business.upsert", "business": "alpha", "name": "Alpha"}],
+        "init-alpha-source-path-drift",
+    )
+    _commit(
+        store,
+        "business:alpha",
+        [{"action": "app.surface.upsert", "business": "alpha", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-alpha-source-path-drift",
+    )
+
+    launched = False
+
+    def unexpected_run(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("worker should not launch when the surface source path drifts")
+
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core.subprocess, "run", unexpected_run)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "alpha",
+                "workspace": "product/longer",
+                "instruction": "Build the product surface.",
+                "idempotency_key": "claude-source-path-drift",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "anchored to 'product/site'" in str(result.get("error") or "")
+    assert launched is False
 
 
 def test_business_session_allows_claude_agent_surface_refresh(tmp_path, monkeypatch):

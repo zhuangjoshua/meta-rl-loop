@@ -26,6 +26,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import pytest
 
@@ -490,6 +491,54 @@ def test_subscription_event_for_unknown_subscription_is_noop(pg_conn):
         _subscription_event(event_id="evt_unk", subscription_id="sub_unknown", status="active"),
     )
     assert res["processed"] == {"recorded": False, "updated": []}
+
+
+def test_cancel_subscription_marks_cancel_at_period_end_without_dropping_access(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user = app_identity.upsert_app_user(pg_conn, slug, "cancelme@example.com")
+    period_end = datetime.fromtimestamp(1_700_600_000, timezone.utc)
+    app_entitlements.grant_entitlement(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+        tier="paid",
+        status="active",
+        source="stripe",
+        stripe_customer_id="cus_cancel",
+        stripe_subscription_id="sub_cancel",
+        plan_key="pro",
+        current_period_end=period_end,
+        metadata={"stripe_subscription_status": "active"},
+    )
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_updater(subscription_id: str, cancel_at_period_end: bool) -> dict:
+        calls.append((subscription_id, cancel_at_period_end))
+        return {
+            "id": subscription_id,
+            "object": "subscription",
+            "status": "active",
+            "customer": "cus_cancel",
+            "current_period_end": 1_700_600_000,
+            "cancel_at_period_end": True,
+        }
+
+    result = app_payments.cancel_subscription(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+        subscription_updater=fake_updater,
+    )
+
+    assert calls == [("sub_cancel", True)]
+    assert result["recorded"] is True
+    assert result["cancel_at_period_end"] is True
+    assert result["stripe_subscription_status"] == "active"
+    ent = app_entitlements.list_entitlements(pg_conn, slug, app_user_id=user.id)[0]
+    assert ent.metadata["cancel_at_period_end"] is True
+    assert ent.status == "active"
+    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "paid"
 
 
 # ── webhook plumbing ────────────────────────────────────────────────────────────────────

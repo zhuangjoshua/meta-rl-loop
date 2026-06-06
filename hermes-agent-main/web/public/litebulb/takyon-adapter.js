@@ -3868,6 +3868,7 @@
         background_run: result && result.background_run || null,
       });
       await mountLiveBusiness(created, summary, initialSnapshot);
+      rememberHistoryMessage("user", goal);
       addYou(goal);
       const streamSid = LIVE.sessionId || await ensureSession(created);
       if (streamSid) {

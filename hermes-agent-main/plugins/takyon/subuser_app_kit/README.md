@@ -11,7 +11,7 @@ Use it as a starting point, not a visual cage:
 Files:
 
 - `surface-context.js` — generated per business; exports the current surface truth.
-- `runtime-client.js` — same-origin product-host client with prefixed fallback.
+- `runtime-client.js` — same-origin product-host client with prefixed fallback, including account helpers such as `cancelSubscription()`.
 - `packs.js` — mode, subscription, and API pack hints for faster composition.
 - `ui-primitives.js` — small blocked/pricing/usage/API helper renderers.
 - `tokens.css` — neutral shared tokens and state styles.

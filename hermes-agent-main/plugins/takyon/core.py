@@ -1247,6 +1247,28 @@ def _canonical_product_surface_source_path(source_path: str) -> str:
     return normalized
 
 
+def _enforce_canonical_product_surface_source_path(
+    *,
+    business: str,
+    existing_source_path: str,
+    requested_source_path: str,
+    context: str,
+) -> str:
+    existing_raw = str(existing_source_path or "").strip()
+    requested = _canonical_product_surface_source_path(
+        requested_source_path or existing_raw or "product/site"
+    )
+    if not existing_raw:
+        return requested
+    existing = _canonical_product_surface_source_path(existing_raw)
+    if requested != existing:
+        raise TakyonError(
+            f"{context} refused for business '{business}': product surface source_path "
+            f"is anchored to '{existing}' and cannot switch to '{requested}'"
+        )
+    return requested
+
+
 def _subuser_app_kit_source_dir() -> Path:
     return Path(__file__).resolve().parent / "subuser_app_kit"
 
@@ -2444,7 +2466,11 @@ def _subuser_app_starter_context_js(*, title_literal: str) -> str:
                   planKey: String(primary.plan_key || primary.planKey || "").trim(),
                   tier: String(primary.tier || "").trim(),
                   currentPeriodEnd: String(primary.current_period_end || primary.currentPeriodEnd || "").trim(),
-                  cancelAtPeriodEnd: Boolean(primary.cancel_at_period_end || primary.cancelAtPeriodEnd),
+                  cancelAtPeriodEnd: Boolean(
+                    primary.cancel_at_period_end ||
+                    primary.cancelAtPeriodEnd ||
+                    (primary.metadata && (primary.metadata.cancel_at_period_end || primary.metadata.cancelAtPeriodEnd))
+                  ),
                   source: primary,
                   entitlements: ranked,
                 };
@@ -2587,6 +2613,19 @@ def _subuser_app_starter_context_js(*, title_literal: str) -> str:
               return starterJsonRequest(starterRuntime.routeUrl("account"), { method: "GET" });
             }
 
+            export async function starterCancelSubscription(payload = {}) {
+              if (railCallable("account")) {
+                return starterRuntime.cancelSubscription(payload);
+              }
+              return starterJsonRequest(starterRuntime.routeUrl("account"), {
+                method: "POST",
+                body: JSON.stringify({
+                  ...payload,
+                  action: "cancel_subscription",
+                }),
+              });
+            }
+
             export async function starterProfile() {
               if (railCallable("profile")) {
                 return starterRuntime.profile();
@@ -2679,6 +2718,7 @@ def _subuser_app_starter_pages_js() -> str:
               starterDefaultPlanKey,
               starterLoadAppState,
               starterRequestAuth,
+              starterCancelSubscription,
               starterCheckout,
               starterGenerate,
               starterProfile,
@@ -3428,7 +3468,7 @@ def _subuser_app_starter_pages_js() -> str:
             }
 
             function StarterProfilePageInner() {
-              const { appState } = useStarterAppState();
+              const { appState, setAppState } = useStarterAppState();
               const [profile, setProfile] = useState(null);
               const [displayName, setDisplayName] = useState("");
               const [headline, setHeadline] = useState("");
@@ -3436,6 +3476,9 @@ def _subuser_app_starter_pages_js() -> str:
               const [message, setMessage] = useState("");
               const [error, setError] = useState("");
               const [pending, setPending] = useState(false);
+              const [cancelMessage, setCancelMessage] = useState("");
+              const [cancelError, setCancelError] = useState("");
+              const [cancelPending, setCancelPending] = useState(false);
 
               useEffect(() => {
                 if (!appState?.canManageProfile) return;
@@ -3499,6 +3542,11 @@ def _subuser_app_starter_pages_js() -> str:
               const statusState = appState.subscription?.state || "none";
               const accessState = appState.access?.state || "unknown";
               const currentPeriodEnd = appState.subscription?.currentPeriodEnd || "";
+              const cancelScheduled = Boolean(appState.subscription?.cancelAtPeriodEnd);
+              const canCancelSubscription = Boolean(
+                (appState.subscription?.source?.stripe_subscription_id || appState.subscription?.source?.stripeSubscriptionId) &&
+                !cancelScheduled
+              );
               const paidLabel = formatMoney(revenue.amount_paid_cents || 0, "usd");
               const profileName =
                 String(
@@ -3507,13 +3555,45 @@ def _subuser_app_starter_pages_js() -> str:
                   appState.user?.name ||
                   ""
                 ).trim() || "Not set yet";
-              const bannerTitle = appState.entitled ? "Membership active." : "Membership needs attention.";
-              const bannerBody = appState.entitled
+              const bannerTitle = cancelScheduled
+                ? "Cancellation scheduled."
+                : appState.entitled
+                  ? "Membership active."
+                  : "Membership needs attention.";
+              const bannerBody = cancelScheduled
+                ? `Your subscription stays active until ${formatDate(currentPeriodEnd)}.`
+                : appState.entitled
                 ? "Your account, billing state, and profile live here. Changes should show up here after they save."
                 : statusState === "past_due"
                   ? "Billing looks interrupted right now. Refresh your membership to restore access."
                   : "Finish subscription to unlock the private app experience.";
               const primaryCtaLabel = statusState === "past_due" ? "Refresh membership" : "Subscribe";
+
+              async function handleCancelSubscription() {
+                if (typeof window !== "undefined") {
+                  const confirmed = window.confirm("Cancel this subscription at the end of the current billing period?");
+                  if (!confirmed) return;
+                }
+                setCancelPending(true);
+                setCancelMessage("");
+                setCancelError("");
+                try {
+                  await starterCancelSubscription();
+                  const nextAppState = await starterLoadAppState();
+                  setAppState(nextAppState);
+                  setCancelMessage("Cancellation scheduled. Your access stays active until the end of the current period.");
+                } catch (cancelRequestError) {
+                  setCancelError(
+                    String(
+                      cancelRequestError?.message ||
+                      cancelRequestError ||
+                      "Unable to cancel the subscription."
+                    )
+                  );
+                } finally {
+                  setCancelPending(false);
+                }
+              }
 
               return (
                 <div className="starter-shell-stack">
@@ -3569,10 +3649,27 @@ def _subuser_app_starter_pages_js() -> str:
                             {primaryCtaLabel}
                           </Link>
                         ) : null}
+                        {canCancelSubscription ? (
+                          <button
+                            className="starter-link-button starter-link-quiet"
+                            type="button"
+                            onClick={handleCancelSubscription}
+                            disabled={cancelPending}
+                          >
+                            {cancelPending ? "Cancelling..." : "Cancel subscription"}
+                          </button>
+                        ) : null}
                         <Link className="starter-link-button starter-link-quiet" href="/app">
                           Back to app
                         </Link>
                       </div>
+                      {cancelScheduled ? (
+                        <div className="starter-alert">
+                          Cancellation is already scheduled. Access remains live until {formatDate(currentPeriodEnd)}.
+                        </div>
+                      ) : null}
+                      {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
+                      {cancelError ? <div className="starter-alert starter-alert-error">{cancelError}</div> : null}
                     </section>
                     <section className="starter-profile-card">
                       <p className="starter-kicker">Profile</p>
@@ -3848,6 +3945,7 @@ def _subuser_app_worker_contract_block(
     paid_runtime = set(runtime_features)
     if "checkout" in paid_runtime or "account" in paid_runtime:
         lines.append("- `account` is the canonical paid-state read rail. Use it for current user, entitlements, usage, and subscription state; do not model customer-facing paid state as a standalone `billing` dependency.")
+        lines.append("- Subscription cancellation should flow through the shared account rail behavior (for example the AppKit helper `starterCancelSubscription(...)`) instead of a fake support form or browser-only toggle.")
     if "checkout" not in paid_runtime and "account" not in paid_runtime:
         lines.append("- Paid rails are not declared. Do not render pricing cards, upgrade buttons, subscriptions, or paid-tier UI as live.")
     elif not {"account", "checkout"} <= paid_runtime:
@@ -3880,7 +3978,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- Any starter source already present in `src/` is generic wiring only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
-        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         "- AppKit now seeds canonical starter shells for `/`, `/app`, and `/app/profile`. Reuse those route intentions and access boundaries by default, but redesign their layout, hierarchy, copy, and styling freely when the business calls for it.",
         "- For a first monthly bootstrap, treat the seeded `/app` route as a polished access shell for sign-in, subscribe, and account management unless the contract explicitly requires more product workflow.",
@@ -10648,7 +10746,12 @@ class TakyonStore:
                 raise TakyonError("surface status is required")
             existing = self._stored_app_surface_contract(conn, slug)
             existing_shape = _surface_subuser_app_shape(existing)
-            existing_source_path = _canonical_product_surface_source_path(str(existing.get("source_path") or ""))
+            existing_source_path_raw = str(existing.get("source_path") or "").strip()
+            existing_source_path = (
+                _canonical_product_surface_source_path(existing_source_path_raw)
+                if existing_source_path_raw
+                else ""
+            )
             existing_source_root = self._business_root(slug) / existing_source_path if existing_source_path else None
             existing_has_source_files = bool(
                 existing_source_root
@@ -10656,8 +10759,13 @@ class TakyonStore:
                 and existing_source_root.is_dir()
                 and _product_source_files(existing_source_root, limit=1)
             )
-            source_path = _canonical_product_surface_source_path(
-                str(op.get("source_path") or existing_source_path or "product/site")
+            source_path = _enforce_canonical_product_surface_source_path(
+                business=slug,
+                existing_source_path=existing_source_path_raw,
+                requested_source_path=str(
+                    op.get("source_path") or existing_source_path_raw or "product/site"
+                ),
+                context="product surface source update",
             )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
             runtime_features_raw = op.get("runtime_features")
@@ -10956,18 +11064,40 @@ class TakyonStore:
                 publish_source_path = _safe_relpath(str(op.get("publish_source_path")), field="publish_source_path").as_posix()
             blocker = str(op.get("blocker") or "")
             existing = self._stored_app_surface_contract(conn, slug)
-            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            existing_publish_status = str(existing.get("publish_status") or "").strip().lower()
+            existing_public_url = str(existing.get("public_url") or "").strip()
+            existing_published_at = str(existing.get("published_at") or "").strip()
+            preserve_live_state = (
+                publish_status == "blocked"
+                and existing_publish_status == "published"
+                and bool(existing_public_url)
+            )
+            effective_publish_status = existing_publish_status if preserve_live_state else publish_status
+            effective_public_url = existing_public_url if preserve_live_state else public_url
+            effective_published_at = existing_published_at if preserve_live_state else published_at
+            last_attempt = {
+                "status": publish_status,
+                "public_url": public_url,
+                "publish_target": publish_target,
+                "published_at": published_at,
+                "receipt_path": receipt_path,
+                "publish_source_path": publish_source_path,
+                "blocker": blocker,
+            }
             metadata = {
-                **metadata,
+                **existing_metadata,
                 "takyon_publish": {
-                    "status": publish_status,
-                    "public_url": public_url,
+                    "status": effective_publish_status,
+                    "public_url": effective_public_url,
                     "publish_target": publish_target,
-                    "published_at": published_at,
+                    "published_at": effective_published_at,
                     "receipt_path": receipt_path,
                     "publish_source_path": publish_source_path,
                     "blocker": blocker,
+                    "preserved_live_state": preserve_live_state,
                 },
+                "takyon_publish_last_attempt": last_attempt,
             }
             conn.execute(
                 """
@@ -10979,9 +11109,9 @@ class TakyonStore:
                 """,
                 (
                     publish_target,
-                    public_url,
-                    publish_status,
-                    published_at,
+                    effective_public_url,
+                    effective_publish_status,
+                    effective_published_at,
                     receipt_path,
                     blocker,
                     _json_dumps(metadata),
@@ -10991,15 +11121,29 @@ class TakyonStore:
             )
             self._rewrite_app_files(conn, slug)
             self._sync_business_workspace_remote(slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=metadata["takyon_publish"])
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    **last_attempt,
+                    "effective_publish_status": effective_publish_status,
+                    "effective_public_url": effective_public_url,
+                    "effective_published_at": effective_published_at,
+                    "preserved_live_state": preserve_live_state,
+                },
+            )
             return {
                 "action": action,
                 "business": slug,
-                "publish_status": publish_status,
-                "public_url": public_url,
+                "publish_status": effective_publish_status,
+                "public_url": effective_public_url,
                 "publish_target": publish_target,
                 "receipt_path": receipt_path,
                 "blocker": blocker,
+                "attempted_publish_status": publish_status,
+                "preserved_live_state": preserve_live_state,
             }
 
         if action == "app.plan.upsert":
@@ -12817,9 +12961,12 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
         surface = app.get("surface") or app.get("surface_contract") or {}
         if not isinstance(surface, dict):
             surface = {}
-        source_path = str(args.get("source_path") or "").strip()
-        if not source_path:
-            source_path = str(surface.get("source_path") or "product/site")
+        source_path = _enforce_canonical_product_surface_source_path(
+            business=business,
+            existing_source_path=str(surface.get("source_path") or "").strip(),
+            requested_source_path=str(args.get("source_path") or surface.get("source_path") or "product/site"),
+            context="product surface refresh",
+        )
         publish_target = _product_publish_target(business, args.get("publish_target") or surface.get("publish_target"))
         requested_publish_policy = str(args.get("publish_policy") or surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
         legacy_shared_renderer = _is_shared_renderer_publish_policy(requested_publish_policy)
@@ -13256,6 +13403,12 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
             user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
             entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
+            for entitlement in entitlements:
+                metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
+                if "cancel_at_period_end" not in entitlement and "cancel_at_period_end" in metadata:
+                    entitlement["cancel_at_period_end"] = bool(metadata.get("cancel_at_period_end"))
+                if "stripe_subscription_status" not in entitlement and "stripe_subscription_status" in metadata:
+                    entitlement["stripe_subscription_status"] = metadata.get("stripe_subscription_status")
             budget = store._ensure_app_budget(conn, business)
             usage = conn.execute(
                 "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
@@ -13263,6 +13416,67 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             ).fetchone()
             revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
         return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        session_token = str(args.get("session_token") or "").strip()
+        if not session_token:
+            raise TakyonError("session_token is required")
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if not isinstance(conn, _PGConn):
+                raise TakyonError("app subscription cancellation requires the Postgres runtime")
+            leaves = store._app_leaves()
+            with store._leaf_conn(conn) as leaf:
+                user = leaves["identity"].validate_session(leaf, business, session_token)
+                if user is None:
+                    raise TakyonError("app account not found")
+            try:
+                from . import stripe_util
+            except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+                from plugins.takyon import stripe_util
+            try:
+                with store._leaf_conn(conn) as leaf:
+                    outcome = leaves["payments"].cancel_subscription(
+                        leaf,
+                        business,
+                        app_user_id=user.id,
+                        subscription_updater=lambda subscription_id, cancel_at_period_end: stripe_util.stripe_request(
+                            f"subscriptions/{subscription_id}",
+                            {
+                                "cancel_at_period_end": (
+                                    "true" if cancel_at_period_end else "false"
+                                ),
+                            },
+                        ),
+                    )
+            except leaves["payments"].AppPaymentError as exc:
+                raise TakyonError(str(exc)) from exc
+            store._record_event(
+                conn,
+                scope=f"business:{business}/app",
+                business_slug=business,
+                event_type="app.subscription.cancel",
+                payload={
+                    "app_user_id": user.id,
+                    "stripe_subscription_id": outcome.get("stripe_subscription_id"),
+                    "cancel_at_period_end": bool(outcome.get("cancel_at_period_end")),
+                    "already_canceling": bool(outcome.get("already_canceling")),
+                },
+            )
+            store._rewrite_app_files(conn, business)
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                **outcome,
+            }
+        )
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -18187,6 +18401,24 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         app_summary = store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
         app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
         surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
+        if not isinstance(surface_for_worker, dict):
+            surface_for_worker = {}
+        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
+        normalized_workspace = workspace_rel.strip("/").lower()
+        workspace_targets_product_surface = (
+            normalized_workspace == "product"
+            or normalized_workspace.startswith("product/")
+            or normalized_workspace in {"site", "website"}
+        )
+        if not worker_session_bound and not refresh_surface:
+            refresh_surface = workspace_targets_product_surface
+        if refresh_surface and workspace_targets_product_surface:
+            _enforce_canonical_product_surface_source_path(
+                business=business,
+                existing_source_path=str(surface_for_worker.get("source_path") or "").strip(),
+                requested_source_path=workspace_rel,
+                context="product surface refresh",
+            )
 
         business_root = store._business_root(business).resolve()
         workspace_path = store._resolve_business_file(
@@ -18211,7 +18443,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             raise TakyonError(
                 "Claude Agent SDK dependencies unavailable before worker launch: "
                 f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
-        )
+            )
 
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
@@ -18298,10 +18530,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         }
 
         worker_invoked = True
-        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
-        if not worker_session_bound and not refresh_surface:
-            normalized_workspace = workspace_rel.strip("/").lower()
-            refresh_surface = normalized_workspace == "product" or normalized_workspace.startswith("product/") or normalized_workspace in {"site", "website"}
         install_surface = _boolish(args.get("install"), default=True)
         refresh_timeout_seconds = _clamp_int(
             args.get("refresh_timeout_seconds"),
@@ -18427,6 +18655,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     surface = {}
                 requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
                 publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+                surface_refresh_source_path = _enforce_canonical_product_surface_source_path(
+                    business=business,
+                    existing_source_path=str(surface.get("source_path") or "").strip(),
+                    requested_source_path=workspace_rel,
+                    context="product surface refresh",
+                )
                 receipt_id = hashlib.sha256(
                     f"{idempotency_key}:surface-refresh:{workspace_rel}:attempt:{worker_attempts}".encode("utf-8")
                 ).hexdigest()[:32]
@@ -18434,7 +18668,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     store=store,
                     business=business,
                     surface=surface,
-                    source_path=workspace_rel,
+                    source_path=surface_refresh_source_path,
                     publish_target=_product_publish_target(business, surface.get("publish_target")),
                     requested_publish_policy=requested_publish_policy,
                     publish_policy=publish_policy,

@@ -118,6 +118,7 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "export async function starterRequestAuth" in starter_context
     assert "export async function starterSession" in starter_context
     assert "export async function starterAccount" in starter_context
+    assert "export async function starterCancelSubscription" in starter_context
     assert "export async function starterProfile" in starter_context
     assert "export async function starterUpdateProfile" in starter_context
     assert "export async function starterCheckout" in starter_context
@@ -155,6 +156,7 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "We received your checkout." in starter_pages
     assert "Sign in to view your account." in starter_pages
     assert "Use your email to manage your subscription and profile." in starter_pages
+    assert "Cancel subscription" in starter_pages
     starter_server = (workspace_root / "src" / "components" / "starter-server.js").read_text()
     assert "function requestHasSessionCookie()" in starter_server
     assert 'const target = "takyon_app_session="' in starter_server
@@ -191,6 +193,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
     assert "starterRequestAuth(...)" in block
     assert "starterIsEntitled(...)" in block
+    assert "starterCancelSubscription(...)" in block
     assert "starterSubscriptionState(...)" in block
     assert "starterCanUseApp(...)" in block
     assert "starterViewerState(...)" in block

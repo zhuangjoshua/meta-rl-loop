@@ -59,6 +59,7 @@ from takyon_cli.config import (
 )
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.core import (
+    handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
     handle_business_enqueue_job,
     handle_business_meta_ad_bind_manual_launch,
@@ -2052,6 +2053,27 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "metadata": body.get("metadata") or {},
         }))
         return _takyon_app_json(status, payload)
+
+    if parts == ["account"]:
+        action = (
+            str(body.get("action") or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if action == "cancel_subscription":
+            token = _takyon_app_session_token(request)
+            if not token:
+                return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+            status, payload = _takyon_app_tool(handle_business_cancel_app_subscription({
+                "business": business,
+                "session_token": token,
+            }))
+            return _takyon_app_json(status, payload)
+        return _takyon_app_json(
+            HTTPStatus.BAD_REQUEST,
+            {"success": False, "error": "unsupported_account_action"},
+        )
 
     if parts == ["profile"]:
         token = _takyon_app_session_token(request)

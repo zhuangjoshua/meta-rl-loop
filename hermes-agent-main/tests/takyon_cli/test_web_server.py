@@ -451,9 +451,17 @@ def test_local_dashboard_principal_falls_back_to_platform_owner(monkeypatch):
 
     principal = types.SimpleNamespace(user_id="platform-user", status="active", business_slugs=("alpha",))
 
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: None)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: None,
+    )
     monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _headers: False)
-    monkeypatch.setattr(web_server, "_resolve_local_dashboard_principal", lambda: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_local_dashboard_principal",
+        lambda runtime_database_url=None: principal,
+    )
 
     request = types.SimpleNamespace(
         state=types.SimpleNamespace(auth0_user=None),
@@ -540,7 +548,11 @@ def test_operator_businesses_endpoint_returns_owned_businesses(tmp_path, monkeyp
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: principal,
+    )
 
     store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
     store.commit(
@@ -745,7 +757,11 @@ def test_business_file_endpoint_reads_owned_file_directly(tmp_path, monkeypatch,
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: principal,
+    )
 
     store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
     store.commit(
@@ -794,7 +810,11 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: principal,
+    )
 
     store = TakyonStore(tmp_path, database_url=pg_store_dsn, operator_user_id="user-123")
     store.commit(
@@ -884,7 +904,11 @@ def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch)
 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: principal,
+    )
 
     def _fake_enqueue_job(args, **_kwargs):
         captured.update(args)
@@ -1142,6 +1166,45 @@ def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
     assert "Subscription flow is wired." in response.text
     assert "student@example.com" in response.text
     assert 'href="/app?checkout=success"' in response.text
+
+
+def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[dict[str, str]] = []
+
+    def fake_cancel_handler(args):
+        calls.append(args)
+        return json.dumps(
+            {
+                "success": True,
+                "business": args["business"],
+                "cancel_at_period_end": True,
+            }
+        )
+
+    monkeypatch.setattr(web_server, "handle_business_cancel_app_subscription", fake_cancel_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/account",
+            json={"action": "cancel_subscription"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json()["cancel_at_period_end"] is True
+    assert calls == [{"business": "mathflow", "session_token": "session_123"}]
 
 
 def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):

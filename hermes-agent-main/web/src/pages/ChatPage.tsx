@@ -2919,7 +2919,7 @@ export default function ChatPage() {
             className={cn(
               "td-rail flex-col",
               rightOpen
-                ? "fixed inset-y-0 right-0 z-[60] flex w-[min(92vw,360px)]"
+                ? "fixed inset-y-0 right-0 z-[60] flex w-[min(92vw,540px)]"
                 : "hidden lg:flex",
             )}
           >
