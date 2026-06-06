@@ -169,6 +169,12 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 .activity.is-blocked .activity__pulse{background:var(--alert);color:var(--alert)}
 @keyframes activityPulseDot{0%,100%{transform:scale(.82);opacity:.55}50%{transform:scale(1);opacity:1}}
 @keyframes activityPulseRing{0%{transform:scale(.72);opacity:.42}100%{transform:scale(1.7);opacity:0}}
+.activity.is-running .activity__phase,
+.activity.is-running .activity__headline,
+.activity.is-running .activity__note,
+.activity.is-running .activity__item-label,
+.activity.is-running .activity__item-detail{background:linear-gradient(90deg,var(--muted) 25%,var(--ink) 50%,var(--muted) 75%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:activityTextShimmer 2.4s ease-in-out infinite}
+@keyframes activityTextShimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
 .activity__caret{font:700 11px 'Space Mono',monospace;color:var(--muted);flex:0 0 auto;margin-top:1px}
 .activity__phase{font:700 9px 'Space Mono',monospace;letter-spacing:.12em;text-transform:uppercase;flex:0 0 auto;margin-top:2px}
 .activity__headline{flex:1;min-width:0;font:700 12.5px/1.45 'Space Mono',monospace;color:var(--ink);white-space:normal;overflow:visible;text-overflow:clip}

@@ -820,6 +820,24 @@
       .trim();
   }
 
+  function normalizeActivityThoughtText(value) {
+    const clean = cleanActivityText(value)
+      .replace(/[^\S\r\n]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (!clean) return "";
+    const oneLine = clean.replace(/\s+/g, " ").trim();
+    const stripped = oneLine.replace(/^[^a-z0-9]+/i, "").trim();
+    if (!stripped) return "";
+    if (/^(?:thinking|pondering|reviewing|considering|analyzing|planning|synthesizing|reasoning|checking|reading|reflecting)\.\.\.$/i.test(stripped)) {
+      return "";
+    }
+    if (/^(?:\w+\s+){0,2}(?:thinking|pondering|reviewing|considering|analyzing|planning|synthesizing|checking|reading|reflecting)\.\.\.$/i.test(stripped)) {
+      return "";
+    }
+    return clean;
+  }
+
   function friendlyToolLabel(name, fallback) {
     const raw = String(name || "").trim().toLowerCase();
     if (!raw) return humanizeKey(fallback || "tool");
@@ -861,7 +879,7 @@
       return target ? `${clean} · ${target}` : clean;
     }
     const raw = String(phase || "running").trim().toLowerCase();
-    if (raw === "thinking") return "Reviewing your request";
+    if (raw === "thinking") return "thinking...";
     if (raw === "planning") return "Planning the next steps";
     if (raw === "editing") return target ? `Updating ${target}` : "Updating files";
     if (raw === "fixing") return target ? `Fixing ${target}` : "Fixing issues";
@@ -878,6 +896,28 @@
       headline: label,
       note,
       state: status === "blocked" ? "blocked" : "running",
+    });
+  }
+
+  function applyLiveThoughtSummary(text, phase) {
+    const clean = normalizeActivityThoughtText(text);
+    if (!clean) {
+      if (!LIVE.activityHasMeaningfulUpdate) {
+        setActivitySummary({
+          phase: phase || "thinking",
+          headline: "thinking...",
+          note: "",
+          state: "running",
+        });
+      }
+      return;
+    }
+    LIVE.activityHasMeaningfulUpdate = true;
+    setActivitySummary({
+      phase: phase || "thinking",
+      headline: clean.replace(/\s+/g, " ").trim(),
+      note: clean,
+      state: "running",
     });
   }
 
@@ -3041,9 +3081,16 @@
     const headlineEl = $(".activity__headline", LIVE.activityCard);
     if (headlineEl) headlineEl.textContent = LIVE.activityHeadline || friendlyActivityHeadline(LIVE.activityPhase, "", "");
     const countEl = $(".activity__count", LIVE.activityCard);
-    if (countEl) countEl.textContent = countLabel;
+    if (countEl) {
+      countEl.textContent = countLabel;
+      countEl.style.display = countLabel ? "" : "none";
+    }
     const noteEl = $(".activity__note", LIVE.activityCard);
-    if (noteEl) noteEl.textContent = LIVE.activityNote || LIVE.activityHeadline || "";
+    const note = LIVE.activityNote || "";
+    if (noteEl) {
+      noteEl.textContent = note;
+      noteEl.style.display = note ? "" : "none";
+    }
     const barEl = $(".activity__bar", LIVE.activityCard);
     if (barEl) {
       if (typeof LIVE.activityPercent === "number") {
@@ -3059,21 +3106,27 @@
     }
     const listEl = $(".activity__list", LIVE.activityCard);
     if (listEl) {
-      listEl.innerHTML = items.map((item) => {
-        const status = traceStatus(item);
-        const isDone = status === "done";
-        const isBlocked = status === "blocked";
-        const detail = cleanActivityText(item && item.detail || "");
-        const label = String(item && item.label || "Work").trim();
-        return `<div class="activity__item${isDone ? " is-done" : ""}">
-          <span class="activity__item-dot" style="color:${isBlocked ? "var(--alert)" : isDone ? "var(--blue)" : meta.color}">${isBlocked ? "!" : isDone ? "✓" : meta.icon}</span>
-          <div class="activity__item-main">
-            <div class="activity__item-label">${esc(label)}</div>
-            ${detail ? `<div class="activity__item-detail">${esc(detail)}</div>` : ""}
-          </div>
-          <span class="activity__item-status ${status === "running" ? "is-running" : status === "done" ? "is-done" : status === "blocked" ? "is-blocked" : ""}">${esc(status === "done" ? "done" : status === "blocked" ? "blocked" : "running")}</span>
-        </div>`;
-      }).join("") || `<div class="activity__item"><span class="activity__item-dot" style="color:${meta.color}">${meta.icon}</span><div class="activity__item-main"><div class="activity__item-label">Waiting for the first visible step</div></div></div>`;
+      if (!items.length) {
+        listEl.innerHTML = "";
+        listEl.style.display = "none";
+      } else {
+        listEl.style.display = "grid";
+        listEl.innerHTML = items.map((item) => {
+          const status = traceStatus(item);
+          const isDone = status === "done";
+          const isBlocked = status === "blocked";
+          const detail = cleanActivityText(item && item.detail || "");
+          const label = String(item && item.label || "Work").trim();
+          return `<div class="activity__item${isDone ? " is-done" : ""}">
+            <span class="activity__item-dot" style="color:${isBlocked ? "var(--alert)" : isDone ? "var(--blue)" : meta.color}">${isBlocked ? "!" : isDone ? "✓" : meta.icon}</span>
+            <div class="activity__item-main">
+              <div class="activity__item-label">${esc(label)}</div>
+              ${detail ? `<div class="activity__item-detail">${esc(detail)}</div>` : ""}
+            </div>
+            <span class="activity__item-status ${status === "running" ? "is-running" : status === "done" ? "is-done" : status === "blocked" ? "is-blocked" : ""}">${esc(status === "done" ? "done" : status === "blocked" ? "blocked" : "running")}</span>
+          </div>`;
+        }).join("");
+      }
     }
     scrollChat();
   }
@@ -3157,8 +3210,8 @@
     LIVE.traceLogSeen = new Set();
     setActivitySummary({
       phase: "thinking",
-      headline: "Reviewing your request",
-      note: "Reading your instruction and choosing the first concrete step.",
+      headline: "thinking...",
+      note: "",
       percent: null,
       state: "running",
     });
@@ -3386,16 +3439,23 @@
       });
       return;
     }
-    if (ev.type === "thinking.delta" || ev.type === "reasoning.delta") {
+    if (ev.type === "thinking.delta" || ev.type === "reasoning.delta" || ev.type === "reasoning.available") {
+      const text = String(payload.text || "").trim();
+      if (!text) return;
+      applyLiveThoughtSummary(text, "thinking");
       return;
     }
     if (ev.type === "status.update") {
       const text = String(payload.text || "").trim();
       const kind = String(payload.kind || "").trim().toLowerCase();
-      if (text) {
+      if (text && !isTransientConnectionMessage(text)) {
+        LIVE.activityHasMeaningfulUpdate = true;
+        const clean = cleanActivityText(text);
         setActivitySummary({
-          headline: LIVE.activityHeadline || friendlyActivityHeadline("running", text, ""),
-          note: cleanActivityText(text),
+          phase: kind === "error" ? "fixing" : LIVE.activityPhase || "running",
+          headline: friendlyActivityHeadline(kind === "error" ? "fixing" : "running", clean, ""),
+          note: clean,
+          state: kind === "error" ? "blocked" : "running",
         });
       }
       if (kind === "takyon") {
@@ -3659,10 +3719,9 @@
     LIVE.activeBusiness = business;
     syncBusinessParam(business);
     const summary = providedSummary || businessSummary(business) || { slug: business, name: business, goal: "", mode: "live" };
-    const brand = deriveBrand(summary.goal || summary.name || business);
     const biz = {
       slug: business,
-      name: summary.name || brand.name,
+      name: summary.name || humanizeKey(business),
       idea: summary.goal || "",
       mode: summary.mode || "live",
     };
@@ -3770,9 +3829,8 @@
       if (errorEl) errorEl.textContent = "Enter a company idea.";
       return;
     }
-    const brand = deriveBrand(name || goal);
-    const businessName = name || brand.name;
-    const businessSlug = slugifyName(name || brand.slug);
+    const businessName = name || "";
+    const businessSlug = name ? slugifyName(name) : "";
     setStatus("building…", "build");
     try {
       const sessionId = await ensureSession("");
@@ -3786,9 +3844,10 @@
       }, 600000);
       if (Array.isArray(result && result.businesses)) rememberBusinesses(result.businesses);
       const created = String(result && result.business_slug || businessSlug).trim().toLowerCase();
+      const createdName = String(result && result.business_name || businessName || "").trim();
       const summary = businessSummary(created) || {
         slug: created,
-        name: businessName,
+        name: createdName || humanizeKey(created || businessSlug || "litebulb"),
         goal,
         mode,
       };

@@ -339,7 +339,7 @@
 .tk-dash .td-msg { max-width: 100%; }
 .tk-dash .td-msg .td-mrole { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--td-meta); margin-bottom: 4px; }
 .tk-dash .td-msg .td-mbody { font-size: 13px; line-height: 1.5; word-wrap: break-word; overflow-wrap: anywhere; }
-.tk-dash .td-msg.td-ceo .td-mbody { background: var(--td-surface-2); border: 1px solid var(--td-border-2); padding: 10px 12px; border-radius: 3px 11px 11px 11px; color: var(--td-fg); }
+.tk-dash .td-msg.td-ceo .td-mbody { padding: 0; color: var(--td-fg); }
 .tk-dash .td-msg.td-you { align-self: flex-end; max-width: 85%; }
 .tk-dash .td-msg.td-you .td-mrole { text-align: right; }
 .tk-dash .td-msg.td-you .td-mbody { background: var(--td-accent); color: #fff; padding: 9px 12px; border-radius: 11px 11px 3px 11px; }
@@ -351,7 +351,17 @@
 .tk-dash .td-activity-line { display: flex; align-items: center; gap: 8px; font-family: var(--td-font-mono); font-size: 11px; letter-spacing: .04em; color: var(--td-muted); }
 .tk-dash .td-activity-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--td-accent); flex: none; animation: td-pulse 1.6s ease-in-out infinite; }
 .tk-dash .td-activity-tokens { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 15px; }
-.tk-dash .td-activity-token { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .03em; color: var(--td-meta); }
+.tk-dash .td-activity-token { font-family: var(--td-font-mono); font-size: 10px; letter-spacing: .03em; }
+.tk-dash .td-activity-line .truncate,
+.tk-dash .td-activity-token {
+  background: linear-gradient(90deg, var(--td-muted) 25%, var(--td-fg) 50%, var(--td-muted) 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: td-shimmer 2.4s ease-in-out infinite;
+}
+@keyframes td-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 
 /* Shared Markdown renderer hardcodes old dark-theme text-foreground; force readable ink inside warm surfaces. Links keep their accent via [&_a] utilities. */
 .tk-dash .td-prose :where(h1, h2, h3, h4, h5, h6, p, li, code, strong, em, blockquote, table, th, td) { color: var(--td-fg); }

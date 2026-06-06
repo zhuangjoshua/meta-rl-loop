@@ -32,6 +32,12 @@ _TAKYON_SKILL_ALIASES = {
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
 _DEFAULT_BOOTSTRAP_MAX_TURNS = 20
+_CREATE_NAME_LLM_PROMPT = (
+    "Choose the canonical initial product or company name from the user's idea. "
+    "If the user explicitly gives or strongly implies a name, use that exact name. "
+    "Only invent a concise new name when the idea does not already imply one. "
+    "Return only the name text, with no quotes, JSON, explanation, or extra words."
+)
 
 
 _CLI_ONLY_COMMANDS = {
@@ -667,12 +673,144 @@ def _display_name_from_slug(slug: str) -> str:
     return name or _slugify(slug)
 
 
+def _extract_create_name_candidate(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            text = str(data.get("name") or "").strip()
+    text = text.splitlines()[0].strip()
+    if ":" in text:
+        prefix, suffix = text.split(":", 1)
+        if prefix.strip().lower() in {"name", "business name", "company name", "product name"}:
+            text = suffix.strip()
+    if " - " in text:
+        prefix, _suffix = text.split(" - ", 1)
+        if prefix.strip():
+            text = prefix.strip()
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+    text = text.strip("`\"' ")
+    text = re.sub(r"[.。,:;!?]+$", "", text).strip()
+    return _collapse_whitespace(text)
+
+
+def _create_name_call_estimate_cents() -> int:
+    raw = str(os.getenv("TAKYON_CREATE_NAME_ESTIMATE_CENTS") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 1
+
+
+def _create_name_call_actual_cents(
+    response: Any,
+    *,
+    model: str,
+    runtime: dict[str, Any],
+    reserved_cents: int,
+) -> int:
+    response_usage = getattr(response, "usage", None)
+    if not response_usage:
+        return max(0, int(reserved_cents or 0))
+    try:
+        from agent.usage_pricing import estimate_usage_cost, normalize_usage
+
+        usage = normalize_usage(
+            response_usage,
+            provider=str(runtime.get("provider") or ""),
+            api_mode=str(runtime.get("api_mode") or ""),
+        )
+        cost = estimate_usage_cost(
+            model,
+            usage,
+            provider=str(runtime.get("provider") or ""),
+            base_url=str(runtime.get("base_url") or ""),
+        )
+        if cost.amount_usd is not None:
+            return max(0, int(round(float(cost.amount_usd) * 100)))
+        if cost.status == "included":
+            return 0
+    except Exception:
+        pass
+    return max(0, int(reserved_cents or 0))
+
+
+def _derive_name_from_goal_with_llm(goal: str, *, operator_user_id: str | None = None) -> str:
+    load_takyon_env()
+    from agent.auxiliary_client import call_llm
+    from takyon_cli.runtime_provider import resolve_runtime_provider
+
+    model_config = _read_model_config(TakyonStore())
+    resolved_model = _require_agent_model_config(model_config)
+    configured_provider = str(model_config.get("provider") or "").strip()
+    runtime = resolve_runtime_provider(
+        requested=configured_provider or None,
+        target_model=resolved_model,
+    )
+    resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
+    reservation_key = ""
+    reserved_cents = 0
+    response = None
+    try:
+        if resolved_operator_user_id:
+            reservation_key, reserved_cents = _operator_budget_reserve(
+                operator_user_id=resolved_operator_user_id,
+                business_slug=None,
+                reservation_key=_idempotency_key("create-name", uuid.uuid4().hex),
+                estimate_cents=_create_name_call_estimate_cents(),
+            )
+        response = call_llm(
+            provider=str(runtime.get("provider") or configured_provider or "").strip() or None,
+            model=resolved_model,
+            main_runtime=runtime,
+            messages=[
+                {"role": "system", "content": _CREATE_NAME_LLM_PROMPT},
+                {"role": "user", "content": goal},
+            ],
+            temperature=0.0,
+            max_tokens=32,
+            timeout=20.0,
+        )
+        content = ""
+        try:
+            content = str(response.choices[0].message.content or "")
+        except Exception:
+            content = ""
+        candidate = _extract_create_name_candidate(content)
+        if not candidate:
+            raise TakyonError("model did not return a usable business name")
+        return candidate
+    finally:
+        if reservation_key:
+            _operator_budget_finalize(
+                operator_user_id=resolved_operator_user_id,
+                business_slug=None,
+                reservation_key=reservation_key,
+                reserved_cents=reserved_cents,
+                actual_cents=_create_name_call_actual_cents(
+                    response,
+                    model=resolved_model,
+                    runtime=runtime,
+                    reserved_cents=reserved_cents,
+                )
+                if response is not None
+                else 0,
+            )
+
+
 def _derive_name_from_goal(goal: str) -> str:
     text = _collapse_whitespace(goal)
     if not text:
         raise TakyonError("business name or goal is required")
     candidate = text
-    for separator in (" - ", " — ", " – ", ": "):
+    for separator in (" -- ", " - ", " — ", " – ", ": "):
         if separator in candidate:
             prefix = candidate.split(separator, 1)[0].strip()
             if prefix:
@@ -717,6 +855,32 @@ def _resolve_create_identity(name: str, goal: str, slug_hint: str = "") -> tuple
         slug = _slugify(slug_seed)
         return _display_name_from_slug(slug), slug
     raise TakyonError("business name or goal is required")
+
+
+def _resolve_dashboard_create_identity(
+    name: str,
+    goal: str,
+    slug_hint: str = "",
+    *,
+    operator_user_id: str | None = None,
+) -> tuple[str, str]:
+    explicit_name = _collapse_whitespace(name)
+    if explicit_name:
+        return explicit_name, _slugify(explicit_name)
+    goal_text = _collapse_whitespace(goal)
+    if goal_text:
+        try:
+            resolved_name = _derive_name_from_goal_with_llm(
+                goal_text,
+                operator_user_id=operator_user_id,
+            )
+            if resolved_name:
+                return resolved_name, _slugify(resolved_name)
+        except Exception as exc:
+            if isinstance(exc, TakyonError) and "operator budget exhausted" in str(exc).lower():
+                raise
+        return _resolve_create_identity("", goal_text, slug_hint)
+    return _resolve_create_identity("", "", slug_hint)
 
 
 @contextlib.contextmanager

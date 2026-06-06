@@ -271,10 +271,11 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_create_identity(name, goal, slug_hint=""):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
         assert name == "Latexflow"
         assert goal == "Overleaf competitor"
         assert slug_hint == "latexflow"
+        assert operator_user_id == "user-1"
         return "Latexflow", "latexflow"
 
     def fake_run_takyon_command(*_args, **_kwargs):
@@ -290,7 +291,7 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
         }
 
     fake_cli.TakyonStore = FakeStore
-    fake_cli._resolve_create_identity = fake_resolve_create_identity
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
@@ -344,10 +345,11 @@ def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(s
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_create_identity(name, goal, slug_hint=""):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
         assert name == "Cat App"
         assert goal == "cat app"
         assert slug_hint == "cat-app"
+        assert operator_user_id == "user-1"
         return "Cat App", "cat-app"
 
     def fake_run_takyon_command(argv, **_kwargs):
@@ -364,7 +366,7 @@ def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(s
         }
 
     fake_cli.TakyonStore = FakeStore
-    fake_cli._resolve_create_identity = fake_resolve_create_identity
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(
@@ -424,8 +426,8 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_create_identity(name, goal, slug_hint=""):
-        captured["resolve"] = (name, goal, slug_hint)
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+        captured["resolve"] = (name, goal, slug_hint, operator_user_id)
         return "Longer", "longer"
 
     def fake_run_takyon_command(argv, **_kwargs):
@@ -442,7 +444,7 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
         }
 
     fake_cli.TakyonStore = FakeStore
-    fake_cli._resolve_create_identity = fake_resolve_create_identity
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
@@ -474,7 +476,7 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
         },
     )
 
-    assert captured["resolve"] == ("", "build Longer - a men's health app", "")
+    assert captured["resolve"] == ("", "build Longer - a men's health app", "", "user-1")
     assert captured["argv"] == [
         "create",
         "--live",
@@ -486,6 +488,72 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
     result = response["result"]
     assert result["business_slug"] == "longer"
     assert result["business_name"] == "Longer"
+
+
+def test_takyon_dashboard_create_seeds_current_name_on_first_response(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": "", "takyon_operator_user_id": "user-1"}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+        assert operator_user_id == "user-1"
+        return "Longer", "longer"
+
+    def fake_run_takyon_command(*_args, **_kwargs):
+        return {
+            "success": True,
+            "business": "longer",
+            "mode": "live",
+            "bootstrap_job": {
+                "job_id": "job-456",
+                "kind": "ceo_bootstrap",
+                "status": "queued",
+            },
+        }
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "longer",
+            "current": {},
+            "overview": {"goal": "Longer -- a men's health app"},
+            "outputs": [],
+            "background_run": {"kind": "create", "status": "queued"},
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_businesses_for_session",
+        lambda *_args, **_kwargs: [{"slug": "longer", "name": "Longer"}],
+    )
+    monkeypatch.setattr(server, "_takyon_store", lambda *_args, **_kwargs: object())
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-current-name-1",
+        {
+            "session_id": sid,
+            "business_name": "",
+            "business": "",
+            "goal": "Longer -- a men's health app",
+            "mode": "live",
+        },
+    )
+
+    current = response["result"]["current"]
+    assert current["name"] == "Longer"
+    assert current["slug"] == "longer"
+    assert current["mode"] == "live"
 
 
 def test_takyon_dashboard_workspace_uses_explicit_business_slug(server, monkeypatch):

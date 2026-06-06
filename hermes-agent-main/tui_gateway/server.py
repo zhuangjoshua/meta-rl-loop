@@ -8355,7 +8355,11 @@ def _(rid, params: dict) -> dict:
     if session is None:
         return _err(rid, 4001, "session not found")
     try:
-        from plugins.takyon.cli import TakyonStore, _resolve_create_identity, run_takyon_command
+        from plugins.takyon.cli import (
+            TakyonStore,
+            _resolve_dashboard_create_identity,
+            run_takyon_command,
+        )
 
         requested_name = str(params.get("name") or params.get("business_name") or "").strip()
         requested_goal = str(params.get("goal") or "").strip()
@@ -8364,13 +8368,14 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4004, "test mode is disabled; all businesses run live")
         if requested_mode != "live":
             return _err(rid, 4004, "mode must be live")
-        resolved_name, slug = _resolve_create_identity(
+        operator_user_id = _takyon_operator_user_id(session) or None
+        resolved_name, slug = _resolve_dashboard_create_identity(
             requested_name,
             requested_goal,
             str(params.get("slug") or params.get("business") or "").strip(),
+            operator_user_id=operator_user_id,
         )
 
-        operator_user_id = _takyon_operator_user_id(session) or None
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
         command_argv = ["create", "--live"]
@@ -8409,6 +8414,13 @@ def _(rid, params: dict) -> dict:
             output_limit=int(params.get("limit") or 50),
             view="boot",
         )
+        current = dict(workspace.get("current") or {})
+        if resolved_name and not str(current.get("name") or "").strip():
+            current["name"] = resolved_name
+        if slug and not str(current.get("slug") or "").strip():
+            current["slug"] = slug
+        if active_mode and not str(current.get("mode") or "").strip():
+            current["mode"] = active_mode
         return _ok(
             rid,
             {
@@ -8422,7 +8434,7 @@ def _(rid, params: dict) -> dict:
                 "lifecycle_state": "queued" if bootstrap_job else "ready",
                 "output": f"Create started for business:{slug}",
                 "scope": f"business:{slug}",
-                "current": workspace.get("current") or {},
+                "current": current,
                 "overview": workspace.get("overview") or {},
                 "outputs": workspace.get("outputs") or [],
                 "background_run": workspace.get("background_run"),
