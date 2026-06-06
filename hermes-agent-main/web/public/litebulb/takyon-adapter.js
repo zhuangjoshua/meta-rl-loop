@@ -45,6 +45,16 @@
     assistantText: "",
     assistantDeltaSeen: false,
     assistantTypingTimer: null,
+    activityCard: null,
+    activityDetails: null,
+    activityPhase: "thinking",
+    activityHeadline: "",
+    activityNote: "",
+    activityPercent: null,
+    activityItems: new Map(),
+    activityState: "idle",
+    activityOpen: true,
+    activityUserToggled: false,
     businesses: [],
     businessIndex: new Map(),
     businessesLoading: false,
@@ -771,6 +781,68 @@
       .replace(/\b\w/g, (ch) => ch.toUpperCase());
   }
 
+  function activityPhaseMeta(phase) {
+    const raw = String(phase || "running").trim().toLowerCase() || "running";
+    const colors = {
+      thinking: "var(--muted)",
+      planning: "var(--blue)",
+      editing: "var(--amber)",
+      running: "var(--green)",
+      fixing: "var(--alert)",
+      finalizing: "var(--purple)",
+      done: "var(--blue)",
+    };
+    const labels = {
+      thinking: "thinking",
+      planning: "planning",
+      editing: "editing",
+      running: "working",
+      fixing: "fixing",
+      finalizing: "wrapping up",
+      done: "done",
+    };
+    return {
+      key: raw,
+      color: colors[raw] || "var(--muted)",
+      label: labels[raw] || humanizeKey(raw),
+      icon: raw === "done" ? "✓" : raw === "thinking" ? "⋯" : "▸",
+    };
+  }
+
+  function cleanActivityText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .replace(/^The company has /i, "")
+      .replace(/^agent -> /i, "")
+      .trim();
+  }
+
+  function friendlyToolLabel(name, fallback) {
+    const raw = String(name || "").trim().toLowerCase();
+    if (!raw) return humanizeKey(fallback || "tool");
+    if (raw === "web_extract") return "Reading websites";
+    if (raw === "todo") return "Updating task list";
+    if (raw === "business_write_file") return "Updating workspace files";
+    if (raw === "business_create_workspace") return "Creating workspace files";
+    if (raw === "business_upsert_app_surface_contract") return "Saving app plan";
+    if (raw === "business_claude_agent_task") return "Running product worker";
+    if (raw === "skill_view") return "Loading skill";
+    return humanizeKey(name);
+  }
+
+  function friendlyActivityHeadline(phase, message, target) {
+    const clean = cleanActivityText(message);
+    if (clean) return target ? `${clean} · ${target}` : clean;
+    const raw = String(phase || "running").trim().toLowerCase();
+    if (raw === "thinking") return "Understanding the request";
+    if (raw === "planning") return "Planning the next steps";
+    if (raw === "editing") return target ? `Updating ${target}` : "Updating files";
+    if (raw === "fixing") return target ? `Fixing ${target}` : "Fixing issues";
+    if (raw === "finalizing") return "Wrapping up";
+    if (raw === "done") return "Done";
+    return target ? `Working on ${target}` : "Using tools";
+  }
+
   function cronTaskTitle(job) {
     const raw = String(job && job.name || "").trim();
     if (/takyon-ceo|ceo/i.test(raw)) return "CEO wake loop";
@@ -1392,6 +1464,7 @@
     const signature = traceLogSignature(entry);
     if (!signature || LIVE.traceLogSeen.has(signature)) return false;
     LIVE.traceLogSeen.add(signature);
+    if (syncActivityFromTrace(entry)) return true;
     ceolog(traceLogHtml(entry), true);
     return true;
   }
@@ -2602,6 +2675,16 @@
     LIVE.toolEls.clear();
     LIVE.assistantBubble = null;
     LIVE.assistantText = "";
+    LIVE.activityCard = null;
+    LIVE.activityDetails = null;
+    LIVE.activityPhase = "thinking";
+    LIVE.activityHeadline = "";
+    LIVE.activityNote = "";
+    LIVE.activityPercent = null;
+    LIVE.activityItems = new Map();
+    LIVE.activityState = "idle";
+    LIVE.activityOpen = true;
+    LIVE.activityUserToggled = false;
     LIVE.bootedBusiness = "";
     LIVE.planBusiness = "";
     RT.live = false;
@@ -2717,8 +2800,8 @@
     }
     return {
       kind: "tool",
-      label: j$(name),
-      detail: context || j$(name),
+      label: humanizeKey(name),
+      detail: context || humanizeKey(name),
       status,
       tool_name: name,
       updated_at: new Date().toISOString(),
@@ -2729,19 +2812,181 @@
     const toolName = String(name || "").trim();
     const nextPreview = String(preview || "").trim();
     if (!toolName || !nextPreview) return;
-    LIVE.toolEls.forEach((holder) => {
-      if (!holder || holder.dataset.toolName !== toolName) return;
-      const chip = holder.querySelector(".tool");
-      if (!chip || chip.classList.contains("done")) return;
-      if (holder.dataset.toolPreview === nextPreview) return;
-      holder.dataset.toolPreview = nextPreview;
-      const ttl = holder.querySelector(".ttl");
-      if (ttl) {
-        ttl.textContent = nextPreview;
-        ttl.title = nextPreview;
-      }
-      ceolog(`<span class="l-blue">[tool]</span> ${esc(toolName)} · ${esc(nextPreview)}`, true);
+    LIVE.toolEls.forEach((ref) => {
+      if (!ref || ref.toolName !== toolName) return;
+      upsertActivityItem(String(ref.entryKey || `tool:${toolName}`), {
+        label: friendlyToolLabel(toolName, toolName),
+        detail: nextPreview,
+        status: "running",
+      });
     });
+  }
+
+  function ensureActivityCard(seed) {
+    if (LIVE.activityCard && document.body.contains(LIVE.activityCard)) return LIVE.activityCard;
+    LIVE.activityItems = new Map();
+    LIVE.activityPhase = String(seed && seed.phase || "thinking").trim().toLowerCase() || "thinking";
+    LIVE.activityHeadline = String(seed && seed.headline || "Understanding the request").trim();
+    LIVE.activityNote = String(seed && seed.note || "").trim();
+    LIVE.activityPercent = null;
+    LIVE.activityState = "running";
+    LIVE.activityOpen = true;
+    LIVE.activityUserToggled = false;
+    const container = document.createElement("div");
+    container.className = "m";
+    container.innerHTML = `
+      <details class="activity" open>
+        <summary>
+          <span class="activity__caret">▾</span>
+          <span class="activity__phase"></span>
+          <span class="activity__headline"></span>
+          <span class="activity__count"></span>
+        </summary>
+        <div class="activity__body">
+          <div class="activity__note"></div>
+          <div class="activity__bar" style="display:none"><i></i></div>
+          <div class="activity__list"></div>
+        </div>
+      </details>`;
+    msgs().appendChild(container);
+    LIVE.activityCard = container;
+    LIVE.activityDetails = $("details", container);
+    LIVE.activityDetails.addEventListener("toggle", () => {
+      LIVE.activityOpen = !!(LIVE.activityDetails && LIVE.activityDetails.open);
+      LIVE.activityUserToggled = true;
+      const caret = $(".activity__caret", container);
+      if (caret) caret.textContent = LIVE.activityDetails && LIVE.activityDetails.open ? "▾" : "▸";
+    });
+    renderActivityCard();
+    scrollChat();
+    return container;
+  }
+
+  function upsertActivityItem(key, item) {
+    if (!key) return;
+    ensureActivityCard();
+    const current = LIVE.activityItems.get(key) || {};
+    LIVE.activityItems.set(key, Object.assign({}, current, item, {
+      key,
+      updated_at: item && item.updated_at ? item.updated_at : new Date().toISOString(),
+    }));
+    renderActivityCard();
+  }
+
+  function setActivitySummary(next) {
+    ensureActivityCard(next);
+    if (next && Object.prototype.hasOwnProperty.call(next, "phase")) {
+      LIVE.activityPhase = String(next.phase || LIVE.activityPhase).trim().toLowerCase() || LIVE.activityPhase;
+    }
+    if (next && Object.prototype.hasOwnProperty.call(next, "headline")) {
+      const headline = String(next.headline || "").trim();
+      if (headline) LIVE.activityHeadline = headline;
+    }
+    if (next && Object.prototype.hasOwnProperty.call(next, "note")) {
+      LIVE.activityNote = String(next.note || "").trim();
+    }
+    if (next && Object.prototype.hasOwnProperty.call(next, "percent")) {
+      LIVE.activityPercent = typeof next.percent === "number" && isFinite(next.percent)
+        ? Math.max(0, Math.min(100, Number(next.percent)))
+        : null;
+    }
+    if (next && Object.prototype.hasOwnProperty.call(next, "state")) {
+      LIVE.activityState = String(next.state || LIVE.activityState).trim().toLowerCase() || LIVE.activityState;
+    }
+    renderActivityCard();
+  }
+
+  function renderActivityCard() {
+    if (!LIVE.activityCard || !document.body.contains(LIVE.activityCard)) return;
+    const details = LIVE.activityDetails || $("details", LIVE.activityCard);
+    if (!details) return;
+    LIVE.activityDetails = details;
+    const meta = activityPhaseMeta(LIVE.activityPhase);
+    const items = Array.from(LIVE.activityItems.values()).sort((a, b) => traceUpdatedAtMs(b && b.updated_at) - traceUpdatedAtMs(a && a.updated_at));
+    const countLabel = items.length ? `${items.length} ${items.length === 1 ? "tool call" : "tool calls"}` : "";
+    const shouldOpen = LIVE.activityUserToggled
+      ? !!LIVE.activityOpen
+      : LIVE.activityState === "running";
+    if (details.open !== shouldOpen) details.open = shouldOpen;
+    const caret = $(".activity__caret", LIVE.activityCard);
+    if (caret) caret.textContent = details.open ? "▾" : "▸";
+    const phaseEl = $(".activity__phase", LIVE.activityCard);
+    if (phaseEl) {
+      phaseEl.textContent = meta.label;
+      phaseEl.style.color = meta.color;
+    }
+    const headlineEl = $(".activity__headline", LIVE.activityCard);
+    if (headlineEl) headlineEl.textContent = LIVE.activityHeadline || friendlyActivityHeadline(LIVE.activityPhase, "", "");
+    const countEl = $(".activity__count", LIVE.activityCard);
+    if (countEl) countEl.textContent = countLabel;
+    const noteEl = $(".activity__note", LIVE.activityCard);
+    if (noteEl) noteEl.textContent = LIVE.activityNote || LIVE.activityHeadline || "";
+    const barEl = $(".activity__bar", LIVE.activityCard);
+    if (barEl) {
+      if (typeof LIVE.activityPercent === "number") {
+        barEl.style.display = "";
+        const fill = $("i", barEl);
+        if (fill) {
+          fill.style.width = `${LIVE.activityPercent}%`;
+          fill.style.background = meta.color;
+        }
+      } else {
+        barEl.style.display = "none";
+      }
+    }
+    const listEl = $(".activity__list", LIVE.activityCard);
+    if (listEl) {
+      listEl.innerHTML = items.map((item) => {
+        const status = traceStatus(item);
+        const isDone = status === "done";
+        const isBlocked = status === "blocked";
+        const detail = cleanActivityText(item && item.detail || "");
+        const label = String(item && item.label || "Work").trim();
+        return `<div class="activity__item${isDone ? " is-done" : ""}">
+          <span class="activity__item-dot" style="color:${isBlocked ? "var(--alert)" : isDone ? "var(--blue)" : meta.color}">${isBlocked ? "!" : isDone ? "✓" : meta.icon}</span>
+          <div class="activity__item-main">
+            <div class="activity__item-label">${esc(label)}</div>
+            ${detail ? `<div class="activity__item-detail">${esc(detail)}</div>` : ""}
+          </div>
+          <span class="activity__item-status ${status === "running" ? "is-running" : status === "done" ? "is-done" : status === "blocked" ? "is-blocked" : ""}">${esc(status === "done" ? "done" : status === "blocked" ? "blocked" : "running")}</span>
+        </div>`;
+      }).join("") || `<div class="activity__item"><span class="activity__item-dot" style="color:${meta.color}">${meta.icon}</span><div class="activity__item-main"><div class="activity__item-label">Waiting on the first tool call</div></div></div>`;
+    }
+    scrollChat();
+  }
+
+  function syncActivityFromTrace(entry) {
+    if (!RT.live || !entry) return false;
+    const status = traceStatus(entry);
+    const kind = String(entry.kind || "note").trim().toLowerCase();
+    const label = String(entry.label || "").trim();
+    const detail = cleanActivityText(entry.detail || entry.summary || "");
+    if (kind === "tool" || kind === "skill") {
+      upsertActivityItem(String(entry.entry_key || entry.id || `${kind}:${label}`), {
+        label: friendlyToolLabel(entry.tool_name || label, label || kind),
+        detail,
+        status,
+        updated_at: entry.updated_at,
+      });
+      return true;
+    }
+    if (kind === "turn") {
+      setActivitySummary({
+        phase: status === "done" ? "done" : status === "blocked" ? "fixing" : LIVE.activityPhase || "running",
+        headline: detail || label || "CEO turn",
+        note: detail || label || "",
+        state: status === "done" ? "done" : status === "blocked" ? "blocked" : "running",
+      });
+      return true;
+    }
+    if (kind === "note" && detail) {
+      setActivitySummary({
+        headline: LIVE.activityHeadline || detail,
+        note: detail,
+      });
+      return true;
+    }
+    return false;
   }
 
   function cancelAssistantTypingAnimation() {
@@ -2928,7 +3173,17 @@
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
+      if (LIVE.activityCard && LIVE.activityState !== "running") {
+        LIVE.activityCard = null;
+        LIVE.activityDetails = null;
+        LIVE.activityItems = new Map();
+      }
       LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
+      ensureActivityCard({
+        phase: "thinking",
+        headline: "Understanding the request",
+        note: "The CEO is starting a new turn.",
+      });
       upsertLiveTrace({
         entry_key: LIVE.activeTurnTraceId,
         kind: "turn",
@@ -2960,6 +3215,13 @@
         });
         LIVE.activeTurnTraceId = "";
       }
+      setActivitySummary({
+        phase: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "fixing",
+        headline: String(payload.text || "").trim().slice(0, 120) || "CEO turn completed.",
+        note: LIVE.activityNote || "The CEO turn finished.",
+        percent: null,
+        state: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "blocked",
+      });
       const finalText = String(payload.text || "");
       if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
       else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
@@ -2974,14 +3236,17 @@
       return;
     }
     if (ev.type === "thinking.delta" || ev.type === "reasoning.delta") {
-      const text = String(payload.text || "").trim();
-      if (text) addThink(text);
       return;
     }
     if (ev.type === "status.update") {
       const text = String(payload.text || "").trim();
       const kind = String(payload.kind || "").trim().toLowerCase();
-      if (text) ceolog(esc(text), true);
+      if (text) {
+        setActivitySummary({
+          headline: LIVE.activityHeadline || friendlyActivityHeadline("running", text, ""),
+          note: cleanActivityText(text),
+        });
+      }
       if (kind === "takyon") {
         LIVE.historyRunning = true;
         syncHistoryPollTimer();
@@ -2995,38 +3260,30 @@
       const target = payload.target ? String(payload.target).trim() : "";
       const percent = payload.percent;
       if (!message) return;
-      let el = document.getElementById("progress-status");
-      if (!el) {
-        el = document.createElement("div");
-        el.id = "progress-status";
-        el.className = "m";
-        const m = msgs();
-        if (m) m.appendChild(el);
-      }
-      const colors = { thinking: "var(--muted)", planning: "var(--blue)", editing: "var(--amber)", running: "var(--green)", fixing: "var(--alert)", finalizing: "var(--purple)", done: "var(--green)" };
-      const c = colors[phase] || "var(--muted)";
-      const bar = typeof percent === "number" && isFinite(percent) ? `<div class="bar" style="margin:4px 0 0"><i style="width:${Math.max(0, Math.min(100, percent))}%;background:${c}"></i></div>` : "";
-      el.innerHTML = `<div class="tool" style="border-color:${c};border-style:solid"><span class="ic" style="color:${c}">${phase === "done" ? "✓" : "▸"}</span><span class="nm" style="color:${c}">${esc(phase)}</span><span class="ttl">${esc(message)}${target ? " · " + esc(target) : ""}</span></div>${bar}`;
-      scrollChat();
-      if (phase === "done") { el.removeAttribute("id"); el.style.opacity = "0.5"; }
+      setActivitySummary({
+        phase,
+        headline: friendlyActivityHeadline(phase, message, target),
+        note: target ? `${cleanActivityText(message)} · ${target}` : cleanActivityText(message),
+        percent,
+        state: phase === "done" ? "done" : "running",
+      });
       return;
     }
     if (ev.type === "tool.start") {
       const trace = liveToolTrace(payload, "running");
-      const el = addTool({
-        kind: toolKind(payload.name),
-        nm: payload.name || "tool",
-        ttl: payload.context || payload.name || "working",
-      });
-      el.dataset.toolName = String(payload.name || "tool");
-      if (payload.tool_id) LIVE.toolEls.set(String(payload.tool_id), el);
+      const entryKey = `tool:${String(payload.tool_id || `${payload.name || "tool"}:${Date.now()}`)}`;
       if (payload.tool_id) {
-        upsertLiveTrace(Object.assign({ entry_key: `tool:${String(payload.tool_id)}` }, trace || {}));
+        LIVE.toolEls.set(String(payload.tool_id), {
+          entryKey,
+          toolName: String(payload.name || "").trim(),
+        });
       }
-      ceolog(
-        `<span class="l-blue">[${esc(trace && trace.kind === "skill" ? "skill" : "tool")}]</span> ${esc(trace && trace.label || payload.name || "tool")}`,
-        true
-      );
+      upsertActivityItem(entryKey, {
+        label: friendlyToolLabel(payload.name || "", payload.context || payload.name || "tool"),
+        detail: cleanActivityText(payload.context || payload.name || "working"),
+        status: "running",
+      });
+      if (payload.tool_id) upsertLiveTrace(Object.assign({ entry_key: entryKey }, trace || {}));
       return;
     }
     if (ev.type === "tool.progress") {
@@ -3035,10 +3292,13 @@
     }
     if (ev.type === "tool.complete") {
       const key = String(payload.tool_id || "");
-      const holder = LIVE.toolEls.get(key);
-      if (holder) {
-        const chip = holder.querySelector(".tool");
-        if (chip) chip.classList.add("done");
+      const ref = LIVE.toolEls.get(key);
+      if (ref) {
+        upsertActivityItem(String(ref.entryKey || `tool:${key}`), {
+          label: friendlyToolLabel(payload.name || ref.toolName || "", payload.summary || payload.name || "tool"),
+          detail: cleanActivityText(payload.summary || ""),
+          status: "completed",
+        });
       }
       if (key) {
         const trace = liveToolTrace(payload, "completed") || {};
@@ -3046,7 +3306,6 @@
         trace.updated_at = new Date().toISOString();
         upsertLiveTrace(Object.assign({ entry_key: `tool:${key}`, status: "completed" }, trace));
       }
-      if (payload.summary) ceolog(`<span class="l-green">[tool]</span> ${esc(payload.summary)}`, true);
       scheduleLiveRefresh(150);
       void refreshBusinessData(LIVE.activeBusiness, {
         skipCredits: true,
@@ -3072,6 +3331,13 @@
         });
         LIVE.activeTurnTraceId = "";
       }
+      setActivitySummary({
+        phase: "fixing",
+        headline: text.slice(0, 120) || "The live CEO stream reported an error.",
+        note: text,
+        percent: null,
+        state: "blocked",
+      });
       if (LIVE.assistantBubble) finishAssistantText(text);
       else addCeo(formatRichText(text));
       setStatus("paused", "paused");
@@ -3165,13 +3431,22 @@
         : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/workspace?limit=50&view=${encodeURIComponent(view)}`, { signal: controller.signal });
       const boardPromise = skipBoard
         ? Promise.resolve(null)
-        : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`, { signal: controller.signal });
+        : fetchJSON(`/api/plugins/kanban/board?board=${encodeURIComponent(business)}`, { signal: controller.signal }).catch((err) => {
+          if (isAbortError(err)) return null;
+          throw err;
+        });
       const creditsPromise = skipCredits
         ? Promise.resolve(LIVE.creativeCredits)
-        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`, { signal: controller.signal });
+        : fetchJSON(`/api/takyon/businesses/${encodeURIComponent(business)}/creative-credits`, { signal: controller.signal }).catch((err) => {
+          if (isAbortError(err)) return null;
+          throw err;
+        });
       const accountPromise = skipAccount
         ? Promise.resolve(LIVE.operatorAccount)
-        : fetchJSON("/api/takyon/operator/account", { signal: controller.signal });
+        : fetchJSON("/api/takyon/operator/account", { signal: controller.signal }).catch((err) => {
+          if (isAbortError(err)) return null;
+          throw err;
+        });
       const dashboardPromise = activeSessionId
         ? rpc("takyon.dashboard.state", {
           session_id: activeSessionId,
