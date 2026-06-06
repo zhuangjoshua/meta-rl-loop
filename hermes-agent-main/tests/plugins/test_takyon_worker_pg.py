@@ -199,7 +199,28 @@ def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
     for name in ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
+    monkeypatch.setattr(core, "_xurl_oauth1_auth_ready", lambda: False)
     monkeypatch.setattr(core, "_xurl_shared_auth_ready", lambda: True)
+    assert core._missing_env_for_requirement("x") == []
+
+
+def test_x_requirement_accepts_oauth1_credentials(monkeypatch):
+    for name in (
+        "X_API_KEY",
+        "TWITTER_API_KEY",
+        "X_BEARER_TOKEN",
+        "TWITTER_BEARER_TOKEN",
+        "X_API_SECRET",
+        "TWITTER_API_SECRET",
+        "X_ACCESS_TOKEN",
+        "TWITTER_ACCESS_TOKEN",
+        "X_ACCESS_TOKEN_SECRET",
+        "TWITTER_ACCESS_TOKEN_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
+    monkeypatch.setattr(core, "_xurl_oauth1_auth_ready", lambda: True)
+    monkeypatch.setattr(core, "_xurl_shared_auth_ready", lambda: False)
     assert core._missing_env_for_requirement("x") == []
 
 
@@ -292,8 +313,70 @@ def test_xurl_auth_status_uses_explicit_default_identity(tmp_path, monkeypatch):
         "--app",
         "takyon-shared",
         "whoami",
+        "--auth",
+        "oauth2",
         "-u",
         "vaalapp",
+    ]
+
+
+def test_xurl_auth_status_prefers_oauth1_when_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
+    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".xurl").write_text(
+        "\n".join(
+            [
+                "apps:",
+                "  takyon-shared:",
+                "    client_id: shared-id",
+                "    client_secret: shared-secret",
+                "    default_user: vaalapp",
+                "    oauth2_tokens:",
+                "      vaalapp:",
+                "        type: oauth2",
+                "        oauth2:",
+                "          access_token: token",
+                "          refresh_token: refresh",
+                "    oauth1_token:",
+                "      type: oauth1",
+                "      oauth1:",
+                "        access_token: at",
+                "        token_secret: ts",
+                "        consumer_key: ck",
+                "        consumer_secret: cs",
+                "default_app: takyon-shared",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"data":{"username":"vaalapp"}}\n'
+        stderr = ""
+
+    def _fake_run(command, **kwargs):
+        calls.append(list(command))
+        if command[-1] == "status":
+            status = _Proc()
+            status.stdout = "shared auth present\n"
+            return status
+        return _Proc()
+
+    monkeypatch.setattr(core.subprocess, "run", _fake_run)
+    assert core._xurl_auth_status_ok(home=str(home)) is True
+    assert calls[1] == [
+        "/usr/local/bin/xurl",
+        "--app",
+        "takyon-shared",
+        "whoami",
+        "--auth",
+        "oauth1",
     ]
 
 
@@ -347,6 +430,7 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
 
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
+    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
 
     def _fake_run(command, *, home, timeout):
         captured["command"] = command
@@ -389,6 +473,8 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
         "takyon-shared",
         "post",
         "Ship it",
+        "--auth",
+        "oauth2",
         "-u",
         "vaalapp",
     ]
@@ -405,6 +491,7 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
 
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
+    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
     monkeypatch.setattr(worker, "_run_xurl_json_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")))
     monkeypatch.setattr(
         worker,
@@ -433,6 +520,7 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
 
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
+    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
 
     responses = iter(
         (
@@ -474,14 +562,54 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
 
     assert len(commands) == 2
     assert commands[0][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "post"]
-    assert commands[0][-2:] == ["-u", "vaalapp"]
+    assert commands[0][-4:] == ["--auth", "oauth2", "-u", "vaalapp"]
     assert commands[1][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "reply"]
     assert commands[1][4] == "tweet-1"
-    assert commands[1][-2:] == ["-u", "vaalapp"]
+    assert commands[1][-4:] == ["--auth", "oauth2", "-u", "vaalapp"]
     thread_posts = captured_result["payload"]["provider_response"]["thread_posts"]
     assert [item["post_id"] for item in thread_posts] == ["tweet-1", "tweet-2"]
     assert result.result["post_id"] == "tweet-1"
     assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-1"
+
+
+def test_x_publish_outreach_handler_uses_oauth1_without_username(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
+    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("default", ""))
+    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth1")
+    def _fake_run(command, *, home, timeout):
+        captured["command"] = list(command)
+        return {"data": {"id": "tweet-123"}}
+
+    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
+    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        lambda slug, **kwargs: {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
+    )
+    monkeypatch.setattr(worker, "_update_outreach_work_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
+
+    result = worker.x_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-oauth1",
+            business_slug="acme",
+            payload={"body": "Ship it", "provider": "x"},
+        )
+    )
+
+    assert captured["command"] == [
+        "/usr/local/bin/xurl",
+        "--app",
+        "default",
+        "post",
+        "Ship it",
+        "--auth",
+        "oauth1",
+    ]
+    assert result.result["post_id"] == "tweet-123"
 
 
 def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):

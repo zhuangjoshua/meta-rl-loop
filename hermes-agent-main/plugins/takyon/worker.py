@@ -221,6 +221,7 @@ def _persist_xurl_shared_auth_best_effort(home: Path) -> None:
 
 def _ensure_local_xurl_auth() -> tuple[str, Path]:
     from .core import (
+        _apply_xurl_oauth1_credentials,
         _decode_xurl_shared_auth_blob,
         _read_xurl_shared_auth_secret,
         _resolve_xurl_executable,
@@ -234,6 +235,9 @@ def _ensure_local_xurl_auth() -> tuple[str, Path]:
         raise RuntimeError("xurl is not installed on the worker host")
     auth_path = _xurl_auth_path(home=str(home))
     if _xurl_auth_status_ok(home=str(home)):
+        return xurl, auth_path
+    if _apply_xurl_oauth1_credentials(home=str(home)) and _xurl_auth_status_ok(home=str(home)):
+        _persist_xurl_shared_auth_best_effort(home)
         return xurl, auth_path
 
     key, value = _read_xurl_shared_auth_secret()
@@ -257,6 +261,13 @@ def _xurl_identity_flags(*, home: Path) -> tuple[str, str]:
 
     app_name, username = _xurl_default_identity(home=str(home))
     return str(app_name or "").strip(), str(username or "").strip()
+
+
+def _xurl_auth_mode(*, home: Path) -> str:
+    from .core import _xurl_default_auth_profile
+
+    _app_name, auth_mode, _username = _xurl_default_auth_profile(home=str(home))
+    return str(auth_mode or "").strip()
 
 
 def _update_outreach_work_request(
@@ -1080,6 +1091,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     try:
         xurl, _auth_path = _ensure_local_xurl_auth()
         app_name, username = _xurl_identity_flags(home=home)
+        auth_mode = _xurl_auth_mode(home=home)
         segments = _split_x_thread_segments(body)
         if not segments:
             raise RuntimeError("x publish job is missing a body")
@@ -1095,6 +1107,8 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 command.extend(["reply", current_reply_to, segment])
             else:
                 command.extend(["post", segment])
+            if auth_mode:
+                command.extend(["--auth", auth_mode])
             if username:
                 command.extend(["-u", username])
             response = _run_xurl_json_command(command, home=home, timeout=90)
@@ -1118,6 +1132,8 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         if app_name:
             whoami_command.extend(["--app", app_name])
         whoami_command.append("whoami")
+        if auth_mode:
+            whoami_command.extend(["--auth", auth_mode])
         if username:
             whoami_command.extend(["-u", username])
         whoami = _try_run_xurl_json_command(whoami_command, home=home, timeout=20)

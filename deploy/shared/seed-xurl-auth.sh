@@ -33,7 +33,12 @@ import sys
 from pathlib import Path
 
 from plugins.takyon import safebox
-from plugins.takyon.core import _xurl_auth_status_ok, load_takyon_env
+from plugins.takyon.core import (
+    _apply_xurl_oauth1_credentials,
+    _read_x_oauth1_credentials,
+    _xurl_auth_status_ok,
+    load_takyon_env,
+)
 
 load_takyon_env()
 
@@ -46,7 +51,15 @@ for key in ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET"):
     if raw_secret:
         break
 
-if raw_secret:
+oauth1 = _read_x_oauth1_credentials()
+have_oauth1 = all(str(oauth1.get(key) or "").strip() for key in ("consumer_key", "consumer_secret", "access_token", "token_secret"))
+
+if have_oauth1:
+    if not _apply_xurl_oauth1_credentials(home=str(auth_path.parent)):
+        print("failed to seed xurl OAuth1 credentials", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"seeded {auth_path} from OAuth1 credentials")
+elif raw_secret:
     try:
         decoded = base64.b64decode(raw_secret.encode("utf-8"), validate=True)
     except Exception:

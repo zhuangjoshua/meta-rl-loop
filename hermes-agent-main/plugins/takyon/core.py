@@ -527,8 +527,14 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 }
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
 _XURL_SHARED_AUTH_ENV_KEYS = ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET")
+_X_OAUTH1_ENV_ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
+    "consumer_key": ("X_API_KEY", "TWITTER_API_KEY"),
+    "consumer_secret": ("X_API_SECRET", "TWITTER_API_SECRET"),
+    "access_token": ("X_ACCESS_TOKEN", "TWITTER_ACCESS_TOKEN"),
+    "token_secret": ("X_ACCESS_TOKEN_SECRET", "TWITTER_ACCESS_TOKEN_SECRET"),
+}
 _X_CREDENTIAL_REQUIREMENT_LABEL = (
-    "X_API_KEY/TWITTER_API_KEY/X_BEARER_TOKEN/TWITTER_BEARER_TOKEN/valid shared xurl auth"
+    "X_API_KEY+X_API_SECRET+X_ACCESS_TOKEN+X_ACCESS_TOKEN_SECRET/TWITTER_*/valid shared xurl auth"
 )
 
 
@@ -4790,43 +4796,133 @@ def _xurl_auth_path(*, home: str | None = None) -> Path:
     return base / ".xurl"
 
 
-def _xurl_default_identity(*, home: str | None = None) -> tuple[str, str]:
+def _xurl_default_auth_profile(*, home: str | None = None) -> tuple[str, str, str]:
     auth_path = _xurl_auth_path(home=home)
     if not auth_path.exists():
-        return "", ""
+        return "", "", ""
     try:
         import yaml
 
         payload = yaml.safe_load(auth_path.read_text(encoding="utf-8")) or {}
     except Exception:
-        return "", ""
+        return "", "", ""
     if not isinstance(payload, Mapping):
-        return "", ""
+        return "", "", ""
     apps = payload.get("apps")
     if not isinstance(apps, Mapping):
-        return "", ""
+        return "", "", ""
     default_app = str(payload.get("default_app") or "").strip()
     candidates: list[tuple[str, Mapping[str, Any]]] = []
     if default_app and isinstance(apps.get(default_app), Mapping):
         candidates.append((default_app, apps.get(default_app) or {}))
     for name, app_payload in apps.items():
-        if str(name or "").strip() == default_app:
+        candidate_name = str(name or "").strip()
+        if not candidate_name or candidate_name == default_app:
             continue
         if isinstance(app_payload, Mapping):
-            candidates.append((str(name or "").strip(), app_payload))
+            candidates.append((candidate_name, app_payload))
     for app_name, app_payload in candidates:
-        if not app_name:
-            continue
+        oauth1_token = app_payload.get("oauth1_token")
+        if isinstance(oauth1_token, Mapping) and isinstance(oauth1_token.get("oauth1"), Mapping):
+            oauth1 = oauth1_token.get("oauth1") or {}
+            if all(
+                str(oauth1.get(key) or "").strip()
+                for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
+            ):
+                return app_name, "oauth1", ""
         default_user = str(app_payload.get("default_user") or "").strip()
         if default_user:
-            return app_name, default_user
+            return app_name, "oauth2", default_user
         oauth2_tokens = app_payload.get("oauth2_tokens")
         if isinstance(oauth2_tokens, Mapping):
             for username in oauth2_tokens:
                 candidate = str(username or "").strip()
                 if candidate:
-                    return app_name, candidate
-    return "", ""
+                    return app_name, "oauth2", candidate
+    return "", "", ""
+
+
+def _xurl_default_identity(*, home: str | None = None) -> tuple[str, str]:
+    app_name, _auth_mode, username = _xurl_default_auth_profile(home=home)
+    return app_name, username
+
+
+def _read_x_oauth1_credentials() -> dict[str, str]:
+    creds: dict[str, str] = {}
+    for logical_name, aliases in _X_OAUTH1_ENV_ALIAS_GROUPS.items():
+        value = ""
+        for key in aliases:
+            value = str(os.getenv(key) or "").strip()
+            if value:
+                break
+            try:
+                value = str(safebox.read_env_backed_value(key) or "").strip()
+            except Exception:
+                value = ""
+            if value:
+                break
+        creds[logical_name] = value
+    return creds
+
+
+def _apply_xurl_oauth1_credentials(*, home: str | None = None) -> bool:
+    xurl = _resolve_xurl_executable()
+    if not xurl:
+        return False
+    creds = _read_x_oauth1_credentials()
+    if not all(
+        str(creds.get(key) or "").strip()
+        for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
+    ):
+        return False
+    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
+    auth_path = _xurl_auth_path(home=resolved_home)
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    app_name, _auth_mode, _username = _xurl_default_auth_profile(home=resolved_home)
+    command = [xurl]
+    if app_name:
+        command.extend(["--app", app_name])
+    command.extend(
+        [
+            "auth",
+            "oauth1",
+            "--consumer-key",
+            creds["consumer_key"],
+            "--consumer-secret",
+            creds["consumer_secret"],
+            "--access-token",
+            creds["access_token"],
+            "--token-secret",
+            creds["token_secret"],
+        ]
+    )
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            env=_runtime_env({"HOME": resolved_home}),
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
+def _xurl_oauth1_auth_ready() -> bool:
+    creds = _read_x_oauth1_credentials()
+    if not all(
+        str(creds.get(key) or "").strip()
+        for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
+    ):
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="takyon-xurl-oauth1-") as tmpdir:
+            if not _apply_xurl_oauth1_credentials(home=tmpdir):
+                return False
+            return _xurl_auth_status_ok(home=tmpdir)
+    except Exception:
+        return False
 
 
 def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
@@ -4861,11 +4957,13 @@ def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
         )
     ):
         return False
-    app_name, username = _xurl_default_identity(home=resolved_home)
+    app_name, auth_mode, username = _xurl_default_auth_profile(home=resolved_home)
     identity_command = [xurl]
     if app_name:
         identity_command.extend(["--app", app_name])
     identity_command.append("whoami")
+    if auth_mode:
+        identity_command.extend(["--auth", auth_mode])
     if username:
         identity_command.extend(["-u", username])
     try:
@@ -5230,7 +5328,7 @@ def _missing_env_for_requirement(requirement: str) -> list[str]:
         alias = _API_ENV_ALIASES.get("x", ())
         if any(os.getenv(name) for name in alias):
             return []
-        if _xurl_auth_status_ok() or _xurl_shared_auth_ready():
+        if _xurl_auth_status_ok() or _xurl_oauth1_auth_ready() or _xurl_shared_auth_ready():
             return []
         return [_X_CREDENTIAL_REQUIREMENT_LABEL]
     alias = _API_ENV_ALIASES.get(key.lower())
