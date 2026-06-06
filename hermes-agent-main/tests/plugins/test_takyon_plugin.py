@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2619,6 +2620,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     site.mkdir(parents=True)
     (site / ".next").mkdir()
     (site / ".next" / "BUILD_ID").write_text("build-1\n", encoding="utf-8")
+    (site / ".next" / "build-manifest.json").write_text("{}\n", encoding="utf-8")
     next_bin = site / "node_modules" / "next" / "dist" / "bin"
     next_bin.mkdir(parents=True)
     (next_bin / "next").write_text("#!/usr/bin/env node\nconsole.log('next');\n", encoding="utf-8")
@@ -2678,6 +2680,89 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /checkout /usage /generate" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
 
+
+def test_next_product_publish_handoffs_to_activation_host_and_prunes_local_build_artifacts(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "latexflow"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / ".next").mkdir()
+    (site / ".next" / "BUILD_ID").write_text("build-1\n", encoding="utf-8")
+    (site / ".next" / "build-manifest.json").write_text("{}\n", encoding="utf-8")
+    next_bin = site / "node_modules" / "next" / "dist" / "bin"
+    next_bin.mkdir(parents=True)
+    (next_bin / "next").write_text("#!/usr/bin/env node\nconsole.log('next');\n", encoding="utf-8")
+    (next_bin / "next").chmod(0o755)
+    (site / "node_modules" / ".bin").mkdir(parents=True)
+    (site / "node_modules" / ".bin" / "next").symlink_to("../next/dist/bin/next")
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "latexflow-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TAKYON_NODE_NAME", "worker-b")
+    monkeypatch.setenv("TAKYON_PRODUCT_ACTIVATION_NODE", "argon-alpha-14")
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+
+    captured: dict[str, Path] = {}
+
+    def _fake_handoff(*, source_root: Path, slug: str, publish_target: str):
+        captured["source_root"] = source_root
+        return {
+            "status": "published",
+            "deploy_kind": "next_systemd_caddy",
+            "public_url": publish_target,
+            "publish_root": f"/opt/takyon/.takyon/product-services/{slug}",
+            "publish_source_path": source_root.name,
+            "published_at": "2026-06-06T20:00:00+00:00",
+            "service_name": f"takyon-product-{slug}",
+            "activation_mode": "remote_ssh",
+        }
+
+    monkeypatch.setattr(takyon_core, "_handoff_next_product_service_to_activation_host", _fake_handoff)
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="latexflow",
+        source_path="product/site",
+        publish_target="https://latexflow.fourmanifold.com/",
+    )
+
+    assert captured["source_root"] == site
+    assert result["status"] == "published"
+    assert result["activation_mode"] == "remote_ssh"
+    assert not (site / "node_modules").exists()
+    assert not (site / ".next").exists()
+
+
+def test_product_service_working_directory_guard_rejects_tmp_and_business_roots(tmp_path, monkeypatch):
+    takyon_home = tmp_path / ".takyon"
+    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
+    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(takyon_home / "product-services"))
+
+    business_root = takyon_home / "businesses" / "clipbook" / "product" / "site"
+    business_root.mkdir(parents=True)
+    assert "business mirror" in takyon_core._product_service_working_directory_blocker(business_root)
+
+    scratch_parent = Path(tempfile.gettempdir()) / "takyon-workspaces"
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    tmp_root = Path(tempfile.mkdtemp(prefix="takyon-product-unit-", dir=str(scratch_parent)))
+    try:
+        assert "temporary workspace" in takyon_core._product_service_working_directory_blocker(tmp_root)
+    finally:
+        if tmp_root.exists():
+            import shutil
+
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
 def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "inboxpilot"

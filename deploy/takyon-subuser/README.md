@@ -20,6 +20,12 @@ The current runtime still serves shared product hosts from
 `product-sites` tree from the operator source host until that surface moves to
 another canonical backend.
 
+This host is not the product activation node. Its tracked unit sets
+`TAKYON_NODE_NAME=takyon-subuser` and `TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14`,
+so shared code can tell that live `product-services/<slug>` activation belongs on the
+current top-level operator host. If a future builder host needs to publish remotely,
+configure `TAKYON_PRODUCT_ACTIVATION_SSH_TARGET` plus an activation SSH key there.
+
 The sub-user host serves only:
 
 - shared `slug.fourmanifold.com` product subdomains

@@ -1963,6 +1963,7 @@ def _build_isolated_turn_payload(
     business_slug: str,
     system_message: str | None = None,
     max_iterations_override: int | None = None,
+    agent_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     gateway_ctx = getattr(agent, "_takyon_operator_gateway_context", None)
     requested_provider = str(
@@ -1971,7 +1972,7 @@ def _build_isolated_turn_payload(
     upstream_base_url = str(
         getattr(gateway_ctx, "upstream_base_url", "") or getattr(agent, "base_url", "") or ""
     ).strip()
-    return {
+    payload = {
         "session_key": str(session.get("session_key") or ""),
         "operator_user_id": operator_user_id,
         "business_slug": business_slug,
@@ -2016,6 +2017,14 @@ def _build_isolated_turn_payload(
         },
         "system_message": system_message or None,
     }
+    overrides = (
+        dict(agent_config_overrides)
+        if isinstance(agent_config_overrides, dict)
+        else {}
+    )
+    if overrides:
+        payload["agent_config"].update(overrides)
+    return payload
 
 
 def _forward_isolated_turn_event(
@@ -2103,6 +2112,7 @@ def _run_isolated_gateway_turn(
     streamer,
     system_message_override: str | None = None,
     max_iterations_override: int | None = None,
+    agent_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = _build_isolated_turn_payload(
         session,
@@ -2113,6 +2123,7 @@ def _run_isolated_gateway_turn(
         business_slug=business_slug,
         system_message=system_message_override,
         max_iterations_override=max_iterations_override,
+        agent_config_overrides=agent_config_overrides,
     )
     proc = subprocess.Popen(
         [sys.executable, "-m", "tui_gateway.isolated_turn_worker"],
@@ -3112,8 +3123,9 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     history = list(session.get("history", []))
+    history_memory_only = bool(session.get("history_memory_only"))
     db = _get_db()
-    if db is not None and session.get("session_key"):
+    if not history_memory_only and db is not None and session.get("session_key"):
         try:
             history = db.get_messages_as_conversation(
                 session["session_key"], include_ancestors=True
@@ -3798,6 +3810,7 @@ def _start_streaming_session_turn(
     record_user_history: bool = True,
     system_message_override: str | None = None,
     max_iterations_override: int | None = None,
+    agent_config_overrides: dict[str, Any] | None = None,
     post_complete_callback: Callable[[], str | None] | None = None,
     start_delay_ms: int = 0,
 ) -> None:
@@ -3831,6 +3844,7 @@ def _start_streaming_session_turn(
             record_user_history=record_user_history,
             system_message_override=system_message_override,
             max_iterations_override=max_iterations_override,
+            agent_config_overrides=agent_config_overrides,
             post_complete_callback=post_complete_callback,
         )
 
@@ -3849,6 +3863,7 @@ def _run_prompt_submit(
     record_user_history: bool = True,
     system_message_override: str | None = None,
     max_iterations_override: int | None = None,
+    agent_config_overrides: dict[str, Any] | None = None,
     post_complete_callback: Callable[[], str | None] | None = None,
 ) -> None:
     with session["history_lock"]:
@@ -3856,6 +3871,8 @@ def _run_prompt_submit(
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
+        if not record_user_history:
+            session["history_memory_only"] = True
     agent = session["agent"]
     _emit("message.start", sid)
 
@@ -4021,6 +4038,8 @@ def _run_prompt_submit(
                     worker_kwargs["system_message_override"] = system_message_override
                 if max_iterations_override is not None:
                     worker_kwargs["max_iterations_override"] = max_iterations_override
+                if isinstance(agent_config_overrides, dict) and agent_config_overrides:
+                    worker_kwargs["agent_config_overrides"] = dict(agent_config_overrides)
                 worker_result = _run_isolated_gateway_turn(
                     sid,
                     session,
@@ -4412,6 +4431,8 @@ def _run_prompt_submit(
             _clear_session_context(session_tokens)
             session.pop("takyon_active_turn_key", None)
             with session["history_lock"]:
+                if not record_user_history:
+                    session.pop("history_memory_only", None)
                 session["running"] = False
 
         # Chain a goal-continuation turn if the judge said so. We do
@@ -8594,11 +8615,26 @@ def _(rid, params: dict) -> dict:
         else:
             bootstrap_turn = {
                 "user_prompt": requested_goal or f"Bootstrap business:{slug} now.",
-                "system_prompt": "",
+                "ephemeral_system_prompt": "",
+                "enabled_toolsets": ["takyon", "web", "skills"],
+                "disabled_toolsets": [],
+                "load_soul_identity": False,
+                "skip_memory": True,
+                "skip_context_files": True,
                 "max_turns": 20,
             }
-        bootstrap_system_prompt = str(bootstrap_turn.get("system_prompt") or "")
         bootstrap_user_prompt = str(bootstrap_turn.get("user_prompt") or "")
+        bootstrap_agent_config = {
+            "enabled_toolsets": list(bootstrap_turn.get("enabled_toolsets") or []),
+            "disabled_toolsets": list(bootstrap_turn.get("disabled_toolsets") or []),
+            "ephemeral_system_prompt": str(
+                bootstrap_turn.get("ephemeral_system_prompt") or ""
+            )
+            or None,
+            "load_soul_identity": bool(bootstrap_turn.get("load_soul_identity")),
+            "skip_memory": bool(bootstrap_turn.get("skip_memory")),
+            "skip_context_files": bool(bootstrap_turn.get("skip_context_files")),
+        }
         try:
             bootstrap_max_turns = int(bootstrap_turn.get("max_turns") or 20)
         except (TypeError, ValueError):
@@ -8656,8 +8692,8 @@ def _(rid, params: dict) -> dict:
             session,
             bootstrap_user_prompt,
             record_user_history=False,
-            system_message_override=bootstrap_system_prompt,
             max_iterations_override=max(1, bootstrap_max_turns),
+            agent_config_overrides=bootstrap_agent_config,
             post_complete_callback=_finalize_bootstrap,
             start_delay_ms=125,
         )

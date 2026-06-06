@@ -1262,8 +1262,22 @@ def _ceo_bootstrap_turn_config(
             active_mode,
             business_name=business_name,
         ),
-        "system_prompt": _load_ceo_prompt(),
+        "ephemeral_system_prompt": _load_ceo_prompt(),
         "enabled_toolsets": ["takyon", "web", "skills"],
+        "disabled_toolsets": [
+            "cronjob",
+            "messaging",
+            "clarify",
+            "memory",
+            "session_search",
+            "terminal",
+            "file",
+            "browser",
+            "code_execution",
+        ],
+        "load_soul_identity": False,
+        "skip_memory": True,
+        "skip_context_files": True,
         "max_turns": _DEFAULT_BOOTSTRAP_MAX_TURNS,
     }
 

@@ -558,3 +558,40 @@ def isolated_business_workspace(
             yield home
     finally:
         shutil.rmtree(home, ignore_errors=True)
+
+
+@contextmanager
+def mounted_business_workspace(
+    backend: StorageBackend,
+    slug: str,
+    *,
+    owner_label: str = "",
+    scratch_parent: str | os.PathLike[str] | None = None,
+    delete_local: bool = True,
+) -> Iterator[Path]:
+    """Materialize one business into a private scratch Takyon home without auto-sync on exit.
+
+    This is the minimal worker mount seam for runs that want disposable host scratch:
+    sync-down on enter, let the caller decide if/when to sync-up, always delete the scratch
+    home on exit.
+    """
+    parent = Path(scratch_parent).expanduser() if scratch_parent else Path(tempfile.gettempdir()) / "takyon-workspaces"
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    safe_slug = _safe_slug(slug)
+    prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
+    home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
+    try:
+        try:
+            os.chmod(home, 0o700)
+        except OSError:
+            pass
+        workspace = home / "businesses" / safe_slug
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        sync_down(backend, safe_slug, workspace, delete_local=delete_local)
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)

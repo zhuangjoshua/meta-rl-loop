@@ -919,8 +919,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         business_name=business_name,
     )
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
-    system_prompt = str(bootstrap_turn.get("system_prompt") or "")
-    toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "web", "skills", "todo"])
+    system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")
+    toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "web", "skills"])
     owner_user_id = _business_owner_user_id(slug)
     payload = job.payload or {}
     try:

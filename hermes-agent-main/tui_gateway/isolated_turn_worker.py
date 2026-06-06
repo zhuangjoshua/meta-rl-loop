@@ -226,6 +226,7 @@ def _build_agent(payload: dict[str, Any], workspace_root: str):
         "checkpoints_enabled": bool(agent_cfg.get("checkpoints_enabled")),
         "pass_session_id": bool(agent_cfg.get("pass_session_id")),
         "skip_context_files": bool(agent_cfg.get("skip_context_files")),
+        "load_soul_identity": bool(agent_cfg.get("load_soul_identity")),
         "skip_memory": bool(agent_cfg.get("skip_memory")),
     }
 

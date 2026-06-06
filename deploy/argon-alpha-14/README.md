@@ -15,6 +15,12 @@ deploy/argon-alpha-14/bootstrap-host.sh
 deploy/argon-alpha-14/deploy-runtime.sh
 ```
 
+Repair legacy product-service drift on the activation host with:
+
+```bash
+deploy/argon-alpha-14/repair-product-runtime.sh
+```
+
 The operator plane's tracked runtime contract includes Docker because
 `business_claude_agent_task` defaults `product/site` work onto the isolated
 Docker rail. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
@@ -27,6 +33,11 @@ deploy/argon-alpha-14/takyon-dashboard.service
 ```
 
 Deploys should install that unit on the VPS before restarting `takyon-dashboard.service`.
+
+This host is the current product activation node (`TAKYON_NODE_NAME=argon-alpha-14`,
+`TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14`). Product builds may happen elsewhere later,
+but only this host should hold live `product-services/<slug>` trees, write `takyon-product-*.service`
+units, and own product-runtime activation.
 
 The Caddyfile owns:
 

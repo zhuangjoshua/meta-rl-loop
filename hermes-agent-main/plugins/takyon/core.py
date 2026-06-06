@@ -12,10 +12,12 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import stat
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -23,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -7234,13 +7236,70 @@ def _test_app_checkout_url(*, business: str, intent_id: str, origin: str | None 
     return f"local://takyon/checkout/{business}/{intent_id}"
 
 
-def _product_service_publish_root(slug: str) -> Path:
+def _product_service_publish_base() -> Path:
     raw = os.getenv("TAKYON_PRODUCT_SERVICE_ROOT", "").strip()
-    base = Path(raw).expanduser().resolve() if raw else (get_takyon_home() / "product-services").resolve()
+    return Path(raw).expanduser().resolve() if raw else (get_takyon_home() / "product-services").resolve()
+
+
+def _product_service_publish_root(slug: str) -> Path:
+    base = _product_service_publish_base()
     target = (base / _slugify(slug)).resolve()
     if base not in (target, *target.parents):
         raise TakyonError("product service publish root escaped service base")
     return target
+
+
+def _product_activation_node() -> str:
+    return str(os.getenv("TAKYON_PRODUCT_ACTIVATION_NODE", "") or "").strip().lower()
+
+
+def _current_product_node_name() -> str:
+    return str(
+        os.getenv("TAKYON_NODE_NAME")
+        or os.getenv("HOSTNAME")
+        or socket.gethostname()
+        or ""
+    ).strip().lower()
+
+
+def _is_current_product_activation_node() -> bool:
+    activation_node = _product_activation_node()
+    if not activation_node:
+        return True
+    return activation_node == _current_product_node_name()
+
+
+def _product_activation_ssh_target() -> str:
+    return str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_TARGET", "") or "").strip()
+
+
+def _product_activation_remote_runtime() -> Path:
+    raw = os.getenv("TAKYON_PRODUCT_ACTIVATION_REMOTE_RUNTIME", "").strip()
+    return Path(raw).expanduser().resolve() if raw else Path("/opt/takyon/hermes-agent-main")
+
+
+def _product_activation_remote_home() -> Path:
+    raw = os.getenv("TAKYON_PRODUCT_ACTIVATION_REMOTE_HOME", "").strip()
+    return Path(raw).expanduser().resolve() if raw else Path("/opt/takyon/.takyon")
+
+
+def _product_service_working_directory_blocker(root: Path) -> str:
+    resolved = Path(root).resolve()
+    publish_base = _product_service_publish_base()
+    if publish_base in (resolved, *resolved.parents):
+        return ""
+    scratch_root = (Path(tempfile.gettempdir()) / "takyon-workspaces").resolve()
+    if resolved == scratch_root or scratch_root in resolved.parents:
+        return f"refusing to install product service from temporary workspace: {resolved}"
+    businesses_root = (get_takyon_home() / "businesses").resolve()
+    if resolved == businesses_root or businesses_root in resolved.parents:
+        return f"refusing to install product service from business mirror instead of product-services: {resolved}"
+    if publish_base not in (resolved, *resolved.parents):
+        return (
+            "refusing to install product service outside the durable product-services root: "
+            f"{resolved}"
+        )
+    return ""
 
 
 def _product_service_systemd_dir() -> Path:
@@ -7422,6 +7481,9 @@ def _run_product_admin_command(command: list[str], *, timeout_seconds: int = 30)
 def _write_product_service_file(*, slug: str, source_root: Path, port: int, metadata: dict[str, Any]) -> tuple[Path | None, str]:
     systemd_dir = _product_service_systemd_dir()
     service_name = _product_service_name(slug)
+    blocker = _product_service_working_directory_blocker(source_root)
+    if blocker:
+        return None, blocker
     if not _product_deploy_dry_run():
         systemctl = shutil.which("systemctl")
         if not systemctl:
@@ -7475,10 +7537,8 @@ def _write_product_service_file(*, slug: str, source_root: Path, port: int, meta
     return service_file, ""
 
 
-def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
-    target_root = _product_service_publish_root(slug)
+def _copy_product_service_tree(*, source_root: Path, target_root: Path) -> Path:
     target_root.parent.mkdir(parents=True, exist_ok=True)
-
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {
             name
@@ -7490,6 +7550,13 @@ def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
     _make_static_publish_tree_readable(target_root)
     _make_product_publish_path_traversable(target_root)
     return target_root
+
+
+def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
+    return _copy_product_service_tree(
+        source_root=source_root,
+        target_root=_product_service_publish_root(slug),
+    )
 
 
 def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, publish_root: Path | None = None) -> tuple[Path | None, str]:
@@ -7665,7 +7732,61 @@ def _probe_product_public_url(url: str) -> tuple[bool, str]:
     return False, f"public URL probe failed for {url}: {last_error}"
 
 
-def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, Any]:
+def _prune_product_source_build_artifacts(source_root: Path) -> None:
+    for name in ("node_modules", ".next"):
+        target = source_root / name
+        if target.is_symlink() or target.is_file():
+            try:
+                target.unlink()
+            except OSError:
+                continue
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+
+
+@contextmanager
+def _product_activation_ssh_key_file() -> Iterable[Path]:
+    raw_path = str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_KEY", "") or "").strip()
+    if raw_path:
+        path = Path(raw_path).expanduser()
+        if not path.exists():
+            raise TakyonError(f"activation ssh key not found: {path}")
+        yield path
+        return
+    raw_key = (
+        str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_KEY_B64", "") or "").strip()
+        or str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_PRIVATE_KEY_B64", "") or "").strip()
+    )
+    if not raw_key:
+        raise TakyonError(
+            "product activation requires TAKYON_PRODUCT_ACTIVATION_SSH_KEY or "
+            "TAKYON_PRODUCT_ACTIVATION_SSH_KEY_B64 on non-activation nodes"
+        )
+    try:
+        decoded = base64.b64decode(raw_key.encode("utf-8"), validate=True)
+    except Exception:
+        decoded = raw_key.encode("utf-8")
+    fd, tmp_path = tempfile.mkstemp(prefix="takyon-product-activate-", suffix=".key")
+    try:
+        os.close(fd)
+        key_path = Path(tmp_path)
+        key_path.write_bytes(decoded.replace(b"\r\n", b"\n"))
+        key_path.chmod(0o600)
+        yield key_path
+    finally:
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
+
+
+def _publish_next_product_service_prepared(
+    *,
+    source_root: Path,
+    slug: str,
+    publish_target: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "blocked",
         "publish_target": publish_target,
@@ -7677,12 +7798,12 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
         "deploy_kind": "next_systemd_caddy",
         "service_name": _product_service_name(slug),
     }
-    metadata, blocker = _product_next_service_metadata(source_root)
-    if metadata is None:
-        result["blocker"] = (
-            "product surface source exists, but no static publish directory with index.html exists; "
-            f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
-        )
+    blocker = ""
+    metadata_payload = dict(metadata or {})
+    if not metadata_payload:
+        metadata_payload, blocker = _product_next_service_metadata(source_root)
+    if not metadata_payload:
+        result["blocker"] = blocker or "missing Next.js product service metadata"
         return result
     try:
         port = _product_service_port(slug)
@@ -7694,7 +7815,7 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
     except Exception as exc:
         result["blocker"] = f"failed to stage durable product service tree: {exc}"
         return result
-    service_file, blocker = _write_product_service_file(slug=slug, source_root=service_root, port=port, metadata=metadata)
+    service_file, blocker = _write_product_service_file(slug=slug, source_root=service_root, port=port, metadata=metadata_payload)
     result.update({"port": port, "service_file": str(service_file or "")})
     if blocker:
         result["blocker"] = blocker
@@ -7725,6 +7846,204 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
     )
     if _product_deploy_dry_run():
         result["dry_run"] = True
+    return result
+
+
+def _handoff_next_product_service_to_activation_host(
+    *,
+    source_root: Path,
+    slug: str,
+    publish_target: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "blocked",
+        "publish_target": publish_target,
+        "public_url": "",
+        "published_at": "",
+        "publish_root": "",
+        "publish_source_path": "",
+        "blocker": "",
+        "deploy_kind": "next_systemd_caddy",
+        "service_name": _product_service_name(slug),
+    }
+    ssh_target = _product_activation_ssh_target()
+    if not ssh_target:
+        result["blocker"] = (
+            "product publish must activate on "
+            f"{_product_activation_node() or 'the configured activation node'}, but "
+            "TAKYON_PRODUCT_ACTIVATION_SSH_TARGET is not set on this node"
+        )
+        return result
+    remote_runtime = _product_activation_remote_runtime()
+    remote_home = _product_activation_remote_home()
+    remote_python = remote_runtime / ".venv" / "bin" / "python"
+    source_basename = source_root.name
+    with tempfile.TemporaryDirectory(prefix=f"takyon-product-handoff-{_slugify(slug)}-") as tmpdir:
+        tar_path = Path(tmpdir) / "artifact.tar"
+        remote_tar = f"/tmp/takyon-product-activate-{_slugify(slug)}-{uuid.uuid4().hex}.tar"
+        with tarfile.open(tar_path, "w") as archive:
+            archive.add(
+                source_root,
+                arcname=source_basename,
+                filter=lambda info: None
+                if (
+                    info.name.endswith("/.git")
+                    or "/.git/" in info.name
+                    or info.name.endswith("/.cache")
+                    or "/.cache/" in info.name
+                    or info.name.endswith("/__pycache__")
+                    or "/__pycache__/" in info.name
+                    or info.name.endswith(".pyc")
+                )
+                else info,
+            )
+        remote_script = dedent(
+            f"""
+            set -euo pipefail
+            cd {shlex.quote(str(remote_runtime))}
+            env TAKYON_HOME={shlex.quote(str(remote_home))} HOME=/root PYTHONUNBUFFERED=1 \\
+              TAKYON_REMOTE_ARTIFACT={shlex.quote(remote_tar)} \\
+              TAKYON_REMOTE_ARTIFACT_ROOT={shlex.quote(source_basename)} \\
+              TAKYON_REMOTE_ARTIFACT_SLUG={shlex.quote(_slugify(slug))} \\
+              TAKYON_REMOTE_PUBLISH_TARGET={shlex.quote(publish_target)} \\
+              {shlex.quote(str(remote_python))} - <<'PY'
+            import json
+            import os
+            import shutil
+            import tarfile
+            import tempfile
+            from pathlib import Path
+
+            from plugins.takyon import core as takyon_core
+
+            tar_path = Path(os.environ["TAKYON_REMOTE_ARTIFACT"])
+            source_basename = os.environ["TAKYON_REMOTE_ARTIFACT_ROOT"]
+            slug = os.environ["TAKYON_REMOTE_ARTIFACT_SLUG"]
+            publish_target = os.environ["TAKYON_REMOTE_PUBLISH_TARGET"]
+            extract_root = Path(tempfile.mkdtemp(prefix=f"takyon-product-activate-{{slug}}-"))
+            try:
+                with tarfile.open(tar_path) as archive:
+                    members = archive.getmembers()
+                    for member in members:
+                        member_path = (extract_root / member.name).resolve()
+                        if extract_root.resolve() not in (member_path, *member_path.parents):
+                            raise RuntimeError(f"artifact escaped activation temp root: {{member.name}}")
+                    archive.extractall(extract_root)
+                result = takyon_core._publish_next_product_service_prepared(
+                    source_root=extract_root / source_basename,
+                    slug=slug,
+                    publish_target=publish_target,
+                )
+                print(json.dumps(result))
+            finally:
+                shutil.rmtree(extract_root, ignore_errors=True)
+                try:
+                    tar_path.unlink()
+                except OSError:
+                    pass
+            PY
+            """
+        ).strip()
+        try:
+            with _product_activation_ssh_key_file() as key_path:
+                scp = subprocess.run(
+                    [
+                        "scp",
+                        "-i",
+                        str(key_path),
+                        "-o",
+                        "IdentitiesOnly=yes",
+                        "-o",
+                        "StrictHostKeyChecking=accept-new",
+                        str(tar_path),
+                        f"{ssh_target}:{remote_tar}",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=300,
+                )
+                if scp.returncode != 0:
+                    result["blocker"] = _truncate_text(
+                        "\n".join(part for part in (scp.stdout.strip(), scp.stderr.strip()) if part)
+                        or "scp handoff failed",
+                        4000,
+                    )
+                    return result
+                ssh = subprocess.run(
+                    [
+                        "ssh",
+                        "-i",
+                        str(key_path),
+                        "-o",
+                        "IdentitiesOnly=yes",
+                        "-o",
+                        "StrictHostKeyChecking=accept-new",
+                        ssh_target,
+                        remote_script,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=600,
+                )
+        except Exception as exc:
+            result["blocker"] = f"failed to hand off product activation to {ssh_target}: {exc}"
+            return result
+    if ssh.returncode != 0:
+        result["blocker"] = _truncate_text(
+            "\n".join(part for part in (ssh.stdout.strip(), ssh.stderr.strip()) if part)
+            or f"activation handoff to {ssh_target} failed",
+            4000,
+        )
+        return result
+    lines = [line.strip() for line in ssh.stdout.splitlines() if line.strip()]
+    if not lines:
+        result["blocker"] = f"activation handoff to {ssh_target} returned no result"
+        return result
+    try:
+        remote_result = json.loads(lines[-1])
+    except Exception as exc:
+        result["blocker"] = f"activation handoff to {ssh_target} returned invalid JSON: {exc}"
+        return result
+    if isinstance(remote_result, dict):
+        remote_result.setdefault("activation_mode", "remote_ssh")
+        remote_result.setdefault("activation_target", ssh_target)
+        return remote_result
+    result["blocker"] = f"activation handoff to {ssh_target} returned unexpected payload"
+    return result
+
+
+def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, Any]:
+    metadata, blocker = _product_next_service_metadata(source_root)
+    if metadata is None:
+        return {
+            "status": "blocked",
+            "publish_target": publish_target,
+            "public_url": "",
+            "published_at": "",
+            "publish_root": "",
+            "publish_source_path": "",
+            "blocker": (
+            "product surface source exists, but no static publish directory with index.html exists; "
+            f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
+            ),
+            "deploy_kind": "next_systemd_caddy",
+            "service_name": _product_service_name(slug),
+        }
+    if _is_current_product_activation_node():
+        result = _publish_next_product_service_prepared(
+            source_root=source_root,
+            slug=slug,
+            publish_target=publish_target,
+            metadata=metadata,
+        )
+    else:
+        result = _handoff_next_product_service_to_activation_host(
+            source_root=source_root,
+            slug=slug,
+            publish_target=publish_target,
+        )
+    if result.get("status") == "published":
+        _prune_product_source_build_artifacts(source_root)
     return result
 
 
@@ -18398,11 +18717,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             operator_user_id = str(business_row.get("owner_user_id") or store._active_operator_user_id() or "").strip()
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
-        app_summary = store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
-        app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
-        surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
-        if not isinstance(surface_for_worker, dict):
-            surface_for_worker = {}
         refresh_surface = _boolish(args.get("refresh_surface"), default=False)
         normalized_workspace = workspace_rel.strip("/").lower()
         workspace_targets_product_surface = (
@@ -18410,43 +18724,19 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or normalized_workspace.startswith("product/")
             or normalized_workspace in {"site", "website"}
         )
+        docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
         if not worker_session_bound and not refresh_surface:
             refresh_surface = workspace_targets_product_surface
-        if refresh_surface and workspace_targets_product_surface:
-            _enforce_canonical_product_surface_source_path(
-                business=business,
-                existing_source_path=str(surface_for_worker.get("source_path") or "").strip(),
-                requested_source_path=workspace_rel,
-                context="product surface refresh",
-            )
-
-        business_root = store._business_root(business).resolve()
-        workspace_path = store._resolve_business_file(
-            business,
-            workspace_rel,
-            require_output_root=True,
-            field="workspace",
-        ).resolve()
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        if not workspace_path.is_dir():
-            raise TakyonError(f"workspace is not a directory: {workspace_rel}")
-        if business_root not in (workspace_path, *workspace_path.parents):
-            raise TakyonError("workspace escaped business root")
-
-        script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
-        if not script.exists():
-            raise TakyonError(f"Claude Agent SDK helper missing: {script}")
-
-        dependency_state = _ensure_repo_node_dependencies(("@anthropic-ai/claude-agent-sdk",))
-        if not dependency_state.get("success"):
-            missing = ", ".join(dependency_state.get("missing_packages") or ["@anthropic-ai/claude-agent-sdk"])
-            raise TakyonError(
-                "Claude Agent SDK dependencies unavailable before worker launch: "
-                f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
-            )
-
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
-        docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
+        workspace_context = nullcontext(None)
+        if docker_isolated_worker:
+            from . import storage
+
+            workspace_context = storage.mounted_business_workspace(
+                store._workspace_storage_backend(),
+                business,
+                owner_label=str(operator_user_id or business),
+            )
         if not docker_isolated_worker:
             node = _resolve_runtime_executable("node")
             if not node:
@@ -18494,41 +18784,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip()
         guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
         resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
-        workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_rel)
-        plans_configured = _app_summary_has_configured_plans(app) if _workspace_needs_runtime_ui_contract(workspace_rel) else False
-        if _workspace_needs_runtime_ui_contract(workspace_rel):
-            _materialize_subuser_app_kit(
-                workspace_path,
-                slug=business,
-                surface=surface_for_worker,
-                plans=app.get("plans") if isinstance(app, dict) else None,
-            )
-        worker_instruction_parts = [instruction.rstrip()]
-        if guidance_block:
-            worker_instruction_parts.append(guidance_block)
-        if _workspace_needs_customer_ai_copy_contract(workspace_rel):
-            worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
-        if _workspace_needs_runtime_ui_contract(workspace_rel):
-            runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
-            if runtime_ui_contract:
-                worker_instruction_parts.append(runtime_ui_contract)
-            worker_instruction_parts.append(_subuser_app_worker_contract_block(surface_for_worker, plans_configured=plans_configured))
-            worker_instruction_parts.append(_subuser_app_kit_contract_block(surface_for_worker))
-        worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
-        worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
-        payload_base = {
-            "business": business,
-            "workspace": workspace_rel,
-            "cwd": str(workspace_path),
-            "root": str(workspace_path),
-            "model": model,
-            "effort": effort,
-            "maxTurns": max_turns,
-            "timeoutMs": timeout_ms,
-            "maxBudgetUsd": budget_usd,
-            "allowBash": bool(_workspace_needs_runtime_ui_contract(workspace_rel)),
-        }
-
         worker_invoked = True
         install_surface = _boolish(args.get("install"), default=True)
         refresh_timeout_seconds = _clamp_int(
@@ -18540,222 +18795,299 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         sdk_result: dict[str, Any] = {}
         pretend_findings: list[dict[str, Any]] = []
         surface_refresh: dict[str, Any] | None = None
-        surface = surface_for_worker if isinstance(surface_for_worker, dict) else {}
-        requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-        publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
-        active_worker_instruction = worker_instruction
         worker_attempts = 0
         local_repair_retries: list[str] = []
-        max_local_repair_retries = 1 if refresh_surface and _workspace_needs_runtime_ui_contract(workspace_rel) else 0
-        while True:
-            worker_attempts += 1
-            attempt_payload = {
-                **payload_base,
-                "instruction": active_worker_instruction,
-            }
-            started_line = (
-                f"Claude worker started for {workspace_rel}."
-                if worker_attempts == 1
-                else f"Claude worker started for {workspace_rel} (attempt {worker_attempts})."
-            )
-            _record_claude_agent_runtime_event(
-                business=business,
-                workspace_rel=workspace_rel,
-                status="output",
-                detail=started_line,
-                line=started_line,
-            )
+        agent_record: dict[str, Any] | None = None
+        with workspace_context as mounted_home:
+            active_store = store
             if docker_isolated_worker:
-                run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
-                    payload=attempt_payload,
-                    workspace_path=workspace_path,
-                    timeout_ms=timeout_ms,
-                )
-                proc = _run_claude_agent_task_process(
-                    run_cmd=run_cmd,
-                    payload=docker_payload,
-                    cwd=worker_cwd,
-                    timeout_ms=timeout_ms,
-                    env=worker_env,
+                active_store = TakyonStore(root=mounted_home, operator_user_id=operator_user_id or None)
+                active_store._workspace_sync_cache.add(_slugify(business))
+
+            app_summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
+            app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
+            surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
+            if not isinstance(surface_for_worker, dict):
+                surface_for_worker = {}
+            if refresh_surface and workspace_targets_product_surface:
+                _enforce_canonical_product_surface_source_path(
                     business=business,
-                    workspace_rel=workspace_rel,
-                )
-            else:
-                proc = _run_claude_agent_task_process(
-                    run_cmd=[node, str(script)],
-                    payload=attempt_payload,
-                    cwd=str(_repo_root()),
-                    timeout_ms=timeout_ms,
-                    env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
-                    business=business,
-                    workspace_rel=workspace_rel,
-                )
-            stdout = proc.stdout.strip()
-            stderr = proc.stderr.strip()
-            try:
-                sdk_result = json.loads(stdout) if stdout else {}
-            except json.JSONDecodeError:
-                sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
-            if proc.returncode != 0:
-                sdk_result.setdefault("success", False)
-                sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
-            if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
-                sdk_result["blocked"] = True
-            if sdk_result.get("success"):
-                prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
-                if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
-                    sdk_result["workspace_prefix_repair"] = prefix_repair
-                if prefix_repair.get("blocked"):
-                    sdk_result["success"] = False
-                    sdk_result["error"] = (
-                        "Claude Agent SDK output blocked because source files were written under a "
-                        f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
-                    )
-            pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
-            if pretend_findings:
-                sdk_result["success"] = False
-                sdk_result["pretend_product_findings"] = pretend_findings
-                sdk_result["error"] = (
-                    "Claude Agent SDK output blocked by Hermes no-pretend contract: "
-                    "product source contains fake/demo auth, account, checkout, or integration state. "
-                    "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
-                )
-            if sdk_result.get("success"):
-                summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
-                if summary_text:
-                    _record_claude_agent_runtime_event(
-                        business=business,
-                        workspace_rel=workspace_rel,
-                        status="completed",
-                        detail=summary_text,
-                        line=summary_text,
-                    )
-            else:
-                error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
-                if error_text:
-                    _record_claude_agent_runtime_event(
-                        business=business,
-                        workspace_rel=workspace_rel,
-                        status="failed",
-                        detail=error_text,
-                        line=error_text,
-                    )
-            if sdk_result.get("success"):
-                # Claude Agent SDK edits the isolated workspace tree directly, so persist those writes before
-                # any later refresh/publish/agent-record step can fail and let the scratch workspace be
-                # discarded. Without this sync, successful site work vanishes when the enclosing worker turn
-                # exits uncleanly.
-                store._sync_business_workspace_remote(business)
-            surface_refresh = None
-            if sdk_result.get("success") and refresh_surface:
-                summary = store.read(scope=f"business:{business}", query="summary", include=["app"])
-                app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
-                surface = app.get("surface") or app.get("surface_contract") or {}
-                if not isinstance(surface, dict):
-                    surface = {}
-                requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-                publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
-                surface_refresh_source_path = _enforce_canonical_product_surface_source_path(
-                    business=business,
-                    existing_source_path=str(surface.get("source_path") or "").strip(),
+                    existing_source_path=str(surface_for_worker.get("source_path") or "").strip(),
                     requested_source_path=workspace_rel,
                     context="product surface refresh",
                 )
-                receipt_id = hashlib.sha256(
-                    f"{idempotency_key}:surface-refresh:{workspace_rel}:attempt:{worker_attempts}".encode("utf-8")
-                ).hexdigest()[:32]
-                surface_refresh = _finalize_product_surface_refresh(
-                    store=store,
-                    business=business,
-                    surface=surface,
-                    source_path=surface_refresh_source_path,
-                    publish_target=_product_publish_target(business, surface.get("publish_target")),
-                    requested_publish_policy=requested_publish_policy,
-                    publish_policy=publish_policy,
-                    install=install_surface,
-                    timeout_seconds=refresh_timeout_seconds,
-                    receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
-                    refresh_source="business_claude_agent_task",
+
+            business_root = active_store._business_root(business).resolve()
+            workspace_path = active_store._resolve_business_file(
+                business,
+                workspace_rel,
+                require_output_root=True,
+                field="workspace",
+            ).resolve()
+            workspace_path.mkdir(parents=True, exist_ok=True)
+            if not workspace_path.is_dir():
+                raise TakyonError(f"workspace is not a directory: {workspace_rel}")
+            if business_root not in (workspace_path, *workspace_path.parents):
+                raise TakyonError("workspace escaped business root")
+
+            script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
+            if not script.exists():
+                raise TakyonError(f"Claude Agent SDK helper missing: {script}")
+
+            dependency_state = _ensure_repo_node_dependencies(("@anthropic-ai/claude-agent-sdk",))
+            if not dependency_state.get("success"):
+                missing = ", ".join(dependency_state.get("missing_packages") or ["@anthropic-ai/claude-agent-sdk"])
+                raise TakyonError(
+                    "Claude Agent SDK dependencies unavailable before worker launch: "
+                    f"missing {missing}. {dependency_state.get('error') or 'run npm install in the Takyon repo root'}"
                 )
-            should_retry_local_repair = (
-                sdk_result.get("success")
-                and surface_refresh is not None
-                and len(local_repair_retries) < max_local_repair_retries
-                and _surface_refresh_supports_local_repair_retry(surface_refresh)
-            )
-            if should_retry_local_repair:
-                blocker = str(surface_refresh.get("blocker") or _surface_refresh_exact_blocker(surface_refresh)).strip()
-                if blocker:
-                    local_repair_retries.append(blocker)
-                    retry_note = _truncate_text(blocker, 280)
-                    _record_claude_agent_runtime_event(
+
+            workspace_contract = WORKSPACE_PATH_CONTRACT.format(workspace=workspace_rel)
+            plans_configured = _app_summary_has_configured_plans(app) if _workspace_needs_runtime_ui_contract(workspace_rel) else False
+            if _workspace_needs_runtime_ui_contract(workspace_rel):
+                _materialize_subuser_app_kit(
+                    workspace_path,
+                    slug=business,
+                    surface=surface_for_worker,
+                    plans=app.get("plans") if isinstance(app, dict) else None,
+                )
+            worker_instruction_parts = [instruction.rstrip()]
+            if guidance_block:
+                worker_instruction_parts.append(guidance_block)
+            if _workspace_needs_customer_ai_copy_contract(workspace_rel):
+                worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
+            if _workspace_needs_runtime_ui_contract(workspace_rel):
+                runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
+                if runtime_ui_contract:
+                    worker_instruction_parts.append(runtime_ui_contract)
+                worker_instruction_parts.append(_subuser_app_worker_contract_block(surface_for_worker, plans_configured=plans_configured))
+                worker_instruction_parts.append(_subuser_app_kit_contract_block(surface_for_worker))
+            worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
+            worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
+            payload_base = {
+                "business": business,
+                "workspace": workspace_rel,
+                "cwd": str(workspace_path),
+                "root": str(workspace_path),
+                "model": model,
+                "effort": effort,
+                "maxTurns": max_turns,
+                "timeoutMs": timeout_ms,
+                "maxBudgetUsd": budget_usd,
+                "allowBash": bool(_workspace_needs_runtime_ui_contract(workspace_rel)),
+            }
+
+            surface = surface_for_worker if isinstance(surface_for_worker, dict) else {}
+            requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+            publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+            active_worker_instruction = worker_instruction
+            max_local_repair_retries = 1 if refresh_surface and _workspace_needs_runtime_ui_contract(workspace_rel) else 0
+            while True:
+                worker_attempts += 1
+                attempt_payload = {
+                    **payload_base,
+                    "instruction": active_worker_instruction,
+                }
+                started_line = (
+                    f"Claude worker started for {workspace_rel}."
+                    if worker_attempts == 1
+                    else f"Claude worker started for {workspace_rel} (attempt {worker_attempts})."
+                )
+                _record_claude_agent_runtime_event(
+                    business=business,
+                    workspace_rel=workspace_rel,
+                    status="output",
+                    detail=started_line,
+                    line=started_line,
+                )
+                if docker_isolated_worker:
+                    run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
+                        payload=attempt_payload,
+                        workspace_path=workspace_path,
+                        timeout_ms=timeout_ms,
+                    )
+                    proc = _run_claude_agent_task_process(
+                        run_cmd=run_cmd,
+                        payload=docker_payload,
+                        cwd=worker_cwd,
+                        timeout_ms=timeout_ms,
+                        env=worker_env,
                         business=business,
                         workspace_rel=workspace_rel,
-                        status="output",
-                        detail=f"Retrying local product repair once: {retry_note}",
-                        line=f"Retrying local product repair once: {retry_note}",
                     )
-                    active_worker_instruction = _worker_local_repair_instruction(
-                        worker_instruction,
-                        blocker=blocker,
-                        attempt_number=worker_attempts + 1,
+                else:
+                    proc = _run_claude_agent_task_process(
+                        run_cmd=[node, str(script)],
+                        payload=attempt_payload,
+                        cwd=str(_repo_root()),
+                        timeout_ms=timeout_ms,
+                        env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
+                        business=business,
+                        workspace_rel=workspace_rel,
                     )
-                    continue
-            break
+                stdout = proc.stdout.strip()
+                stderr = proc.stderr.strip()
+                try:
+                    sdk_result = json.loads(stdout) if stdout else {}
+                except json.JSONDecodeError:
+                    sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+                if proc.returncode != 0:
+                    sdk_result.setdefault("success", False)
+                    sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+                if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+                    sdk_result["blocked"] = True
+                if sdk_result.get("success"):
+                    prefix_repair = _repair_nested_workspace_prefix(workspace_path, workspace_rel)
+                    if prefix_repair.get("repaired") or prefix_repair.get("blocked"):
+                        sdk_result["workspace_prefix_repair"] = prefix_repair
+                    if prefix_repair.get("blocked"):
+                        sdk_result["success"] = False
+                        sdk_result["error"] = (
+                            "Claude Agent SDK output blocked because source files were written under a "
+                            f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
+                        )
+                pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
+                if pretend_findings:
+                    sdk_result["success"] = False
+                    sdk_result["pretend_product_findings"] = pretend_findings
+                    sdk_result["error"] = (
+                        "Claude Agent SDK output blocked by Hermes no-pretend contract: "
+                        "product source contains fake/demo auth, account, checkout, or integration state. "
+                        "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
+                    )
+                if sdk_result.get("success"):
+                    summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
+                    if summary_text:
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="completed",
+                            detail=summary_text,
+                            line=summary_text,
+                        )
+                else:
+                    error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
+                    if error_text:
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="failed",
+                            detail=error_text,
+                            line=error_text,
+                        )
+                if sdk_result.get("success"):
+                    # Persist successful worker edits before later refresh/publish logic can fail.
+                    active_store._sync_business_workspace_remote(business)
+                surface_refresh = None
+                if sdk_result.get("success") and refresh_surface:
+                    summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
+                    app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+                    surface = app.get("surface") or app.get("surface_contract") or {}
+                    if not isinstance(surface, dict):
+                        surface = {}
+                    requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
+                    publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
+                    surface_refresh_source_path = _enforce_canonical_product_surface_source_path(
+                        business=business,
+                        existing_source_path=str(surface.get("source_path") or "").strip(),
+                        requested_source_path=workspace_rel,
+                        context="product surface refresh",
+                    )
+                    receipt_id = hashlib.sha256(
+                        f"{idempotency_key}:surface-refresh:{workspace_rel}:attempt:{worker_attempts}".encode("utf-8")
+                    ).hexdigest()[:32]
+                    surface_refresh = _finalize_product_surface_refresh(
+                        store=active_store,
+                        business=business,
+                        surface=surface,
+                        source_path=surface_refresh_source_path,
+                        publish_target=_product_publish_target(business, surface.get("publish_target")),
+                        requested_publish_policy=requested_publish_policy,
+                        publish_policy=publish_policy,
+                        install=install_surface,
+                        timeout_seconds=refresh_timeout_seconds,
+                        receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
+                        refresh_source="business_claude_agent_task",
+                    )
+                    active_store._sync_business_workspace_remote(business)
+                should_retry_local_repair = (
+                    sdk_result.get("success")
+                    and surface_refresh is not None
+                    and len(local_repair_retries) < max_local_repair_retries
+                    and _surface_refresh_supports_local_repair_retry(surface_refresh)
+                )
+                if should_retry_local_repair:
+                    blocker = str(surface_refresh.get("blocker") or _surface_refresh_exact_blocker(surface_refresh)).strip()
+                    if blocker:
+                        local_repair_retries.append(blocker)
+                        retry_note = _truncate_text(blocker, 280)
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="output",
+                            detail=f"Retrying local product repair once: {retry_note}",
+                            line=f"Retrying local product repair once: {retry_note}",
+                        )
+                        active_worker_instruction = _worker_local_repair_instruction(
+                            worker_instruction,
+                            blocker=blocker,
+                            attempt_number=worker_attempts + 1,
+                        )
+                        continue
+                break
+            status = "completed" if sdk_result.get("success") else "failed"
+            if sdk_result.get("blocked"):
+                status = "blocked"
+            if surface_refresh and surface_refresh.get("blocker"):
+                status = "blocked"
+            record_operations: list[dict[str, Any]] = []
+            if surface_refresh:
+                record_operations.extend(
+                    _product_surface_refresh_operations(
+                        business=business,
+                        surface_refresh=surface_refresh,
+                        surface=surface,
+                        publish_target=_product_publish_target(business, surface.get("publish_target")),
+                        publish_policy=publish_policy,
+                        requested_publish_policy=requested_publish_policy,
+                        activate_on_success=True,
+                    )
+                )
+            record_operations.append(
+                {
+                    "action": "agent.record",
+                    "business": business,
+                    "scope": f"business:{business}/workspace:{workspace_rel}",
+                    "status": status,
+                    "prompt": active_worker_instruction,
+                    "result": {
+                        "source": "claude-agent-sdk",
+                        "workspace": workspace_rel,
+                        "model": model,
+                        "guidance_skills": resolved_guidance_skills,
+                        "summary": sdk_result.get("summary") or "",
+                        "error": sdk_result.get("error") or None,
+                        "blocked": bool(sdk_result.get("blocked")),
+                        "worker_attempts": worker_attempts,
+                        "local_repair_retries": local_repair_retries,
+                        "pretend_product_findings": pretend_findings,
+                        "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
+                        "surface_refresh": surface_refresh,
+                    },
+                }
+            )
+            agent_record = active_store.commit(
+                scope=f"business:{business}",
+                operations=record_operations,
+                idempotency_key=f"{idempotency_key}:claude-sdk-agent-record",
+                reason=args.get("reason") or "Claude Agent SDK task record",
+                actor=args.get("actor") or "agent",
+            )
         operator_budget = _finalize_operator_task_budget(
             operator_user_id=operator_user_id,
             reservation_key=str(operator_budget.get("reservation_key") or ""),
             reserved_cents=int(operator_budget.get("reserved_cents") or 0),
             consume_reserved=worker_invoked,
-        )
-        status = "completed" if sdk_result.get("success") else "failed"
-        if sdk_result.get("blocked"):
-            status = "blocked"
-        if surface_refresh and surface_refresh.get("blocker"):
-            status = "blocked"
-
-        record_operations: list[dict[str, Any]] = []
-        if surface_refresh:
-            record_operations.extend(
-                _product_surface_refresh_operations(
-                    business=business,
-                    surface_refresh=surface_refresh,
-                    surface=surface,
-                    publish_target=_product_publish_target(business, surface.get("publish_target")),
-                    publish_policy=publish_policy,
-                    requested_publish_policy=requested_publish_policy,
-                    activate_on_success=True,
-                )
-            )
-        record_operations.append(
-            {
-                "action": "agent.record",
-                "business": business,
-                "scope": f"business:{business}/workspace:{workspace_rel}",
-                "status": status,
-                "prompt": active_worker_instruction,
-                "result": {
-                    "source": "claude-agent-sdk",
-                    "workspace": workspace_rel,
-                    "model": model,
-                    "guidance_skills": resolved_guidance_skills,
-                    "summary": sdk_result.get("summary") or "",
-                    "error": sdk_result.get("error") or None,
-                    "blocked": bool(sdk_result.get("blocked")),
-                    "worker_attempts": worker_attempts,
-                    "local_repair_retries": local_repair_retries,
-                    "pretend_product_findings": pretend_findings,
-                    "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
-                    "surface_refresh": surface_refresh,
-                },
-            }
-        )
-        agent_record = store.commit(
-            scope=f"business:{business}",
-            operations=record_operations,
-            idempotency_key=f"{idempotency_key}:claude-sdk-agent-record",
-            reason=args.get("reason") or "Claude Agent SDK task record",
-            actor=args.get("actor") or "agent",
         )
 
         result_payload = {

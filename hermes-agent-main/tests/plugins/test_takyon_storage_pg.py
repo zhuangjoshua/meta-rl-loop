@@ -318,6 +318,27 @@ def test_with_business_workspace_can_sync_partial_progress_on_exception(tmp_path
     assert (resumed / "metrics" / "summary.md").read_text() == "partial progress\n"
 
 
+def test_mounted_business_workspace_syncs_down_and_cleans_without_syncing_back(tmp_path):
+    backend = _backend(tmp_path)
+    seed = tmp_path / "seed"
+    _seed_workspace(seed)
+    storage.sync_up(backend, "biz-x", seed)
+    before = backend.list_digests(storage.object_prefix("biz-x"))
+
+    home_ref: Path | None = None
+    with storage.mounted_business_workspace(backend, "biz-x", owner_label="tester") as home:
+        home_ref = home
+        scratch = home / "businesses" / "biz-x"
+        assert (scratch / "research" / "strategy.md").exists()
+        (scratch / "metrics").mkdir(parents=True, exist_ok=True)
+        (scratch / "metrics" / "summary.md").write_text("scratch only\n")
+
+    assert home_ref is not None
+    assert not home_ref.exists()
+    after = backend.list_digests(storage.object_prefix("biz-x"))
+    assert after == before
+
+
 def test_sync_excludes_dependency_and_build_caches(tmp_path):
     backend = _backend(tmp_path)
     src = tmp_path / "src"

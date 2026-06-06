@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 BOOTSTRAP_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/bootstrap-host.sh"
+REPAIR_PRODUCT_RUNTIME_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/repair-product-runtime.sh"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
@@ -46,6 +47,11 @@ fi
 
 if [[ ! -f "$SEED_XURL_AUTH_SCRIPT" ]]; then
   echo "xurl auth seed script not found: $SEED_XURL_AUTH_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$REPAIR_PRODUCT_RUNTIME_SCRIPT" ]]; then
+  echo "repair script not found: $REPAIR_PRODUCT_RUNTIME_SCRIPT" >&2
   exit 1
 fi
 
@@ -97,6 +103,12 @@ TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
   "$SEED_XURL_AUTH_SCRIPT"
+
+TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
+TAKYON_STOP_CORE_SERVICES=1 \
+  "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
