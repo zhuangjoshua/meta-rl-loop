@@ -1248,6 +1248,26 @@ def _business_bootstrap_instruction(
     return "\n".join(lines)
 
 
+def _ceo_bootstrap_turn_config(
+    slug: str,
+    goal: str,
+    active_mode: str,
+    *,
+    business_name: str = "",
+) -> dict[str, Any]:
+    return {
+        "user_prompt": _business_bootstrap_instruction(
+            slug,
+            goal,
+            active_mode,
+            business_name=business_name,
+        ),
+        "system_prompt": _load_ceo_prompt(),
+        "enabled_toolsets": ["takyon", "web", "skills"],
+        "max_turns": _DEFAULT_BOOTSTRAP_MAX_TURNS,
+    }
+
+
 def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
     try:
         from . import jobs, worker

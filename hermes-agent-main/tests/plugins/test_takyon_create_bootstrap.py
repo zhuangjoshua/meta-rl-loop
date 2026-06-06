@@ -7,7 +7,7 @@ def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
 
     observed = {"scheduled_inline": False, "enqueued": None}
-    state = {"business": {"slug": "latexflow", "mode": "test"}}
+    state = {"business": {"slug": "latexflow", "mode": "live"}}
 
     class FakeStore:
         def __init__(self, *args, **kwargs):
@@ -45,7 +45,7 @@ def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
 
     result = takyon_cli.run_takyon_command(
-        ["create", "--test", "--schedule", "every 6h", "latexflow", "overleaf competitor"],
+        ["create", "--live", "--schedule", "every 6h", "latexflow", "overleaf competitor"],
         model="",
         max_turns=7,
     )
@@ -54,7 +54,7 @@ def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
     assert observed["enqueued"] == {
         "slug": "latexflow",
         "goal": "overleaf competitor",
-        "mode": "test",
+        "mode": "live",
         "schedule": "every 6h",
         "max_turns": 7,
     }
@@ -66,7 +66,7 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
 
     observed = {"enqueued": None}
-    state = {"business": {"slug": "latexflow", "mode": "test"}}
+    state = {"business": {"slug": "latexflow", "mode": "live"}}
 
     class FakeStore:
         def __init__(self, *args, **kwargs):
@@ -102,7 +102,7 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
 
     takyon_cli.run_takyon_command(
-        ["create", "--test", "latexflow", "overleaf competitor"],
+        ["create", "--live", "latexflow", "overleaf competitor"],
         model="",
         max_turns=30,
     )
@@ -110,7 +110,7 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
     assert observed["enqueued"] == {
         "slug": "latexflow",
         "goal": "overleaf competitor",
-        "mode": "test",
+        "mode": "live",
         "schedule": "every 6h",
         "max_turns": 20,
     }

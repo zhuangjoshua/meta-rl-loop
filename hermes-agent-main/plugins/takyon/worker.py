@@ -900,9 +900,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     from gateway.session_context import clear_session_vars, set_session_vars
 
     from .cli import (
-        _business_bootstrap_instruction,
         _business_workspace_execution_context,
-        _load_ceo_prompt,
+        _ceo_bootstrap_turn_config,
     )
     from .core import TakyonStore
 
@@ -913,13 +912,15 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     active_mode = "live"
     goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
     business_name = str((business or {}).get("name") or "").strip()
-    user_prompt = _business_bootstrap_instruction(
+    bootstrap_turn = _ceo_bootstrap_turn_config(
         slug,
         goal,
         active_mode,
         business_name=business_name,
     )
-    system_prompt = _load_ceo_prompt()
+    user_prompt = str(bootstrap_turn.get("user_prompt") or "")
+    system_prompt = str(bootstrap_turn.get("system_prompt") or "")
+    toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "web", "skills", "todo"])
     owner_user_id = _business_owner_user_id(slug)
     payload = job.payload or {}
     try:
@@ -961,7 +962,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 slug=slug,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                toolsets=["takyon", "web", "skills", "todo"],
+                toolsets=toolsets,
                 max_turns=max_turns,
                 inactivity_limit=inactivity_limit,
                 progress=progress,

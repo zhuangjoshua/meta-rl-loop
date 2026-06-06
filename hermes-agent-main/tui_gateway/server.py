@@ -4,6 +4,7 @@ import concurrent.futures
 import contextlib
 import contextvars
 import copy
+import importlib
 import json
 import logging
 import mimetypes
@@ -18,7 +19,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agent.skill_utils import parse_frontmatter
 from takyon_constants import get_takyon_home
@@ -1960,6 +1961,8 @@ def _build_isolated_turn_payload(
     *,
     operator_user_id: str,
     business_slug: str,
+    system_message: str | None = None,
+    max_iterations_override: int | None = None,
 ) -> dict[str, Any]:
     gateway_ctx = getattr(agent, "_takyon_operator_gateway_context", None)
     requested_provider = str(
@@ -1982,7 +1985,11 @@ def _build_isolated_turn_payload(
             "base_url": upstream_base_url,
         },
         "agent_config": {
-            "max_iterations": int(getattr(agent, "max_iterations", 90) or 90),
+            "max_iterations": int(
+                max_iterations_override
+                or getattr(agent, "max_iterations", 90)
+                or 90
+            ),
             "verbose_logging": bool(session.get("tool_progress_mode") == "verbose"),
             "reasoning_config": getattr(agent, "reasoning_config", None),
             "service_tier": getattr(agent, "service_tier", None),
@@ -2007,6 +2014,7 @@ def _build_isolated_turn_payload(
             "skip_context_files": bool(getattr(agent, "skip_context_files", False)),
             "skip_memory": bool(getattr(agent, "skip_memory", False)),
         },
+        "system_message": system_message or None,
     }
 
 
@@ -2093,6 +2101,8 @@ def _run_isolated_gateway_turn(
     operator_user_id: str,
     business_slug: str,
     streamer,
+    system_message_override: str | None = None,
+    max_iterations_override: int | None = None,
 ) -> dict[str, Any]:
     payload = _build_isolated_turn_payload(
         session,
@@ -2101,6 +2111,8 @@ def _run_isolated_gateway_turn(
         history,
         operator_user_id=operator_user_id,
         business_slug=business_slug,
+        system_message=system_message_override,
+        max_iterations_override=max_iterations_override,
     )
     proc = subprocess.Popen(
         [sys.executable, "-m", "tui_gateway.isolated_turn_worker"],
@@ -3653,34 +3665,15 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4009, "session busy")
         session["running"] = True
 
-    _start_agent_build(sid, session)
-
-    def run_after_agent_ready() -> None:
-        err = _wait_agent(session, rid)
-        if err:
-            _emit(
-                "error",
-                sid,
-                {
-                    "message": err.get("error", {}).get(
-                        "message", "agent initialization failed"
-                    )
-                },
-            )
-            with session["history_lock"]:
-                session["running"] = False
-            return
-        _run_prompt_submit(
-            rid,
-            sid,
-            session,
-            text,
-            display_text=text,
-            contextualize_takyon=True,
-            create_in_test_mode=create_in_test_mode,
-        )
-
-    threading.Thread(target=run_after_agent_ready, daemon=True).start()
+    _start_streaming_session_turn(
+        rid,
+        sid,
+        session,
+        text,
+        display_text=text,
+        contextualize_takyon=True,
+        create_in_test_mode=create_in_test_mode,
+    )
     return _ok(rid, {"status": "streaming"})
 
 
@@ -3783,6 +3776,67 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
+def _history_without_latest_user_message(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    trimmed = list(messages)
+    for index in range(len(trimmed) - 1, -1, -1):
+        entry = trimmed[index]
+        if isinstance(entry, dict) and entry.get("role") == "user":
+            del trimmed[index]
+            break
+    return trimmed
+
+
+def _start_streaming_session_turn(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    display_text: str | None = None,
+    contextualize_takyon: bool = False,
+    create_in_test_mode: bool = False,
+    record_user_history: bool = True,
+    system_message_override: str | None = None,
+    max_iterations_override: int | None = None,
+    post_complete_callback: Callable[[], str | None] | None = None,
+    start_delay_ms: int = 0,
+) -> None:
+    _start_agent_build(sid, session)
+
+    def run_after_agent_ready() -> None:
+        err = _wait_agent(session, rid)
+        if err:
+            _emit(
+                "error",
+                sid,
+                {
+                    "message": err.get("error", {}).get(
+                        "message", "agent initialization failed"
+                    )
+                },
+            )
+            with session["history_lock"]:
+                session["running"] = False
+            return
+        if start_delay_ms > 0:
+            time.sleep(start_delay_ms / 1000.0)
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            display_text=display_text,
+            contextualize_takyon=contextualize_takyon,
+            create_in_test_mode=create_in_test_mode,
+            record_user_history=record_user_history,
+            system_message_override=system_message_override,
+            max_iterations_override=max_iterations_override,
+            post_complete_callback=post_complete_callback,
+        )
+
+    threading.Thread(target=run_after_agent_ready, daemon=True).start()
+
+
 def _run_prompt_submit(
     rid,
     sid: str,
@@ -3792,6 +3846,10 @@ def _run_prompt_submit(
     display_text: str | None = None,
     contextualize_takyon: bool = False,
     create_in_test_mode: bool = False,
+    record_user_history: bool = True,
+    system_message_override: str | None = None,
+    max_iterations_override: int | None = None,
+    post_complete_callback: Callable[[], str | None] | None = None,
 ) -> None:
     with session["history_lock"]:
         history = list(session["history"])
@@ -3952,16 +4010,24 @@ def _run_prompt_submit(
 
             worker_usage = None
             turn_cost_after_usd = turn_cost_before_usd
+            original_agent_max_iterations = getattr(agent, "max_iterations", None)
             if getattr(agent, "_takyon_operator_gateway", False):
+                worker_kwargs = {
+                    "operator_user_id": resolved_operator_user_id,
+                    "business_slug": current_business,
+                    "streamer": streamer,
+                }
+                if system_message_override:
+                    worker_kwargs["system_message_override"] = system_message_override
+                if max_iterations_override is not None:
+                    worker_kwargs["max_iterations_override"] = max_iterations_override
                 worker_result = _run_isolated_gateway_turn(
                     sid,
                     session,
                     agent,
                     run_message,
                     list(history),
-                    operator_user_id=resolved_operator_user_id,
-                    business_slug=current_business,
-                    streamer=streamer,
+                    **worker_kwargs,
                 )
                 result = worker_result.get("result")
                 worker_usage = (
@@ -4004,23 +4070,38 @@ def _run_prompt_submit(
                     else contextlib.nullcontext(None)
                 )
                 with workspace_context as workspace_home:
-                    session_tokens = _set_session_context(
-                        session["session_key"],
-                        operator_user_id=_takyon_operator_user_id(session),
-                        workspace_root=str(workspace_home or ""),
-                        business_slug=current_business,
-                    )
-                    result = agent.run_conversation(
-                        run_message,
-                        conversation_history=list(history),
-                        stream_callback=_stream,
-                    )
+                    try:
+                        if max_iterations_override is not None:
+                            agent.max_iterations = int(max_iterations_override)
+                        session_tokens = _set_session_context(
+                            session["session_key"],
+                            operator_user_id=_takyon_operator_user_id(session),
+                            workspace_root=str(workspace_home or ""),
+                            business_slug=current_business,
+                        )
+                        run_kwargs = {
+                            "conversation_history": list(history),
+                            "stream_callback": _stream,
+                        }
+                        if system_message_override:
+                            run_kwargs["system_message"] = system_message_override
+                        result = agent.run_conversation(run_message, **run_kwargs)
+                    finally:
+                        if (
+                            max_iterations_override is not None
+                            and original_agent_max_iterations is not None
+                        ):
+                            agent.max_iterations = original_agent_max_iterations
 
             last_reasoning = None
             status_note = None
             if isinstance(result, dict):
                 if isinstance(result.get("messages"), list):
-                    if isinstance(display_text, str) and display_text:
+                    if not record_user_history:
+                        result["messages"] = _history_without_latest_user_message(
+                            result["messages"]
+                        )
+                    elif isinstance(display_text, str) and display_text:
                         for message in reversed(result["messages"]):
                             if isinstance(message, dict) and message.get("role") == "user":
                                 message["display_text"] = display_text
@@ -4059,6 +4140,24 @@ def _run_prompt_submit(
                 _sync_session_key_after_compress(
                     sid, session, clear_pending_title=False, restart_slash_worker=True,
                 )
+                if (
+                    not record_user_history
+                    and isinstance(result.get("messages"), list)
+                ):
+                    try:
+                        session_db = getattr(agent, "_session_db", None) or _get_db()
+                        session_key = str(
+                            getattr(agent, "session_id", "")
+                            or session.get("session_key")
+                            or sid
+                        ).strip()
+                        if session_db and session_key:
+                            session_db.replace_messages(session_key, result["messages"])
+                    except Exception as exc:
+                        print(
+                            f"[tui_gateway] hidden-history rewrite failed: {exc}",
+                            file=sys.stderr,
+                        )
 
                 raw = result.get("final_response", "")
                 status = (
@@ -4084,6 +4183,22 @@ def _run_prompt_submit(
             else:
                 raw = str(result)
                 status = "complete"
+
+            if status == "complete" and callable(post_complete_callback):
+                try:
+                    post_warning = str(post_complete_callback() or "").strip()
+                    if post_warning:
+                        if status_note:
+                            status_note = f"{status_note}\n{post_warning}"
+                        else:
+                            status_note = post_warning
+                except Exception as exc:
+                    logger.exception("post-turn finalization failed")
+                    warning = f"Post-turn finalization failed: {exc}"
+                    if status_note:
+                        status_note = f"{status_note}\n{warning}"
+                    else:
+                        status_note = warning
 
             usage_payload = worker_usage if isinstance(worker_usage, dict) else _get_usage(agent)
             payload = {"text": raw, "usage": usage_payload, "status": status}
@@ -4188,6 +4303,7 @@ def _run_prompt_submit(
                 and raw.strip()
                 and isinstance(text, str)
                 and text.strip()
+                and record_user_history
             ):
                 try:
                     from agent.title_generator import maybe_auto_title
@@ -8354,13 +8470,11 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
+    started_stream = False
     try:
-        from plugins.takyon.cli import (
-            TakyonStore,
-            _resolve_dashboard_create_identity,
-            run_takyon_command,
-        )
+        takyon_cli = importlib.import_module("plugins.takyon.cli")
 
+        sid = str(params.get("session_id") or "").strip()
         requested_name = str(params.get("name") or params.get("business_name") or "").strip()
         requested_goal = str(params.get("goal") or "").strip()
         requested_mode = str(params.get("mode") or "live").strip().lower()
@@ -8368,8 +8482,25 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4004, "test mode is disabled; all businesses run live")
         if requested_mode != "live":
             return _err(rid, 4004, "mode must be live")
+        can_stream_bootstrap = bool(
+            session.get("agent") is not None or session.get("agent_ready") is not None
+        )
+        history_lock = session.get("history_lock")
+        if can_stream_bootstrap:
+            if history_lock is None:
+                history_lock = threading.Lock()
+                session["history_lock"] = history_lock
+            with history_lock:
+                if session.get("running"):
+                    return _err(rid, 4009, "session busy")
+                session["running"] = True
+        TakyonStore = takyon_cli.TakyonStore
+        resolve_dashboard_create_identity = takyon_cli._resolve_dashboard_create_identity
+        run_takyon_command = takyon_cli.run_takyon_command
+        read_model_config = getattr(takyon_cli, "_read_model_config", lambda _store: {})
+        build_bootstrap_turn = getattr(takyon_cli, "_ceo_bootstrap_turn_config", None)
         operator_user_id = _takyon_operator_user_id(session) or None
-        resolved_name, slug = _resolve_dashboard_create_identity(
+        resolved_name, slug = resolve_dashboard_create_identity(
             requested_name,
             requested_goal,
             str(params.get("slug") or params.get("business") or "").strip(),
@@ -8379,12 +8510,14 @@ def _(rid, params: dict) -> dict:
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
         command_argv = ["create", "--live"]
+        if can_stream_bootstrap:
+            command_argv.append("--no-auto")
         if resolved_name:
             command_argv.extend(["--name", resolved_name])
         command_argv.append(slug)
         if requested_goal:
             command_argv.append(requested_goal)
-        result = run_takyon_command(
+        command_result = run_takyon_command(
             command_argv,
             model=os.getenv("TAKYON_MODEL", ""),
             max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),
@@ -8393,21 +8526,13 @@ def _(rid, params: dict) -> dict:
             shell_history=None,
             operator_user_id=operator_user_id,
         )
-        bootstrap_job = (result.get("bootstrap_job") or {}) if isinstance(result, dict) else {}
         active_mode = "live"
+        config = read_model_config(store)
+        schedule = str(config.get("default_ceo_schedule") or "every 6h").strip() or "every 6h"
         _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
         session["takyon_pending_business_create"] = True
         session["takyon_pending_business_create_at"] = time.time()
-        session["takyon_background_run"] = {
-            "kind": "create",
-            "business": slug,
-            "status": "queued",
-            "started_at": time.time(),
-            "detail": "Queued CEO bootstrap job.",
-            "job_id": str(bootstrap_job.get("job_id") or ""),
-        }
-        _takyon_set_background_run(slug, session["takyon_background_run"])
         workspace = _takyon_workspace_payload(
             session,
             slug,
@@ -8421,6 +8546,122 @@ def _(rid, params: dict) -> dict:
             current["slug"] = slug
         if active_mode and not str(current.get("mode") or "").strip():
             current["mode"] = active_mode
+
+        if not can_stream_bootstrap:
+            bootstrap_job = (
+                command_result.get("bootstrap_job") or {}
+                if isinstance(command_result, dict)
+                else {}
+            )
+            if bootstrap_job:
+                session["takyon_background_run"] = {
+                    "kind": "create",
+                    "business": slug,
+                    "status": str(bootstrap_job.get("status") or "queued"),
+                    "started_at": time.time(),
+                    "detail": "Queued CEO bootstrap job.",
+                    "job_id": str(bootstrap_job.get("job_id") or ""),
+                }
+                _takyon_set_background_run(slug, session["takyon_background_run"])
+            return _ok(
+                rid,
+                {
+                    "business_slug": slug,
+                    "business_name": resolved_name,
+                    "goal": requested_goal,
+                    "mode": active_mode,
+                    "job_id": str(bootstrap_job.get("job_id") or ""),
+                    "job_kind": str(bootstrap_job.get("kind") or "ceo_bootstrap"),
+                    "job_status": str(bootstrap_job.get("status") or "queued"),
+                    "lifecycle_state": "queued" if bootstrap_job else "ready",
+                    "scope": f"business:{slug}",
+                    "current": current,
+                    "overview": workspace.get("overview") or {},
+                    "outputs": workspace.get("outputs") or [],
+                    "background_run": workspace.get("background_run") or session.get("takyon_background_run"),
+                    "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
+                },
+            )
+
+        session.pop("takyon_background_run", None)
+        if callable(build_bootstrap_turn):
+            bootstrap_turn = build_bootstrap_turn(
+                slug,
+                requested_goal,
+                active_mode,
+                business_name=resolved_name,
+            )
+        else:
+            bootstrap_turn = {
+                "user_prompt": requested_goal or f"Bootstrap business:{slug} now.",
+                "system_prompt": "",
+                "max_turns": 20,
+            }
+        bootstrap_system_prompt = str(bootstrap_turn.get("system_prompt") or "")
+        bootstrap_user_prompt = str(bootstrap_turn.get("user_prompt") or "")
+        try:
+            bootstrap_max_turns = int(bootstrap_turn.get("max_turns") or 20)
+        except (TypeError, ValueError):
+            bootstrap_max_turns = 20
+
+        def _finalize_bootstrap() -> str | None:
+            from plugins.takyon.worker import _refresh_business_surface_after_bootstrap
+
+            warning_parts: list[str] = []
+            surface_refresh = _refresh_business_surface_after_bootstrap(
+                slug,
+                job_id=f"session:{session.get('session_key') or sid or slug}",
+            )
+            if isinstance(surface_refresh, dict):
+                publish = (
+                    surface_refresh.get("publish")
+                    if isinstance(surface_refresh.get("publish"), dict)
+                    else {}
+                )
+                publish_status = str(
+                    publish.get("status") or surface_refresh.get("status") or ""
+                ).strip()
+                publish_blocker = str(
+                    publish.get("blocker")
+                    or surface_refresh.get("blocker")
+                    or surface_refresh.get("error")
+                    or ""
+                ).strip()
+                if publish_status and publish_status != "published" and publish_blocker:
+                    warning_parts.append(
+                        f"Product surface: {publish_status} - {publish_blocker}"
+                    )
+            if schedule:
+                store.commit(
+                    scope=f"business:{slug}",
+                    operations=[
+                        {
+                            "action": "cron.ensure_ceo_wakeup",
+                            "business": slug,
+                            "schedule": schedule,
+                        }
+                    ],
+                    idempotency_key=(
+                        f"session-bootstrap-wake:{session.get('session_key') or sid or slug}:"
+                        f"{slug}:{schedule}"
+                    ),
+                    reason="bootstrap completed and enabled CEO wake loop",
+                    actor="worker",
+                )
+            return "\n".join(part for part in warning_parts if part)
+
+        _start_streaming_session_turn(
+            rid,
+            sid,
+            session,
+            bootstrap_user_prompt,
+            record_user_history=False,
+            system_message_override=bootstrap_system_prompt,
+            max_iterations_override=max(1, bootstrap_max_turns),
+            post_complete_callback=_finalize_bootstrap,
+            start_delay_ms=125,
+        )
+        started_stream = True
         return _ok(
             rid,
             {
@@ -8428,10 +8669,11 @@ def _(rid, params: dict) -> dict:
                 "business_name": resolved_name,
                 "goal": requested_goal,
                 "mode": active_mode,
-                "job_id": str(bootstrap_job.get("job_id") or ""),
-                "job_kind": str(bootstrap_job.get("kind") or "ceo_bootstrap"),
-                "job_status": str(bootstrap_job.get("status") or "queued"),
-                "lifecycle_state": "queued" if bootstrap_job else "ready",
+                "job_id": "",
+                "job_kind": "ceo_bootstrap",
+                "job_status": "streaming",
+                "lifecycle_state": "streaming",
+                "streaming": True,
                 "output": f"Create started for business:{slug}",
                 "scope": f"business:{slug}",
                 "current": current,
@@ -8442,8 +8684,18 @@ def _(rid, params: dict) -> dict:
             },
         )
     except SystemExit as e:
+        if not started_stream:
+            history_lock = session.get("history_lock")
+            if history_lock is not None:
+                with history_lock:
+                    session["running"] = False
         return _err(rid, 4004, str(e))
     except Exception as e:
+        if not started_stream:
+            history_lock = session.get("history_lock")
+            if history_lock is not None:
+                with history_lock:
+                    session["running"] = False
         return _err(rid, 5051, str(e))
 
 

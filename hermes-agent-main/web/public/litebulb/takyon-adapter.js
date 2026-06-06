@@ -3867,13 +3867,12 @@
         outputs: result && result.outputs || [],
         background_run: result && result.background_run || null,
       });
+      if (LIVE.sessionId) LIVE.sessionBusiness = created;
       await mountLiveBusiness(created, summary, initialSnapshot);
-      rememberHistoryMessage("user", goal);
-      addYou(goal);
-      const streamSid = LIVE.sessionId || await ensureSession(created);
-      if (streamSid) {
-        primeLiveTurnUi();
-        rpc("prompt.submit", { session_id: streamSid, text: goal }, 600000).catch(() => {});
+      if (result && result.streaming) {
+        if (!LIVE.historyRunning && !LIVE.assistantDeltaSeen) primeLiveTurnUi();
+        LIVE.historyRunning = true;
+        syncHistoryPollTimer();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

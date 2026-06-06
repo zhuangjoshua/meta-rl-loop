@@ -5665,7 +5665,7 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
             return None
 
         def _ensure_business(self, conn, slug):
-            return {"name": "Demo", "goal": "Ship a planner", "mode": "test"}
+            return {"name": "Demo", "goal": "Ship a planner", "mode": "live"}
 
         def _ensure_app_budget(self, conn, slug):
             return {
@@ -5706,7 +5706,7 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     assert snapshot["current"] == {
         "name": "Demo",
         "goal": "Ship a planner",
-        "mode": "test",
+        "mode": "live",
     }
     assert snapshot["overview"]["current_action"] == {
         "source": "runtime",

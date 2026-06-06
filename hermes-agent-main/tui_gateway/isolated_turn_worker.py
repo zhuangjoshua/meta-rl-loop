@@ -471,10 +471,16 @@ def main() -> int:
                 def _stream(delta: str) -> None:
                     _emit_event("message.delta", {"text": delta})
 
+                run_kwargs = {
+                    "conversation_history": list(payload.get("history") or []),
+                    "stream_callback": _stream,
+                }
+                system_message = payload.get("system_message") or None
+                if system_message:
+                    run_kwargs["system_message"] = system_message
                 result = agent.run_conversation(
                     payload.get("run_message"),
-                    conversation_history=list(payload.get("history") or []),
-                    stream_callback=_stream,
+                    **run_kwargs,
                 )
                 _send(
                     {
