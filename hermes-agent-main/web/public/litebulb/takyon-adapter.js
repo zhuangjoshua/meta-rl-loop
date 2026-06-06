@@ -36,6 +36,9 @@
     sessionId: "",
     sessionBusiness: "",
     ws: null,
+    wsConnectPromise: null,
+    bufferGatewayEvents: false,
+    gatewayEventBuffer: [],
     reconnectTimer: null,
     pollTimer: null,
     runtimePollTimer: null,
@@ -182,9 +185,13 @@
     }
   }
 
-  function wsUrl() {
+  function wsUrl(sessionId) {
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${scheme}//${window.location.host}${ENV.basePath}/api/ws?token=${encodeURIComponent(ENV.token)}`;
+    const params = new URLSearchParams();
+    params.set("token", ENV.token);
+    const sid = String(sessionId || "").trim();
+    if (sid) params.set("session_id", sid);
+    return `${scheme}//${window.location.host}${ENV.basePath}/api/ws?${params.toString()}`;
   }
 
   function currentBusinessParam() {
@@ -277,6 +284,40 @@
   function hasSeenHistoryMessage(role, text) {
     const key = historyMessageKey(role, text);
     return !!key && LIVE.historySeen.has(key);
+  }
+
+  function cloneGatewayEvent(ev) {
+    const payload = ev && ev.payload;
+    let payloadCopy = payload || {};
+    if (payload && typeof payload === "object") {
+      try {
+        payloadCopy = JSON.parse(JSON.stringify(payload));
+      } catch (_err) {
+        payloadCopy = { ...payload };
+      }
+    }
+    return {
+      type: String(ev && ev.type || "").trim(),
+      session_id: String(ev && ev.session_id || "").trim(),
+      payload: payloadCopy,
+    };
+  }
+
+  function startGatewayEventBuffer() {
+    LIVE.bufferGatewayEvents = true;
+    LIVE.gatewayEventBuffer = [];
+  }
+
+  function clearGatewayEventBuffer() {
+    LIVE.bufferGatewayEvents = false;
+    LIVE.gatewayEventBuffer = [];
+  }
+
+  function flushGatewayEventBuffer() {
+    const queued = Array.isArray(LIVE.gatewayEventBuffer) ? LIVE.gatewayEventBuffer.slice() : [];
+    LIVE.bufferGatewayEvents = false;
+    LIVE.gatewayEventBuffer = [];
+    queued.forEach((event) => handleGatewayEvent(event));
   }
 
   function hasObjectKeys(value) {
@@ -2828,6 +2869,7 @@
   }
 
   function closeLiveSocket() {
+    LIVE.wsConnectPromise = null;
     if (!LIVE.ws) return;
     try {
       LIVE.ws.close(1000, "litebulb_reset");
@@ -3253,35 +3295,9 @@
     scrollChat();
   }
 
-  function typeAssistantText(text, options) {
+  function mergeHistoryMessages(items, options) {
     const opts = options || {};
-    const finalText = String(text || "").trim();
-    if (!finalText) {
-      finishAssistantText("(empty response)", opts);
-      return;
-    }
-    cancelAssistantTypingAnimation();
-    LIVE.assistantDeltaSeen = false;
-    LIVE.assistantText = "";
-    rememberHistoryMessage("assistant", finalText);
-    const bubble = ensureAssistantBubble();
-    const total = finalText.length;
-    const chunk = Math.max(2, Math.ceil(total / 36));
-    let index = 0;
-    const step = () => {
-      index = Math.min(total, index + chunk);
-      bubble.innerHTML = formatRichText(`${finalText.slice(0, index)}${index < total ? "▌" : ""}`);
-      scrollChat();
-      if (index >= total) {
-        finishAssistantText(finalText, opts);
-        return;
-      }
-      LIVE.assistantTypingTimer = window.setTimeout(step, total > 320 ? 18 : 24);
-    };
-    step();
-  }
-
-  function mergeHistoryMessages(items) {
+    const allowAssistantReplay = opts.allowAssistantReplay !== false;
     const messages = Array.isArray(items) ? items : [];
     messages.forEach((item) => {
       const role = String(item && item.role || "").trim().toLowerCase();
@@ -3293,8 +3309,8 @@
         return;
       }
       if (role === "assistant") {
-        if (LIVE.assistantBubble && !LIVE.assistantDeltaSeen && !LIVE.assistantText) typeAssistantText(text);
-        else finishAssistantText(text);
+        if (!allowAssistantReplay) return;
+        finishAssistantText(text);
         return;
       }
       if (role === "system") {
@@ -3317,7 +3333,9 @@
       const res = await rpc("session.history", { session_id: LIVE.sessionId }, 10000);
       const wasRunning = LIVE.historyRunning;
       LIVE.historyRunning = Boolean(res && res.running);
-      mergeHistoryMessages(res && res.messages);
+      mergeHistoryMessages(res && res.messages, {
+        allowAssistantReplay: !LIVE.historyRunning,
+      });
       if (wasRunning && !LIVE.historyRunning && LIVE.activityTurnStartedAt) {
         const messages = Array.isArray(res && res.messages) ? res.messages : [];
         const assistantFinal = [...messages].reverse().find((item) => String(item && item.role || "").trim().toLowerCase() === "assistant");
@@ -3379,16 +3397,24 @@
 
   async function ensureSession(business) {
     const desired = String(business || "").trim().toLowerCase();
-    if (LIVE.sessionId && LIVE.sessionBusiness === desired) return LIVE.sessionId;
-    closeLiveSocket();
-    const res = await rpc("session.create", {
-      cols: 100,
-      _takyon_boot_business: desired || undefined,
-    }, 120000);
-    LIVE.sessionId = res && res.session_id || "";
-    LIVE.sessionBusiness = desired;
+    const socketReady = !!(
+      LIVE.ws &&
+      LIVE.ws.readyState === WebSocket.OPEN
+    );
+    if (LIVE.sessionId && LIVE.sessionBusiness === desired && socketReady) {
+      return LIVE.sessionId;
+    }
+    if (!(LIVE.sessionId && LIVE.sessionBusiness === desired)) {
+      closeLiveSocket();
+      const res = await rpc("session.create", {
+        cols: 100,
+        _takyon_boot_business: desired || undefined,
+      }, 120000);
+      LIVE.sessionId = res && res.session_id || "";
+      LIVE.sessionBusiness = desired;
+    }
     if (LIVE.sessionId) {
-      connectLiveSocket(LIVE.sessionId);
+      await connectLiveSocket(LIVE.sessionId);
       void pollRuntimeEvents();
     }
     return LIVE.sessionId;
@@ -3397,6 +3423,10 @@
   function handleGatewayEvent(ev) {
     if (!ev || !ev.type) return;
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
+    if (LIVE.bufferGatewayEvents) {
+      LIVE.gatewayEventBuffer.push(cloneGatewayEvent(ev));
+      return;
+    }
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
       primeLiveTurnUi();
@@ -3436,8 +3466,16 @@
       });
       const finalText = String(payload.text || "");
       const clearStarterActivity = !keepActivityRow;
-      if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText, { clearStarterActivity });
-      else finishAssistantText(finalText || LIVE.assistantText || "(empty response)", { clearStarterActivity });
+      const responseText = finalText || LIVE.assistantText || "(empty response)";
+      if (finalText.trim() && hasSeenHistoryMessage("assistant", finalText)) {
+        cancelAssistantTypingAnimation();
+        LIVE.assistantText = "";
+        LIVE.assistantDeltaSeen = false;
+        LIVE.assistantBubble = null;
+        if (clearStarterActivity) removeActivityCard();
+      } else {
+        finishAssistantText(responseText, { clearStarterActivity });
+      }
       if (payload.warning) ceolog(esc(String(payload.warning)), true);
       LIVE.historyRunning = false;
       syncHistoryPollTimer();
@@ -3575,10 +3613,36 @@
   }
 
   function connectLiveSocket(sessionId) {
-    if (!sessionId) return;
+    if (!sessionId) return Promise.resolve();
+    if (
+      LIVE.ws &&
+      LIVE.sessionId === sessionId &&
+      LIVE.ws.readyState === WebSocket.OPEN
+    ) {
+      return Promise.resolve();
+    }
+    if (LIVE.wsConnectPromise && LIVE.sessionId === sessionId) {
+      return LIVE.wsConnectPromise;
+    }
     closeLiveSocket();
-    const ws = new WebSocket(wsUrl());
+    const ws = new WebSocket(wsUrl(sessionId));
     LIVE.ws = ws;
+    LIVE.wsConnectPromise = new Promise((resolve, reject) => {
+      let settled = false;
+      function settle(ok, err) {
+        if (settled) return;
+        settled = true;
+        LIVE.wsConnectPromise = null;
+        if (ok) resolve();
+        else reject(err || new Error("Live chat connection failed."));
+      }
+      ws.addEventListener("open", () => settle(true), { once: true });
+      ws.addEventListener("error", () => settle(false, new Error("Live chat connection failed.")), { once: true });
+      ws.addEventListener("close", () => {
+        if (settled) return;
+        settle(false, new Error("Live chat connection closed before it was ready."));
+      }, { once: true });
+    });
     ws.addEventListener("message", (event) => {
       try {
         const msg = JSON.parse(event.data);
@@ -3599,6 +3663,7 @@
         });
       }, 1200);
     });
+    return LIVE.wsConnectPromise;
   }
 
   function launcherResumeButton(summary) {
@@ -3819,7 +3884,13 @@
     if (desk) desk.innerHTML = "";
     openProduct();
     openStatus();
+    cancelAssistantTypingAnimation();
+    removeActivityCard();
+    LIVE.assistantBubble = null;
+    LIVE.assistantText = "";
+    LIVE.assistantDeltaSeen = false;
     msgs().innerHTML = "";
+    flushGatewayEventBuffer();
     RT.logBuf = [];
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);
@@ -3843,6 +3914,7 @@
     setStatus("building…", "build");
     try {
       const sessionId = await ensureSession("");
+      startGatewayEventBuffer();
       const result = await rpc("takyon.dashboard.create", {
         session_id: sessionId,
         business: businessSlug,
@@ -3875,6 +3947,7 @@
         syncHistoryPollTimer();
       }
     } catch (err) {
+      clearGatewayEventBuffer();
       const message = err instanceof Error ? err.message : String(err);
       setStatus("paused", "paused");
       if (errorEl) {

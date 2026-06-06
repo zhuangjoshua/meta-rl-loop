@@ -7022,9 +7022,15 @@ async def gateway_ws(ws: WebSocket) -> None:
     from tui_gateway.ws import handle_ws
 
     principal = _resolve_dashboard_headers_principal(ws.headers)
+    session_id = str(ws.query_params.get("session_id", "") or "").strip()
 
     await ws.accept()
-    await handle_ws(ws, principal=principal, preaccepted=True)
+    await handle_ws(
+        ws,
+        principal=principal,
+        preaccepted=True,
+        session_id=session_id,
+    )
 
 
 @app.post("/api/tui/rpc")

@@ -3952,6 +3952,68 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
     assert cron_jobs.list_jobs(include_disabled=True) == []
 
 
+def test_delete_business_removes_product_service_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "1")
+    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
+    monkeypatch.setenv("TAKYON_PRODUCT_SYSTEMD_DIR", str(tmp_path / "systemd"))
+    monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
+
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "init-delete-product-service",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "artifact.write", "path": "product/spec.md", "content": "# Spec\n"}],
+        "write-delete-product-service",
+    )
+
+    service_root = tmp_path / "product-services" / "latexflow"
+    service_root.mkdir(parents=True)
+    (service_root / "server.js").write_text("console.log('live');\n", encoding="utf-8")
+
+    systemd_dir = tmp_path / "systemd"
+    systemd_dir.mkdir(parents=True)
+    service_file = systemd_dir / "takyon-product-latexflow.service"
+    service_file.write_text("[Unit]\nDescription=Takyon Product - latexflow\n", encoding="utf-8")
+
+    caddyfile = tmp_path / "Caddyfile"
+    caddyfile.write_text(
+        "latexflow.fourmanifold.com {\n"
+        "    handle {\n"
+        "        reverse_proxy 127.0.0.1:4010\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.delete",
+                "business": "latexflow",
+                "confirm": True,
+                "delete_domains": False,
+            }
+        ],
+        "delete-product-service",
+    )
+    deletion = result["results"][0]
+
+    assert deletion["product_service"]["service_root"]["removed"] is True
+    assert deletion["product_service"]["service_file"]["removed"] is True
+    assert deletion["product_service"]["caddy_route"]["removed"] is True
+    assert not service_root.exists()
+    assert not service_file.exists()
+    assert "latexflow.fourmanifold.com" not in caddyfile.read_text(encoding="utf-8")
+
+
 def test_delete_business_removes_remote_workspace_copy(tmp_path):
     store = TakyonStore(tmp_path)
     _commit(

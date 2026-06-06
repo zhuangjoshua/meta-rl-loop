@@ -124,3 +124,39 @@ async def test_handle_ws_supports_preaccepted_socket(monkeypatch):
     assert fake_ws.accept_calls == 0
     assert sent[0]["method"] == "event"
     assert sent[0]["params"]["type"] == "gateway.ready"
+
+
+@pytest.mark.asyncio
+async def test_handle_ws_binds_transport_to_session(monkeypatch):
+    import tui_gateway.server as server_module
+    import tui_gateway.ws as ws_module
+
+    sent: list[dict] = []
+    original_sessions = server_module._sessions
+
+    class FakeDisconnect(Exception):
+        pass
+
+    class FakeWS:
+        async def accept(self) -> None:
+            return None
+
+        async def receive_text(self) -> str:
+            assert server_module._sessions["sid"]["transport"].__class__.__name__ == "WSTransport"
+            raise FakeDisconnect()
+
+        async def send_text(self, text: str) -> None:
+            sent.append(__import__("json").loads(text))
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ws_module, "_WebSocketDisconnect", FakeDisconnect)
+    server_module._sessions = {"sid": {"transport": None}}
+    try:
+        await handle_ws(FakeWS(), session_id="sid")
+    finally:
+        server_module._sessions = original_sessions
+
+    assert sent[0]["method"] == "event"
+    assert sent[0]["params"]["type"] == "gateway.ready"

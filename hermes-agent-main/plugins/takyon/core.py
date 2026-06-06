@@ -7671,6 +7671,63 @@ def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static
     return caddyfile, ""
 
 
+def _remove_product_caddy_route(*, publish_target: str) -> tuple[Path | None, str, bool]:
+    caddyfile = _product_service_caddyfile()
+    host = urllib.parse.urlparse(publish_target).netloc
+    if not host:
+        return None, "publish target has no host", False
+    if not caddyfile.exists():
+        return caddyfile, "", False
+    existing = caddyfile.read_text(encoding="utf-8")
+    pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
+    if not pattern.search(existing):
+        return caddyfile, "", False
+    updated = pattern.sub("", existing).strip()
+    if updated:
+        updated += "\n"
+    backup = caddyfile.with_name(f"{caddyfile.name}.takyon-backup")
+    backup.write_text(existing, encoding="utf-8")
+    caddyfile.write_text(updated, encoding="utf-8")
+    if _product_deploy_dry_run():
+        return caddyfile, "", True
+    caddy = shutil.which("caddy")
+    if not caddy:
+        return caddyfile, "caddy is unavailable; removed route but could not validate/reload", True
+    ok, output = _run_product_admin_command([caddy, "validate", "--config", str(caddyfile)], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"caddy validate failed: {output}", True
+    systemctl = shutil.which("systemctl") or "systemctl"
+    ok, output = _run_product_admin_command([systemctl, "reload", "caddy"], timeout_seconds=30)
+    if not ok:
+        return caddyfile, f"systemctl reload caddy failed: {output}", True
+    return caddyfile, "", True
+
+
+def _remove_product_service_file(*, slug: str) -> tuple[Path | None, str, bool]:
+    systemd_dir = _product_service_systemd_dir()
+    service_file = systemd_dir / f"{_product_service_name(slug)}.service"
+    if not service_file.exists():
+        return service_file, "", False
+    if not _product_deploy_dry_run():
+        systemctl = shutil.which("systemctl")
+        if not systemctl:
+            return service_file, "systemctl is unavailable; cannot remove product service", False
+        service_name = _product_service_name(slug)
+        ok, output = _run_product_admin_command([systemctl, "disable", "--now", service_name], timeout_seconds=60)
+        if not ok:
+            return service_file, f"systemctl disable --now {service_name} failed: {output}", False
+    try:
+        service_file.unlink()
+    except OSError as exc:
+        return service_file, f"failed to remove product service file: {exc}", False
+    if not _product_deploy_dry_run():
+        systemctl = shutil.which("systemctl") or "systemctl"
+        ok, output = _run_product_admin_command([systemctl, "daemon-reload"], timeout_seconds=30)
+        if not ok:
+            return service_file, f"systemctl daemon-reload failed: {output}", True
+    return service_file, "", True
+
+
 def _make_static_publish_tree_readable(root: Path) -> None:
     for path in [root, *root.rglob("*")]:
         try:
@@ -10483,6 +10540,24 @@ class TakyonStore:
             if publish_root_resolved not in (published_site, *published_site.parents):
                 raise TakyonError("refusing to delete published site outside product site root")
             published_site_summary = self._filesystem_summary(published_site)
+        product_service_root = _product_service_publish_root(slug)
+        product_service_base = _product_service_publish_base()
+        if product_service_base not in (product_service_root, *product_service_root.parents):
+            raise TakyonError("refusing to delete product service outside product service root")
+        product_service_summary = self._filesystem_summary(product_service_root)
+        service_file = _product_service_systemd_dir() / f"{_product_service_name(slug)}.service"
+        product_service_file = {"path": str(service_file), "exists": service_file.exists()}
+        publish_target = _product_publish_target(slug)
+        caddyfile = _product_service_caddyfile()
+        product_service_route = {"path": str(caddyfile), "exists": False}
+        if caddyfile.exists():
+            try:
+                host = urllib.parse.urlparse(publish_target).netloc
+                existing_caddy = caddyfile.read_text(encoding="utf-8")
+                route_pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*") if host else None
+                product_service_route["exists"] = bool(route_pattern and route_pattern.search(existing_caddy))
+            except OSError:
+                product_service_route["exists"] = False
         cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
         db_counts = self._business_delete_db_counts(conn, slug)
 
@@ -10493,6 +10568,11 @@ class TakyonStore:
             "business_record": business,
             "filesystem": filesystem,
             "published_site": published_site_summary,
+            "product_service": {
+                "service_root": product_service_summary,
+                "service_file": product_service_file,
+                "caddy_route": product_service_route,
+            },
             "cron": cron_preview,
             "domains": {"provider": "vercel", "candidates": domains, "results": []},
             "database": {"candidates": db_counts, "deleted": {}},
@@ -10519,6 +10599,38 @@ class TakyonStore:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
             result["published_site"] = {**published_site_summary, "removed": False, "skipped": True}
+        product_service_result = {
+            "service_root": {**product_service_summary, "removed": False},
+            "service_file": {**product_service_file, "removed": False},
+            "caddy_route": {**product_service_route, "removed": False},
+        }
+        if delete_files:
+            removed_service_file, service_blocker, service_file_removed = _remove_product_service_file(slug=slug)
+            product_service_result["service_file"] = {
+                **product_service_file,
+                "path": str(removed_service_file or service_file),
+                "removed": bool(service_file_removed),
+            }
+            if service_blocker:
+                product_service_result["service_file"]["blocker"] = service_blocker
+            if product_service_root.exists() and not service_blocker:
+                shutil.rmtree(product_service_root)
+                product_service_result["service_root"] = {**product_service_summary, "removed": True}
+            else:
+                product_service_result["service_root"] = {**product_service_summary, "removed": False}
+            removed_caddyfile, caddy_blocker, caddy_removed = _remove_product_caddy_route(publish_target=publish_target)
+            product_service_result["caddy_route"] = {
+                **product_service_route,
+                "path": str(removed_caddyfile or caddyfile),
+                "removed": bool(caddy_removed),
+            }
+            if caddy_blocker:
+                product_service_result["caddy_route"]["blocker"] = caddy_blocker
+        else:
+            product_service_result["service_root"]["skipped"] = True
+            product_service_result["service_file"]["skipped"] = True
+            product_service_result["caddy_route"]["skipped"] = True
+        result["product_service"] = product_service_result
         if delete_files:
             self._delete_business_workspace_remote(slug)
 

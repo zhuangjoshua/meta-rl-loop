@@ -126,6 +126,7 @@ async def handle_ws(
     *,
     principal: Any | None = None,
     preaccepted: bool = False,
+    session_id: str = "",
 ) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
     if not preaccepted:
@@ -136,6 +137,12 @@ async def handle_ws(
         asyncio.get_running_loop(),
         operator_principal=principal,
     )
+
+    sid = str(session_id or "").strip()
+    if sid:
+        session = server._sessions.get(sid)
+        if session is not None:
+            session["transport"] = transport
 
     await transport.write_async(
         {
