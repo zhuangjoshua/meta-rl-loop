@@ -241,7 +241,8 @@
   function isTransientConnectionMessage(message) {
     const text = String(message || "").trim();
     if (!text) return false;
-    return /live stream (?:reconnecting|disconnected|unauthorized|forbidden)|websocket connection failed/i.test(text);
+    return /^(?:connecting to takyon\.?|connected to the live takyon runtime\.?)$/i.test(text)
+      || /live stream (?:reconnecting|disconnected|unauthorized|forbidden)|websocket connection failed/i.test(text);
   }
 
   function isBusinessScopeDeniedMessage(message) {
@@ -831,9 +832,24 @@
     return humanizeKey(name);
   }
 
+  function friendlyToolNote(name, detail) {
+    const raw = String(name || "").trim().toLowerCase();
+    const clean = cleanActivityText(detail);
+    if (raw === "web_extract") return clean || "Checking source pages for context.";
+    if (raw === "todo") return clean || "Updating the task list.";
+    if (raw === "business_write_file") return clean || "Updating workspace files.";
+    if (raw === "business_create_workspace") return clean || "Creating workspace files.";
+    if (raw === "business_upsert_app_surface_contract") return clean || "Saving the product surface plan.";
+    if (raw === "business_claude_agent_task") return clean || "Running the delegated product/site worker.";
+    if (raw === "skill_view") return clean || "Loading the most relevant skill.";
+    return clean || friendlyToolLabel(name, name || "tool");
+  }
+
   function friendlyActivityHeadline(phase, message, target) {
     const clean = cleanActivityText(message);
     if (clean) {
+      const runningTool = clean.match(/^Running ([a-z0-9_.-]+)/i);
+      if (runningTool) return friendlyToolLabel(runningTool[1], runningTool[1]);
       if (/(\d+)\s+blockers?\s+need ceo recovery/i.test(clean)) {
         return clean.replace(/(\d+)\s+blockers?\s+need ceo recovery\.?/i, "Reviewing $1 blocked tasks");
       }
@@ -851,6 +867,17 @@
     if (raw === "finalizing") return "Wrapping up";
     if (raw === "done") return "Done";
     return target ? `Working on ${target}` : "Using tools";
+  }
+
+  function setActivitySummaryFromTool(name, detail, status) {
+    const label = friendlyToolLabel(name, name || "tool");
+    const note = friendlyToolNote(name, detail);
+    setActivitySummary({
+      phase: status === "blocked" ? "fixing" : "running",
+      headline: label,
+      note,
+      state: status === "blocked" ? "blocked" : "running",
+    });
   }
 
   function cronTaskTitle(job) {
@@ -1733,7 +1760,6 @@
     }
     $("#mb-biz").textContent = RT.biz.name || RT.biz.slug || "—";
     if (snapshot.business_slug !== LIVE.bootedBusiness) {
-      addThink("connected to the live Takyon runtime.");
       LIVE.bootedBusiness = snapshot.business_slug;
     }
   }
@@ -2873,6 +2899,7 @@
     container.innerHTML = `
       <details class="activity" open>
         <summary>
+          <span class="activity__pulse" aria-hidden="true"></span>
           <span class="activity__caret">▾</span>
           <span class="activity__phase"></span>
           <span class="activity__headline"></span>
@@ -2944,6 +2971,9 @@
       ? !!LIVE.activityOpen
       : LIVE.activityState === "running";
     if (details.open !== shouldOpen) details.open = shouldOpen;
+    details.classList.toggle("is-running", LIVE.activityState === "running");
+    details.classList.toggle("is-done", LIVE.activityState === "done");
+    details.classList.toggle("is-blocked", LIVE.activityState === "blocked");
     const caret = $(".activity__caret", LIVE.activityCard);
     if (caret) caret.textContent = details.open ? "▾" : "▸";
     const phaseEl = $(".activity__phase", LIVE.activityCard);
@@ -2986,7 +3016,7 @@
           </div>
           <span class="activity__item-status ${status === "running" ? "is-running" : status === "done" ? "is-done" : status === "blocked" ? "is-blocked" : ""}">${esc(status === "done" ? "done" : status === "blocked" ? "blocked" : "running")}</span>
         </div>`;
-      }).join("") || `<div class="activity__item"><span class="activity__item-dot" style="color:${meta.color}">${meta.icon}</span><div class="activity__item-main"><div class="activity__item-label">Waiting on the first tool call</div></div></div>`;
+      }).join("") || `<div class="activity__item"><span class="activity__item-dot" style="color:${meta.color}">${meta.icon}</span><div class="activity__item-main"><div class="activity__item-label">Waiting for the first visible step</div></div></div>`;
     }
     scrollChat();
   }
@@ -3052,15 +3082,7 @@
     return LIVE.assistantBubble;
   }
 
-  function showAssistantPlaceholder(text) {
-    cancelAssistantTypingAnimation();
-    LIVE.assistantText = "";
-    LIVE.assistantDeltaSeen = false;
-    ensureAssistantBubble().innerHTML = `<span style="color:var(--muted);font-style:italic">${esc(text || "thinking…")}</span>`;
-    scrollChat();
-  }
-
-  function primeLiveTurnUi(placeholderText) {
+  function primeLiveTurnUi() {
     LIVE.activityItems = new Map();
     LIVE.activityPercent = null;
     LIVE.activityPhase = "thinking";
@@ -3072,11 +3094,12 @@
     setActivitySummary({
       phase: "thinking",
       headline: "Reviewing your request",
-      note: "The CEO is deciding what to do first.",
+      note: "Reading your instruction and choosing the first concrete step.",
       percent: null,
       state: "running",
     });
-    showAssistantPlaceholder(placeholderText || "thinking…");
+    LIVE.assistantText = "";
+    LIVE.assistantDeltaSeen = false;
     setStatus("thinking…", "run");
   }
 
@@ -3238,7 +3261,7 @@
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
-      primeLiveTurnUi("thinking…");
+      primeLiveTurnUi();
       LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
       upsertLiveTrace({
         entry_key: LIVE.activeTurnTraceId,
@@ -3315,10 +3338,14 @@
       const target = payload.target ? String(payload.target).trim() : "";
       const percent = payload.percent;
       if (!message) return;
+      const runningTool = cleanActivityText(message).match(/^Running ([a-z0-9_.-]+)/i);
+      const nextNote = runningTool
+        ? friendlyToolNote(runningTool[1], target || message)
+        : target ? `${cleanActivityText(message)} · ${target}` : cleanActivityText(message);
       setActivitySummary({
         phase,
         headline: friendlyActivityHeadline(phase, message, target),
-        note: target ? `${cleanActivityText(message)} · ${target}` : cleanActivityText(message),
+        note: nextNote,
         percent,
         state: phase === "done" ? "done" : "running",
       });
@@ -3335,14 +3362,16 @@
       }
       upsertActivityItem(entryKey, {
         label: friendlyToolLabel(payload.name || "", payload.context || payload.name || "tool"),
-        detail: cleanActivityText(payload.context || payload.name || "working"),
+        detail: friendlyToolNote(payload.name || "", payload.context || payload.name || "working"),
         status: "running",
       });
+      setActivitySummaryFromTool(payload.name || "", payload.context || payload.name || "working", "running");
       if (payload.tool_id) upsertLiveTrace(Object.assign({ entry_key: entryKey }, trace || {}));
       return;
     }
     if (ev.type === "tool.progress") {
       applyToolPreview(payload.name, payload.preview);
+      setActivitySummaryFromTool(payload.name || "", payload.preview || payload.name || "working", "running");
       return;
     }
     if (ev.type === "tool.complete") {
@@ -3351,7 +3380,7 @@
       if (ref) {
         upsertActivityItem(String(ref.entryKey || `tool:${key}`), {
           label: friendlyToolLabel(payload.name || ref.toolName || "", payload.summary || payload.name || "tool"),
-          detail: cleanActivityText(payload.summary || ""),
+          detail: friendlyToolNote(payload.name || ref.toolName || "", payload.summary || ""),
           status: "completed",
         });
       }
@@ -3648,7 +3677,6 @@
     openStatus();
     msgs().innerHTML = "";
     RT.logBuf = [];
-    addThink("connecting to Takyon.");
     updateMenu();
     LIVE.menuTimer = window.setInterval(() => updateMenu(), 1000);
     restartLivePollTimer(15000);
@@ -3699,7 +3727,7 @@
       addYou(goal);
       const streamSid = LIVE.sessionId || await ensureSession(created);
       if (streamSid) {
-        primeLiveTurnUi("thinking…");
+        primeLiveTurnUi();
         rpc("prompt.submit", { session_id: streamSid, text: goal }, 600000).catch(() => {});
       }
     } catch (err) {
@@ -3728,11 +3756,11 @@
     addYou(text);
     try {
       let sessionId = await ensureSession(LIVE.activeBusiness);
-      primeLiveTurnUi(LIVE.historyRunning ? "interrupting the current turn…" : "thinking…");
+      primeLiveTurnUi();
       if (LIVE.historyRunning && sessionId) {
         await rpc("session.interrupt", { session_id: sessionId }, 10000);
         await wait(400);
-        primeLiveTurnUi("thinking…");
+        primeLiveTurnUi();
       }
       LIVE.historyRunning = true;
       syncHistoryPollTimer();

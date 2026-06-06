@@ -1710,7 +1710,11 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             sid,
             {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)},
         )
-        _emit_progress(sid, "running", f"Running {name}", target=_tool_ctx(name, args))
+        progress_message = str(detail or label or f"Running {name}").strip()
+        progress_target = str(_tool_ctx(name, args) or "").strip()
+        if progress_target and progress_target == progress_message:
+            progress_target = ""
+        _emit_progress(sid, "running", progress_message, target=progress_target or None)
 
 
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
