@@ -2777,6 +2777,35 @@ def _subuser_app_starter_pages_js() -> str:
               ];
             }
 
+            function landingState(appState = null) {
+              if (!appState || !appState.authenticated) {
+                return {
+                  primaryHref: "/app?intent=subscribe",
+                  primaryLabel: "Subscribe",
+                  secondaryHref: "/app?intent=signin",
+                  secondaryLabel: "Sign in",
+                  membershipState: "",
+                };
+              }
+              const subscriptionState = String(appState.subscription?.state || "").trim().toLowerCase();
+              if (appState.entitled) {
+                return {
+                  primaryHref: "/app",
+                  primaryLabel: "Open app",
+                  secondaryHref: "/app/profile",
+                  secondaryLabel: "Account",
+                  membershipState: subscriptionState || "active",
+                };
+              }
+              return {
+                primaryHref: "/app?intent=subscribe",
+                primaryLabel: subscriptionState === "past_due" ? "Update billing" : "Complete subscription",
+                secondaryHref: "/app/profile",
+                secondaryLabel: "Account",
+                membershipState: subscriptionState || "signed_in",
+              };
+            }
+
             function useStarterAppState() {
               return useContext(StarterAppStateContext);
             }
@@ -2895,7 +2924,7 @@ def _subuser_app_starter_pages_js() -> str:
               );
             }
 
-            function StarterSubscriptionCard({ appState, onCheckoutComplete }) {
+            function StarterSubscriptionCard({ appState, checkoutState = "", onCheckoutComplete }) {
               const plan = currentPlan();
               const [error, setError] = useState("");
               const [pending, setPending] = useState(false);
@@ -2933,9 +2962,11 @@ def _subuser_app_starter_pages_js() -> str:
                       <small>{plan?.billingInterval ? `/ ${plan.billingInterval}` : ""}</small>
                     </p>
                     <p className="starter-price-copy">
-                      {appState.subscription.state === "past_due"
-                        ? "Update billing to restore access."
-                        : "Your membership starts as soon as checkout is complete."}
+                      {checkoutState === "success"
+                        ? "We received your checkout. If access has not unlocked yet, open Account while we confirm the subscription."
+                        : appState.subscription.state === "past_due"
+                          ? "Update billing to restore access."
+                          : "Your membership starts as soon as checkout is complete."}
                     </p>
                     <div className="starter-inline-actions">
                       <button
@@ -2947,7 +2978,7 @@ def _subuser_app_starter_pages_js() -> str:
                         {pending ? "Starting checkout..." : "Subscribe"}
                       </button>
                       <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                        View account
+                        Account
                       </Link>
                     </div>
                     {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
@@ -2982,14 +3013,18 @@ def _subuser_app_starter_pages_js() -> str:
             function StarterProductGateInner() {
               const { appState } = useStarterAppState();
               const [intent, setIntent] = useState("signin");
+              const [checkoutState, setCheckoutState] = useState("");
               useEffect(() => {
                 if (typeof window === "undefined") return;
-                const nextIntent = String(
-                  new URLSearchParams(window.location.search).get("intent") || "signin"
-                )
+                const params = new URLSearchParams(window.location.search);
+                const nextIntent = String(params.get("intent") || "signin")
+                  .trim()
+                  .toLowerCase();
+                const nextCheckout = String(params.get("checkout") || "")
                   .trim()
                   .toLowerCase();
                 setIntent(nextIntent === "subscribe" ? "subscribe" : "signin");
+                setCheckoutState(nextCheckout === "success" ? "success" : "");
               }, []);
               if (!appState) {
                 return (
@@ -3005,7 +3040,7 @@ def _subuser_app_starter_pages_js() -> str:
                 return <StarterBlockedCard appState={appState} />;
               }
               if (appState.access.state === "subscription_required") {
-                return <StarterSubscriptionCard appState={appState} />;
+                return <StarterSubscriptionCard appState={appState} checkoutState={checkoutState} />;
               }
               return <StarterAuthCard intent={intent === "subscribe" ? "subscribe" : "signin"} />;
             }
@@ -3018,10 +3053,24 @@ def _subuser_app_starter_pages_js() -> str:
               );
             }
 
-            export function StarterLandingPage() {
+            export function StarterLandingPage({ initialAppState = null }) {
               const plan = currentPlan();
               const sections = featureCards();
               const steps = stepCards();
+              const [appState, setAppState] = useState(initialAppState);
+              useEffect(() => {
+                let active = true;
+                starterLoadAppState()
+                  .then((payload) => {
+                    if (!active) return;
+                    setAppState(payload);
+                  })
+                  .catch(() => {});
+                return () => {
+                  active = false;
+                };
+              }, []);
+              const landing = landingState(appState);
               return (
                 <main className="starter-root starter-page">
                   <header className="starter-nav">
@@ -3038,11 +3087,11 @@ def _subuser_app_starter_pages_js() -> str:
                         ))}
                       </nav>
                       <div className="starter-actions">
-                        <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
-                          Sign in
+                        <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
+                          {landing.secondaryLabel}
                         </Link>
-                        <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                          Subscribe
+                        <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
+                          {landing.primaryLabel}
                         </Link>
                       </div>
                     </div>
@@ -3060,16 +3109,21 @@ def _subuser_app_starter_pages_js() -> str:
                           Start with a clear offer, explain what members get, and make it easy to continue into the app.
                         </p>
                         <div className="starter-hero-actions">
-                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            {plan ? "Start subscription flow" : "Enter the app"}
+                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
+                            {appState?.entitled ? "Open app" : appState?.authenticated ? landing.primaryLabel : (plan ? "Start subscription flow" : "Enter the app")}
                           </Link>
-                          <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
-                            Sign in
+                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
+                            {landing.secondaryLabel}
                           </Link>
                         </div>
                         <p className="starter-hero-meta">
                           <strong>{planSummary(plan)}</strong> {plan ? "Cancel anytime." : ""}
                         </p>
+                        {landing.membershipState ? (
+                          <div className="starter-pill-row">
+                            <StarterStatePill label="Membership" state={landing.membershipState} />
+                          </div>
+                        ) : null}
                       </div>
                       <aside className="starter-card starter-proof-card" aria-label="What happens next">
                         <h3>What to expect</h3>
@@ -3140,11 +3194,11 @@ def _subuser_app_starter_pages_js() -> str:
                           Show the plan clearly up front so people know exactly what they are joining.
                         </p>
                         <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            Subscribe
+                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
+                            {appState?.entitled ? "Open app" : landing.primaryLabel}
                           </Link>
-                          <Link className="starter-link-button starter-link-quiet" href="/app?intent=signin">
-                            Sign in
+                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
+                            {landing.secondaryLabel}
                           </Link>
                         </div>
                       </div>
@@ -3169,11 +3223,11 @@ def _subuser_app_starter_pages_js() -> str:
                           ))}
                         </div>
                         <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            Open app
+                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
+                            {appState?.entitled ? "Open app" : landing.primaryLabel}
                           </Link>
-                          <Link className="starter-link-button starter-link-quiet" href="/app/profile">
-                            Open profile
+                          <Link className="starter-link-button starter-link-quiet" href={appState?.authenticated ? "/app/profile" : landing.secondaryHref}>
+                            {appState?.authenticated ? "Open account" : landing.secondaryLabel}
                           </Link>
                         </div>
                       </div>
@@ -3189,8 +3243,11 @@ def _subuser_app_starter_pages_js() -> str:
                           Sign in or subscribe to continue into the app.
                         </p>
                         <div className="starter-inline-actions">
-                          <Link className="starter-link-button starter-link-primary" href="/app?intent=subscribe">
-                            Continue to app
+                          <Link className="starter-link-button starter-link-primary" href={landing.primaryHref}>
+                            {appState?.entitled ? "Open app" : landing.primaryLabel}
+                          </Link>
+                          <Link className="starter-link-button starter-link-quiet" href={landing.secondaryHref}>
+                            {landing.secondaryLabel}
                           </Link>
                         </div>
                       </div>
@@ -3217,7 +3274,7 @@ def _subuser_app_starter_pages_js() -> str:
                       </Link>
                       <nav className="starter-app-links" aria-label="App">
                         <Link href="/app">App</Link>
-                        <Link href="/app/profile">Profile</Link>
+                        <Link href="/app/profile">Account</Link>
                         <Link href="/">Landing page</Link>
                       </nav>
                     </div>
