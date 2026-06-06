@@ -2950,31 +2950,24 @@
     LIVE.activityHasMeaningfulUpdate = false;
   }
 
-  function shouldHideStarterActivity() {
-    return !!(
-      LIVE.activityTurnStartedAt
-      && !LIVE.activityHasMeaningfulUpdate
-      && LIVE.activityItems.size === 0
-    );
-  }
-
   function finalizeActivityTurn(options) {
     const payload = options || {};
     const status = String(payload.status || "").trim().toLowerCase();
-    const finalText = String(payload.text || "").trim();
     const keepActivityRow = LIVE.activityHasMeaningfulUpdate || LIVE.activityItems.size > 0;
     if (keepActivityRow) {
+      const settledHeadline = LIVE.activityHeadline && !/^thinking\.\.\.$/i.test(LIVE.activityHeadline)
+        ? LIVE.activityHeadline
+        : status === "complete" ? "Done" : "Needs attention";
+      const settledNote = LIVE.activityNote || "";
       LIVE.activityOpen = false;
       LIVE.activityUserToggled = false;
       setActivitySummary({
         phase: status === "complete" ? "done" : "fixing",
-        headline: finalText.slice(0, 120) || "CEO turn completed.",
-        note: LIVE.activityNote || "The CEO finished this turn.",
+        headline: settledHeadline,
+        note: settledNote,
         percent: null,
         state: status === "complete" ? "done" : "blocked",
       });
-    } else {
-      removeActivityCard();
     }
     LIVE.activityTurnStartedAt = 0;
     LIVE.activityHasMeaningfulUpdate = false;
@@ -2994,7 +2987,7 @@
     const container = document.createElement("div");
     container.className = "m";
     container.innerHTML = `
-      <details class="activity" open>
+      <details class="activity">
         <summary>
           <span class="activity__pulse" aria-hidden="true"></span>
           <span class="activity__caret">▾</span>
@@ -3064,29 +3057,44 @@
     const meta = activityPhaseMeta(LIVE.activityPhase);
     const items = Array.from(LIVE.activityItems.values()).sort((a, b) => traceUpdatedAtMs(b && b.updated_at) - traceUpdatedAtMs(a && a.updated_at));
     const countLabel = items.length ? `${items.length} ${items.length === 1 ? "step" : "steps"}` : "";
-    const shouldOpen = LIVE.activityUserToggled
+    const note = LIVE.activityNote || "";
+    const hasPercent = typeof LIVE.activityPercent === "number";
+    const hasDetails = !!note || !!items.length || hasPercent;
+    const isStarter = !LIVE.activityHasMeaningfulUpdate
+      && LIVE.activityPhase === "thinking"
+      && !hasDetails
+      && /^thinking\.\.\.$/i.test(String(LIVE.activityHeadline || "").trim());
+    const shouldOpen = hasDetails && (LIVE.activityUserToggled
       ? !!LIVE.activityOpen
-      : !!LIVE.activityOpen;
+      : !!LIVE.activityOpen);
     if (details.open !== shouldOpen) details.open = shouldOpen;
     details.classList.toggle("is-running", LIVE.activityState === "running");
     details.classList.toggle("is-done", LIVE.activityState === "done");
     details.classList.toggle("is-blocked", LIVE.activityState === "blocked");
+    details.classList.toggle("is-starter", isStarter);
     const caret = $(".activity__caret", LIVE.activityCard);
-    if (caret) caret.textContent = details.open ? "▾" : "▸";
+    if (caret) {
+      caret.textContent = details.open ? "▾" : "▸";
+      caret.style.display = hasDetails ? "" : "none";
+    }
     const phaseEl = $(".activity__phase", LIVE.activityCard);
     if (phaseEl) {
       phaseEl.textContent = meta.label;
       phaseEl.style.color = meta.color;
+      phaseEl.style.display = isStarter ? "none" : "";
     }
     const headlineEl = $(".activity__headline", LIVE.activityCard);
-    if (headlineEl) headlineEl.textContent = LIVE.activityHeadline || friendlyActivityHeadline(LIVE.activityPhase, "", "");
+    if (headlineEl) {
+      headlineEl.textContent = isStarter
+        ? "thinking..."
+        : LIVE.activityHeadline || friendlyActivityHeadline(LIVE.activityPhase, "", "");
+    }
     const countEl = $(".activity__count", LIVE.activityCard);
     if (countEl) {
       countEl.textContent = countLabel;
       countEl.style.display = countLabel ? "" : "none";
     }
     const noteEl = $(".activity__note", LIVE.activityCard);
-    const note = LIVE.activityNote || "";
     if (noteEl) {
       noteEl.textContent = note;
       noteEl.style.display = note ? "" : "none";
@@ -3223,7 +3231,6 @@
 
   function appendAssistantText(text) {
     if (!text) return;
-    if (shouldHideStarterActivity()) removeActivityCard();
     cancelAssistantTypingAnimation();
     LIVE.assistantDeltaSeen = true;
     LIVE.assistantText += text;
@@ -3231,9 +3238,9 @@
     scrollChat();
   }
 
-  function finishAssistantText(text) {
+  function finishAssistantText(text, options) {
+    const opts = options || {};
     cancelAssistantTypingAnimation();
-    if (shouldHideStarterActivity()) removeActivityCard();
     if (text) LIVE.assistantText = String(text);
     if (LIVE.assistantText) {
       ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
@@ -3242,14 +3249,15 @@
     LIVE.assistantText = "";
     LIVE.assistantDeltaSeen = false;
     LIVE.assistantBubble = null;
+    if (opts.clearStarterActivity) removeActivityCard();
     scrollChat();
   }
 
-  function typeAssistantText(text) {
+  function typeAssistantText(text, options) {
+    const opts = options || {};
     const finalText = String(text || "").trim();
-    if (shouldHideStarterActivity()) removeActivityCard();
     if (!finalText) {
-      finishAssistantText("(empty response)");
+      finishAssistantText("(empty response)", opts);
       return;
     }
     cancelAssistantTypingAnimation();
@@ -3265,7 +3273,7 @@
       bubble.innerHTML = formatRichText(`${finalText.slice(0, index)}${index < total ? "▌" : ""}`);
       scrollChat();
       if (index >= total) {
-        finishAssistantText(finalText);
+        finishAssistantText(finalText, opts);
         return;
       }
       LIVE.assistantTypingTimer = window.setTimeout(step, total > 320 ? 18 : 24);
@@ -3422,13 +3430,14 @@
         });
         LIVE.activeTurnTraceId = "";
       }
-      finalizeActivityTurn({
+      const keepActivityRow = finalizeActivityTurn({
         status: payload.status,
         text: payload.text,
       });
       const finalText = String(payload.text || "");
-      if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
-      else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
+      const clearStarterActivity = !keepActivityRow;
+      if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText, { clearStarterActivity });
+      else finishAssistantText(finalText || LIVE.assistantText || "(empty response)", { clearStarterActivity });
       if (payload.warning) ceolog(esc(String(payload.warning)), true);
       LIVE.historyRunning = false;
       syncHistoryPollTimer();
