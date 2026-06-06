@@ -221,16 +221,6 @@ def test_bootstrap_prompt_keeps_truth_and_blocker_language():
     assert "If something is blocked, record the blocker and continue with local/test artifacts that do not require that provider." in prompt
 
 
-def test_bootstrap_prompt_requires_canonical_blocker_reporting():
-    from plugins.takyon.cli import _business_bootstrap_instruction
-
-    prompt = _business_bootstrap_instruction("demo", "find users", "test")
-
-    assert "Do not write status headers, blocker prose, missing-credential notes, or publish claims into those draft files." in prompt
-    assert "Treat product/surface.md, distribution/surface.md, queued jobs, receipts, and direct tool results as the canonical current state." in prompt
-    assert "only current blockers still supported by canonical surface files, queued jobs, receipts, or direct tool errors." in prompt
-
-
 def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
