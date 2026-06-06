@@ -201,6 +201,13 @@ def _ensure_local_xurl_auth() -> tuple[str, Path]:
     return xurl, auth_path
 
 
+def _xurl_identity_flags(*, home: Path) -> tuple[str, str]:
+    from .core import _xurl_default_identity
+
+    app_name, username = _xurl_default_identity(home=str(home))
+    return str(app_name or "").strip(), str(username or "").strip()
+
+
 def _update_outreach_work_request(
     slug: str,
     work_request_id: str,
@@ -1020,10 +1027,25 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
 
     try:
         xurl, _auth_path = _ensure_local_xurl_auth()
-        command = [xurl, "reply", reply_to, body] if reply_to else [xurl, "post", body]
+        app_name, username = _xurl_identity_flags(home=home)
+        command = [xurl]
+        if app_name:
+            command.extend(["--app", app_name])
+        if reply_to:
+            command.extend(["reply", reply_to, body])
+        else:
+            command.extend(["post", body])
+        if username:
+            command.extend(["-u", username])
         provider_response = _run_xurl_json_command(command, home=home, timeout=90)
         post_id = _extract_x_post_id(provider_response) or str(job.id)
-        whoami = _try_run_xurl_json_command([xurl, "whoami"], home=home, timeout=20)
+        whoami_command = [xurl]
+        if app_name:
+            whoami_command.extend(["--app", app_name])
+        whoami_command.append("whoami")
+        if username:
+            whoami_command.extend(["-u", username])
+        whoami = _try_run_xurl_json_command(whoami_command, home=home, timeout=20)
         username = _extract_x_username(whoami)
         post_url = (
             f"https://x.com/{username}/status/{post_id}"

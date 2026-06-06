@@ -4690,6 +4690,45 @@ def _xurl_auth_path(*, home: str | None = None) -> Path:
     return base / ".xurl"
 
 
+def _xurl_default_identity(*, home: str | None = None) -> tuple[str, str]:
+    auth_path = _xurl_auth_path(home=home)
+    if not auth_path.exists():
+        return "", ""
+    try:
+        import yaml
+
+        payload = yaml.safe_load(auth_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return "", ""
+    if not isinstance(payload, Mapping):
+        return "", ""
+    apps = payload.get("apps")
+    if not isinstance(apps, Mapping):
+        return "", ""
+    default_app = str(payload.get("default_app") or "").strip()
+    candidates: list[tuple[str, Mapping[str, Any]]] = []
+    if default_app and isinstance(apps.get(default_app), Mapping):
+        candidates.append((default_app, apps.get(default_app) or {}))
+    for name, app_payload in apps.items():
+        if str(name or "").strip() == default_app:
+            continue
+        if isinstance(app_payload, Mapping):
+            candidates.append((str(name or "").strip(), app_payload))
+    for app_name, app_payload in candidates:
+        if not app_name:
+            continue
+        default_user = str(app_payload.get("default_user") or "").strip()
+        if default_user:
+            return app_name, default_user
+        oauth2_tokens = app_payload.get("oauth2_tokens")
+        if isinstance(oauth2_tokens, Mapping):
+            for username in oauth2_tokens:
+                candidate = str(username or "").strip()
+                if candidate:
+                    return app_name, candidate
+    return "", ""
+
+
 def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
     xurl = _resolve_xurl_executable()
     if not xurl:
@@ -4722,9 +4761,16 @@ def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
         )
     ):
         return False
+    app_name, username = _xurl_default_identity(home=resolved_home)
+    identity_command = [xurl]
+    if app_name:
+        identity_command.extend(["--app", app_name])
+    identity_command.append("whoami")
+    if username:
+        identity_command.extend(["-u", username])
     try:
         identity = subprocess.run(
-            [xurl, "whoami"],
+            identity_command,
             text=True,
             capture_output=True,
             timeout=20,
