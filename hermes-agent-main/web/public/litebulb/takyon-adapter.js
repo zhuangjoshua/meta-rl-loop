@@ -2910,6 +2910,37 @@
     LIVE.activityHasMeaningfulUpdate = false;
   }
 
+  function shouldHideStarterActivity() {
+    return !!(
+      LIVE.activityTurnStartedAt
+      && !LIVE.activityHasMeaningfulUpdate
+      && LIVE.activityItems.size === 0
+    );
+  }
+
+  function finalizeActivityTurn(options) {
+    const payload = options || {};
+    const status = String(payload.status || "").trim().toLowerCase();
+    const finalText = String(payload.text || "").trim();
+    const keepActivityRow = LIVE.activityHasMeaningfulUpdate || LIVE.activityItems.size > 0;
+    if (keepActivityRow) {
+      LIVE.activityOpen = false;
+      LIVE.activityUserToggled = false;
+      setActivitySummary({
+        phase: status === "complete" ? "done" : "fixing",
+        headline: finalText.slice(0, 120) || "CEO turn completed.",
+        note: LIVE.activityNote || "The CEO finished this turn.",
+        percent: null,
+        state: status === "complete" ? "done" : "blocked",
+      });
+    } else {
+      removeActivityCard();
+    }
+    LIVE.activityTurnStartedAt = 0;
+    LIVE.activityHasMeaningfulUpdate = false;
+    return keepActivityRow;
+  }
+
   function ensureActivityCard(seed) {
     if (LIVE.activityCard && document.body.contains(LIVE.activityCard)) return LIVE.activityCard;
     LIVE.activityItems = new Map();
@@ -3139,6 +3170,7 @@
 
   function appendAssistantText(text) {
     if (!text) return;
+    if (shouldHideStarterActivity()) removeActivityCard();
     cancelAssistantTypingAnimation();
     LIVE.assistantDeltaSeen = true;
     LIVE.assistantText += text;
@@ -3148,6 +3180,7 @@
 
   function finishAssistantText(text) {
     cancelAssistantTypingAnimation();
+    if (shouldHideStarterActivity()) removeActivityCard();
     if (text) LIVE.assistantText = String(text);
     if (LIVE.assistantText) {
       ensureAssistantBubble().innerHTML = formatRichText(LIVE.assistantText);
@@ -3161,6 +3194,7 @@
 
   function typeAssistantText(text) {
     const finalText = String(text || "").trim();
+    if (shouldHideStarterActivity()) removeActivityCard();
     if (!finalText) {
       finishAssistantText("(empty response)");
       return;
@@ -3220,8 +3254,17 @@
     if (!LIVE.sessionId) return;
     try {
       const res = await rpc("session.history", { session_id: LIVE.sessionId }, 10000);
+      const wasRunning = LIVE.historyRunning;
       LIVE.historyRunning = Boolean(res && res.running);
       mergeHistoryMessages(res && res.messages);
+      if (wasRunning && !LIVE.historyRunning && LIVE.activityTurnStartedAt) {
+        const messages = Array.isArray(res && res.messages) ? res.messages : [];
+        const assistantFinal = [...messages].reverse().find((item) => String(item && item.role || "").trim().toLowerCase() === "assistant");
+        finalizeActivityTurn({
+          status: "complete",
+          text: String(assistantFinal && assistantFinal.text || LIVE.assistantText || "").trim(),
+        });
+      }
       syncHistoryPollTimer();
       if (!LIVE.historyRunning) return;
       scheduleLiveRefresh(250);
@@ -3314,7 +3357,6 @@
       return;
     }
     if (ev.type === "message.complete") {
-      const keepActivityRow = LIVE.activityHasMeaningfulUpdate || LIVE.activityItems.size > 0;
       if (LIVE.activeTurnTraceId) {
         const turnStatus = String(payload.status || "").trim().toLowerCase() === "complete" ? "completed" : "failed";
         upsertLiveTrace({
@@ -3327,21 +3369,10 @@
         });
         LIVE.activeTurnTraceId = "";
       }
-      if (keepActivityRow) {
-        LIVE.activityOpen = false;
-        LIVE.activityUserToggled = false;
-        setActivitySummary({
-          phase: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "fixing",
-          headline: String(payload.text || "").trim().slice(0, 120) || "CEO turn completed.",
-          note: LIVE.activityNote || "The CEO finished this turn.",
-          percent: null,
-          state: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "blocked",
-        });
-      } else {
-        removeActivityCard();
-      }
-      LIVE.activityTurnStartedAt = 0;
-      LIVE.activityHasMeaningfulUpdate = false;
+      finalizeActivityTurn({
+        status: payload.status,
+        text: payload.text,
+      });
       const finalText = String(payload.text || "");
       if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
       else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
