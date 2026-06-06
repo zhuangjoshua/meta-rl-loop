@@ -53,6 +53,7 @@
     activityPercent: null,
     activityItems: new Map(),
     activityState: "idle",
+    activityTurnStartedAt: 0,
     activityOpen: true,
     activityUserToggled: false,
     businesses: [],
@@ -797,7 +798,7 @@
       planning: "planning",
       editing: "editing",
       running: "working",
-      fixing: "fixing",
+      fixing: "unblocking",
       finalizing: "wrapping up",
       done: "done",
     };
@@ -832,9 +833,18 @@
 
   function friendlyActivityHeadline(phase, message, target) {
     const clean = cleanActivityText(message);
-    if (clean) return target ? `${clean} · ${target}` : clean;
+    if (clean) {
+      if (/(\d+)\s+blockers?\s+need ceo recovery/i.test(clean)) {
+        return clean.replace(/(\d+)\s+blockers?\s+need ceo recovery\.?/i, "Reviewing $1 blocked tasks");
+      }
+      if (/business is synced/i.test(clean)) return "Workspace is up to date";
+      if (/ceo wake completed/i.test(clean)) return "CEO review complete";
+      if (/ceo wake is running/i.test(clean)) return "CEO is reviewing the business";
+      if (/strategy context/i.test(clean)) return "Using saved strategy context";
+      return target ? `${clean} · ${target}` : clean;
+    }
     const raw = String(phase || "running").trim().toLowerCase();
-    if (raw === "thinking") return "Understanding the request";
+    if (raw === "thinking") return "Reviewing your request";
     if (raw === "planning") return "Planning the next steps";
     if (raw === "editing") return target ? `Updating ${target}` : "Updating files";
     if (raw === "fixing") return target ? `Fixing ${target}` : "Fixing issues";
@@ -1464,6 +1474,10 @@
     const signature = traceLogSignature(entry);
     if (!signature || LIVE.traceLogSeen.has(signature)) return false;
     LIVE.traceLogSeen.add(signature);
+    if (RT.live) {
+      syncActivityFromTrace(entry);
+      return true;
+    }
     if (syncActivityFromTrace(entry)) return true;
     ceolog(traceLogHtml(entry), true);
     return true;
@@ -1620,7 +1634,16 @@
 
     const backgroundDetail = String(backgroundRun.detail || "").trim();
     if (backgroundDetail && backgroundDetail !== LIVE.lastBackgroundDetail) {
-      ceolog(`<span class="sys">[background]</span> ${esc(backgroundDetail)}`, true);
+      if (RT.live && !LIVE.activeTurnTraceId) {
+        setActivitySummary({
+          phase: "running",
+          headline: friendlyActivityHeadline("running", backgroundDetail, ""),
+          note: cleanActivityText(backgroundDetail),
+          state: "running",
+        });
+      } else {
+        ceolog(`<span class="sys">[background]</span> ${esc(backgroundDetail)}`, true);
+      }
       LIVE.lastBackgroundDetail = backgroundDetail;
     }
 
@@ -1643,10 +1666,22 @@
       const statusLabel = currentAction.status || "recorded";
       const summary = currentAction.label || currentAction.detail || "Business is synced.";
       const detail = blocker || currentAction.detail;
-      ceolog(
-        `<span class="sys">[${esc(statusLabel)}]</span> ${esc(summary)}${detail && detail !== summary ? ` — ${esc(detail)}` : ""}`,
-        true,
-      );
+      if (RT.live) {
+        if (!LIVE.activeTurnTraceId) {
+          const note = cleanActivityText(detail || summary);
+          setActivitySummary({
+            phase: /recover|block|fix|error/i.test(statusLabel) ? "fixing" : /done|sync|ready/i.test(statusLabel) ? "done" : "running",
+            headline: friendlyActivityHeadline(/recover|block|fix|error/i.test(statusLabel) ? "fixing" : /done|sync|ready/i.test(statusLabel) ? "done" : "running", summary, ""),
+            note: note || friendlyActivityHeadline("running", summary, ""),
+            state: /recover|block|fix|error/i.test(statusLabel) ? "blocked" : /done|sync|ready/i.test(statusLabel) ? "done" : "running",
+          });
+        }
+      } else {
+        ceolog(
+          `<span class="sys">[${esc(statusLabel)}]</span> ${esc(summary)}${detail && detail !== summary ? ` — ${esc(detail)}` : ""}`,
+          true,
+        );
+      }
       LIVE.lastCeoHeadline = headline;
     }
   }
@@ -2683,6 +2718,7 @@
     LIVE.activityPercent = null;
     LIVE.activityItems = new Map();
     LIVE.activityState = "idle";
+    LIVE.activityTurnStartedAt = 0;
     LIVE.activityOpen = true;
     LIVE.activityUserToggled = false;
     LIVE.bootedBusiness = "";
@@ -2903,7 +2939,7 @@
     LIVE.activityDetails = details;
     const meta = activityPhaseMeta(LIVE.activityPhase);
     const items = Array.from(LIVE.activityItems.values()).sort((a, b) => traceUpdatedAtMs(b && b.updated_at) - traceUpdatedAtMs(a && a.updated_at));
-    const countLabel = items.length ? `${items.length} ${items.length === 1 ? "tool call" : "tool calls"}` : "";
+    const countLabel = items.length ? `${items.length} ${items.length === 1 ? "step" : "steps"}` : "";
     const shouldOpen = LIVE.activityUserToggled
       ? !!LIVE.activityOpen
       : LIVE.activityState === "running";
@@ -2961,6 +2997,15 @@
     const kind = String(entry.kind || "note").trim().toLowerCase();
     const label = String(entry.label || "").trim();
     const detail = cleanActivityText(entry.detail || entry.summary || "");
+    const updatedAtMs = traceUpdatedAtMs(entry && entry.updated_at);
+    if (
+      LIVE.activityTurnStartedAt
+      && LIVE.activityState === "running"
+      && updatedAtMs
+      && updatedAtMs + 1500 < LIVE.activityTurnStartedAt
+    ) {
+      return false;
+    }
     if (kind === "tool" || kind === "skill") {
       upsertActivityItem(String(entry.entry_key || entry.id || `${kind}:${label}`), {
         label: friendlyToolLabel(entry.tool_name || label, label || kind),
@@ -3173,22 +3218,25 @@
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
-      if (LIVE.activityCard && LIVE.activityState !== "running") {
-        LIVE.activityCard = null;
-        LIVE.activityDetails = null;
-        LIVE.activityItems = new Map();
-      }
+      LIVE.activityItems = new Map();
+      LIVE.activityPercent = null;
+      LIVE.activityPhase = "thinking";
+      LIVE.activityHeadline = "";
+      LIVE.activityNote = "";
+      LIVE.activityState = "running";
+      LIVE.activityTurnStartedAt = Date.now();
+      LIVE.traceLogSeen = new Set();
       LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
       ensureActivityCard({
         phase: "thinking",
-        headline: "Understanding the request",
-        note: "The CEO is starting a new turn.",
+        headline: "Reviewing your request",
+        note: "The CEO is deciding what to do first.",
       });
       upsertLiveTrace({
         entry_key: LIVE.activeTurnTraceId,
         kind: "turn",
         label: "CEO turn",
-        detail: "CEO turn is running.",
+        detail: "The CEO is working on this request.",
         status: "running",
         updated_at: new Date().toISOString(),
       });
@@ -3218,10 +3266,11 @@
       setActivitySummary({
         phase: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "fixing",
         headline: String(payload.text || "").trim().slice(0, 120) || "CEO turn completed.",
-        note: LIVE.activityNote || "The CEO turn finished.",
+        note: LIVE.activityNote || "The CEO finished this turn.",
         percent: null,
         state: String(payload.status || "").trim().toLowerCase() === "complete" ? "done" : "blocked",
       });
+      LIVE.activityTurnStartedAt = 0;
       const finalText = String(payload.text || "");
       if (!LIVE.assistantDeltaSeen && finalText.trim()) typeAssistantText(finalText);
       else finishAssistantText(finalText || LIVE.assistantText || "(empty response)");
@@ -3338,6 +3387,7 @@
         percent: null,
         state: "blocked",
       });
+      LIVE.activityTurnStartedAt = 0;
       if (LIVE.assistantBubble) finishAssistantText(text);
       else addCeo(formatRichText(text));
       setStatus("paused", "paused");
