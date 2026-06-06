@@ -199,11 +199,7 @@ def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
     for name in ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
-    monkeypatch.setattr(
-        core,
-        "_read_xurl_shared_auth_secret",
-        lambda: ("XURL_SHARED_AUTH_B64_SECRET", base64.b64encode(b"apps: {}\n").decode("ascii")),
-    )
+    monkeypatch.setattr(core, "_xurl_shared_auth_ready", lambda: True)
     assert core._missing_env_for_requirement("x") == []
 
 
@@ -221,6 +217,49 @@ def test_xurl_auth_status_rejects_empty_status(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core.subprocess, "run", lambda *args, **kwargs: _Proc())
     assert core._xurl_auth_status_ok(home=str(home)) is False
+
+
+def test_xurl_auth_status_rejects_unauthorized_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
+    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".xurl").write_text("apps: {}\n", encoding="utf-8")
+
+    class _StatusProc:
+        returncode = 0
+        stdout = "shared auth present\n"
+        stderr = ""
+
+    class _WhoamiProc:
+        returncode = 0
+        stdout = '{\n  "title":"Unauthorized",\n  "status":401\n}\n'
+        stderr = ""
+
+    responses = iter((_StatusProc(), _WhoamiProc()))
+    monkeypatch.setattr(core.subprocess, "run", lambda *args, **kwargs: next(responses))
+    assert core._xurl_auth_status_ok(home=str(home)) is False
+
+
+def test_xurl_shared_auth_ready_validates_seeded_blob(monkeypatch):
+    seen: dict[str, str] = {}
+    auth_blob = "apps:\n  shared: {}\n"
+    monkeypatch.setattr(
+        core,
+        "_read_xurl_shared_auth_secret",
+        lambda: ("XURL_SHARED_AUTH_B64_SECRET", base64.b64encode(auth_blob.encode("utf-8")).decode("ascii")),
+    )
+
+    def _fake_status(*, home=None):
+        assert home
+        auth_path = Path(home) / ".xurl"
+        seen["home"] = str(home)
+        seen["text"] = auth_path.read_text(encoding="utf-8")
+        return False
+
+    monkeypatch.setattr(core, "_xurl_auth_status_ok", _fake_status)
+    assert core._xurl_shared_auth_ready() is False
+    assert seen["text"] == auth_blob
 
 
 def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):

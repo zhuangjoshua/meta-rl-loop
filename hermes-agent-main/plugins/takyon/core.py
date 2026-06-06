@@ -526,7 +526,7 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
 _XURL_SHARED_AUTH_ENV_KEYS = ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET")
 _X_CREDENTIAL_REQUIREMENT_LABEL = (
-    "X_API_KEY/TWITTER_API_KEY/X_BEARER_TOKEN/TWITTER_BEARER_TOKEN/shared xurl auth"
+    "X_API_KEY/TWITTER_API_KEY/X_BEARER_TOKEN/TWITTER_BEARER_TOKEN/valid shared xurl auth"
 )
 
 
@@ -4722,6 +4722,34 @@ def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
         )
     ):
         return False
+    try:
+        identity = subprocess.run(
+            [xurl, "whoami"],
+            text=True,
+            capture_output=True,
+            timeout=20,
+            env=_runtime_env({"HOME": resolved_home}),
+        )
+    except Exception:
+        return False
+    identity_output = "\n".join(
+        part for part in (identity.stdout, identity.stderr) if part
+    ).strip().lower()
+    if identity.returncode != 0:
+        return False
+    if any(
+        marker in identity_output
+        for marker in (
+            "unauthorized",
+            '"status":401',
+            '"status": 401',
+            '"title":"unauthorized"',
+            '"title": "unauthorized"',
+            "not authenticated",
+            "forbidden",
+        )
+    ):
+        return False
     return True
 
 
@@ -4755,9 +4783,21 @@ def _xurl_shared_auth_ready() -> bool:
     key, value = _read_xurl_shared_auth_secret()
     if not key or not value:
         return False
-    if key.endswith("_B64_SECRET"):
-        return bool(_decode_xurl_shared_auth_blob(key, value).strip())
-    return True
+    auth_text = _decode_xurl_shared_auth_blob(key, value)
+    if not auth_text.strip():
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="takyon-xurl-auth-") as tmpdir:
+            home = Path(tmpdir)
+            auth_path = home / ".xurl"
+            auth_path.write_text(auth_text, encoding="utf-8")
+            try:
+                os.chmod(auth_path, 0o600)
+            except Exception:
+                pass
+            return _xurl_auth_status_ok(home=str(home))
+    except Exception:
+        return False
 
 
 def _is_x_provider_name(value: Any) -> bool:
