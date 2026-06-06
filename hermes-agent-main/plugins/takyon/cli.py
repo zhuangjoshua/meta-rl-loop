@@ -1239,11 +1239,13 @@ def _business_bootstrap_instruction(
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
         "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked.",
+        "Draft files under distribution/campaign/ are send-ready campaign assets only. Do not write status headers, blocker prose, missing-credential notes, or publish claims into those draft files.",
         "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
+        "Treat product/surface.md, distribution/surface.md, queued jobs, receipts, and direct tool results as the canonical current state. Do not restate stale draft-file text or earlier failed attempts after a later refresh or publish succeeds.",
         "If something is blocked, record the blocker in research/strategy.md and continue with the next step.",
         "",
         "## Final response",
-        "Concise status only: business filesystem root, what was created, what is blocked or missing.",
+        "Concise canonical status only: business filesystem root, what was created, and only current blockers still supported by canonical surface files, queued jobs, receipts, or direct tool errors.",
     ]
     return "\n".join(lines)
 
