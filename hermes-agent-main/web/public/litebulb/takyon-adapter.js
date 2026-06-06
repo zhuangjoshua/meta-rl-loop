@@ -2544,17 +2544,18 @@
     openGraph = function openGraphLiveAware() { /* north star removed */ };
   }
 
-  const originalOpenTask = openTask;
+  const originalOpenTask = typeof openTask === "function" ? openTask : null;
   openTask = async function openTaskLiveAware(id) {
     const task = RT.tasks.find((item) => item.id === id);
     if (!RT.live) {
-      originalOpenTask(id);
+      if (originalOpenTask) originalOpenTask(id);
       return;
     }
     if (task && task._deliverablePath) {
       void openDocument(task._deliverablePath, task.title || "Deliverable");
       return;
     }
+    if (!originalOpenTask) return;
     originalOpenTask(id);
     if (!task || task._detailLoaded || task._loadingDetail) return;
     task._loadingDetail = true;
