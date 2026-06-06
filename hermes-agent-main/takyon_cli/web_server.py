@@ -7253,6 +7253,12 @@ def mount_spa(application: FastAPI):
             return _serve_index(prefix)
         html = _litebulb_index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+        adapter_path = WEB_DIST / "litebulb" / "takyon-adapter.js"
+        adapter_version = (
+            str(int(adapter_path.stat().st_mtime_ns))
+            if adapter_path.is_file()
+            else "0"
+        )
         token_script = (
             f'<script>window.__TAKYON_SESSION_TOKEN__="{_SESSION_TOKEN}";'
             f"window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
@@ -7263,7 +7269,7 @@ def mount_spa(application: FastAPI):
         # (honouring any reverse-proxy prefix).
         html = html.replace(
             'src="./takyon-adapter.js"',
-            f'src="{prefix}/litebulb/takyon-adapter.js"',
+            f'src="{prefix}/litebulb/takyon-adapter.js?v={adapter_version}"',
         )
         html = html.replace("</head>", f"{token_script}</head>", 1)
         return HTMLResponse(
