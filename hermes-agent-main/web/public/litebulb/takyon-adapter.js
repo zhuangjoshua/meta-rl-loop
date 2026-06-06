@@ -2540,11 +2540,6 @@
     });
   };
 
-  const originalLayoutMain = layoutMain;
-  layoutMain = function layoutMainLiveAware() {
-    originalLayoutMain();
-  };
-
   if (typeof openGraph === "function") {
     openGraph = function openGraphLiveAware() { /* north star removed */ };
   }
