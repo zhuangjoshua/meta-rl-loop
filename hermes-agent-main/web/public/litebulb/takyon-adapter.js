@@ -3060,6 +3060,26 @@
     scrollChat();
   }
 
+  function primeLiveTurnUi(placeholderText) {
+    LIVE.activityItems = new Map();
+    LIVE.activityPercent = null;
+    LIVE.activityPhase = "thinking";
+    LIVE.activityHeadline = "";
+    LIVE.activityNote = "";
+    LIVE.activityState = "running";
+    LIVE.activityTurnStartedAt = Date.now();
+    LIVE.traceLogSeen = new Set();
+    setActivitySummary({
+      phase: "thinking",
+      headline: "Reviewing your request",
+      note: "The CEO is deciding what to do first.",
+      percent: null,
+      state: "running",
+    });
+    showAssistantPlaceholder(placeholderText || "thinking…");
+    setStatus("thinking…", "run");
+  }
+
   function appendAssistantText(text) {
     if (!text) return;
     cancelAssistantTypingAnimation();
@@ -3218,20 +3238,8 @@
     if (ev.session_id && LIVE.sessionId && ev.session_id !== LIVE.sessionId) return;
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
-      LIVE.activityItems = new Map();
-      LIVE.activityPercent = null;
-      LIVE.activityPhase = "thinking";
-      LIVE.activityHeadline = "";
-      LIVE.activityNote = "";
-      LIVE.activityState = "running";
-      LIVE.activityTurnStartedAt = Date.now();
-      LIVE.traceLogSeen = new Set();
+      primeLiveTurnUi("thinking…");
       LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
-      ensureActivityCard({
-        phase: "thinking",
-        headline: "Reviewing your request",
-        note: "The CEO is deciding what to do first.",
-      });
       upsertLiveTrace({
         entry_key: LIVE.activeTurnTraceId,
         kind: "turn",
@@ -3240,10 +3248,8 @@
         status: "running",
         updated_at: new Date().toISOString(),
       });
-      setStatus("thinking…", "run");
       LIVE.historyRunning = true;
       syncHistoryPollTimer();
-      showAssistantPlaceholder("thinking…");
       return;
     }
     if (ev.type === "message.delta") {
@@ -3693,6 +3699,7 @@
       addYou(goal);
       const streamSid = LIVE.sessionId || await ensureSession(created);
       if (streamSid) {
+        primeLiveTurnUi("thinking…");
         rpc("prompt.submit", { session_id: streamSid, text: goal }, 600000).catch(() => {});
       }
     } catch (err) {
@@ -3721,12 +3728,11 @@
     addYou(text);
     try {
       let sessionId = await ensureSession(LIVE.activeBusiness);
-      showAssistantPlaceholder(LIVE.historyRunning ? "interrupting the current turn…" : "thinking…");
-      setStatus("thinking…", "run");
+      primeLiveTurnUi(LIVE.historyRunning ? "interrupting the current turn…" : "thinking…");
       if (LIVE.historyRunning && sessionId) {
         await rpc("session.interrupt", { session_id: sessionId }, 10000);
         await wait(400);
-        showAssistantPlaceholder("thinking…");
+        primeLiveTurnUi("thinking…");
       }
       LIVE.historyRunning = true;
       syncHistoryPollTimer();
