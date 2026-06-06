@@ -9,7 +9,7 @@
 
 ## Output Contract
 
-Return exactly one send-ready post (no variants unless the operator explicitly asks). For a thread, return one send-ready thread (each tweet standalone, no "1/" numbering in the posted text). Return the draft text only: no status headers, blocker notes, credential reminders, or hand-written publish claims.
+Return exactly one send-ready post (no variants unless the operator explicitly asks). For a thread, return one send-ready thread (each tweet standalone, no "1/" numbering in the posted text).
 
 ## Craft (use the engine)
 

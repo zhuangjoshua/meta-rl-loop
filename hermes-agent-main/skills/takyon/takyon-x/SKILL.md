@@ -131,7 +131,6 @@ None. Copy is crafted from the references and published through the Takyon busin
 - Use `business_write_file` or `business_patch_file` to create or refresh `distribution/voice/x.md` when repeated X work needs durable channel guidance.
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only legacy X drafts live under `distribution/phase-1-outreach/`, move or merge that visible state forward before drafting new work.
 - Keep in-progress X drafts visible under `distribution/campaign/` when the turn is not publishing immediately.
-- Keep X draft files content-only. Do not write status headers, blocker prose, missing-credential notes, or hand-written publish claims into the draft body; that state belongs in tool results, receipts, queued jobs, `distribution/local-published/`, or `metrics/conversations/`.
 - Draft with the copy engine (hooks → build → refine → de-Claude/humanize → set edge dial), then ship one send-ready piece.
 - Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
 - Use `business_record_conversation_message` and `business_update_conversation_message_status` so the thread state stays truthful after a draft, suppressed publication, or real publish outcome.
@@ -142,7 +141,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 2. Inspect `distribution/voice/x.md`, the current campaign workspace, and the relevant conversation mirrors. If X voice guidance is missing, stale, or too generic, refresh `distribution/voice/x.md` first (using the copy engine).
 3. **If this is a reply:** read the target thread first. Draft exactly one send-ready reply by default — one move, usually 1–2 sentences — using `references/x-playbook.md` (Replies) and the edge dial in `references/voice-and-edge.md`. Answer the real thing (the false tradeoff, the smug premise, the outdated assumption), not always the literal claim. No variants unless the operator asks.
 4. **If this is a top-level post or thread:** read current `research/` state first, then draft one send-ready piece with one concrete payload. Use that research state to choose the audience, promise, objection, and hook. Generate hooks (`references/hook-library.md`), build with `references/x-playbook.md`, then run the refinement and de-Claude passes (`references/refinement-protocol.md`, `references/ai-tells.md`). Prefer a real number, product contrast, tradeoff, or direct observation over generic positioning.
-5. If the turn is still in draft mode, keep the draft visible under `distribution/campaign/` as send-ready copy only rather than pretending it was published or turning the draft into a status memo.
+5. If the turn is still in draft mode, keep the draft visible under `distribution/campaign/` rather than pretending it was published.
 6. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a conversation mirror or receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
 7. If the business is in live mode and the publish path is provider-backed, call `business_publish_outreach` and inspect the resulting receipt, job, or blocker. If the channel requires deferred action rather than immediate publication, record that next step with `business_enqueue_job`.
 8. After the draft or publish step, keep `metrics/conversations/` truthful with the conversation tools. Do not mark a thread resolved just because a draft exists.
@@ -151,7 +150,6 @@ None. Copy is crafted from the references and published through the Takyon busin
 
 - Durable X voice guidance lives in `distribution/voice/x.md`.
 - Send-ready drafts stay compact and visible in `distribution/campaign/` when they are not yet published (one send-ready piece by default; variants only on request).
-- Send-ready draft files contain the draft itself, not blocker summaries, credential reminders, or hand-written publication claims.
 - Local suppressed publication belongs under `distribution/local-published/`.
 - Conversation truth belongs in `metrics/conversations/`, not in a narrative summary.
 
