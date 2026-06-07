@@ -967,7 +967,7 @@ def _auth0_public_path(path: str) -> bool:
         return True
     if path == "/api/product-tls/ask":
         return True
-    if path in {"/", "/index.html", "/favicon.ico", "/robots.txt"}:
+    if path in {"/", "/chat", "/index.html", "/favicon.ico", "/robots.txt"}:
         return True
     return path.startswith((
         "/assets/",
