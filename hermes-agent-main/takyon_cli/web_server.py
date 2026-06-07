@@ -971,6 +971,7 @@ def _auth0_public_path(path: str) -> bool:
         return True
     return path.startswith((
         "/assets/",
+        "/litebulb/",
         "/fonts/",
         "/fonts-terminal/",
         "/ds-assets/",

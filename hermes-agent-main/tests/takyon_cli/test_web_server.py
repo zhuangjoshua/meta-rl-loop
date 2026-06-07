@@ -1195,6 +1195,8 @@ def test_auth0_public_path_allows_litebulb_shell_and_machine_facing_pg_routes():
     import takyon_cli.web_server as web_server
 
     assert web_server._auth0_public_path("/chat") is True
+    assert web_server._auth0_public_path("/litebulb/assets/litebulb.js") is True
+    assert web_server._auth0_public_path("/litebulb/takyon-adapter.js") is True
     assert web_server._auth0_public_path("/v1/me") is True
     assert web_server._auth0_public_path("/internal/ai-gateway/messages") is True
     assert web_server._auth0_public_path("/internal/creative-gateway/meta-launch") is True
