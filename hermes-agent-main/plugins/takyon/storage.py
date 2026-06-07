@@ -98,6 +98,16 @@ class StorageUnconfigured(StorageError):
     back to the local store or fabricating a "synced" result."""
 
 
+def _storage_client_missing_object(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    error = response.get("Error") if isinstance(response.get("Error"), dict) else {}
+    code = str(error.get("Code") or "").strip().lower()
+    status = str((response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or "").strip()
+    return code in {"404", "nosuchkey", "notfound"} or status == "404"
+
+
 # ── digest + path safety ─────────────────────────────────────────────────────────────────────────
 
 
@@ -364,12 +374,22 @@ class SupabaseS3StorageBackend:
                 if rel and _sync_path_excluded(rel):
                     out[key] = _EXCLUDED_DIGEST
                     continue
-                head = self._client.head_object(Bucket=self.bucket, Key=key)
+                try:
+                    head = self._client.head_object(Bucket=self.bucket, Key=key)
+                except Exception as exc:
+                    if _storage_client_missing_object(exc):
+                        logger.warning("storage list skipped vanished object: %s", key)
+                        continue
+                    raise
                 dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
                 if not dg:
                     # No recorded digest (e.g. written by something else): hash the bytes so the
                     # listing is still correct rather than guessing from an ETag.
-                    dg = digest_bytes(self.get(key))
+                    try:
+                        dg = digest_bytes(self.get(key))
+                    except ObjectNotFound:
+                        logger.warning("storage list skipped vanished object during get: %s", key)
+                        continue
                 out[key] = dg
         return out
 

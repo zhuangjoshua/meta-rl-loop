@@ -407,3 +407,43 @@ def test_supabase_listing_skips_head_requests_for_excluded_paths():
     assert digests["biz-x/product/site/node_modules/pkg/index.js"] == "<excluded>"
     assert digests["biz-x/product/site/index.html"] == "abc123"
     assert backend._client.head_calls == ["biz-x/product/site/index.html"]
+
+
+def test_supabase_listing_skips_objects_that_vanish_after_list():
+    class _Paginator:
+        def paginate(self, **_kwargs):
+            yield {
+                "Contents": [
+                    {"Key": "biz-x/product/site/index.html"},
+                    {"Key": "biz-x/product/site/missing.html"},
+                ]
+            }
+
+    class _ClientError(Exception):
+        def __init__(self, code: str):
+            self.response = {
+                "Error": {"Code": code},
+                "ResponseMetadata": {"HTTPStatusCode": 404},
+            }
+            super().__init__(code)
+
+    class _Client:
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            return _Paginator()
+
+        def head_object(self, *, Bucket, Key):
+            assert Bucket == "bucket"
+            if Key.endswith("missing.html"):
+                raise _ClientError("NotFound")
+            return {"Metadata": {"sha256": "abc123"}}
+
+        def get_object(self, *, Bucket, Key):  # pragma: no cover - should not be reached here
+            raise AssertionError((Bucket, Key))
+
+    backend = storage.SupabaseS3StorageBackend.__new__(storage.SupabaseS3StorageBackend)
+    backend.bucket = "bucket"
+    backend._client = _Client()
+
+    digests = backend.list_digests("biz-x/")
+    assert digests == {"biz-x/product/site/index.html": "abc123"}
