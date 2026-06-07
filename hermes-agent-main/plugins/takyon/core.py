@@ -97,6 +97,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
         "business_meta_ad_insights_sync",
+        "business_x_metrics_sync",
         "business_reddit_ad_launch",
         "business_reddit_ad_control",
         "business_reddit_ad_insights_sync",
@@ -5044,6 +5045,143 @@ def _xurl_shared_auth_ready() -> bool:
         return False
 
 
+def _parse_jsonish_output(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"items": parsed}
+    return {"raw": raw}
+
+
+def _run_xurl_json_command(
+    command: list[str],
+    *,
+    home: str | None = None,
+    timeout: int = 90,
+) -> dict[str, Any]:
+    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
+    proc = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=_runtime_env({"HOME": resolved_home}),
+    )
+    if proc.returncode != 0:
+        detail = str(proc.stderr or proc.stdout or "xurl command failed").strip()
+        raise TakyonError(detail or "xurl command failed")
+    return _parse_jsonish_output(proc.stdout or proc.stderr)
+
+
+def _xurl_metrics_request_context(*, home: str | None = None) -> tuple[str, str, str, str, str]:
+    xurl = _resolve_xurl_executable()
+    if not xurl:
+        raise TakyonError("xurl is not installed on this host")
+    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
+    if not _xurl_auth_status_ok(home=resolved_home):
+        if not _apply_xurl_oauth1_credentials(home=resolved_home):
+            raise TakyonError("xurl auth is not ready and OAuth1 credentials are not available")
+        if not _xurl_auth_status_ok(home=resolved_home):
+            raise TakyonError("xurl auth is present but not usable")
+    app_name, auth_mode, username = _xurl_default_auth_profile(home=resolved_home)
+    return resolved_home, xurl, str(app_name or "").strip(), str(auth_mode or "").strip(), str(username or "").strip()
+
+
+def _x_metrics_field_list(*, published_at: Any = None) -> list[str]:
+    fields = ["created_at", "public_metrics"]
+    published_dt = _parse_iso_datetime(published_at)
+    if published_dt is None or published_dt >= datetime.now(timezone.utc) - timedelta(days=30):
+        fields.extend(["non_public_metrics", "organic_metrics"])
+    return fields
+
+
+def _x_metrics_lookup(
+    post_id: str,
+    *,
+    published_at: Any = None,
+    home: str | None = None,
+) -> dict[str, Any]:
+    resolved_home, xurl, app_name, auth_mode, username = _xurl_metrics_request_context(home=home)
+    query = urllib.parse.urlencode(
+        {
+            "ids": str(post_id or "").strip(),
+            "tweet.fields": ",".join(_x_metrics_field_list(published_at=published_at)),
+        }
+    )
+    command = [xurl]
+    if app_name:
+        command.extend(["--app", app_name])
+    if auth_mode:
+        command.extend(["--auth", auth_mode])
+    if username:
+        command.extend(["-u", username])
+    command.append(f"/2/tweets?{query}")
+    payload = _run_xurl_json_command(command, home=resolved_home, timeout=60)
+    data = payload.get("data")
+    tweets = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+    for item in tweets:
+        if isinstance(item, Mapping) and str(item.get("id") or "").strip() == str(post_id or "").strip():
+            return dict(item)
+    raise TakyonError(f"X metrics lookup returned no post for id {post_id}")
+
+
+def _x_metrics_value_map(snapshot: Mapping[str, Any] | None, key: str) -> dict[str, int]:
+    metrics = snapshot.get(key) if isinstance(snapshot, Mapping) else {}
+    if not isinstance(metrics, Mapping):
+        return {}
+    normalized: dict[str, int] = {}
+    for metric_name, value in metrics.items():
+        metric_key = str(metric_name or "").strip()
+        if not metric_key:
+            continue
+        normalized[metric_key] = _meta_int_metric(value)
+    return normalized
+
+
+def _x_aggregate_post_snapshots(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    sections = ("public_metrics", "non_public_metrics", "organic_metrics")
+    totals: dict[str, dict[str, int]] = {section: {} for section in sections}
+    latest_sync_at = ""
+    posts: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        synced_at = str(row.get("synced_at") or "").strip()
+        if synced_at and synced_at > latest_sync_at:
+            latest_sync_at = synced_at
+        for section in sections:
+            metrics = _x_metrics_value_map(row, section)
+            for name, value in metrics.items():
+                totals[section][name] = totals[section].get(name, 0) + value
+        posts.append(
+            {
+                "post_id": str(row.get("post_id") or "").strip(),
+                "post_url": str(row.get("post_url") or "").strip(),
+                "published_at": str(row.get("published_at") or "").strip(),
+                "synced_at": synced_at,
+                "public_metrics": _x_metrics_value_map(row, "public_metrics"),
+                "non_public_metrics": _x_metrics_value_map(row, "non_public_metrics"),
+                "organic_metrics": _x_metrics_value_map(row, "organic_metrics"),
+            }
+        )
+    posts.sort(key=lambda item: str(item.get("synced_at") or ""), reverse=True)
+    return {
+        "posts_synced": len(posts),
+        "latest_sync_at": latest_sync_at,
+        "totals": totals,
+        "posts": posts,
+    }
+
+
 def _is_x_provider_name(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return text in {"x", "twitter", "x_social"}
@@ -7390,7 +7528,13 @@ def _product_service_working_directory_blocker(root: Path) -> str:
     if resolved == scratch_root or scratch_root in resolved.parents:
         return f"refusing to install product service from temporary workspace: {resolved}"
     businesses_root = (get_takyon_home() / "businesses").resolve()
-    if resolved == businesses_root or businesses_root in resolved.parents:
+    cache_businesses_root = (get_takyon_home() / "cache" / "businesses").resolve()
+    if (
+        resolved == businesses_root
+        or businesses_root in resolved.parents
+        or resolved == cache_businesses_root
+        or cache_businesses_root in resolved.parents
+    ):
         return f"refusing to install product service from business mirror instead of product-services: {resolved}"
     if publish_base not in (resolved, *resolved.parents):
         return (
@@ -8663,6 +8807,18 @@ class TakyonStore:
         )
         self._workspace_sync_cache: set[str] = set()
 
+    def _workspace_storage_backend_kind(self) -> str:
+        load_takyon_env()
+        return (os.getenv("TAKYON_STORAGE_BACKEND") or "local").strip().lower()
+
+    def _business_workspace_base(self) -> Path:
+        base = self._workspace_root_override or self.root
+        if self._workspace_root_override is not None:
+            return base / "businesses"
+        if self._workspace_storage_backend_kind() == "supabase_s3":
+            return base / "cache" / "businesses"
+        return base / "businesses"
+
     def _connect(self) -> "_PGConn":
         # The per-business filesystem half of the store remains local/object-backed, so make root first.
         self.root.mkdir(parents=True, exist_ok=True)
@@ -9247,8 +9403,7 @@ class TakyonStore:
     def _workspace_storage_backend(self) -> Any:
         from . import storage
 
-        load_takyon_env()
-        backend_kind = (os.getenv("TAKYON_STORAGE_BACKEND") or "local").strip().lower()
+        backend_kind = self._workspace_storage_backend_kind()
         local_root = None
         if backend_kind == "local" and not str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip():
             local_root = self.root / "storage"
@@ -9261,8 +9416,7 @@ class TakyonStore:
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
             return
-        base = self._workspace_root_override or self.root
-        workspace = base / "businesses" / _slugify(slug)
+        workspace = self._business_root(slug, sync=False)
         if not workspace.exists():
             return
         storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
@@ -9303,8 +9457,7 @@ class TakyonStore:
         return [str(row["table_name"]) for row in rows]
 
     def _business_root(self, slug: str, *, sync: bool = True) -> Path:
-        base = self._workspace_root_override or self.root
-        root = base / "businesses" / _slugify(slug)
+        root = self._business_workspace_base() / _slugify(slug)
         if sync:
             self._sync_business_workspace_cache(slug, root)
         return root
@@ -10396,6 +10549,173 @@ class TakyonStore:
                 },
             }
 
+    def traction_timeseries(self, slug: str, *, range_key: str = "M") -> dict[str, Any]:
+        slug = _slugify(slug)
+        key = str(range_key or "M").strip().upper() or "M"
+        if key not in {"D", "W", "M", "Y"}:
+            key = "M"
+
+        now_dt = datetime.now(timezone.utc)
+
+        def floor_hour(value: datetime) -> datetime:
+            return value.replace(minute=0, second=0, microsecond=0)
+
+        def floor_day(value: datetime) -> datetime:
+            return value.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def floor_month(value: datetime) -> datetime:
+            return value.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        def add_months(value: datetime, months: int) -> datetime:
+            year = value.year + ((value.month - 1 + months) // 12)
+            month = ((value.month - 1 + months) % 12) + 1
+            return value.replace(year=year, month=month, day=1)
+
+        if key == "D":
+            bucket_count = 24
+            bucket_starts = [floor_hour(now_dt) - timedelta(hours=(bucket_count - 1 - index)) for index in range(bucket_count)]
+            end_exclusive = bucket_starts[-1] + timedelta(hours=1)
+            previous_start = bucket_starts[0] - timedelta(hours=bucket_count)
+        elif key == "W":
+            bucket_count = 7
+            bucket_starts = [floor_day(now_dt) - timedelta(days=(bucket_count - 1 - index)) for index in range(bucket_count)]
+            end_exclusive = bucket_starts[-1] + timedelta(days=1)
+            previous_start = bucket_starts[0] - timedelta(days=bucket_count)
+        elif key == "M":
+            bucket_count = 30
+            bucket_starts = [floor_day(now_dt) - timedelta(days=(bucket_count - 1 - index)) for index in range(bucket_count)]
+            end_exclusive = bucket_starts[-1] + timedelta(days=1)
+            previous_start = bucket_starts[0] - timedelta(days=bucket_count)
+        else:
+            bucket_count = 12
+            month_floor = floor_month(now_dt)
+            bucket_starts = [add_months(month_floor, -(bucket_count - 1 - index)) for index in range(bucket_count)]
+            end_exclusive = add_months(bucket_starts[-1], 1)
+            previous_start = add_months(bucket_starts[0], -bucket_count)
+
+        period_start = bucket_starts[0]
+
+        def bucket_index(value: datetime) -> int | None:
+            if value < period_start or value >= end_exclusive:
+                return None
+            if key == "D":
+                delta = value - period_start
+                index = int(delta.total_seconds() // 3600)
+            elif key in {"W", "M"}:
+                delta = value - period_start
+                index = int(delta.total_seconds() // 86400)
+            else:
+                index = (value.year - period_start.year) * 12 + (value.month - period_start.month)
+            if 0 <= index < bucket_count:
+                return index
+            return None
+
+        def label_for(value: datetime) -> str:
+            if key == "D":
+                return value.strftime("%H:%M")
+            if key == "Y":
+                return value.strftime("%b")
+            return f"{value.strftime('%b')} {value.day}"
+
+        revenue_series = [0 for _ in range(bucket_count)]
+        users_series = [0 for _ in range(bucket_count)]
+        usage_series = [0 for _ in range(bucket_count)]
+        totals = {"revenue_cents": 0, "users": 0, "usage_events": 0}
+        previous_totals = {"revenue_cents": 0, "users": 0, "usage_events": 0}
+
+        with self._connect() as conn:
+            revenue_rows = [
+                self._row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT occurred_at, amount_paid_cents
+                    FROM app_revenue_events
+                    WHERE business_slug = ? AND occurred_at >= ? AND occurred_at < ?
+                    ORDER BY occurred_at ASC
+                    """,
+                    (slug, previous_start.isoformat(), end_exclusive.isoformat()),
+                ).fetchall()
+            ]
+            user_rows = [
+                self._row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT created_at
+                    FROM app_users
+                    WHERE business_slug = ? AND created_at >= ? AND created_at < ?
+                    ORDER BY created_at ASC
+                    """,
+                    (slug, previous_start.isoformat(), end_exclusive.isoformat()),
+                ).fetchall()
+            ]
+            usage_rows = [
+                self._row_to_dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT created_at
+                    FROM app_usage_events
+                    WHERE business_slug = ? AND created_at >= ? AND created_at < ?
+                    ORDER BY created_at ASC
+                    """,
+                    (slug, previous_start.isoformat(), end_exclusive.isoformat()),
+                ).fetchall()
+            ]
+
+        for row in revenue_rows:
+            occurred_at = _parse_iso_datetime(str(row.get("occurred_at") or ""))
+            if occurred_at is None:
+                continue
+            amount = int(row.get("amount_paid_cents") or 0)
+            index = bucket_index(occurred_at)
+            if index is not None:
+                revenue_series[index] += amount
+                totals["revenue_cents"] += amount
+            elif previous_start <= occurred_at < period_start:
+                previous_totals["revenue_cents"] += amount
+
+        for row in user_rows:
+            created_at = _parse_iso_datetime(str(row.get("created_at") or ""))
+            if created_at is None:
+                continue
+            index = bucket_index(created_at)
+            if index is not None:
+                users_series[index] += 1
+                totals["users"] += 1
+            elif previous_start <= created_at < period_start:
+                previous_totals["users"] += 1
+
+        for row in usage_rows:
+            created_at = _parse_iso_datetime(str(row.get("created_at") or ""))
+            if created_at is None:
+                continue
+            index = bucket_index(created_at)
+            if index is not None:
+                usage_series[index] += 1
+                totals["usage_events"] += 1
+            elif previous_start <= created_at < period_start:
+                previous_totals["usage_events"] += 1
+
+        points = [
+            {
+                "start": bucket_start.isoformat(),
+                "label": label_for(bucket_start),
+                "revenue_cents": revenue_series[index],
+                "users": users_series[index],
+                "usage_events": usage_series[index],
+            }
+            for index, bucket_start in enumerate(bucket_starts)
+        ]
+
+        return {
+            "success": True,
+            "business": slug,
+            "range": key,
+            "generated_at": now_dt.isoformat(),
+            "points": points,
+            "totals": totals,
+            "previous_totals": previous_totals,
+        }
+
     def _sync_business_ceo_cron_control(self, slug: str, state: str, reason: str) -> dict[str, Any]:
         from cron.jobs import list_jobs, pause_job, resume_job
 
@@ -10616,7 +10936,7 @@ class TakyonStore:
 
         business = self._ensure_business(conn, slug)
         root = self._business_root(slug).resolve()
-        businesses_root = (self.root / "businesses").resolve()
+        businesses_root = self._business_workspace_base().resolve()
         if businesses_root not in (root, *root.parents):
             raise TakyonError("refusing to delete filesystem outside Takyon businesses root")
 
@@ -12498,7 +12818,12 @@ class TakyonStore:
             return {"action": action, "business": slug, "event": event_id}
 
         if action == "cron.ensure_ceo_wakeup":
-            result = self._ensure_ceo_cron(slug, schedule=str(op.get("schedule") or "every 6h"), reason=reason)
+            result = self._ensure_ceo_cron(
+                slug,
+                schedule=str(op.get("schedule") or "every 6h"),
+                reason=reason,
+                defer_first_run=bool(op.get("defer_first_run")),
+            )
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type=action, payload=result)
             return {"action": action, "business": slug, **result}
 
@@ -12611,12 +12936,32 @@ class TakyonStore:
             "schedule": (updated or existing).get("schedule_display"),
         }
 
-    def _ensure_ceo_cron(self, slug: str, *, schedule: str, reason: str) -> dict[str, Any]:
+    def _ensure_ceo_cron(
+        self,
+        slug: str,
+        *,
+        schedule: str,
+        reason: str,
+        defer_first_run: bool = False,
+    ) -> dict[str, Any]:
         blocker: dict[str, Any] | None
         with self._connect() as conn:
             blocker = self._control_blocker(conn, f"business:{slug}")
         if blocker:
             raise TakyonError(f"cannot schedule CEO wakeup; business:{slug} is {blocker['state']}")
+
+        first_run_at: datetime | None = None
+        if defer_first_run:
+            from cron.jobs import parse_schedule
+
+            parsed_for_first_run = parse_schedule(schedule)
+            if str(parsed_for_first_run.get("kind") or "") != "interval":
+                raise TakyonError(
+                    "Deferred first-run CEO wake schedules currently require an interval cadence like "
+                    "'every 6h'."
+                )
+            interval_seconds = max(60, int(parsed_for_first_run.get("minutes") or 0) * 60)
+            first_run_at = datetime.now(timezone.utc) + timedelta(seconds=interval_seconds)
 
         if _db_backend() == "postgres":
             from cron.jobs import parse_schedule
@@ -12638,10 +12983,11 @@ class TakyonStore:
             with self._connect() as conn:
                 with self._leaf_conn(conn) as raw:
                     existing = wakes.get_wake_schedule(raw, slug)
-                    wakes.upsert_wake_schedule(
+                    scheduled = wakes.upsert_wake_schedule(
                         raw,
                         slug,
                         interval_seconds=interval_seconds,
+                        next_run_at=first_run_at if (defer_first_run and existing is None) else None,
                         kind="ceo_wake",
                         enabled=True,
                         payload={"estimate_cents": expensive_threshold_cents()},
@@ -12651,6 +12997,12 @@ class TakyonStore:
                 "schedule": str(parsed.get("display") or schedule),
                 "updated": existing is not None,
                 "interval_seconds": interval_seconds,
+                "defer_first_run": bool(defer_first_run),
+                "next_run_at": (
+                    scheduled.next_run_at.isoformat()
+                    if isinstance(scheduled.next_run_at, datetime)
+                    else str(scheduled.next_run_at or "")
+                ),
                 "reason": reason,
             }
 
@@ -12672,7 +13024,13 @@ class TakyonStore:
                     "state": "scheduled",
                 },
             )
-            return {"cron_job": updated["id"], "schedule": updated.get("schedule_display"), "updated": True}
+            return {
+                "cron_job": updated["id"],
+                "schedule": updated.get("schedule_display"),
+                "updated": True,
+                "defer_first_run": bool(defer_first_run),
+                "next_run_at": str(updated.get("next_run_at") or ""),
+            }
         job = create_job(
             prompt=prompt,
             schedule=schedule,
@@ -12682,7 +13040,16 @@ class TakyonStore:
             enabled_toolsets=enabled_toolsets,
             repeat=None,
         )
-        return {"cron_job": job["id"], "schedule": job.get("schedule_display"), "updated": False, "reason": reason}
+        if first_run_at is not None:
+            job = update_job(job["id"], {"next_run_at": first_run_at.isoformat()}) or job
+        return {
+            "cron_job": job["id"],
+            "schedule": job.get("schedule_display"),
+            "updated": False,
+            "defer_first_run": bool(defer_first_run),
+            "next_run_at": str(job.get("next_run_at") or ""),
+            "reason": reason,
+        }
 
 
 def _store() -> TakyonStore:
@@ -13080,8 +13447,7 @@ def _resolved_business_output_path_for_action(store: "TakyonStore", business: st
         require_output_root=True,
         field="artifact path",
     )
-    base = getattr(store, "_workspace_root_override", None) or store.root
-    rel = str(file_path.relative_to(base / "businesses" / _slugify(business)))
+    rel = str(file_path.relative_to(store._business_root(business, sync=False)))
     return rel, file_path
 
 
@@ -14597,6 +14963,211 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             operation["worker_queue"] = True
             operation["worker_max_attempts"] = 1
         return _commit_tool(canonical_args, operation, scope=operation["scope"])
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def _x_outreach_receipt_candidates(store: "TakyonStore", business: str) -> list[dict[str, Any]]:
+    receipts_dir = store._resolve_business_file(business, "metrics/receipts/outreach")
+    business_root = store._business_root(business)
+    if not receipts_dir.exists() or not receipts_dir.is_dir():
+        return []
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for path in receipts_dir.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        provider = str(payload.get("provider") or "").strip().lower()
+        channel = str(payload.get("channel") or "").strip().lower()
+        post_id = str(payload.get("post_id") or "").strip()
+        if not post_id or not (_is_x_provider_name(provider) or _is_x_provider_name(channel)):
+            continue
+        try:
+            rel = path.relative_to(business_root).as_posix()
+        except Exception:
+            continue
+        try:
+            sort_key = path.stat().st_mtime
+        except OSError:
+            sort_key = 0.0
+        candidates.append(
+            (
+                sort_key,
+                {
+                    "receipt_rel": rel,
+                    "receipt_abs": path,
+                    "receipt": payload,
+                    "post_id": post_id,
+                    "post_url": str(payload.get("post_url") or "").strip(),
+                    "published_at": str(payload.get("published_at") or "").strip(),
+                },
+            )
+        )
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in candidates]
+
+
+def _x_load_outreach_receipt(store: "TakyonStore", business: str, args: Mapping[str, Any]) -> dict[str, Any]:
+    receipt_raw = str(args.get("receipt_path") or "").strip()
+    requested_post_id = str(args.get("post_id") or "").strip()
+    candidates = _x_outreach_receipt_candidates(store, business)
+    if receipt_raw:
+        receipt_rel = _safe_relpath(receipt_raw, field="receipt_path").as_posix()
+        if not receipt_rel.startswith("metrics/receipts/outreach/"):
+            raise TakyonError("receipt_path must point to metrics/receipts/outreach/<...>.json")
+        for item in candidates:
+            if item["receipt_rel"] == receipt_rel:
+                return item
+        raise TakyonError(f"X outreach receipt not found at {receipt_rel}")
+    if requested_post_id:
+        for item in candidates:
+            if item["post_id"] == requested_post_id:
+                return item
+        raise TakyonError(f"no X outreach receipt found for post_id {requested_post_id}")
+    if candidates:
+        return candidates[0]
+    raise TakyonError("no X outreach receipt exists for this business yet")
+
+
+def _x_metrics_summary_rel() -> str:
+    return "metrics/x/summary.json"
+
+
+def _x_write_summary(store: "TakyonStore", business: str) -> tuple[str, dict[str, Any]]:
+    posts_dir = store._resolve_business_file(business, "metrics/x/posts")
+    snapshots: list[dict[str, Any]] = []
+    if posts_dir.exists() and posts_dir.is_dir():
+        for path in sorted(posts_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                snapshots.append(payload)
+    summary = _x_aggregate_post_snapshots(snapshots)
+    summary_rel = _x_metrics_summary_rel()
+    _atomic_write_text(
+        store._resolve_business_file(business, summary_rel),
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+    )
+    return summary_rel, summary
+
+
+def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        receipt_match = _x_load_outreach_receipt(store, business, args)
+        receipt = receipt_match["receipt"]
+        post_id = str(receipt_match["post_id"] or "").strip()
+        if not post_id:
+            raise TakyonError("resolved X outreach receipt does not contain a post_id")
+
+        metrics_dir_rel = "metrics/x"
+        sync_key = _file_slug(f"{post_id}-{idempotency_key}", "x-metrics")
+        sync_rel = f"{metrics_dir_rel}/syncs/{sync_key}.json"
+        sync_abs = store._resolve_business_file(business, sync_rel)
+        prior = _read_existing_receipt(sync_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_x_metrics_sync",
+                    "business": business,
+                    "idempotent": True,
+                    "post_id": post_id,
+                    "receipt": sync_rel,
+                    "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                    "post_metrics_path": f"{metrics_dir_rel}/posts/{post_id}.json",
+                    "summary_path": _x_metrics_summary_rel(),
+                    "status": prior.get("status"),
+                    "value": prior,
+                }
+            )
+
+        tweet = _x_metrics_lookup(post_id, published_at=receipt_match.get("published_at"))
+        synced_at = _now()
+        post_rel = f"{metrics_dir_rel}/posts/{post_id}.json"
+        snapshot = {
+            "business": business,
+            "post_id": post_id,
+            "post_url": str(receipt_match.get("post_url") or receipt.get("post_url") or "").strip(),
+            "published_at": str(receipt_match.get("published_at") or receipt.get("published_at") or "").strip(),
+            "source_receipt": str(receipt_match.get("receipt_rel") or "").strip(),
+            "synced_at": synced_at,
+            "tweet": tweet,
+            "public_metrics": dict(tweet.get("public_metrics") or {}) if isinstance(tweet.get("public_metrics"), Mapping) else {},
+            "non_public_metrics": dict(tweet.get("non_public_metrics") or {}) if isinstance(tweet.get("non_public_metrics"), Mapping) else {},
+            "organic_metrics": dict(tweet.get("organic_metrics") or {}) if isinstance(tweet.get("organic_metrics"), Mapping) else {},
+        }
+        sync_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "post_id": post_id,
+            "post_url": snapshot["post_url"],
+            "source_receipt": snapshot["source_receipt"],
+            "published_at": snapshot["published_at"],
+            "synced_at": synced_at,
+            "success": True,
+            "status": "synced",
+            "tweet": tweet,
+            "public_metrics": snapshot["public_metrics"],
+            "non_public_metrics": snapshot["non_public_metrics"],
+            "organic_metrics": snapshot["organic_metrics"],
+        }
+        _atomic_write_text(
+            store._resolve_business_file(business, post_rel),
+            json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
+        )
+        _atomic_write_text(sync_abs, json.dumps(sync_receipt, ensure_ascii=False, indent=2) + "\n")
+        _append_jsonl(
+            store._resolve_business_file(business, f"{metrics_dir_rel}/insights.jsonl"),
+            {**sync_receipt, "receipt": sync_rel, "post_metrics_path": post_rel},
+        )
+        summary_rel, summary = _x_write_summary(store, business)
+        store.commit(
+            scope=f"business:{business}/metrics:x/{post_id}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "x.metrics_sync",
+                    "payload": {
+                        **sync_receipt,
+                        "metrics_dir": metrics_dir_rel,
+                        "receipt": sync_rel,
+                        "post_metrics_path": post_rel,
+                        "summary_path": summary_rel,
+                    },
+                }
+            ],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record x metrics sync",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_x_metrics_sync",
+                "business": business,
+                "status": "synced",
+                "post_id": post_id,
+                "post_url": snapshot["post_url"],
+                "receipt": sync_rel,
+                "metrics_path": f"{metrics_dir_rel}/insights.jsonl",
+                "post_metrics_path": post_rel,
+                "summary_path": summary_rel,
+                "totals": summary.get("totals") if isinstance(summary, dict) else {},
+                "value": sync_receipt,
+            }
+        )
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -18975,7 +19546,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         )
         timeout_ms = _clamp_int(
             args.get("timeout_ms"),
-            default=300_000,
+            default=420_000 if customer_facing_product_workspace else 300_000,
             minimum=30_000,
             maximum=1_800_000,
         )
@@ -18986,11 +19557,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip().lower()
         if effort not in {"low", "medium", "high"}:
             effort = "medium" if customer_facing_product_workspace else "high"
+        default_model = (
+            "claude-sonnet-4-6"
+            if customer_facing_product_workspace
+            else (_model_from_config("claude_agent_default", "deep_work_default") or DEFAULT_CLAUDE_AGENT_MODEL)
+        )
         model = str(
             args.get("model")
             or os.getenv("TAKYON_CLAUDE_AGENT_MODEL")
-            or _model_from_config("claude_agent_default", "deep_work_default")
-            or DEFAULT_CLAUDE_AGENT_MODEL
+            or default_model
         ).strip()
         guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
         resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
@@ -19454,7 +20029,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_delete_business",
-        "description": "Dry-run or permanently delete one business, including filesystem, CEO cron jobs, and its fourmanifold.com/Vercel subdomain.",
+        "description": "Dry-run or permanently delete one business, including its durable workspace, local cache/files, CEO cron jobs, and its fourmanifold.com/Vercel subdomain.",
         "handler": handle_business_delete_business,
         "schema": _schema(
             "business_delete_business",
@@ -19462,7 +20037,7 @@ TAKYON_TOOL_DEFINITIONS = [
             {
                 "business": _BUSINESS_PROP,
                 "confirm": {"type": "boolean", "description": "Required true for permanent deletion; false previews only"},
-                "delete_files": {"type": "boolean", "description": "Delete .takyon/businesses/<business> filesystem tree; default true"},
+                "delete_files": {"type": "boolean", "description": "Delete the business's durable object-store workspace plus any local cache/files; default true"},
                 "delete_cron": {"type": "boolean", "description": "Delete Takyon CEO cron jobs for this business; default true"},
                 "delete_domains": {"type": "boolean", "description": "Remove the business subdomain from the Vercel project; default true"},
                 "base_domain": {"type": "string", "description": "Base domain for business subdomains; defaults to PUBLIC_COMPANY_BASE_DOMAIN or fourmanifold.com"},
@@ -19741,6 +20316,33 @@ TAKYON_TOOL_DEFINITIONS = [
             "Disabled compatibility stub.",
             {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_x_metrics_sync",
+        "description": (
+            "Read current X post metrics for a previously published business X post and persist "
+            "truthful local snapshots under metrics/x/. This records platform metrics only; it does not invent business attribution."
+        ),
+        "handler": handle_business_x_metrics_sync,
+        "schema": _schema(
+            "business_x_metrics_sync",
+            "Sync platform metrics from X for a previously published business post.",
+            {
+                "business": _BUSINESS_PROP,
+                "receipt_path": {
+                    "type": "string",
+                    "description": "Optional explicit path to metrics/receipts/outreach/<...>.json for an X publish receipt.",
+                },
+                "post_id": {
+                    "type": "string",
+                    "description": "Optional X post id; when omitted the latest X outreach receipt is used.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
         ),
     },
     {
@@ -20184,10 +20786,10 @@ TAKYON_TOOL_DEFINITIONS = [
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work"},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
-                "model": {"type": "string", "description": "Optional Claude model override"},
+                "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-4-6; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 24 for product/site work and 12 otherwise"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 300000 for product/site work and 300000 otherwise"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 420000 for product/site work and 300000 otherwise"},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
                 "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 180 for product/site work and 300 otherwise"},

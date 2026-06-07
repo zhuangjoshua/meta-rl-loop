@@ -1,0 +1,11 @@
+.Panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cds-space-4);
+  width: 100%;
+  border: 1px solid var(--cds-color-border-strong); /* #878a8d */
+  border-radius: var(--cds-radius-card);            /* 4px */
+  background: var(--cds-color-surface-card);
+  padding: var(--cds-space-4) var(--cds-space-4) var(--cds-space-6); /* 16 16 24 */
+}

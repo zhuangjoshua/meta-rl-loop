@@ -1,0 +1,85 @@
+/* Logged-in home — matches the logged-out landing: warm glow (no dots),
+   Bricolage display headline, vertically-centered hero, companies panel below. */
+.lb-aph {
+  min-height: 100%;
+  /* the standalone home now owns its typography (AppShell used to provide it) */
+  font-family: var(--cds-font-sans);
+  color: var(--cds-color-text-default);
+  /* Seamless: ONE theme-aware base fills everything; the glow is radials-over-TRANSPARENT,
+     so below the top band it's the same base color — no hard cutoff/seam. Follows dark mode. */
+  background-color: var(--cds-color-surface-app);
+  background-image:
+    radial-gradient(82% 66% at 50% -16%, rgba(233, 251, 163, 0.44) 0%, rgba(238, 244, 196, 0.20) 46%, rgba(255, 255, 255, 0) 80%),
+    radial-gradient(56% 48% at 82% -6%, rgba(252, 196, 110, 0.12) 0%, rgba(252, 196, 110, 0) 72%);
+  background-repeat: no-repeat;
+  background-size: 100% clamp(620px, 80vh, 1040px);
+}
+/* dark: a subtler, deeper warm/lime glow over the dark surface */
+[data-theme="dark"] .lb-aph {
+  background-image:
+    radial-gradient(82% 66% at 50% -16%, rgba(186, 230, 64, 0.12) 0%, rgba(186, 230, 64, 0) 70%),
+    radial-gradient(56% 48% at 82% -6%, rgba(252, 196, 110, 0.07) 0%, rgba(252, 196, 110, 0) 72%);
+}
+
+/* logged-in top nav (replaces the sidebar): brand left, account menu right.
+   Sits on the glow; transparent so the hero reads as one surface. */
+.lb-homenav { position: relative; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: none; margin: 0; padding: clamp(18px, 2vw, 28px) clamp(24px, 3.6vw, 64px); }
+.lb-homenav__brand { display: inline-flex; align-items: center; gap: 9px; border: 0; background: none; cursor: pointer; padding: 4px; color: var(--cds-color-text-default); font-family: var(--cds-font-sans); font-size: var(--cds-text-md); font-weight: var(--cds-weight-bold); letter-spacing: -0.01em; }
+.lb-homenav__brand:hover { opacity: 0.72; }
+.lb-homenav__acct { position: relative; }
+.lb-homenav__avatar { display: inline-flex; align-items: center; gap: 9px; border: 1px solid transparent; background: none; cursor: pointer; padding: 5px 9px 5px 6px; border-radius: var(--cds-radius-pill); color: var(--cds-color-text-default); }
+.lb-homenav__avatar:hover, .lb-homenav__avatar.is-open { background: var(--cds-color-surface-card); border-color: var(--cds-color-border-default); box-shadow: var(--cds-shadow-xs); }
+.lb-homenav__face { flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--cds-color-surface-dark); color: #fff; display: grid; place-items: center; font-size: var(--cds-text-xs); font-weight: var(--cds-weight-bold); }
+.lb-homenav__name { font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); }
+.lb-homenav__caret { color: var(--cds-color-text-faint); display: inline-flex; }
+.lb-homenav__menu { position: absolute; z-index: 991; top: calc(100% + 8px); right: 0; min-width: 220px; background: var(--cds-color-surface-card); border: 1px solid var(--cds-color-border-strong); border-radius: var(--cds-radius-md); box-shadow: var(--cds-shadow-overlay); padding: var(--cds-space-1_5); }
+.lb-homenav__menu button { display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 11px; border-radius: var(--cds-radius-sm); font-family: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); color: var(--cds-color-text-soft); }
+.lb-homenav__menu button:hover { background: var(--cds-color-surface-sunken); color: var(--cds-color-text-default); }
+.lb-homenav__menu-sep { height: 1px; background: var(--cds-color-border-divider); margin: 5px 0; }
+
+.lb-aph__hero {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  /* COMPACT — keep the prompt tidy at the top so your companies stay prominent
+     just below (so navigating "back" lands you on your portfolio, not a wall of prompt) */
+  min-height: clamp(300px, 44vh, 520px);
+  padding: clamp(30px, 5vh, 76px) 5vw clamp(14px, 2vw, 26px);
+}
+/* first-run (no companies): center the hero in the viewport */
+.lb-aph__hero:last-child { min-height: calc(100vh - 150px); }
+
+.lb-aph__eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: clamp(12px, 0.95vw, 14px); font-weight: var(--cds-weight-medium); letter-spacing: 0.08em; text-transform: uppercase; color: var(--cds-color-text-muted); }
+.lb-aph__eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--lb-lime-edge, #a6de12); }
+.lb-aph__greet { font-family: var(--lb-font-display, "Bricolage Grotesque", sans-serif); font-weight: 400; font-size: clamp(34px, 4.8vw, 64px); letter-spacing: -0.02em; line-height: 1.04; color: var(--cds-color-text-default); margin: 0; max-width: 18ch; }
+.lb-aph__sub { margin: 14px auto 0; max-width: 32rem; color: var(--cds-color-text-soft); font-size: clamp(15px, 1.2vw, 19px); line-height: var(--cds-leading-snug); }
+
+/* chatbox geometry matched to Lovable: 624 wide · 28px radius · 12px pad · 8px gap ·
+   single-line input that grows · shadow-xl (warm-tinted, in our light surface). */
+.lb-aph__prompt {
+  width: 100%; max-width: 624px; margin: clamp(22px, 2.6vw, 40px) auto 0;
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--cds-color-surface-card);
+  border: 1px solid var(--cds-color-border-default);
+  border-radius: 28px;
+  box-shadow: 0 20px 25px -5px rgba(20, 16, 8, 0.10), 0 8px 10px -6px rgba(20, 16, 8, 0.10);
+  padding: 12px; text-align: left;
+  transition: box-shadow var(--cds-duration-base);
+}
+.lb-aph__prompt:focus-within { box-shadow: 0 24px 30px -6px rgba(20, 16, 8, 0.16), 0 0 0 4px rgba(166, 222, 18, 0.18); }
+.lb-aph__input { width: 100%; min-height: 40px; max-height: 264px; padding: 7px 8px 0; border: 0; background: transparent; resize: none; outline: none; font-family: var(--cds-font-sans); font-size: 16px; line-height: 22px; color: var(--cds-color-text-default); }
+.lb-aph__input::placeholder { color: var(--cds-color-text-muted); }
+.lb-aph__prompt-foot { display: flex; align-items: center; gap: 10px; }
+.lb-aph__attach { color: var(--cds-color-text-faint); display: inline-flex; padding-left: 4px; }
+.lb-aph__spacer { flex: 1; }
+.lb-aph__cta { height: 38px; gap: 7px; font-size: var(--cds-text-md); }
+.lb-aph__firsthint { margin: 20px 0 0; color: var(--cds-color-text-soft); font-size: var(--cds-text-sm); }
+
+/* enclosed "Your companies" panel — wide + breathing room, minimal outer padding */
+.lb-aph__cos { max-width: 1560px; margin: 0 auto; padding: clamp(4px, 1vw, 16px) clamp(16px, 2.6vw, 40px) clamp(56px, 7vw, 104px); }
+/* "Your companies" reads as a SECTION of the one home — not a boxed second page.
+   No card container / sunken body: the tiles flow directly on the page. */
+.lb-cospanel { background: none; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
+.lb-cospanel__head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 0 2px clamp(16px, 1.6vw, 22px); }
+.lb-cospanel__title { margin: 0; font-size: clamp(17px, 1.4vw, 21px); font-weight: var(--cds-weight-semibold); letter-spacing: -0.01em; color: var(--cds-color-text-default); }
+.lb-cospanel__browse { border: 1px solid var(--cds-color-border-button); background: var(--cds-color-surface-card); cursor: pointer; font-family: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-semibold); color: var(--cds-color-text-default); padding: 8px 14px; border-radius: var(--cds-radius-md); box-shadow: var(--cds-shadow-xs); }
+.lb-cospanel__browse:hover { background: var(--cds-color-surface-sunken); border-color: var(--cds-color-border-strong); }
+.lb-cospanel__body { padding: 0; background: none; container-type: inline-size; }

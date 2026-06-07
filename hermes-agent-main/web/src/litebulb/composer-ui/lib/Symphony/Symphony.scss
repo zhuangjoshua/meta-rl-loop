@@ -1,0 +1,99 @@
+/* Symphony editor primitives — function nodes, blocks, and connector tree.
+   Built against .function--wt/.blk--asset/.blk--placeholder + connector specs. */
+
+.Node {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cds-space-1_5);
+  border: 1px solid transparent;
+  border-radius: var(--cds-radius-full);
+  padding: var(--cds-space-1_5) var(--cds-space-3);
+  font-size: var(--cds-text-xs);
+  font-weight: var(--cds-weight-semibold);
+  letter-spacing: var(--cds-tracking-wide);
+  text-transform: uppercase;
+  box-shadow: var(--cds-shadow-block);
+  white-space: nowrap;
+
+  &__caret { flex: none; opacity: 0.9; }
+  &__value { font-weight: var(--cds-weight-bold); text-transform: none; letter-spacing: 0; }
+
+  &--weight { background: var(--cds-color-node-weight); border-color: var(--cds-color-node-weight-border); color: var(--cds-color-node-weight-text); }
+  &--condition { background: var(--cds-color-node-condition); border-color: var(--cds-color-node-condition-border); color: var(--cds-color-node-condition-text); }
+  &--filter { background: var(--cds-color-node-filter); border-color: var(--cds-color-node-filter-border); color: var(--cds-color-node-filter-text); }
+}
+
+.Block {
+  display: flex;
+  align-items: center;
+  gap: var(--cds-space-3);
+  border: 1px solid var(--cds-color-border-strong); /* #878a8d */
+  border-radius: var(--cds-radius-md);
+  background: var(--cds-color-surface-card);
+  box-shadow: var(--cds-shadow-block);
+  padding: var(--cds-space-3);
+  min-width: 320px;
+  max-width: 28rem;
+
+  &--placeholder { background: var(--cds-color-surface-sunken); }
+  &--invalid { border-color: var(--cds-color-error-strong); } /* #ff482f */
+
+  &__plus {
+    flex: none;
+    width: var(--cds-space-5);
+    height: var(--cds-space-5);
+    border-radius: var(--cds-radius-full);
+    background: var(--cds-color-brand-accent); /* amber */
+    color: var(--cds-color-text-default);
+    display: grid;
+    place-items: center;
+    font-weight: var(--cds-weight-bold);
+  }
+  &__title { font-weight: var(--cds-weight-semibold); }
+  &__hint { color: var(--cds-color-text-faint); }
+}
+
+/* connector tree: grey rails + arrowheads (root .blk::after is rgb(102,102,102)) */
+.Tree {
+  --cds-rail: rgba(16, 21, 22, 0.4);
+  display: flex;
+  flex-direction: column;
+
+  &__children {
+    position: relative;
+    margin-left: var(--cds-space-4);
+    padding-left: var(--cds-space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--cds-space-2);
+  }
+  &__children::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: -6px;
+    height: calc(100% - 18px);
+    border-left: 1px solid var(--cds-rail);
+  }
+
+  &__row { position: relative; display: flex; }
+  &__row::before {
+    content: "";
+    position: absolute;
+    left: calc(-1 * var(--cds-space-6));
+    top: 50%;
+    width: var(--cds-space-5);
+    border-top: 1px solid var(--cds-rail);
+  }
+  &__row::after {
+    content: "";
+    position: absolute;
+    left: calc(-1 * var(--cds-space-2));
+    top: 50%;
+    transform: translateY(-50%);
+    width: 0;
+    height: 0;
+    border: 4px solid transparent;
+    border-left-color: var(--cds-rail);
+  }
+}

@@ -111,6 +111,7 @@ def create_topup_checkout_session(
     amount_cents: int,
     success_url: str,
     cancel_url: str,
+    customer_id: str | None = None,
 ) -> dict[str, Any]:
     params = {
         "mode": "payment",
@@ -126,7 +127,101 @@ def create_topup_checkout_session(
         "payment_intent_data[metadata][purpose]": "takyon_topup",
         "payment_intent_data[metadata][user_id]": user_id,
     }
+    if customer_id:
+        params["customer"] = customer_id
     return stripe_util.stripe_request("checkout/sessions", params)
+
+
+def _pick_operator_billing_customer(
+    payload: dict[str, Any] | None,
+    *,
+    user_id: str,
+    email: str,
+) -> dict[str, Any] | None:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    email_lower = email.strip().lower()
+    exact_match = None
+    email_match = None
+    for item in rows:
+        if not isinstance(item, dict) or item.get("deleted"):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        candidate_email = str(item.get("email") or "").strip().lower()
+        if metadata.get("takyon_user_id") == user_id:
+            exact_match = item
+            break
+        if not email_match and candidate_email and candidate_email == email_lower:
+            email_match = item
+    return exact_match or email_match
+
+
+def ensure_operator_billing_customer(
+    conn,
+    user_id: str,
+) -> dict[str, Any]:
+    row = _read_operator_payout_row(conn, user_id, for_update=False)
+    email = str(row[3] or "").strip()
+    if not email:
+        raise ValueError("operator_email_unavailable")
+
+    search = stripe_util.stripe_request(
+        "customers",
+        {"email": email, "limit": 10},
+        method="GET",
+    )
+    existing = _pick_operator_billing_customer(search, user_id=user_id, email=email)
+    if existing:
+        customer_id = str(existing.get("id") or "").strip()
+        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        if customer_id and metadata.get("takyon_user_id") != user_id:
+            try:
+                stripe_util.stripe_request(
+                    f"customers/{customer_id}",
+                    {
+                        "metadata[takyon_user_id]": user_id,
+                        "metadata[purpose]": "operator_billing",
+                    },
+                )
+            except stripe_util.StripeError:
+                # Portal should still work even if metadata backfill fails.
+                pass
+        return existing
+
+    created = stripe_util.stripe_request(
+        "customers",
+        {
+            "email": email,
+            "metadata[takyon_user_id]": user_id,
+            "metadata[purpose]": "operator_billing",
+        },
+    )
+    customer_id = str(created.get("id") or "").strip()
+    if not customer_id:
+        raise stripe_util.StripeError("Stripe customer creation returned no customer id")
+    return created
+
+
+def create_operator_billing_portal_session(
+    conn,
+    user_id: str,
+    *,
+    return_url: str,
+) -> dict[str, Any]:
+    if not str(return_url or "").strip():
+        raise ValueError("return_url is required")
+    customer = ensure_operator_billing_customer(conn, user_id)
+    customer_id = str(customer.get("id") or "").strip()
+    if not customer_id:
+        raise stripe_util.StripeError("Stripe customer unavailable for billing portal")
+    return stripe_util.stripe_request(
+        "billing_portal/sessions",
+        {
+            "customer": customer_id,
+            "return_url": return_url,
+        },
+    )
 
 
 def get_operator_payout_state(

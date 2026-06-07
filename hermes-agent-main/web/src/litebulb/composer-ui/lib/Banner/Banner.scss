@@ -1,0 +1,17 @@
+.Banner {
+  display: flex;
+  gap: var(--cds-space-2);
+  align-items: flex-start;
+  padding: var(--cds-space-3);
+  border-radius: var(--cds-radius-md);
+  font-size: var(--cds-text-sm);
+  border: 1px solid transparent;
+
+  &__icon { flex: none; display: inline-flex; margin-top: 1px; }
+  &__content { min-width: 0; }
+
+  &--info { background: var(--cds-color-info-bg); color: var(--cds-color-info); border-color: var(--cds-color-info); }
+  &--success { background: var(--cds-color-success-bg); color: var(--cds-color-success); border-color: var(--cds-color-success); }
+  &--warning { background: var(--cds-color-warning-bg); color: var(--cds-color-warning); border-color: var(--cds-color-warning); }
+  &--error { background: var(--cds-color-error-bg); color: var(--cds-color-error); border-color: var(--cds-color-error); }
+}

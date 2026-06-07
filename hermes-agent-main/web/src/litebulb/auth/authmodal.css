@@ -1,0 +1,34 @@
+/* Auth modal — brand surface (warm, Bricolage title). */
+.lb-authwrap { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 20px; }
+.lb-authscrim { position: absolute; inset: 0; background: rgba(22, 20, 15, 0.42); backdrop-filter: blur(2px); }
+.lb-auth {
+  position: relative; z-index: 1; width: 100%; max-width: 408px;
+  background: var(--lb-gray-0, #fff);
+  border: 1px solid var(--b44-color-border-default, #e1ddd6);
+  border-radius: 20px;
+  box-shadow: 0 28px 70px -24px rgba(20, 16, 8, 0.45);
+  padding: clamp(26px, 3vw, 38px) clamp(24px, 3vw, 36px) clamp(20px, 2.4vw, 28px);
+  text-align: center;
+  font-family: var(--b44-font-sans, "Schibsted Grotesk", sans-serif);
+  animation: lb-auth-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes lb-auth-in { from { opacity: 0; transform: translateY(8px) scale(0.99); } to { opacity: 1; transform: none; } }
+.lb-auth__x { position: absolute; top: 12px; right: 14px; border: 0; background: none; font-size: 22px; line-height: 1; color: var(--b44-color-text-muted, #8d887e); cursor: pointer; }
+.lb-auth__x:hover { color: var(--b44-color-text-default); }
+.lb-auth__brand { display: inline-flex; }
+.lb-auth__title { font-family: var(--b44-font-display, "Bricolage Grotesque", sans-serif); font-size: clamp(22px, 2.2vw, 28px); font-weight: var(--b44-weight-semibold, 600); letter-spacing: -0.015em; color: var(--b44-black, #16140f); margin: 14px 0 0; }
+.lb-auth__sub { margin: 7px 0 0; color: var(--b44-color-text-soft, #524e47); font-size: var(--b44-text-sm, 14px); }
+
+.lb-auth__oauth { display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; margin-top: 22px; height: 46px; border: 1px solid var(--b44-color-border-strong, #d3cec6); border-radius: var(--b44-radius-md, 8px); background: #fff; color: var(--b44-color-text-default, #16140f); font-family: inherit; font-size: 15px; font-weight: 500; cursor: pointer; }
+.lb-auth__oauth:hover { background: var(--b44-color-surface-hover, #f5f3f0); }
+.lb-auth__or { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--b44-color-text-faint, #8d887e); font-size: 12px; }
+.lb-auth__or::before, .lb-auth__or::after { content: ""; flex: 1; height: 1px; background: var(--b44-color-border-default, #e1ddd6); }
+
+.lb-auth__field { display: block; text-align: left; }
+.lb-auth__field span { display: block; font-size: 12px; font-weight: 500; color: var(--b44-color-text-soft, #524e47); margin-bottom: 5px; }
+.lb-auth__field input { width: 100%; height: 44px; padding: 0 13px; border: 1px solid var(--b44-color-border-strong, #d3cec6); border-radius: var(--b44-radius-md, 8px); font-family: inherit; font-size: 15px; color: var(--b44-color-text-default); background: #fff; }
+.lb-auth__field input:focus { outline: none; border-color: var(--b44-black, #16140f); box-shadow: 0 0 0 3px rgba(166, 222, 18, 0.2); }
+.lb-auth__submit { width: 100%; margin-top: 12px; height: 46px; justify-content: center; font-size: 15px; }
+.lb-auth__switch { margin: 18px 0 0; font-size: var(--b44-text-sm, 14px); color: var(--b44-color-text-soft, #524e47); }
+.lb-auth__switch button { border: 0; background: none; color: var(--b44-black, #16140f); font-family: inherit; font-size: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.lb-auth__legal { margin: 14px 0 0; font-size: 11.5px; color: var(--b44-color-text-faint, #8d887e); }

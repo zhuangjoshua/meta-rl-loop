@@ -107,6 +107,13 @@ export const api = {
   },
   getTakyonOperatorAccount: () =>
     fetchJSON<TakyonOperatorAccountResponse>("/api/takyon/operator/account"),
+  getTakyonOperatorHome: () =>
+    fetchJSONWithTimeout<TakyonOperatorHomeResponse>(
+      "/api/takyon/operator/home",
+      15_000,
+      undefined,
+      "operator home",
+    ),
   createTakyonOperatorTopupCheckout: (amountCents: number, returnPath: string) =>
     fetchJSON<{ checkout_url?: string; session_id?: string; amount_cents?: number }>(
       "/api/takyon/operator/topup/checkout",
@@ -114,6 +121,15 @@ export const api = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amount_cents: amountCents, return_path: returnPath }),
+      },
+    ),
+  createTakyonOperatorBillingPortal: (returnPath: string) =>
+    fetchJSON<{ portal_url?: string; customer_id?: string }>(
+      "/api/takyon/operator/billing/portal",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ return_path: returnPath }),
       },
     ),
   createTakyonOperatorPayoutConnect: (returnPath: string) =>
@@ -190,6 +206,13 @@ export const api = {
       15_000,
       undefined,
       "takyon.dashboard.workspace",
+    ),
+  getTakyonBusinessTraction: (slug: string, range = "M") =>
+    fetchJSONWithTimeout<TakyonBusinessTractionResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/traction?range=${encodeURIComponent(range)}`,
+      15_000,
+      undefined,
+      "takyon.dashboard.traction",
     ),
   bindTakyonBusinessMetaManualLaunch: (
     slug: string,
@@ -581,6 +604,15 @@ export interface TakyonOperatorAccountResponse {
   reason?: string;
 }
 
+export interface TakyonOperatorHomeResponse {
+  available: boolean;
+  businesses: TakyonOperatorBusinessSummary[];
+  account: TakyonOperatorAccountResponse;
+  owned_business_count?: number;
+  user_id?: string;
+  reason?: string;
+}
+
 export interface TakyonOperatorBusinessSummary {
   slug?: string;
   name?: string;
@@ -671,6 +703,32 @@ export interface TakyonBusinessWorkspaceResponse {
   overview?: Record<string, unknown>;
   outputs?: unknown[];
   background_run?: Record<string, unknown> | null;
+}
+
+export interface TakyonBusinessTractionPoint {
+  start: string;
+  label: string;
+  revenue_cents: number;
+  users: number;
+  usage_events: number;
+}
+
+export interface TakyonBusinessTractionResponse {
+  success?: boolean;
+  business?: string;
+  range?: string;
+  generated_at?: string;
+  points: TakyonBusinessTractionPoint[];
+  totals: {
+    revenue_cents: number;
+    users: number;
+    usage_events: number;
+  };
+  previous_totals: {
+    revenue_cents: number;
+    users: number;
+    usage_events: number;
+  };
 }
 
 export interface MetaActionResponse {

@@ -1,0 +1,20 @@
+.Badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cds-space-1);
+  font-size: var(--cds-text-xs);
+  font-weight: var(--cds-weight-medium);
+  line-height: 1.4;
+  padding: var(--cds-space-0_5) var(--cds-space-2);
+  border-radius: var(--cds-radius-full);
+  border: 1px solid transparent;
+  background: var(--cds-color-surface-hover);
+  color: var(--cds-color-text-soft);
+
+  &__dot { width: 8px; height: 8px; border-radius: var(--cds-radius-full); background: currentColor; }
+
+  &--success { background: var(--cds-color-success-bg); color: var(--cds-color-success); }
+  &--warning { background: var(--cds-color-warning-bg); color: var(--cds-color-warning); }
+  &--error { background: var(--cds-color-error-bg); color: var(--cds-color-error); }
+  &--info { background: var(--cds-color-info-bg); color: var(--cds-color-info); }
+}

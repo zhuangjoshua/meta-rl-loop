@@ -1,0 +1,21 @@
+@use "./tokens.scss";
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--cds-font-sans);
+  font-size: var(--cds-text-sm);
+  line-height: var(--cds-leading-normal);
+  color: var(--cds-color-text-default);
+  background: var(--cds-color-surface-app);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: var(--cds-color-text-link); text-decoration: none; }
+svg { display: block; }
+
+/* a couple of layout helpers used by stories / the demo app */
+.cds-stack { display: flex; flex-direction: column; gap: var(--cds-space-3); }
+.cds-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--cds-space-3); }

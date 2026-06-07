@@ -1,0 +1,9 @@
+.lb-404 {
+  min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  text-align: center; padding: 40px;
+  font-family: var(--b44-font-sans);
+  background: var(--b44-gray-25, #faf9f7);
+  background-image: var(--lb-glow); background-repeat: no-repeat; background-size: 100% 60vh;
+}
+.lb-404__code { font-family: var(--b44-font-display, "Bricolage Grotesque", sans-serif); font-size: clamp(48px, 8vw, 96px); font-weight: var(--b44-weight-regular, 400); letter-spacing: -0.02em; color: var(--b44-black, #16140f); line-height: 1; }
+.lb-404__msg { margin: 0 0 8px; color: var(--b44-color-text-soft); font-size: var(--b44-text-lg); }

@@ -1,0 +1,242 @@
+/* ============================================================================
+   Litebulb — Landing (base44 DNA)
+   Spacing mirrors base44's marketing site: everything scales with the viewport
+   (clamped vw), so the hero fills the screen with the same airy rhythm instead
+   of sitting capped in the middle. Ratios are base44's measured originals.
+   ========================================================================== */
+
+.lb-landing {
+  min-height: 100vh;
+  background-color: var(--b44-cream);
+  background-size: 100% clamp(680px, 66vw, 1280px);
+  overflow-x: hidden;
+}
+
+/* ── full-bleed banner nav (flat, edge-to-edge — not a floating pill) ── */
+.lb-nav-wrap {
+  position: sticky;
+  top: 0;
+  z-index: var(--b44-z-sticky);
+  padding: 0;
+  background-color: rgba(255, 255, 255, 0.9);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--b44-color-border-default);
+}
+.lb-nav {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  justify-content: space-between;   /* brand → far left, auth → far right */
+  height: clamp(66px, 5vw, 84px);
+  padding: 0 clamp(24px, 3.6vw, 64px);
+  gap: clamp(16px, 2vw, 40px);
+  box-shadow: none;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+.lb-nav .b44-navbar__links { margin: 0 auto; }   /* links sit centered in the spread */
+.lb-nav .b44-navbar__brand {
+  font-family: var(--b44-font-display);
+  font-size: clamp(20px, 1.7vw, 26px);
+  gap: clamp(8px, 0.7vw, 11px);
+  letter-spacing: -0.01em;
+}
+.lb-nav .b44-navbar__links { gap: clamp(18px, 2.1vw, 38px); }
+.lb-nav .b44-navbar__link { font-size: clamp(14px, 1.05vw, 17px); }
+.lb-nav .b44-btn--brand {
+  height: clamp(40px, 3.2vw, 50px);
+  font-size: clamp(15px, 1.15vw, 18px);
+  padding: 0 clamp(18px, 1.7vw, 28px);
+}
+.lb-caret { font-size: 0.66em; opacity: 0.6; }
+.lb-nav-right { display: flex; align-items: center; gap: clamp(12px, 1.4vw, 22px); }
+.lb-globe { width: clamp(20px, 1.5vw, 25px); height: clamp(20px, 1.5vw, 25px); color: var(--b44-color-text-soft); }
+.lb-signin { font-size: clamp(14px, 1.05vw, 17px); }
+@media (max-width: 720px) {
+  .lb-nav .b44-navbar__links,
+  .lb-signin,
+  .lb-globe { display: none; }
+}
+
+/* ── hero (content fills the screen, scales with vw) ── */
+.lb-hero {
+  max-width: none;
+  margin: 0 auto;
+  padding: clamp(44px, 5vw, 104px) 5vw clamp(64px, 8vw, 128px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.lb-eyebrow-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: clamp(12px, 0.95vw, 14px);
+  font-weight: var(--b44-weight-medium);
+  letter-spacing: var(--b44-tracking-wider);
+  text-transform: uppercase;
+  color: var(--b44-color-text-muted);
+}
+.lb-eyebrow-top::before {
+  content: "";
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--b44-lime-500);
+}
+
+.lb-hero-title {
+  font-family: var(--b44-font-display);
+  font-weight: var(--b44-weight-regular);
+  font-size: clamp(38px, 5.2vw, 82px);
+  line-height: 1.04;
+  letter-spacing: -0.02em;
+  color: var(--b44-black);
+  margin: clamp(16px, 1.6vw, 28px) 0 0;
+  max-width: 16ch;
+  text-wrap: balance;
+}
+
+.lb-hero-sub {
+  max-width: clamp(340px, 36vw, 600px);
+  margin: clamp(16px, 1.5vw, 26px) auto 0;
+  font-size: clamp(16px, 1.25vw, 21px);
+  line-height: var(--b44-leading-snug);
+  color: var(--b44-color-text-soft);
+}
+
+/* signature prompt composer — cream fill, big radius, lifted */
+.lb-prompt {
+  width: clamp(320px, 52vw, 1000px);
+  max-width: 92vw;
+  margin: clamp(30px, 3.2vw, 60px) auto 0;
+  border: 1px solid var(--b44-black-a05);
+  background-color: var(--b44-white);
+  border-radius: clamp(18px, 1.7vw, 28px);
+  box-shadow: 0 18px 40px -16px rgba(20, 20, 30, 0.28), 0 2px 6px rgba(0, 0, 0, 0.05);
+  padding: clamp(18px, 1.6vw, 28px) clamp(18px, 1.6vw, 28px) clamp(12px, 1vw, 18px);
+  text-align: left;
+  transition: box-shadow var(--b44-duration-base) var(--b44-ease-standard),
+              transform var(--b44-duration-base) var(--b44-ease-standard);
+}
+.lb-prompt:focus-within {
+  box-shadow: 0 24px 52px -16px rgba(20, 20, 30, 0.34), 0 0 0 4px rgba(173, 233, 0, 0.18);
+  transform: translateY(-1px);
+}
+.lb-prompt .b44-prompt__input {
+  min-height: clamp(84px, 7vw, 128px);
+  font-size: clamp(16px, 1.2vw, 20px);
+  line-height: 1.45;
+}
+.lb-info { color: var(--b44-color-text-faint); }
+
+.lb-eyebrow { margin-top: clamp(40px, 5vw, 80px); }
+.lb-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: clamp(8px, 0.9vw, 14px);
+  max-width: clamp(420px, 46vw, 720px);
+  margin: clamp(14px, 1.4vw, 24px) auto 0;
+}
+.lb-pills .b44-tag {
+  border-color: var(--b44-black-a20);
+  background-color: rgba(255, 255, 255, 0.55);
+  height: clamp(36px, 2.9vw, 44px);
+  font-size: clamp(13px, 1vw, 15px);
+}
+.lb-pills .b44-tag:hover { background-color: var(--b44-white); }
+
+/* ── how it works ── */
+.lb-loop {
+  max-width: var(--b44-container-xl);
+  margin: 0 auto;
+  padding: clamp(56px, 7vw, 128px) 5vw clamp(48px, 6vw, 104px);
+  text-align: center;
+}
+.lb-loop-eyebrow { display: block; }
+.lb-loop-title {
+  font-family: var(--b44-font-display);
+  font-weight: var(--b44-weight-semibold);
+  font-size: clamp(28px, 3.4vw, 52px);
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+  color: var(--b44-black);
+  margin: clamp(10px, 1vw, 18px) auto 0;
+  max-width: 18ch;
+  text-wrap: balance;
+}
+.lb-loop-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: clamp(16px, 1.6vw, 28px);
+  margin-top: clamp(36px, 4vw, 68px);
+  text-align: left;
+}
+@media (max-width: 860px) { .lb-loop-grid { grid-template-columns: 1fr; } }
+.lb-loop-card {
+  background: var(--b44-white);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-2xl);
+  padding: clamp(22px, 2vw, 36px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: transform var(--b44-duration-base) var(--b44-ease-standard),
+              box-shadow var(--b44-duration-base) var(--b44-ease-standard);
+}
+.lb-loop-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 30px -18px rgba(20, 20, 30, 0.26);
+}
+.lb-loop-k {
+  display: inline-block;
+  font-family: var(--b44-font-mono);
+  font-size: clamp(13px, 1vw, 15px);
+  font-weight: var(--b44-weight-medium);
+  color: var(--b44-color-text-faint);
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--b44-lime-500);
+}
+.lb-loop-card h3 {
+  margin: clamp(16px, 1.4vw, 22px) 0 8px;
+  font-size: clamp(18px, 1.4vw, 22px);
+  font-weight: var(--b44-weight-semibold);
+  color: var(--b44-black);
+}
+.lb-loop-card p {
+  margin: 0;
+  font-size: clamp(14px, 1.05vw, 16px);
+  line-height: var(--b44-leading-normal);
+  color: var(--b44-color-text-soft);
+}
+.lb-loop-cta {
+  margin-top: clamp(36px, 4vw, 64px);
+  height: clamp(46px, 3.4vw, 54px);
+  gap: 8px;
+  font-size: clamp(15px, 1.15vw, 18px);
+  padding: 0 clamp(22px, 2vw, 32px);
+}
+
+/* ── footer ── */
+.lb-foot {
+  max-width: var(--b44-container-xl);
+  margin: 0 auto;
+  padding: clamp(28px, 3vw, 44px) 5vw clamp(40px, 4vw, 60px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--b44-color-border-default);
+  flex-wrap: wrap;
+}
+.lb-foot-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--b44-font-display);
+  font-size: clamp(16px, 1.3vw, 19px);
+  font-weight: var(--b44-weight-bold);
+  color: var(--b44-black);
+}
+.lb-foot-meta { font-size: clamp(13px, 1vw, 15px); color: var(--b44-color-text-muted); }

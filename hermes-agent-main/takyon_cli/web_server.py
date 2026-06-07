@@ -275,6 +275,222 @@ def _read_last_jsonl_object(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _takyon_openable_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.match(r"^https?://", text, re.IGNORECASE) or text.lower().startswith("data:"):
+        return text
+    if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.IGNORECASE):
+        return f"https://{text}"
+    return ""
+
+
+def _takyon_latest_channel_job(jobs: list[dict[str, Any]], *needles: str) -> dict[str, Any] | None:
+    wanted = [str(needle or "").strip().lower() for needle in needles if str(needle or "").strip()]
+    if not wanted:
+        return None
+    for job in jobs:
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        kind = str(job.get("kind") or "").strip().lower()
+        payload_channel = str(payload.get("channel") or "").strip().lower()
+        requested_skill = str(payload.get("requested_skill") or "").strip().lower()
+        if payload_channel in wanted or any(token in kind or token in requested_skill for token in wanted):
+            return {
+                "id": str(job.get("id") or "").strip(),
+                "kind": str(job.get("kind") or "").strip(),
+                "status": str(job.get("status") or "queued").strip() or "queued",
+                "label": str(job.get("label") or payload.get("summary") or _takyon_job_label(job.get("kind"))).strip(),
+                "detail": str(job.get("detail") or payload.get("summary") or "").strip(),
+                "updated_at": str(job.get("updated_at") or job.get("created_at") or "").strip(),
+                "created_at": str(job.get("created_at") or "").strip(),
+            }
+    return None
+
+
+def _takyon_collect_business_paid_campaigns(
+    store: Any,
+    business: str,
+    publication_root: str,
+    metrics_root: str,
+    *,
+    plan_secondary_key: str,
+) -> list[dict[str, Any]]:
+    try:
+        business_root = store._business_root(business, sync=False)
+    except TypeError:
+        business_root = store._business_root(business)
+    except Exception:
+        return []
+    root = business_root / publication_root
+    if not root.is_dir():
+        return []
+
+    def _action_entries(actions_root: Path) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        if not actions_root.is_dir():
+            return entries
+        for action_abs in actions_root.glob("*.json"):
+            action = _read_json_object(action_abs)
+            if not action:
+                continue
+            entries.append(
+                {
+                    "path": str(action_abs.relative_to(business_root)),
+                    "sort_key": (
+                        str(action.get("created_at") or action.get("updated_at") or ""),
+                        int(action_abs.stat().st_mtime),
+                        action_abs.name,
+                    ),
+                    "value": action,
+                }
+            )
+        entries.sort(key=lambda item: item["sort_key"], reverse=True)
+        return entries
+
+    campaigns: list[dict[str, Any]] = []
+    for receipt_abs in root.glob("*/receipt.json"):
+        receipt = _read_json_object(receipt_abs)
+        if not receipt:
+            continue
+        slug_name = receipt_abs.parent.name
+        plan_abs = receipt_abs.parent / "plan.json"
+        plan = _read_json_object(plan_abs) or {}
+        campaign_block = plan.get("campaign") if isinstance(plan.get("campaign"), dict) else {}
+        secondary_block = (
+            plan.get(plan_secondary_key) if isinstance(plan.get(plan_secondary_key), dict) else {}
+        )
+        ad_block = plan.get("ad") if isinstance(plan.get("ad"), dict) else {}
+        asset_path = str(
+            receipt.get("ad_video_path")
+            or receipt.get("ad_image_path")
+            or plan.get("ad_video_path")
+            or plan.get("ad_image_path")
+            or ""
+        ).strip()
+        metrics_abs = business_root / metrics_root / slug_name / "insights.jsonl"
+        latest_metrics = _read_last_jsonl_object(metrics_abs) or {}
+        action_entries = _action_entries(receipt_abs.parent / "actions")
+        latest_action = action_entries[0] if action_entries else None
+        latest_state_action = next(
+            (
+                entry
+                for entry in action_entries
+                if isinstance(entry.get("value"), dict)
+                and bool(entry["value"].get("success", True))
+                and str(entry["value"].get("operation") or "").strip().lower() in {"activate", "pause"}
+            ),
+            None,
+        )
+        latest_budget_action = next(
+            (
+                entry
+                for entry in action_entries
+                if isinstance(entry.get("value"), dict)
+                and bool(entry["value"].get("success", True))
+                and str(entry["value"].get("operation") or "").strip().lower() == "set_budget"
+            ),
+            None,
+        )
+        effective_status = str(receipt.get("status") or "").strip()
+        if latest_state_action is not None:
+            action_value = latest_state_action["value"]
+            effective_status = str(
+                action_value.get("status") or action_value.get("operation") or effective_status
+            ).strip()
+        elif latest_action is not None:
+            action_value = latest_action["value"]
+            action_operation = str(action_value.get("operation") or "").strip().lower()
+            if action_operation in {"activate", "pause"}:
+                effective_status = str(action_value.get("status") or effective_status).strip()
+        actual_daily_budget_usd = receipt.get("actual_daily_budget_usd")
+        if actual_daily_budget_usd in {None, ""} and latest_budget_action is not None:
+            actual_daily_budget_usd = latest_budget_action["value"].get("daily_budget_usd")
+        campaigns.append(
+            {
+                "slug": slug_name,
+                "status": effective_status,
+                "launch_mode": str(receipt.get("launch_mode") or plan.get("launch_mode") or "").strip(),
+                "asset_kind": str(receipt.get("asset_kind") or plan.get("asset_kind") or "").strip(),
+                "asset_path": asset_path,
+                "plan_path": str(plan_abs.relative_to(business_root)) if plan_abs.is_file() else "",
+                "receipt_path": str(receipt_abs.relative_to(business_root)),
+                "latest_action_path": str((latest_action or {}).get("path") or "").strip(),
+                "latest_action": latest_action["value"] if latest_action is not None else None,
+                "metrics_path": str(metrics_abs.relative_to(business_root)) if metrics_abs.is_file() else "",
+                "created_at": str(receipt.get("created_at") or "").strip(),
+                "updated_at": str(
+                    (latest_action or {}).get("value", {}).get("created_at")
+                    or receipt.get("updated_at")
+                    or receipt.get("externally_launched_at")
+                    or receipt.get("created_at")
+                    or ""
+                ).strip(),
+                "objective": str(receipt.get("objective") or campaign_block.get("objective") or "").strip(),
+                "campaign_name": str(receipt.get("campaign_name") or campaign_block.get("name") or "").strip(),
+                "secondary_name": str(
+                    receipt.get("adset_name")
+                    or receipt.get("ad_group_name")
+                    or secondary_block.get("name")
+                    or ""
+                ).strip(),
+                "ad_name": str(receipt.get("ad_name") or ad_block.get("name") or "").strip(),
+                "daily_budget_usd": receipt.get("daily_budget_usd") or secondary_block.get("daily_budget_usd"),
+                "actual_daily_budget_usd": actual_daily_budget_usd,
+                "message": str(receipt.get("message") or ad_block.get("message") or "").strip(),
+                "link": str(receipt.get("link") or ad_block.get("link") or "").strip(),
+                "tracked_link": str(receipt.get("tracked_link") or ad_block.get("tracked_link") or "").strip(),
+                "call_to_action": str(receipt.get("call_to_action") or ad_block.get("call_to_action") or "").strip(),
+                "ids": receipt.get("ids") if isinstance(receipt.get("ids"), dict) else {},
+                "latest_metrics": latest_metrics,
+                "open_url": _takyon_openable_url(
+                    receipt.get("preview_url") or receipt.get("post_url") or receipt.get("link")
+                ),
+            }
+        )
+    campaigns.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+    return campaigns
+
+
+def _takyon_channel_start_request_spec(
+    channel: str,
+    campaigns: list[dict[str, Any]] | None = None,
+    latest_job: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    key = str(channel or "").strip().lower()
+    label = "X" if key == "x" else "Reddit" if key == "reddit" else "Meta" if key == "meta" else "Channel"
+    latest_campaign = (campaigns or [None])[0] if campaigns else None
+    latest_status = str(
+        (latest_campaign or {}).get("status") or (latest_job or {}).get("status") or "missing"
+    ).strip().lower()
+    if latest_status in {"created_paused", "paused"}:
+        return {
+            "requested_action": "activate_or_continue_channel_campaign",
+            "summary": f"Activate the paused {label} campaign if it is still the right move; otherwise continue the {label} lane truthfully.",
+            "primary_action_label": "activate",
+        }
+    if latest_status in {"activated", "externally_launched", "active", "live"}:
+        return {
+            "requested_action": "continue_live_channel_campaign",
+            "summary": f"Continue the live {label} lane truthfully: review results, sync metrics, and add another campaign only if warranted.",
+            "primary_action_label": "continue",
+        }
+    if latest_job is not None and _takyon_job_status(latest_job.get("status")) in {"scheduled", "running"}:
+        return {
+            "requested_action": "create_or_continue_channel_campaign",
+            "summary": f"Continue the in-flight {label} lane work truthfully and reuse existing state instead of duplicating it.",
+            "primary_action_label": "continue",
+        }
+    return {
+        "requested_action": "create_or_continue_channel_campaign",
+        "summary": f"Start or continue the {label} outreach lane.",
+        "primary_action_label": "start",
+    }
+
+
 def _takyon_collect_operator_meta_campaigns(store: Any, business_slugs: list[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for business in business_slugs:
@@ -2747,6 +2963,7 @@ def _takyon_blank_outreach_channels() -> dict[str, Any]:
             "label": "X",
             "status": "missing",
             "updated_at": "",
+            "primary_action_label": "start",
             "draft_path": "",
             "items": [],
             "campaigns": [],
@@ -2760,6 +2977,7 @@ def _takyon_blank_outreach_channels() -> dict[str, Any]:
             "label": "Reddit",
             "status": "missing",
             "updated_at": "",
+            "primary_action_label": "start",
             "items": [],
             "campaigns": [],
             "latest_job": None,
@@ -2772,6 +2990,7 @@ def _takyon_blank_outreach_channels() -> dict[str, Any]:
             "label": "Meta",
             "status": "missing",
             "updated_at": "",
+            "primary_action_label": "start",
             "items": [],
             "campaigns": [],
             "latest_job": None,
@@ -2892,6 +3111,65 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
     public_url = str(surface.get("public_url") or "").strip()
     publish_status = str(surface.get("publish_status") or "").strip()
     website_status = "published" if public_url else ("publish_blocked" if product_blocker else "missing")
+    outreach_channels = _takyon_blank_outreach_channels()
+    reddit_campaigns = _takyon_collect_business_paid_campaigns(
+        store,
+        slug,
+        "distribution/reddit-ads",
+        "metrics/reddit-ads",
+        plan_secondary_key="ad_group",
+    )
+    reddit_job = _takyon_latest_channel_job(latest_jobs, "reddit")
+    reddit_start_spec = _takyon_channel_start_request_spec("reddit", reddit_campaigns, reddit_job)
+    outreach_channels["reddit"].update(
+        {
+            "status": str(
+                (reddit_campaigns[0] if reddit_campaigns else {}).get("status")
+                or (reddit_job or {}).get("status")
+                or "missing"
+            ).strip()
+            or "missing",
+            "updated_at": str(
+                (reddit_campaigns[0] if reddit_campaigns else {}).get("updated_at")
+                or (reddit_job or {}).get("updated_at")
+                or ""
+            ).strip(),
+            "primary_action_label": reddit_start_spec["primary_action_label"],
+            "campaigns": reddit_campaigns[:8],
+            "latest_job": reddit_job,
+            "campaign_count": len(reddit_campaigns),
+            "metrics_count": sum(1 for item in reddit_campaigns if isinstance(item.get("latest_metrics"), dict) and item.get("latest_metrics")),
+        }
+    )
+    meta_campaigns = _takyon_collect_business_paid_campaigns(
+        store,
+        slug,
+        "distribution/meta-ads",
+        "metrics/meta-ads",
+        plan_secondary_key="adset",
+    )
+    meta_job = _takyon_latest_channel_job(latest_jobs, "meta")
+    meta_start_spec = _takyon_channel_start_request_spec("meta", meta_campaigns, meta_job)
+    outreach_channels["meta"].update(
+        {
+            "status": str(
+                (meta_campaigns[0] if meta_campaigns else {}).get("status")
+                or (meta_job or {}).get("status")
+                or "missing"
+            ).strip()
+            or "missing",
+            "updated_at": str(
+                (meta_campaigns[0] if meta_campaigns else {}).get("updated_at")
+                or (meta_job or {}).get("updated_at")
+                or ""
+            ).strip(),
+            "primary_action_label": meta_start_spec["primary_action_label"],
+            "campaigns": meta_campaigns[:8],
+            "latest_job": meta_job,
+            "campaign_count": len(meta_campaigns),
+            "metrics_count": sum(1 for item in meta_campaigns if isinstance(item.get("latest_metrics"), dict) and item.get("latest_metrics")),
+        }
+    )
 
     return {
         "business_slug": slug,
@@ -2995,14 +3273,29 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
                     "publish_receipt_path": str(surface.get("publish_receipt_path") or "").strip(),
                 },
                 "outreach": {
-                    "status": "missing",
+                    "status": next(
+                        (
+                            str(channel.get("status") or "").strip()
+                            for channel in outreach_channels.values()
+                            if str(channel.get("status") or "").strip()
+                            and str(channel.get("status") or "").strip() != "missing"
+                        ),
+                        "missing",
+                    ),
                     "path": "",
                     "receipt": "",
-                    "updated_at": "",
+                    "updated_at": next(
+                        (
+                            str(channel.get("updated_at") or "").strip()
+                            for channel in outreach_channels.values()
+                            if str(channel.get("updated_at") or "").strip()
+                        ),
+                        "",
+                    ),
                     "published_count": 0,
                     "items": [],
                     "receipts": [],
-                    "channels": _takyon_blank_outreach_channels(),
+                    "channels": outreach_channels,
                 },
                 "creative_assets": {
                     "status": "missing",
@@ -3063,14 +3356,37 @@ async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, A
     if amount_cents <= 0:
         raise HTTPException(status_code=400, detail="amount_cents must be > 0")
     return_path = _same_origin_path(str(body.get("return_path") or "/"))
+    customer_id = None
     try:
-        from plugins.takyon.control_api import create_topup_checkout_session
+        from plugins.takyon.control_api import (
+            create_topup_checkout_session,
+            ensure_operator_billing_customer,
+        )
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+            import psycopg
+
+            conn = psycopg.connect(url, autocommit=True)
+            try:
+                customer = ensure_operator_billing_customer(conn, str(principal.user_id))
+                customer_id = str(customer.get("id") or "").strip() or None
+            finally:
+                conn.close()
+        except RuntimeNotConfigured:
+            customer_id = None
+        except Exception:
+            customer_id = None
 
         session = create_topup_checkout_session(
             str(principal.user_id),
             amount_cents=amount_cents,
             success_url=_dashboard_absolute_url(request, return_path),
             cancel_url=_dashboard_absolute_url(request, return_path),
+            customer_id=customer_id,
         )
     except Exception as exc:  # noqa: BLE001 - surface an honest UI error
         message = str(exc)
@@ -3081,6 +3397,54 @@ async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, A
         "checkout_url": session.get("url"),
         "session_id": session.get("id"),
         "amount_cents": amount_cents,
+    }
+
+
+@app.post("/api/takyon/operator/billing/portal")
+async def create_takyon_operator_billing_portal(request: Request) -> dict[str, Any]:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return_path = _same_origin_path(str(body.get("return_path") or "/"))
+    try:
+        from plugins.takyon.control_api import create_operator_billing_portal_session
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        import psycopg
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            session = create_operator_billing_portal_session(
+                conn,
+                str(principal.user_id),
+                return_url=_dashboard_absolute_url(request, return_path),
+            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if "operator_email_unavailable" in str(exc):
+            raise HTTPException(status_code=409, detail="operator_email_unavailable") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(status_code=503, detail="billing_portal_unconfigured") from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+    return {
+        "portal_url": session.get("url"),
+        "customer_id": session.get("customer"),
     }
 
 
@@ -3389,6 +3753,32 @@ async def get_takyon_business_workspace(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/takyon/businesses/{slug}/traction")
+async def get_takyon_business_traction(
+    request: Request,
+    slug: str,
+    range: str = "M",
+) -> dict[str, Any]:
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        return store.traction_timeseries(business, range_key=str(range or "M"))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - traction should fail honestly
+        _log.warning("dashboard business traction read failed for %s: %s", business, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/takyon/businesses/{slug}/home")
 async def get_takyon_business_home(
     request: Request,
@@ -3638,6 +4028,25 @@ async def start_takyon_business_outreach_channel(
     spec = channel_specs.get(channel)
     if spec is None:
         raise HTTPException(status_code=400, detail="channel must be one of: x, reddit, meta")
+    campaigns: list[dict[str, Any]] = []
+    if channel in {"reddit", "meta"}:
+        try:
+            from plugins.takyon.core import TakyonStore
+
+            store = TakyonStore(operator_user_id=str(principal.user_id))
+            publication_root = "distribution/reddit-ads" if channel == "reddit" else "distribution/meta-ads"
+            metrics_root = "metrics/reddit-ads" if channel == "reddit" else "metrics/meta-ads"
+            secondary_key = "ad_group" if channel == "reddit" else "adset"
+            campaigns = _takyon_collect_business_paid_campaigns(
+                store,
+                business,
+                publication_root,
+                metrics_root,
+                plan_secondary_key=secondary_key,
+            )
+        except Exception:
+            campaigns = []
+    start_spec = _takyon_channel_start_request_spec(channel, campaigns)
     status, payload = _takyon_app_tool(
         handle_business_enqueue_job(
             {
@@ -3649,10 +4058,10 @@ async def start_takyon_business_outreach_channel(
                     "channel": channel,
                     "channel_label": spec["label"],
                     "requested_skill": spec["requested_skill"],
-                    "requested_action": "create_or_continue_channel_campaign",
+                    "requested_action": start_spec["requested_action"],
                     "workspace": "distribution/campaign/",
                     "ui_origin": "litebulb.outreach_panel",
-                    "summary": f"Start or continue the {spec['label']} outreach lane.",
+                    "summary": start_spec["summary"],
                 },
                 "idempotency_key": str(body.get("idempotency_key") or f"dashboard-outreach-start-{uuid.uuid4().hex}"),
                 "reason": f"start {spec['label']} outreach lane from dashboard panel",

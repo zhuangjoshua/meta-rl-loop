@@ -1,0 +1,76 @@
+/* Litebulb mockup — minimal global reset.
+   Both surfaces share ONE unified UI font now (Schibsted Grotesk via --cds/--lb-font-sans),
+   so the body sets it as the base. Root-level overlays (the Settings modal) and the
+   standalone home then inherit it instead of falling back to the browser serif default.
+   Surfaces that want the display (Bricolage) or mono (JetBrains) face still set it explicitly. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--cds-font-sans);
+  color: var(--cds-color-text-default);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+svg {
+  display: block;
+}
+
+/* Cross-fade between the two surfaces when "Start building" crosses from
+   marketing into the app (and back). Respects reduced-motion. */
+@keyframes lb-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.lb-view {
+  min-height: 100%;
+  animation: lb-view-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lb-view {
+    animation: none;
+  }
+}
+
+/* ── Shared brand mark: a rounded bulb badge used in both surfaces ── */
+.lb-mark {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  flex: none;
+  line-height: 0;
+}
+/* Marketing tone — Litebulb's two brand hues (lime → sunset) with a dark glyph. */
+.lb-mark--brand {
+  background-image: linear-gradient(140deg, #ddff85 0%, #ffc24d 48%, #ff983b 100%);
+  color: rgba(9, 9, 11, 0.82);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+/* Product tone — inked chip with a lime filament, reads on the tool chrome. */
+.lb-mark--ink {
+  background: #101516;
+  color: #c9f94d;
+  border-radius: 7px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}

@@ -1,0 +1,168 @@
+/* ============================================================================
+   Litebulb identity layer — the single source of truth (--lb-*).
+   ----------------------------------------------------------------------------
+   One original Litebulb brand (warm neutrals · retuned filament/sunset/blue/green ·
+   softened radius · Bricolage/Schibsted/JetBrains type · warm glow) that BOTH
+   surfaces inherit. The base44 (--b44-*) and composer (--cds-*) primitives are
+   re-pointed to these values at the bottom, so the existing components render in
+   the unified identity instead of their source brand. Imported LAST so it wins
+   the cascade. De-clones the landing from base44 and the product from composer,
+   and makes the two mesh.
+   ========================================================================== */
+
+:root {
+  /* ── Warm neutral ramp (neither base44 cool zinc nor composer's #878a8d) ── */
+  --lb-gray-0:    #ffffff;
+  --lb-gray-25:   #faf9f7;   /* warm off-white surface base */
+  --lb-gray-50:   #f5f3f0;
+  --lb-gray-75:   #efece8;
+  --lb-gray-100:  #e9e6e1;
+  --lb-gray-200:  #e1ddd6;   /* hairline borders */
+  --lb-gray-300:  #d3cec6;
+  --lb-gray-400:  #b4ada3;
+  --lb-gray-500:  #8d887e;   /* strong border / faint text (warm, replaces #878a8d) */
+  --lb-gray-600:  #6c685f;
+  --lb-gray-700:  #524e47;
+  --lb-gray-800:  #393530;
+  --lb-gray-900:  #252320;
+  --lb-gray-1000: #16140f;   /* warm near-black */
+  --lb-gray-darkbright: #1f1d18;
+  --lb-gray-asset:      #272420;
+
+  /* ── Brand — Litebulb "filament" + warm accents (restrained re-tune) ── */
+  --lb-lime-soft: #e9fba3;   /* CTA fill — a touch more golden than base44 #EBFFB1 */
+  --lb-lime-300:  #ddf585;
+  --lb-lime-edge: #a6de12;   /* CTA edge / strong — vs base44 #ADE900 */
+  --lb-lime-600:  #8bbd05;
+  --lb-lime-ink:  #2f4406;   /* text on lime */
+  --lb-sunset-100:#fff0e6;
+  --lb-sunset-300:#ffb98f;
+  --lb-sunset:    #fb8024;   /* action accent — vivid orange, white text */
+  --lb-sunset-600:#ee6a16;
+  --lb-sunset-700:#c14e07;
+  --lb-blue-100:  #dbe9ff;
+  --lb-blue:      #2e7cf0;   /* links / info / data — vs composer #1f86ff */
+  --lb-blue-600:  #1f5fd0;
+  --lb-blue-800:  #16356f;
+  --lb-green-bold:#1ea968;
+  --lb-green:     #1f8f5d;   /* success / launch — vs composer #31805a */
+  --lb-green-700: #1b4533;
+  --lb-green-play:#54e19e;
+  --lb-amber:     #f6a91d;
+  --lb-red:       #f24a31;
+  --lb-pink:      #ef6aa0;
+
+  /* ── Type — Litebulb's own faces (shared by landing + product) ── */
+  --lb-font-display: "Bricolage Grotesque", "Schibsted Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --lb-font-sans:    "Schibsted Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --lb-font-serif:   "Instrument Serif", Georgia, "Times New Roman", serif;
+  --lb-font-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── Radius — one softened personality (pills reserved for true pills) ── */
+  --lb-radius-sm:   6px;
+  --lb-radius-md:   8px;
+  --lb-radius-card: 10px;
+  --lb-radius-lg:   14px;
+  --lb-radius-xl:   20px;
+  --lb-radius-pill: 9999px;
+
+  /* ── Surfaces / texture ── */
+  --lb-dot: rgba(22, 20, 15, 0.10);
+  /* hero atmosphere — ONE consistent warm wash (lime → soft gold → off-white).
+     No blue, no hard hue shifts; same tone across landing + app home. */
+  --lb-glow:
+    radial-gradient(82% 66% at 50% -16%, rgba(233, 251, 163, 0.46) 0%, rgba(238, 244, 196, 0.22) 46%, rgba(255, 255, 255, 0) 80%),
+    radial-gradient(56% 48% at 82% -6%, rgba(252, 196, 110, 0.12) 0%, rgba(252, 196, 110, 0) 72%),
+    linear-gradient(180deg, #fbfaf7 0%, #ffffff 66%);
+
+  /* ════════════════════════════════════════════════════════════════════════
+     COMPAT — re-point base44 (--b44-*) primitives to the Litebulb identity.
+     The base44 semantic layer references these, so the whole landing inherits.
+     ════════════════════════════════════════════════════════════════════════ */
+  --b44-white: var(--lb-gray-0);
+  --b44-black: var(--lb-gray-1000);
+  --b44-zinc-50:  var(--lb-gray-25);
+  --b44-zinc-100: var(--lb-gray-100);
+  --b44-zinc-200: var(--lb-gray-200);
+  --b44-zinc-300: var(--lb-gray-300);
+  --b44-zinc-400: var(--lb-gray-400);
+  --b44-zinc-500: var(--lb-gray-500);
+  --b44-zinc-600: var(--lb-gray-600);
+  --b44-zinc-700: var(--lb-gray-700);
+  --b44-zinc-800: var(--lb-gray-800);
+  --b44-zinc-900: var(--lb-gray-900);
+  --b44-zinc-950: var(--lb-gray-1000);
+  --b44-cream:    var(--lb-gray-25);
+
+  --b44-lime-100: var(--lb-lime-soft);
+  --b44-lime-200: var(--lb-lime-soft);
+  --b44-lime-300: var(--lb-lime-300);
+  --b44-lime-400: var(--lb-lime-300);
+  --b44-lime-500: var(--lb-lime-edge);
+  --b44-lime-600: var(--lb-lime-600);
+  --b44-lime-900: var(--lb-lime-ink);
+  --b44-orange-100: var(--lb-sunset-100);
+  --b44-orange-300: var(--lb-sunset-300);
+  --b44-orange-400: var(--lb-sunset);
+  --b44-orange-500: var(--lb-sunset);
+  --b44-orange-600: var(--lb-sunset-600);
+  --b44-orange-700: var(--lb-sunset-700);
+
+  --b44-font-sans:    var(--lb-font-sans);
+  --b44-font-display: var(--lb-font-display);
+  --b44-font-mono:    var(--lb-font-mono);
+
+  --b44-texture-hero: var(--lb-glow);
+
+  /* ════════════════════════════════════════════════════════════════════════
+     COMPAT — re-point composer (--cds-*) primitives to the Litebulb identity.
+     ════════════════════════════════════════════════════════════════════════ */
+  --cds-gray-0:    var(--lb-gray-0);
+  --cds-gray-25:   var(--lb-gray-25);
+  --cds-gray-50:   var(--lb-gray-50);
+  --cds-gray-75:   var(--lb-gray-75);
+  --cds-gray-100:  var(--lb-gray-100);
+  --cds-gray-200:  var(--lb-gray-200);
+  --cds-gray-250:  var(--lb-gray-300);
+  --cds-gray-300:  var(--lb-gray-300);
+  --cds-gray-400:  var(--lb-gray-400);
+  --cds-gray-500:  var(--lb-gray-400);
+  --cds-gray-600:  var(--lb-gray-500);
+  --cds-gray-700:  var(--lb-gray-500);   /* was #878a8d → warm strong border */
+  --cds-gray-800:  var(--lb-gray-700);
+  --cds-gray-900:  var(--lb-gray-900);
+  --cds-gray-1000: var(--lb-gray-1000);
+  --cds-gray-darkbright:  var(--lb-gray-darkbright);
+  --cds-gray-asset-block: var(--lb-gray-asset);
+
+  --cds-blue-100: var(--lb-blue);
+  --cds-blue-300: var(--lb-blue);
+  --cds-blue-450: var(--lb-blue-600);
+  --cds-blue-600: var(--lb-blue-600);
+  --cds-blue-750: var(--lb-blue-800);
+  --cds-blue-800: var(--lb-blue-800);
+  --cds-blue-lightest: var(--lb-blue-100);
+  --cds-green-325: var(--lb-green-bold);
+  --cds-green-350: var(--lb-green-bold);
+  --cds-green-375: var(--lb-green);
+  --cds-green-450: var(--lb-green);
+  --cds-green-500: var(--lb-green);
+  --cds-green-700: var(--lb-green-700);
+  --cds-green-800: var(--lb-green-700);
+  --cds-green-play: var(--lb-green-play);
+  --cds-sunset-400: var(--lb-sunset);
+  --cds-sunset-500: var(--lb-sunset-600);
+  --cds-sunset-600: var(--lb-sunset-700);
+  --cds-sand-500:  var(--lb-amber);
+  --cds-amber-500: var(--lb-amber);
+  --cds-pink-500:  var(--lb-pink);
+  --cds-red-fail:  var(--lb-red);
+
+  --cds-font-sans: var(--lb-font-sans);
+  --cds-font-mono: var(--lb-font-mono);
+
+  --cds-radius-sm:   var(--lb-radius-sm);
+  --cds-radius-card: var(--lb-radius-card);
+  --cds-radius-md:   var(--lb-radius-md);
+  --cds-radius-lg:   var(--lb-radius-lg);
+}

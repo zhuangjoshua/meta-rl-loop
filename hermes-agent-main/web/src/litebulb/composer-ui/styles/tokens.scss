@@ -1,0 +1,278 @@
+/* =============================================================================
+   Composer Design System — Theme tokens
+   Light theme on :root, dark theme on [data-theme="dark"].
+   Components consume the SEMANTIC vars (var(--cds-color-*)); primitives are the
+   raw scales. Reverse-engineered from app.composer.trade (HelpScout --hsds-*
+   excluded). Mirrors how lemon-ui themes via CSS variables.
+   ============================================================================= */
+
+:root {
+  /* ---- Primitives: neutrals ---- */
+  --cds-gray-0: #ffffff;
+  --cds-gray-25: #f7f7f7;
+  --cds-gray-50: #f3f4f5;
+  --cds-gray-75: #ecedee;
+  --cds-gray-100: #eaebeb;
+  --cds-gray-200: #e4e7eb;
+  --cds-gray-250: #dcddde;
+  --cds-gray-300: #dadde0;
+  --cds-gray-400: #c5c9cc;
+  --cds-gray-500: #c2c5c6;
+  --cds-gray-600: #99a1af;
+  --cds-gray-700: #878a8d;
+  --cds-gray-800: #445052;
+  --cds-gray-900: #273234;
+  --cds-gray-1000: #101516;
+  --cds-gray-darkbright: #1b2223;
+  --cds-gray-asset-block: #242b2d;
+
+  /* ---- Primitives: blue (action) ---- */
+  --cds-blue-100: #2fc1ff;
+  --cds-blue-300: #1f86ff;
+  --cds-blue-450: #1971da;
+  --cds-blue-600: #2465d9;
+  --cds-blue-750: #154bac;
+  --cds-blue-800: #19386c;
+  --cds-blue-lightest: #d2e7ff;
+  --cds-crystal-300: #17baff;
+  --cds-crystal-50: #e9f3ff;
+
+  /* ---- Primitives: green (grass / verdant) ---- */
+  --cds-green-325: #39d088;
+  --cds-green-350: #1ec072;
+  --cds-green-375: #049f55;
+  --cds-green-450: #179659;
+  --cds-green-500: #31805a;
+  --cds-green-700: #1c372a;
+  --cds-green-800: #0c4128;
+  --cds-green-wt-sub: #1a3f2a;
+  --cds-green-wt-border: #1d4a36;
+  --cds-green-play: #54e19e;
+  --cds-green-50: #e9f9f1;
+  --cds-green-100: #d2f2e3;
+
+  /* ---- Primitives: pink / amber / sunset / purple ---- */
+  --cds-pink-300: #ffb4ed;
+  --cds-pink-500: #f6609f;
+  --cds-pink-700: #753652;
+  --cds-amber-500: #ffbb38;
+  --cds-amber-100: #fff8eb;
+  --cds-sand-500: #f6a811;
+  --cds-sunset-300: #feb999;
+  --cds-sunset-400: #ff854b;
+  --cds-sunset-500: #fc5100;
+  --cds-sunset-600: #d24300;
+  --cds-sunset-100: #ffeee6;
+  --cds-red-fail: #ff482f;
+  --cds-red-fail-bg: #fff6f5;
+  --cds-purple-400: #ba84ff;
+  --cds-purple-700: #573c7a;
+
+  /* ---- Primitives: alpha ---- */
+  --cds-ink-a70: rgba(16, 21, 22, 0.70);
+  --cds-ink-a50: rgba(16, 21, 22, 0.50);
+  --cds-ink-a40: rgba(16, 21, 22, 0.40);
+  --cds-ink-a25: rgba(16, 21, 22, 0.25);
+  --cds-ink-a16: rgba(16, 21, 22, 0.16);
+  --cds-black-a16: rgba(0, 0, 0, 0.16);
+  --cds-black-a08: rgba(0, 0, 0, 0.08);
+  --cds-white-a70: rgba(255, 255, 255, 0.70);
+  --cds-white-a32: rgba(255, 255, 255, 0.32);
+  --cds-white-a16: rgba(255, 255, 255, 0.16);
+
+  /* ---- Semantic: brand ---- */
+  --cds-color-brand-primary: var(--cds-blue-300);
+  --cds-color-brand-primary-hover: var(--cds-blue-450);
+  --cds-color-brand-primary-tint: var(--cds-blue-lightest);
+  --cds-color-brand-secondary: var(--cds-green-500);
+  --cds-color-brand-secondary-hover: var(--cds-green-800);
+  --cds-color-brand-accent: var(--cds-amber-500);
+
+  /* ---- Semantic: text ---- */
+  --cds-color-text-default: var(--cds-gray-1000);
+  --cds-color-text-soft: var(--cds-ink-a70);
+  --cds-color-text-muted: var(--cds-ink-a50);
+  --cds-color-text-faint: var(--cds-gray-700);
+  --cds-color-text-disabled: var(--cds-ink-a40);
+  --cds-color-text-inverse: var(--cds-gray-0);
+  --cds-color-text-inverse-soft: var(--cds-white-a70);
+  --cds-color-text-link: var(--cds-blue-300);
+  --cds-color-text-link-hover: var(--cds-blue-450);
+
+  /* ---- Semantic: surface ---- */
+  --cds-color-surface-app: var(--cds-gray-25);
+  --cds-color-surface-sunken: var(--cds-gray-75);
+  --cds-color-surface-panel: var(--cds-gray-50);
+  --cds-color-surface-card: var(--cds-gray-0);
+  --cds-color-surface-hover: var(--cds-gray-300);
+  --cds-color-surface-dark: var(--cds-gray-1000);
+  --cds-color-surface-dark-raised: var(--cds-gray-darkbright);
+  --cds-color-surface-overlay: rgba(0, 0, 0, 0.50);
+
+  /* ---- Semantic: border ---- */
+  --cds-color-border-default: var(--cds-gray-200);
+  --cds-color-border-strong: var(--cds-gray-700);
+  --cds-color-border-input: var(--cds-gray-400);
+  --cds-color-border-button: var(--cds-gray-400);
+  --cds-color-border-divider: var(--cds-black-a16);
+  --cds-color-border-focus: var(--cds-gray-1000);
+  --cds-color-border-popover: var(--cds-gray-1000);
+  --cds-color-focus-ring: rgba(31, 134, 255, 0.60);
+
+  /* ---- Semantic: state ---- */
+  --cds-color-success: var(--cds-green-500);
+  --cds-color-success-bold: var(--cds-green-350);
+  --cds-color-success-bg: var(--cds-green-50);
+  --cds-color-warning: var(--cds-amber-500);
+  --cds-color-warning-bg: var(--cds-amber-100);
+  --cds-color-error: var(--cds-sunset-500);
+  --cds-color-error-strong: var(--cds-red-fail);
+  --cds-color-error-bg: var(--cds-red-fail-bg);
+  --cds-color-info: var(--cds-blue-300);
+  --cds-color-info-bg: var(--cds-blue-lightest);
+
+  /* ---- Semantic: nodes (symphony blocks) ---- */
+  --cds-color-node-weight: var(--cds-green-500);
+  --cds-color-node-weight-border: var(--cds-green-wt-border);
+  --cds-color-node-weight-text: var(--cds-gray-0);
+  --cds-color-node-condition: var(--cds-blue-600);
+  --cds-color-node-condition-border: var(--cds-blue-800);
+  --cds-color-node-condition-text: var(--cds-gray-0);
+  --cds-color-node-filter: var(--cds-pink-500);
+  --cds-color-node-filter-border: var(--cds-pink-700);
+  --cds-color-node-filter-text: var(--cds-gray-1000);
+  --cds-color-node-selected: var(--cds-sand-500);
+
+  /* ---- Typography ---- */
+  /* Composer's brand face is Neue Haas Grotesk (Adobe Fonts kit). It's commercial,
+     so we can't bundle it — add your kit <link> to render the real face; otherwise
+     this falls back to Helvetica Neue / Helvetica, which is visually ~identical. */
+  --cds-font-sans: "neue-haas-grotesk-display", "Neue Haas Grotesk", "Helvetica Neue", Helvetica, Arial, ui-sans-serif, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --cds-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --cds-text-2xs: 0.625rem;
+  --cds-text-xs: 0.75rem;
+  --cds-text-sm: 0.875rem;
+  --cds-text-base: 0.875rem;
+  --cds-text-md: 1rem;
+  --cds-text-lg: 1.125rem;
+  --cds-text-xl: 1.25rem;
+  --cds-text-2xl: 1.5rem;
+  --cds-text-3xl: 1.875rem;
+  --cds-text-5xl: 3rem;
+  --cds-weight-light: 300;
+  --cds-weight-normal: 400;
+  --cds-weight-medium: 500;
+  --cds-weight-semibold: 600;
+  --cds-weight-bold: 700;
+  --cds-leading-none: 1;
+  --cds-leading-tight: 1.25;
+  --cds-leading-snug: 1.375;
+  --cds-leading-normal: 1.5;
+  --cds-leading-relaxed: 1.625;
+  --cds-leading-loose: 2;
+  --cds-tracking-tight: -0.025em;
+  --cds-tracking-normal: 0;
+  --cds-tracking-wide: 0.025em;
+  --cds-tracking-wider: 0.05em;
+
+  /* ---- Spacing (4px base) ---- */
+  --cds-space-0: 0;
+  --cds-space-px: 1px;
+  --cds-space-0_5: 0.125rem;
+  --cds-space-1: 0.25rem;
+  --cds-space-1_5: 0.375rem;
+  --cds-space-2: 0.5rem;
+  --cds-space-2_5: 0.625rem;
+  --cds-space-3: 0.75rem;
+  --cds-space-4: 1rem;
+  --cds-space-5: 1.25rem;
+  --cds-space-6: 1.5rem;
+  --cds-space-8: 2rem;
+  --cds-space-10: 2.5rem;
+  --cds-space-12: 3rem;
+  --cds-space-16: 4rem;
+
+  /* ---- Radius (default 3px like Composer) ---- */
+  --cds-radius-xs: 2px;
+  --cds-radius-sm: 3px;
+  --cds-radius-card: 4px;
+  --cds-radius-md: 6px;
+  --cds-radius-lg: 12px;
+  --cds-radius-full: 9999px;
+
+  /* ---- Elevation ---- */
+  --cds-shadow-2xs: 0 2px 4px 0 rgba(0, 0, 0, 0.04);
+  --cds-shadow-xs: 0 2px 2px 0 rgba(0, 0, 0, 0.08);
+  --cds-shadow-sm: 0 2px 4px 0 rgba(0, 0, 0, 0.12);
+  --cds-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --cds-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --cds-shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.10), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --cds-shadow-overlay: 0 4px 24px 0 rgba(0, 0, 0, 0.24);
+  --cds-shadow-popover: 0 2px 4px 0 rgba(0, 0, 0, 0.12);
+  --cds-shadow-inner-soft: inset 0 1px 0 0 rgba(255, 255, 255, 0.32);
+  --cds-shadow-inner-drop: inset 0 1px 0 0 #fff, 0 2px 2px 0 rgba(0, 0, 0, 0.12);
+  --cds-shadow-block: inset 0 1px 0 0 rgba(255, 255, 255, 0.32), 0 2px 2px 0 rgba(0, 0, 0, 0.12);
+  --cds-shadow-selected: 0 2px 2px 0 rgba(0, 0, 0, 0.12), 0 0 12px 2px #f6a811;
+
+  /* ---- Motion ---- */
+  --cds-duration-instant: 0s;
+  --cds-duration-fast: 0.1s;
+  --cds-duration-base: 0.15s;
+  --cds-duration-button: 0.2s;
+  --cds-duration-slow: 0.3s;
+  --cds-duration-slower: 0.5s;
+  --cds-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --cds-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --cds-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- Layout ---- */
+  --cds-sidebar-width: 248px;
+  --cds-panel-width: 248px;
+  --cds-toolbar-height: 60px;
+  --cds-blocks-width: 800px;
+
+  /* ---- Z-index ---- */
+  --cds-z-base: 0;
+  --cds-z-raised: 10;
+  --cds-z-sticky: 100;
+  --cds-z-panel: 300;
+  --cds-z-toolbar: 900;
+  --cds-z-modal: 960;
+  --cds-z-popover: 1000;
+  --cds-z-top: 10000;
+
+  /* ---- Texture: editor canvas dot grid ---- */
+  --cds-dotgrid: radial-gradient(rgba(0, 0, 0, 0.4) 0.05em, transparent 0);
+  --cds-dotgrid-size: 12px 12px;
+}
+
+/* =============================================================================
+   Dark theme — remaps surfaces / text / borders to the dark primitives.
+   Brand + state hues stay the same. Toggle with <html data-theme="dark">.
+   ============================================================================= */
+[data-theme="dark"] {
+  --cds-color-text-default: var(--cds-gray-75);
+  --cds-color-text-soft: var(--cds-white-a70);
+  --cds-color-text-muted: rgba(236, 237, 238, 0.5);
+  --cds-color-text-faint: var(--cds-gray-600);
+  --cds-color-text-inverse: var(--cds-gray-1000);
+
+  --cds-color-surface-app: var(--cds-gray-1000);
+  --cds-color-surface-sunken: #0d1110;
+  --cds-color-surface-panel: var(--cds-gray-darkbright);
+  --cds-color-surface-card: var(--cds-gray-900);
+  --cds-color-surface-hover: var(--cds-gray-800);
+
+  --cds-color-border-default: var(--cds-white-a16);
+  --cds-color-border-strong: var(--cds-gray-800);
+  --cds-color-border-input: var(--cds-gray-800);
+  --cds-color-border-divider: var(--cds-white-a16);
+  --cds-color-border-focus: var(--cds-blue-300);
+
+  --cds-color-success-bg: rgba(49, 128, 90, 0.18);
+  --cds-color-warning-bg: rgba(255, 187, 56, 0.16);
+  --cds-color-error-bg: rgba(252, 81, 0, 0.16);
+  --cds-color-info-bg: rgba(31, 134, 255, 0.16);
+
+  --cds-dotgrid: radial-gradient(rgba(255, 255, 255, 0.18) 0.05em, transparent 0);
+}

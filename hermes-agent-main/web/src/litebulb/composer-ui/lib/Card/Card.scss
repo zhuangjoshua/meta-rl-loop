@@ -1,0 +1,14 @@
+.Card {
+  background: var(--cds-color-surface-card);
+  border-radius: var(--cds-radius-md);
+  padding: var(--cds-space-4);
+
+  &--raised {
+    border: 1px solid var(--cds-color-border-default);
+    box-shadow: var(--cds-shadow-sm);
+  }
+  &--outline {
+    border: 1px solid var(--cds-color-border-strong);
+    border-radius: var(--cds-radius-card);
+  }
+}

@@ -1,0 +1,109 @@
+/* Built against Composer's .btn-base + .btn-shadow-inset + button utilities.
+   See reference/composer-source.css. Every variant carries a 1px border;
+   solid variants get the inset top highlight via ::before. */
+
+.Button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--cds-space-1_5);
+  user-select: none;
+  -webkit-appearance: none;
+  appearance: none;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-family: var(--cds-font-sans);
+  font-size: var(--cds-text-sm);
+  font-weight: var(--cds-weight-medium);
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: var(--cds-radius-md);
+  padding: var(--cds-space-2) var(--cds-space-3); /* 8 / 12 */
+  cursor: pointer;
+  transition-property: color, background-color, border-color, box-shadow, opacity, filter;
+  transition-timing-function: var(--cds-ease-in-out);
+  transition-duration: var(--cds-duration-button); /* 0.2s */
+
+  &:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--cds-color-focus-ring); }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+  &:disabled::before { display: none; }
+
+  &__icon { display: inline-flex; flex: none; }
+  &__label { display: inline-flex; }
+
+  /* sizes */
+  &--small { padding: var(--cds-space-1) var(--cds-space-2); font-size: var(--cds-text-xs); border-radius: var(--cds-radius-sm); }
+  &--large { padding: var(--cds-space-3) var(--cds-space-5); font-size: var(--cds-text-md); }
+  &--full { width: 100%; }
+  &--icon-only { padding: var(--cds-space-2); }
+  &--icon-only.Button--small { padding: var(--cds-space-1); }
+
+  /* flat & restrained — no glossy highlight */
+  &--primary::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: none;
+    pointer-events: none;
+  }
+
+  /* ---- primary (solid) = brand ORANGE everywhere (same accent as the
+     marketing / home "Start building" CTA) ---- */
+  &--primary {
+    background: var(--lb-sunset);
+    color: #fff;
+    border-color: var(--lb-sunset-600);
+    box-shadow: var(--cds-shadow-xs);
+    &:hover { background: var(--lb-sunset-600); border-color: var(--lb-sunset-700); }
+    &:active { box-shadow: none; }
+
+    &.Button--status-buy {
+      background: var(--cds-color-brand-secondary);
+      border-color: var(--cds-green-wt-border);
+      &:hover { background: var(--cds-color-brand-secondary-hover); }
+    }
+    &.Button--status-danger {
+      background: var(--cds-color-error);
+      border-color: var(--cds-sunset-600);
+      &:hover { filter: brightness(0.95); }
+    }
+  }
+
+  /* ---- secondary (white workhorse: Undo / Redo / Watch / Share) ---- */
+  &--secondary {
+    background: var(--cds-color-surface-card);
+    color: var(--cds-color-text-default);
+    border-color: var(--cds-color-border-button); /* #c5c9cc */
+    box-shadow: var(--cds-shadow-xs);
+    &:hover { background: var(--cds-color-surface-panel); border-color: var(--cds-color-border-strong); }
+    &.Button--status-danger { color: var(--cds-color-error); }
+  }
+
+  /* ---- outline (white + colored border + colored text: Create / Create with AI) ---- */
+  &--outline {
+    background: var(--cds-color-surface-card);
+    color: var(--cds-color-text-link);
+    border-color: var(--cds-color-brand-primary);
+    &:hover { background: var(--cds-color-brand-primary-tint); }
+    &.Button--status-buy {
+      color: var(--cds-color-brand-secondary);
+      border-color: var(--cds-color-brand-secondary);
+      &:hover { background: var(--cds-color-success-bg); }
+    }
+    &.Button--status-danger {
+      color: var(--cds-color-error);
+      border-color: var(--cds-color-error);
+      &:hover { background: var(--cds-color-error-bg); }
+    }
+  }
+
+  /* ---- tertiary (ghost text button: Clean up) ---- */
+  &--tertiary {
+    background: transparent;
+    color: var(--cds-color-text-soft);
+    &:hover { background: var(--cds-color-surface-hover); color: var(--cds-color-text-default); }
+    &.Button--status-danger { color: var(--cds-color-error); }
+  }
+}

@@ -1,0 +1,12 @@
+.Divider {
+  height: 1px;
+  width: 100%;
+  background: var(--cds-color-border-divider);
+  border: 0;
+
+  &--vertical {
+    height: auto;
+    width: 1px;
+    align-self: stretch;
+  }
+}

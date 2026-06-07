@@ -1,0 +1,1247 @@
+/*! Base44 Design System v0.1.0 — bundled tokens + components.
+   Reverse-engineered for fidelity from base44.com + app.base44.com.
+   Provenance & exclusions: see reference/base44-source.css + README. */
+/* Base44 Design System — full stylesheet barrel.
+   Import this for tokens + all components, or import tokens/components à la carte.
+   Build (build.mjs) inlines these @imports into dist/base44.css. */
+
+
+/* >>> ./tokens/tokens.css */
+/* ============================================================================
+   Base44 Design System — TOKENS  (source of truth)
+   ----------------------------------------------------------------------------
+   Two-layer architecture:
+     LAYER 1  Primitives  (--b44-<scale>-<step>)  raw, theme-agnostic values
+     LAYER 2  Semantic    (--b44-color-<role>)    roles consumed by components
+
+   Provenance: see reference/base44-source.css. Values tagged [real] are
+   captured verbatim from app.base44.com (shadcn-zinc) or base44.com (brand).
+   Values tagged [interp] are ramp interpolations anchored on [real] stops.
+
+   Components reference ONLY semantic tokens. Themes remap the semantic layer.
+   tokens.{scss,json,ts} are generated from THIS file by build-tokens.mjs.
+   ========================================================================== */
+
+:root {
+  /* ========================================================================
+     LAYER 1 — PRIMITIVES
+     ===================================================================== */
+
+  /* --- Neutral / zinc ramp (matches the app's 240-hue shadcn neutrals) --- */
+  --b44-white:      #ffffff;                /* [real] */
+  --b44-black:      #000000;                /* [real] */
+  --b44-zinc-50:    #fafafa;                /* [real] 0 0% 98%      */
+  --b44-zinc-100:   #f4f4f5;                /* [real] 240 4.8% 95.9% */
+  --b44-zinc-200:   #e4e4e7;                /* [real] 240 5.9% 90%   */
+  --b44-zinc-300:   #d4d4d8;                /* [interp] */
+  --b44-zinc-400:   #a1a1aa;                /* [interp] */
+  --b44-zinc-500:   #71717a;                /* [real] 240 3.8% 46.1% */
+  --b44-zinc-600:   #52525b;                /* [interp] */
+  --b44-zinc-700:   #3f3f46;                /* [real] ~sidebar-fg    */
+  --b44-zinc-800:   #27272a;                /* [interp] (dark surfaces) */
+  --b44-zinc-900:   #18181b;                /* [real] 240 5.9% 10%   */
+  --b44-zinc-950:   #09090b;                /* [real] 240 10% 3.9%   */
+  --b44-cream:      #faf9f7;                /* [real] brand off-white #FAF9F7 */
+
+  /* --- Brand lime / chartreuse (signature) --- */
+  --b44-lime-50:    #fbffe6;                /* [interp] */
+  --b44-lime-100:   #f4ffcb;                /* [interp] */
+  --b44-lime-200:   #ebffb1;                /* [real] signature CTA fill #EBFFB1 */
+  --b44-lime-300:   #ddff85;                /* [interp] */
+  --b44-lime-400:   #c9f94d;                /* [interp] */
+  --b44-lime-500:   #ade900;                /* [real] saturated edge #ADE900 */
+  --b44-lime-600:   #8fc400;                /* [interp] */
+  --b44-lime-700:   #6e9700;                /* [interp] */
+  --b44-lime-800:   #556f08;                /* [interp] */
+  --b44-lime-900:   #3f5106;                /* [interp] */
+
+  /* --- Brand sunset orange (action) --- */
+  --b44-orange-50:  #fff4ee;                /* [interp] */
+  --b44-orange-100: #ffe9df;                /* [real] #FFE9DF */
+  --b44-orange-200: #ffbfa1;                /* [real] #FFBFA1 */
+  --b44-orange-300: #ffa877;                /* [interp] */
+  --b44-orange-400: #ff983b;                /* [real] action accent #FF983B (--wst-color-action) */
+  --b44-orange-500: #fa854f;                /* [real] #FA854F */
+  --b44-orange-600: #ff631f;                /* [real] #FF631F */
+  --b44-orange-700: #c94001;                /* [real] #C94001 */
+  --b44-orange-800: #9c3201;                /* [interp] */
+  --b44-orange-900: #6e2401;                /* [interp] */
+
+  /* --- Brand blue (accent + login washes) --- */
+  --b44-blue-50:    #f1f5f9;                /* [real] login wash slate-100 */
+  --b44-blue-100:   #e3edf6;                /* [real] login wash */
+  --b44-blue-200:   #dce8ff;                /* [real] #DCE8FF */
+  --b44-blue-300:   #c2dcf8;                /* [real] login wash */
+  --b44-blue-400:   #95b9ff;                /* [real] #95B9FF */
+  --b44-blue-500:   #3b82f6;                /* [real] sidebar-ring blue-500 */
+  --b44-blue-600:   #094bcc;                /* [real] #094BCC */
+  --b44-blue-700:   #082f7b;                /* [real] #082F7B */
+
+  /* --- Brand green --- */
+  --b44-green-50:   #f3f8f0;                /* [real] #F3F8F0 */
+  --b44-green-100:  #d2e4c7;                /* [real] #D2E4C7 */
+  --b44-green-300:  #92b079;                /* [real] #92B079 */
+  --b44-green-500:  #618741;                /* [real] #618741 */
+  --b44-green-700:  #39641d;                /* [real] #39641D */
+
+  /* --- Brand tan / earth (aligns with --workspace-badge cream) --- */
+  --b44-tan-50:     #f2eae7;                /* [real] #F2EAE7 (≈ --workspace-badge #F2EAE6) */
+  --b44-tan-100:    #e5cec0;                /* [real] #E5CEC0 */
+  --b44-tan-300:    #a9806f;                /* [real] #A9806F */
+  --b44-tan-500:    #8b614f;                /* [real] #8B614F */
+  --b44-tan-700:    #633c2b;                /* [real] #633C2B */
+
+  /* --- State primitives --- */
+  --b44-red-50:     #fef2f2;                /* [interp] */
+  --b44-red-500:    #ef4444;                /* [real] --destructive 0 84.2% 60.2% */
+  --b44-red-600:    #dc2626;                /* [interp] */
+  --b44-amber-50:   #fffbeb;                /* [interp] */
+  --b44-amber-500:  #f59e0b;                /* [interp] standard amber */
+  --b44-amber-700:  #b45309;                /* [interp] */
+
+  /* --- Alpha overlays --- */
+  --b44-black-a05:  rgba(0, 0, 0, 0.05);
+  --b44-black-a10:  rgba(0, 0, 0, 0.10);
+  --b44-black-a20:  rgba(0, 0, 0, 0.20);
+  --b44-black-a40:  rgba(0, 0, 0, 0.40);
+  --b44-black-a60:  rgba(0, 0, 0, 0.60);
+  --b44-white-a30:  rgba(255, 255, 255, 0.30);   /* [real] frosted border  */
+  --b44-white-a80:  rgba(255, 255, 255, 0.80);   /* [real] frosted top     */
+
+  /* ========================================================================
+     TYPOGRAPHY (primitive)
+     ===================================================================== */
+  /* Brand body face: Wix Madefor Text (open source). System stack is the live
+     product fallback. Load Madefor via @font-face or Google Fonts to match. */
+  --b44-font-sans: "Wix Madefor Text", ui-sans-serif, system-ui, -apple-system,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif,
+                   "Apple Color Emoji", "Segoe UI Emoji";
+  /* Marketing display face: Miso (commercial / Wix-hosted, won't load locally).
+     Falls back to the brand sans. Document the licensed-kit swap in README. */
+  --b44-font-display: "Miso", "Wix Madefor Display", var(--b44-font-sans);
+  --b44-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+                   "Liberation Mono", monospace;
+
+  --b44-text-2xs:  0.6875rem;   /* 11px */
+  --b44-text-xs:   0.75rem;     /* 12px [real] body-x-small */
+  --b44-text-sm:   0.875rem;    /* 14px [real] control text */
+  --b44-text-base: 1rem;        /* 16px [real] body */
+  --b44-text-lg:   1.125rem;    /* 18px [real] active tab */
+  --b44-text-xl:   1.25rem;     /* 20px */
+  --b44-text-2xl:  1.5rem;      /* 24px */
+  --b44-text-3xl:  1.875rem;    /* 30px */
+  --b44-text-4xl:  2.25rem;     /* 36px */
+  --b44-text-5xl:  3rem;        /* 48px [real] product display heading */
+  --b44-text-6xl:  3.75rem;     /* 60px */
+  --b44-text-7xl:  4.625rem;    /* 74px [real] marketing hero (Miso) */
+
+  --b44-weight-regular:  400;   /* [real] */
+  --b44-weight-medium:   500;   /* [real] controls/links */
+  --b44-weight-semibold: 600;   /* [real] headings */
+  --b44-weight-bold:     700;   /* [real] */
+  --b44-weight-extrabold:800;   /* [real] Madefor extrabold */
+
+  --b44-leading-none:    1;
+  --b44-leading-tight:   1.1;
+  --b44-leading-snug:    1.27;  /* [real] 48px heading -> 61px */
+  --b44-leading-normal:  1.5;   /* [real] 16px body -> 24px */
+  --b44-leading-relaxed: 1.625;
+
+  --b44-tracking-tighter: -0.02em;
+  --b44-tracking-tight:   -0.01em;   /* [real] -0.48px on 48px */
+  --b44-tracking-normal:  0em;
+  --b44-tracking-wide:    0.025em;
+  --b44-tracking-wider:   0.05em;
+
+  /* ========================================================================
+     SPACING (4px base scale)
+     ===================================================================== */
+  --b44-space-0:   0;
+  --b44-space-px:  1px;
+  --b44-space-0_5: 0.125rem;   /* 2  */
+  --b44-space-1:   0.25rem;    /* 4  */
+  --b44-space-1_5: 0.375rem;   /* 6  */
+  --b44-space-2:   0.5rem;     /* 8  */
+  --b44-space-2_5: 0.625rem;   /* 10 */
+  --b44-space-3:   0.75rem;    /* 12 [real] input padding-x */
+  --b44-space-3_5: 0.875rem;   /* 14 */
+  --b44-space-4:   1rem;       /* 16 [real] button padding-x */
+  --b44-space-5:   1.25rem;    /* 20 */
+  --b44-space-6:   1.5rem;     /* 24 [real] CTA padding-x */
+  --b44-space-7:   1.75rem;    /* 28 */
+  --b44-space-8:   2rem;       /* 32 */
+  --b44-space-10:  2.5rem;     /* 40 */
+  --b44-space-12:  3rem;       /* 48 */
+  --b44-space-14:  3.5rem;     /* 56 */
+  --b44-space-16:  4rem;       /* 64 */
+  --b44-space-20:  5rem;       /* 80 */
+  --b44-space-24:  6rem;       /* 96 */
+
+  /* ========================================================================
+     RADIUS  (--b44-radius-lg == shadcn --radius == 8px)
+     ===================================================================== */
+  --b44-radius-sm:   4px;      /* [real] calc(--radius - 4px) */
+  --b44-radius-md:   6px;      /* [real] calc(--radius - 2px), inputs/buttons */
+  --b44-radius-lg:   8px;      /* [real] --radius */
+  --b44-radius-xl:   12px;     /* [real] frosted panel / prompt card */
+  --b44-radius-2xl:  16px;     /* [interp] */
+  --b44-radius-3xl:  24px;     /* [interp] */
+  --b44-radius-pill: 9999px;   /* [real] marketing CTA (70px at 42px height) */
+
+  /* ========================================================================
+     SIZING — control heights & icon sizes  (so components stay px-free)
+     ===================================================================== */
+  --b44-control-height-sm: 36px;   /* [real] input h-9 */
+  --b44-control-height-md: 40px;   /* [real] button / OAuth h-10 */
+  --b44-control-height-lg: 44px;   /* [interp] */
+  --b44-control-height-cta:42px;   /* [real] marketing CTA */
+  --b44-icon-sm: 14px;
+  --b44-icon-md: 16px;
+  --b44-icon-lg: 20px;
+
+  /* ========================================================================
+     SHADOW / ELEVATION  (verbatim Tailwind scale used by the app)
+     ===================================================================== */
+  --b44-shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);                                   /* [real] */
+  --b44-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);   /* [real] */
+  --b44-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);/* [real] */
+  --b44-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1); /* [real] */
+  --b44-shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);/* [real] */
+
+  /* ========================================================================
+     MOTION  (verbatim: 0.15s cubic-bezier(.4,0,.2,1) is the app default)
+     ===================================================================== */
+  --b44-duration-instant: 75ms;
+  --b44-duration-fast:    150ms;   /* [real] default control transition */
+  --b44-duration-base:    200ms;   /* [real] nav links */
+  --b44-duration-slow:    300ms;
+  --b44-duration-slower:  500ms;
+  --b44-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);   /* [real] */
+  --b44-ease-out:      cubic-bezier(0, 0, 0.2, 1);
+  --b44-ease-in:       cubic-bezier(0.4, 0, 1, 1);
+
+  /* ========================================================================
+     Z-INDEX LADDER
+     ===================================================================== */
+  --b44-z-base:     0;
+  --b44-z-raised:   10;
+  --b44-z-dropdown: 1000;
+  --b44-z-sticky:   1100;
+  --b44-z-overlay:  1200;
+  --b44-z-modal:    1300;
+  --b44-z-popover:  1400;
+  --b44-z-toast:    1500;
+  --b44-z-tooltip:  1600;
+
+  /* ========================================================================
+     LAYOUT
+     ===================================================================== */
+  --b44-header-height:   52px;     /* [real] marketing 8px + 44px */
+  --b44-container-sm:    640px;
+  --b44-container-md:    768px;
+  --b44-container-lg:    980px;    /* [real] marketing site-width */
+  --b44-container-xl:    1200px;
+  --b44-sidebar-width:   280px;    /* [estimate] builder sidebar */
+
+  /* ========================================================================
+     TEXTURES  (verbatim signatures from the login surface)
+     ===================================================================== */
+  --b44-texture-frosted: linear-gradient(to bottom right,
+                           rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.3));  /* [real] */
+  --b44-texture-blue-wash: linear-gradient(174deg,
+                           rgba(194, 220, 248, 0.40) 3.75%,
+                           rgba(227, 237, 246, 0.32) 53.49%,
+                           rgba(241, 245, 249, 0.32) 99.37%);                     /* [real] */
+  --b44-blur-md: blur(12px);                                                     /* [real] backdrop-blur-md */
+  /* Marketing hero sky — 4 layered gradients (cream glow + blue cloud -> cream). [real] */
+  --b44-texture-hero: radial-gradient(42.4% 36.95%, rgba(250,249,247,0.7) 0%, rgba(250,249,247,0) 100%),
+                      radial-gradient(97.22% 78.13% at 50% -17.36%, rgb(93,179,207) 22.39%, rgba(145,201,220,0.56) 58.43%, rgba(250,249,247,0) 85.73%),
+                      radial-gradient(79.49% 72.21% at 50% 0%, rgb(143,198,217) 0%, rgba(151,216,238,0) 100%),
+                      linear-gradient(rgb(34,201,255) -26.16%, rgb(250,249,247) 23.98%);
+
+
+  /* ========================================================================
+     LAYER 2 — SEMANTIC ROLES  (LIGHT theme — default)
+     ===================================================================== */
+
+  /* Text */
+  --b44-color-text-default: var(--b44-zinc-950);   /* #09090B */
+  --b44-color-text-soft:    var(--b44-zinc-700);
+  --b44-color-text-muted:   var(--b44-zinc-500);   /* #71717A */
+  --b44-color-text-faint:   var(--b44-zinc-400);
+  --b44-color-text-inverse: var(--b44-zinc-50);    /* #FAFAFA */
+  --b44-color-text-link:    var(--b44-black);
+  --b44-color-text-on-brand:   var(--b44-black);   /* lime CTA -> black text */
+  --b44-color-text-on-primary: var(--b44-zinc-50); /* dark button -> near-white */
+  --b44-color-text-on-action:  var(--b44-white);   /* orange -> white */
+
+  /* Surfaces */
+  --b44-color-surface-app:     var(--b44-white);
+  --b44-color-surface-sunken:  var(--b44-cream);   /* #FAF9F7 brand off-white */
+  --b44-color-surface-panel:   var(--b44-white);
+  --b44-color-surface-card:    var(--b44-white);
+  --b44-color-surface-hover:   var(--b44-zinc-100);/* accent #F4F4F5 */
+  --b44-color-surface-muted:   var(--b44-zinc-100);
+  --b44-color-surface-dark:    var(--b44-zinc-900);
+  --b44-color-surface-inverse: var(--b44-zinc-950);
+  --b44-color-surface-overlay: var(--b44-black-a60);
+
+  /* Borders */
+  --b44-color-border-default: var(--b44-zinc-200);  /* #E4E4E7 */
+  --b44-color-border-strong:  var(--b44-zinc-300);
+  --b44-color-border-input:   var(--b44-zinc-200);
+  --b44-color-border-divider: var(--b44-zinc-200);
+  --b44-color-border-focus:   var(--b44-zinc-950);  /* ring #09090B */
+
+  /* Brand triad */
+  --b44-color-primary:          var(--b44-zinc-900);   /* product primary #18181B */
+  --b44-color-primary-hover:    var(--b44-zinc-800);
+  --b44-color-brand:            var(--b44-lime-200);   /* signature CTA #EBFFB1 */
+  --b44-color-brand-edge:       var(--b44-lime-500);   /* CTA 1px border #ADE900 */
+  --b44-color-brand-hover:      var(--b44-lime-300);
+  --b44-color-action:           var(--b44-orange-400); /* #FF983B send / action */
+  --b44-color-action-hover:     var(--b44-orange-500);
+  --b44-color-action-strong:    var(--b44-orange-600);
+
+  /* Secondary / muted control fills */
+  --b44-color-secondary:           var(--b44-zinc-100);
+  --b44-color-secondary-foreground:var(--b44-zinc-900);
+  --b44-color-accent:              var(--b44-zinc-100);
+  --b44-color-accent-foreground:   var(--b44-zinc-900);
+
+  /* State */
+  --b44-color-success:     var(--b44-green-500);
+  --b44-color-success-bg:  var(--b44-green-50);
+  --b44-color-success-fg:  var(--b44-white);
+  --b44-color-warning:     var(--b44-amber-500);
+  --b44-color-warning-bg:  var(--b44-amber-50);
+  --b44-color-warning-fg:  var(--b44-amber-700);
+  --b44-color-error:       var(--b44-red-500);
+  --b44-color-error-bg:    var(--b44-red-50);
+  --b44-color-error-fg:    var(--b44-white);
+  --b44-color-info:        var(--b44-blue-500);
+  --b44-color-info-bg:     var(--b44-blue-100);
+  --b44-color-info-fg:     var(--b44-white);
+
+  /* Domain accents */
+  --b44-color-workspace-badge: var(--b44-tan-50);  /* [real] --workspace-badge #F2EAE6 */
+
+  /* Focus ring (composed) */
+  --b44-ring-offset-color: var(--b44-white);
+  --b44-focus-ring: 0 0 0 2px var(--b44-ring-offset-color),
+                    0 0 0 4px var(--b44-color-border-focus);
+}
+
+/* ==========================================================================
+   DARK THEME — remaps surfaces/text/borders; keeps brand + state hues.
+   Values from shadcn-zinc dark defaults.
+   ========================================================================== */
+[data-theme="dark"] {
+  /* Text */
+  --b44-color-text-default: var(--b44-zinc-50);    /* #FAFAFA */
+  --b44-color-text-soft:    var(--b44-zinc-300);
+  --b44-color-text-muted:   var(--b44-zinc-400);   /* #A1A1AA */
+  --b44-color-text-faint:   var(--b44-zinc-600);
+  --b44-color-text-inverse: var(--b44-zinc-950);
+  --b44-color-text-link:    var(--b44-white);
+  --b44-color-text-on-primary: var(--b44-zinc-900);
+
+  /* Surfaces */
+  --b44-color-surface-app:     var(--b44-zinc-950);  /* #09090B */
+  --b44-color-surface-sunken:  var(--b44-black);
+  --b44-color-surface-panel:   var(--b44-zinc-900);  /* raised card #18181B */
+  --b44-color-surface-card:    var(--b44-zinc-900);
+  --b44-color-surface-hover:   var(--b44-zinc-800);
+  --b44-color-surface-muted:   var(--b44-zinc-800);
+  --b44-color-surface-dark:    var(--b44-black);
+  --b44-color-surface-inverse: var(--b44-zinc-50);
+  --b44-color-surface-overlay: rgba(0, 0, 0, 0.7);
+
+  /* Borders */
+  --b44-color-border-default: var(--b44-zinc-800);   /* #27272A */
+  --b44-color-border-strong:  var(--b44-zinc-700);
+  --b44-color-border-input:   var(--b44-zinc-800);
+  --b44-color-border-divider: var(--b44-zinc-800);
+  --b44-color-border-focus:   var(--b44-zinc-300);   /* dark ring lightens */
+
+  /* Brand triad — primary flips to near-white (shadcn dark), brand hues kept */
+  --b44-color-primary:       var(--b44-zinc-50);
+  --b44-color-primary-hover: var(--b44-zinc-200);
+  /* --b44-color-brand / action stay lime / orange */
+
+  /* Secondary / accent */
+  --b44-color-secondary:           var(--b44-zinc-800);
+  --b44-color-secondary-foreground:var(--b44-zinc-50);
+  --b44-color-accent:              var(--b44-zinc-800);
+  --b44-color-accent-foreground:   var(--b44-zinc-50);
+
+  /* State backgrounds darken (hues kept; foregrounds adjust) */
+  --b44-color-success-bg:  rgba(97, 135, 65, 0.15);
+  --b44-color-warning-bg:  rgba(245, 158, 11, 0.15);
+  --b44-color-warning-fg:  var(--b44-amber-500);
+  --b44-color-error-bg:    rgba(239, 68, 68, 0.15);
+  --b44-color-info-bg:     rgba(59, 130, 246, 0.15);
+
+  --b44-color-workspace-badge: var(--b44-tan-700);
+
+  /* Focus ring offset against dark app surface */
+  --b44-ring-offset-color: var(--b44-zinc-950);
+}
+
+/* Optional: follow OS preference when no explicit data-theme is set. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --b44-color-text-default: var(--b44-zinc-50);
+    --b44-color-text-soft:    var(--b44-zinc-300);
+    --b44-color-text-muted:   var(--b44-zinc-400);
+    --b44-color-text-faint:   var(--b44-zinc-600);
+    --b44-color-text-inverse: var(--b44-zinc-950);
+    --b44-color-text-link:    var(--b44-white);
+    --b44-color-text-on-primary: var(--b44-zinc-900);
+    --b44-color-surface-app:     var(--b44-zinc-950);
+    --b44-color-surface-sunken:  var(--b44-black);
+    --b44-color-surface-panel:   var(--b44-zinc-900);
+    --b44-color-surface-card:    var(--b44-zinc-900);
+    --b44-color-surface-hover:   var(--b44-zinc-800);
+    --b44-color-surface-muted:   var(--b44-zinc-800);
+    --b44-color-surface-dark:    var(--b44-black);
+    --b44-color-surface-inverse: var(--b44-zinc-50);
+    --b44-color-surface-overlay: rgba(0, 0, 0, 0.7);
+    --b44-color-border-default: var(--b44-zinc-800);
+    --b44-color-border-strong:  var(--b44-zinc-700);
+    --b44-color-border-input:   var(--b44-zinc-800);
+    --b44-color-border-divider: var(--b44-zinc-800);
+    --b44-color-border-focus:   var(--b44-zinc-300);
+    --b44-color-primary:       var(--b44-zinc-50);
+    --b44-color-primary-hover: var(--b44-zinc-200);
+    --b44-color-secondary:           var(--b44-zinc-800);
+    --b44-color-secondary-foreground:var(--b44-zinc-50);
+    --b44-color-accent:              var(--b44-zinc-800);
+    --b44-color-accent-foreground:   var(--b44-zinc-50);
+    --b44-ring-offset-color: var(--b44-zinc-950);
+  }
+}
+
+/* <<< ./tokens/tokens.css */
+
+
+
+/* >>> ./components/base.css */
+/* Base44 DS — base reset + typography
+   Built on tokens only. Sets the app baseline seen on app.base44.com. */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+.b44-root,
+[data-b44] {
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-base);          /* 16px */
+  line-height: var(--b44-leading-normal);   /* 24px */
+  font-weight: var(--b44-weight-regular);
+  color: var(--b44-color-text-default);
+  background-color: var(--b44-color-surface-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Display + heading scale (product uses semibold grotesk; marketing uses Miso) */
+.b44-display {
+  font-family: var(--b44-font-display);
+  font-size: var(--b44-text-5xl);            /* 48px [real] */
+  font-weight: var(--b44-weight-semibold);
+  line-height: var(--b44-leading-snug);
+  letter-spacing: var(--b44-tracking-tight); /* -0.01em [real] */
+  color: var(--b44-color-text-default);
+  margin: 0;
+}
+.b44-display--hero {
+  font-size: var(--b44-text-7xl);            /* 74px [real] marketing */
+  line-height: var(--b44-leading-tight);
+  font-weight: var(--b44-weight-regular);    /* Miso regular */
+}
+/* product display headings use the brand/system sans (not Miso) — e.g. "Welcome to Base44" */
+.b44-display--sans { font-family: var(--b44-font-sans); }
+
+.b44-h1 { font: var(--b44-weight-semibold) var(--b44-text-4xl)/var(--b44-leading-tight) var(--b44-font-display); letter-spacing: var(--b44-tracking-tight); margin: 0; color: var(--b44-color-text-default); }
+.b44-h2 { font: var(--b44-weight-semibold) var(--b44-text-3xl)/var(--b44-leading-tight) var(--b44-font-display); letter-spacing: var(--b44-tracking-tight); margin: 0; color: var(--b44-color-text-default); }
+.b44-h3 { font: var(--b44-weight-semibold) var(--b44-text-2xl)/var(--b44-leading-snug) var(--b44-font-sans); margin: 0; color: var(--b44-color-text-default); }
+.b44-h4 { font: var(--b44-weight-medium)   var(--b44-text-xl)/var(--b44-leading-snug) var(--b44-font-sans); margin: 0; color: var(--b44-color-text-default); }
+
+/* Body text helpers */
+.b44-text       { font-size: var(--b44-text-base); line-height: var(--b44-leading-normal); color: var(--b44-color-text-default); }
+.b44-text--sm   { font-size: var(--b44-text-sm); }
+.b44-text--xs   { font-size: var(--b44-text-xs); }
+.b44-text--muted{ color: var(--b44-color-text-muted); }
+.b44-text--soft { color: var(--b44-color-text-soft); }
+
+/* Eyebrow / overline (e.g. "NOT SURE WHERE TO START?") */
+.b44-eyebrow {
+  font-size: var(--b44-text-xs);
+  font-weight: var(--b44-weight-medium);
+  letter-spacing: var(--b44-tracking-wider);
+  text-transform: uppercase;
+  color: var(--b44-color-text-muted);
+}
+
+/* Link */
+.b44-link {
+  color: var(--b44-color-text-link);
+  font-weight: var(--b44-weight-medium);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: opacity var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-link:hover { opacity: 0.7; }
+
+/* Marketing hero sky background (the signature blue->cream gradient) */
+.b44-hero { background-image: var(--b44-texture-hero); background-repeat: no-repeat; }
+
+/* Shared focus-visible ring (matches shadcn recipe) */
+.b44-focusable:focus-visible,
+.b44-btn:focus-visible,
+.b44-input:focus-visible,
+.b44-textarea:focus-visible,
+.b44-select:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: var(--b44-focus-ring);
+}
+
+/* <<< ./components/base.css */
+
+
+/* >>> ./components/button.css */
+/* Base44 DS — Button
+   Source: shadcn button (app.base44.com) + brand CTA (base44.com).
+   Default metrics [real]: radius-md 6px, h-40, pad 8/16, 14px/500,
+   transition 0.15s cubic-bezier(.4,0,.2,1). */
+
+.b44-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--b44-space-2);
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--b44-radius-md);
+  height: var(--b44-control-height-md);
+  padding: 0 var(--b44-space-4);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-sm);
+  font-weight: var(--b44-weight-medium);
+  line-height: var(--b44-leading-none);
+  text-decoration: none;
+  transition: color var(--b44-duration-fast) var(--b44-ease-standard),
+              background-color var(--b44-duration-fast) var(--b44-ease-standard),
+              border-color var(--b44-duration-fast) var(--b44-ease-standard),
+              box-shadow var(--b44-duration-fast) var(--b44-ease-standard),
+              opacity var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-btn:disabled,
+.b44-btn[aria-disabled="true"],
+.b44-btn.is-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.b44-btn__icon { width: var(--b44-icon-md); height: var(--b44-icon-md); flex: 0 0 auto; }
+
+/* --- variant: primary (default dark button) --- */
+.b44-btn--primary {
+  background-color: var(--b44-color-primary);
+  color: var(--b44-color-text-on-primary);
+}
+.b44-btn--primary:hover { background-color: var(--b44-color-primary-hover); }
+
+/* --- variant: brand (signature lime CTA, pill) --- */
+.b44-btn--brand {
+  background-color: var(--b44-color-action);          /* orange CTA */
+  border-color: var(--b44-color-action-strong);
+  color: var(--b44-color-text-on-action);
+  border-radius: var(--b44-radius-lg);   /* de-pilled: soft rect, not a pill */
+  height: var(--b44-control-height-cta);
+  padding: 0 var(--b44-space-6);
+  font-size: var(--b44-text-base);
+  font-weight: var(--b44-weight-medium);
+}
+.b44-btn--brand:hover { background-color: var(--b44-color-action-hover); }
+
+/* --- variant: action (orange) --- */
+.b44-btn--action {
+  background-color: var(--b44-color-action);
+  color: var(--b44-color-text-on-action);
+}
+.b44-btn--action:hover { background-color: var(--b44-color-action-hover); }
+.b44-btn--action:active { background-color: var(--b44-color-action-strong); }
+
+/* --- variant: secondary (zinc-100 fill) --- */
+.b44-btn--secondary {
+  background-color: var(--b44-color-secondary);
+  color: var(--b44-color-secondary-foreground);
+}
+.b44-btn--secondary:hover { background-color: var(--b44-color-border-default); }
+
+/* --- variant: outline --- */
+.b44-btn--outline {
+  background-color: var(--b44-color-surface-app);
+  border-color: var(--b44-color-border-input);
+  color: var(--b44-color-text-default);
+}
+.b44-btn--outline:hover {
+  background-color: var(--b44-color-surface-hover);
+  color: var(--b44-color-accent-foreground);
+}
+
+/* --- variant: ghost --- */
+.b44-btn--ghost {
+  background-color: transparent;
+  color: var(--b44-color-text-default);
+}
+.b44-btn--ghost:hover { background-color: var(--b44-color-surface-hover); }
+
+/* --- variant: destructive --- */
+.b44-btn--destructive {
+  background-color: var(--b44-color-error);
+  color: var(--b44-color-error-fg);
+}
+.b44-btn--destructive:hover { background-color: var(--b44-red-600); }
+
+/* --- variant: link --- */
+.b44-btn--link {
+  background-color: transparent;
+  color: var(--b44-color-text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  height: auto;
+  padding: 0;
+}
+.b44-btn--link:hover { opacity: 0.7; }
+
+/* --- sizes --- */
+.b44-btn--sm { height: var(--b44-control-height-sm); padding: 0 var(--b44-space-3); font-size: var(--b44-text-sm); }
+.b44-btn--lg { height: var(--b44-control-height-lg); padding: 0 var(--b44-space-6); font-size: var(--b44-text-base); }
+
+/* --- icon-only --- */
+.b44-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--b44-control-height-md);
+  height: var(--b44-control-height-md);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--b44-radius-md);
+  background-color: transparent;
+  color: var(--b44-color-text-default);
+  cursor: pointer;
+  transition: background-color var(--b44-duration-fast) var(--b44-ease-standard),
+              color var(--b44-duration-fast) var(--b44-ease-standard),
+              box-shadow var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-icon-btn:hover { background-color: var(--b44-color-surface-hover); }
+.b44-icon-btn:focus-visible { outline: 2px solid transparent; outline-offset: 2px; box-shadow: var(--b44-focus-ring); }
+.b44-icon-btn:disabled { opacity: 0.5; pointer-events: none; }
+.b44-icon-btn--sm { width: var(--b44-control-height-sm); height: var(--b44-control-height-sm); }
+
+/* round orange send button (the prompt-bar affordance) */
+.b44-icon-btn--send {
+  width: var(--b44-control-height-md);
+  height: var(--b44-control-height-md);
+  border-radius: var(--b44-radius-pill);
+  background-color: var(--b44-color-action);
+  color: var(--b44-color-text-on-action);
+}
+.b44-icon-btn--send:hover { background-color: var(--b44-color-action-hover); }
+
+/* <<< ./components/button.css */
+
+
+/* >>> ./components/input.css */
+/* Base44 DS — Input / Textarea / Select
+   Source: shadcn Input [real]: h-36, 1px #E4E4E7 border, radius-md 6px,
+   pad 4/12, 14px, transition colors 0.15s, focus-visible ring. */
+
+.b44-input,
+.b44-textarea,
+.b44-select {
+  display: flex;
+  width: 100%;
+  background-color: var(--b44-color-surface-app);
+  color: var(--b44-color-text-default);
+  border: 1px solid var(--b44-color-border-input);
+  border-radius: var(--b44-radius-md);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-sm);
+  line-height: var(--b44-leading-normal);
+  transition: color var(--b44-duration-fast) var(--b44-ease-standard),
+              background-color var(--b44-duration-fast) var(--b44-ease-standard),
+              border-color var(--b44-duration-fast) var(--b44-ease-standard),
+              box-shadow var(--b44-duration-fast) var(--b44-ease-standard);
+}
+
+.b44-input,
+.b44-select {
+  height: var(--b44-control-height-sm);   /* 36px [real] */
+  padding: var(--b44-space-1) var(--b44-space-3);   /* 4px 12px [real] */
+  align-items: center;
+}
+
+.b44-textarea {
+  min-height: var(--b44-space-20);
+  padding: var(--b44-space-2) var(--b44-space-3);
+  resize: vertical;
+}
+
+.b44-input::placeholder,
+.b44-textarea::placeholder { color: var(--b44-color-text-muted); }
+
+.b44-input:hover,
+.b44-textarea:hover,
+.b44-select:hover { border-color: var(--b44-color-border-strong); }
+
+.b44-input:focus-visible,
+.b44-textarea:focus-visible,
+.b44-select:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  border-color: var(--b44-color-border-input);
+  box-shadow: var(--b44-focus-ring);
+}
+
+.b44-input:disabled,
+.b44-textarea:disabled,
+.b44-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--b44-color-surface-muted);
+}
+
+.b44-input--error,
+.b44-textarea--error,
+.b44-select--error { border-color: var(--b44-color-error); }
+.b44-input--error:focus-visible {
+  box-shadow: 0 0 0 2px var(--b44-ring-offset-color), 0 0 0 4px var(--b44-color-error);
+}
+
+.b44-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: var(--b44-space-8);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--b44-space-3) center;
+  cursor: pointer;
+}
+
+/* Field wrapper + label + helper */
+.b44-field { display: flex; flex-direction: column; gap: var(--b44-space-1_5); }
+.b44-label {
+  font-size: var(--b44-text-sm);
+  font-weight: var(--b44-weight-medium);
+  color: var(--b44-color-text-default);
+}
+.b44-helper { font-size: var(--b44-text-xs); color: var(--b44-color-text-muted); }
+.b44-helper--error { color: var(--b44-color-error); }
+
+/* <<< ./components/input.css */
+
+
+/* >>> ./components/card.css */
+/* Base44 DS — Card
+   shadcn card: surface-card bg, 1px border, radius-lg 8px, subtle shadow. */
+
+.b44-card {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--b44-color-surface-card);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-lg);
+  box-shadow: var(--b44-shadow-sm);
+  color: var(--b44-color-text-default);
+}
+.b44-card--flat { box-shadow: none; }
+.b44-card--raised { box-shadow: var(--b44-shadow-md); }
+.b44-card--interactive {
+  cursor: pointer;
+  transition: box-shadow var(--b44-duration-base) var(--b44-ease-standard),
+              border-color var(--b44-duration-base) var(--b44-ease-standard),
+              transform var(--b44-duration-base) var(--b44-ease-standard);
+}
+.b44-card--interactive:hover {
+  box-shadow: var(--b44-shadow-md);
+  border-color: var(--b44-color-border-strong);
+}
+
+.b44-card__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--b44-space-1_5);
+  padding: var(--b44-space-6) var(--b44-space-6) 0;
+}
+.b44-card__title { font-size: var(--b44-text-2xl); font-weight: var(--b44-weight-semibold); line-height: var(--b44-leading-tight); letter-spacing: var(--b44-tracking-tight); margin: 0; }
+.b44-card__desc  { font-size: var(--b44-text-sm); color: var(--b44-color-text-muted); margin: 0; }
+.b44-card__body  { padding: var(--b44-space-6); }
+.b44-card__footer{ display: flex; align-items: center; gap: var(--b44-space-3); padding: 0 var(--b44-space-6) var(--b44-space-6); }
+
+/* <<< ./components/card.css */
+
+
+/* >>> ./components/panel.css */
+/* Base44 DS — Panel & frosted glass
+   .b44-panel--frosted reproduces the signature login right-rail card [real]:
+   linear-gradient(to bottom right, #fff/.8, #fff/.3) + backdrop-blur-md
+   + 1px #fff/.3 border + 12px radius. */
+
+.b44-panel {
+  background-color: var(--b44-color-surface-panel);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-xl);
+  padding: var(--b44-space-6);
+  color: var(--b44-color-text-default);
+}
+.b44-panel--sunken { background-color: var(--b44-color-surface-sunken); }
+
+.b44-panel--frosted {
+  background-image: var(--b44-texture-frosted);
+  -webkit-backdrop-filter: var(--b44-blur-md);
+  backdrop-filter: var(--b44-blur-md);
+  border: 1px solid var(--b44-white-a30);
+  border-radius: var(--b44-radius-xl);
+  padding: var(--b44-space-3);
+}
+
+/* The soft blue wash backdrop (place behind frosted content) */
+.b44-blue-wash { background-image: var(--b44-texture-blue-wash); }
+
+/* <<< ./components/panel.css */
+
+
+/* >>> ./components/badge.css */
+/* Base44 DS — Badge / Tag
+   Pill badges. Includes the marketing "New" badge (peach/orange). */
+
+.b44-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-1);
+  height: var(--b44-space-5);
+  padding: 0 var(--b44-space-2_5);
+  border: 1px solid transparent;
+  border-radius: var(--b44-radius-pill);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-xs);
+  font-weight: var(--b44-weight-medium);
+  line-height: var(--b44-leading-none);
+  white-space: nowrap;
+}
+
+.b44-badge--default { background-color: var(--b44-color-secondary); color: var(--b44-color-secondary-foreground); }
+.b44-badge--brand   { background-color: var(--b44-color-brand); border-color: var(--b44-color-brand-edge); color: var(--b44-color-text-on-brand); }
+.b44-badge--action  { background-color: var(--b44-color-action); color: var(--b44-color-text-on-action); }
+.b44-badge--new     { background-color: var(--b44-orange-100); color: var(--b44-orange-700); }
+.b44-badge--outline { background-color: transparent; border-color: var(--b44-color-border-default); color: var(--b44-color-text-default); }
+.b44-badge--success { background-color: var(--b44-color-success-bg); color: var(--b44-color-success); }
+.b44-badge--warning { background-color: var(--b44-color-warning-bg); color: var(--b44-color-warning-fg); }
+.b44-badge--error   { background-color: var(--b44-color-error-bg); color: var(--b44-color-error); }
+.b44-badge--info    { background-color: var(--b44-color-info-bg); color: var(--b44-color-info); }
+.b44-badge--workspace { background-color: var(--b44-color-workspace-badge); color: var(--b44-tan-700); }
+
+/* Tag = squared badge with subtle border (filter chips, "Reporting Dashboard") */
+.b44-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-1_5);
+  height: var(--b44-control-height-sm);
+  padding: 0 var(--b44-space-4);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-pill);
+  background-color: var(--b44-color-surface-app);
+  color: var(--b44-color-text-default);
+  font-size: var(--b44-text-sm);
+  font-weight: var(--b44-weight-medium);
+  cursor: pointer;
+  transition: background-color var(--b44-duration-fast) var(--b44-ease-standard),
+              border-color var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-tag:hover { background-color: var(--b44-color-surface-hover); border-color: var(--b44-color-border-strong); }
+
+/* <<< ./components/badge.css */
+
+
+/* >>> ./components/tabs.css */
+/* Base44 DS — Tabs + Segmented control
+   Segmented matches the marketing "Apps | Superagents" switcher:
+   pill track, white active pill with shadow. */
+
+/* --- Segmented control --- */
+.b44-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-1);
+  padding: var(--b44-space-1);
+  background-color: var(--b44-color-surface-muted);
+  border-radius: var(--b44-radius-pill);
+}
+.b44-segmented__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-2);
+  height: var(--b44-control-height-sm);
+  padding: 0 var(--b44-space-5);
+  border: none;
+  border-radius: var(--b44-radius-pill);
+  background-color: transparent;
+  color: var(--b44-color-text-soft);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-base);
+  font-weight: var(--b44-weight-medium);
+  cursor: pointer;
+  transition: color var(--b44-duration-base) var(--b44-ease-standard),
+              background-color var(--b44-duration-base) var(--b44-ease-standard),
+              box-shadow var(--b44-duration-base) var(--b44-ease-standard);
+}
+.b44-segmented__item[aria-selected="true"],
+.b44-segmented__item.is-active {
+  background-color: var(--b44-color-surface-app);
+  color: var(--b44-color-text-default);
+  box-shadow: var(--b44-shadow-sm);
+}
+
+/* --- Underline tabs --- */
+.b44-tabs { display: flex; flex-direction: column; }
+.b44-tabs__list {
+  display: flex;
+  align-items: center;
+  gap: var(--b44-space-6);
+  border-bottom: 1px solid var(--b44-color-border-divider);
+}
+.b44-tabs__tab {
+  position: relative;
+  padding: var(--b44-space-3) 0;
+  border: none;
+  background: none;
+  color: var(--b44-color-text-muted);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-sm);
+  font-weight: var(--b44-weight-medium);
+  cursor: pointer;
+  transition: color var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-tabs__tab:hover { color: var(--b44-color-text-default); }
+.b44-tabs__tab[aria-selected="true"],
+.b44-tabs__tab.is-active { color: var(--b44-color-text-default); }
+.b44-tabs__tab[aria-selected="true"]::after,
+.b44-tabs__tab.is-active::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background-color: var(--b44-color-text-default);
+}
+.b44-tabs__panel { padding-top: var(--b44-space-4); }
+
+/* <<< ./components/tabs.css */
+
+
+/* >>> ./components/divider.css */
+/* Base44 DS — Divider (incl. labeled "OR" divider from the login screen) */
+
+.b44-divider {
+  border: none;
+  border-top: 1px solid var(--b44-color-border-divider);
+  margin: var(--b44-space-4) 0;
+}
+.b44-divider--vertical {
+  border-top: none;
+  border-left: 1px solid var(--b44-color-border-divider);
+  margin: 0 var(--b44-space-4);
+  align-self: stretch;
+}
+
+/* labeled divider: <div class="b44-divider-label"><span>OR</span></div> */
+.b44-divider-label {
+  display: flex;
+  align-items: center;
+  gap: var(--b44-space-3);
+  margin: var(--b44-space-4) 0;
+  color: var(--b44-color-text-muted);
+  font-size: var(--b44-text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--b44-tracking-wide);
+}
+.b44-divider-label::before,
+.b44-divider-label::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--b44-color-border-divider);
+}
+
+/* <<< ./components/divider.css */
+
+
+/* >>> ./components/banner.css */
+/* Base44 DS — Banner / Alert */
+
+.b44-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--b44-space-3);
+  padding: var(--b44-space-3) var(--b44-space-4);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-lg);
+  background-color: var(--b44-color-surface-panel);
+  color: var(--b44-color-text-default);
+  font-size: var(--b44-text-sm);
+  line-height: var(--b44-leading-normal);
+}
+.b44-banner__icon { flex: 0 0 auto; width: var(--b44-icon-lg); height: var(--b44-icon-lg); margin-top: var(--b44-space-0_5); }
+.b44-banner__title { font-weight: var(--b44-weight-semibold); margin: 0 0 var(--b44-space-0_5); }
+.b44-banner__body { margin: 0; color: var(--b44-color-text-soft); }
+
+.b44-banner--info    { background-color: var(--b44-color-info-bg);    border-color: var(--b44-blue-300);  color: var(--b44-blue-700); }
+.b44-banner--success { background-color: var(--b44-color-success-bg); border-color: var(--b44-green-300); color: var(--b44-green-700); }
+.b44-banner--warning { background-color: var(--b44-color-warning-bg); border-color: var(--b44-amber-500); color: var(--b44-amber-700); }
+.b44-banner--error   { background-color: var(--b44-color-error-bg);   border-color: var(--b44-red-500);   color: var(--b44-red-600); }
+
+/* <<< ./components/banner.css */
+
+
+/* >>> ./components/popover.css */
+/* Base44 DS — Tooltip + Popover / Menu
+   shadcn popover: surface-popover, 1px border, radius-md, shadow-md. */
+
+.b44-tooltip {
+  display: inline-block;
+  max-width: var(--b44-container-sm);
+  padding: var(--b44-space-1_5) var(--b44-space-2_5);
+  background-color: var(--b44-color-surface-inverse);
+  color: var(--b44-color-text-inverse);
+  border-radius: var(--b44-radius-md);
+  font-size: var(--b44-text-xs);
+  line-height: var(--b44-leading-normal);
+  box-shadow: var(--b44-shadow-md);
+  z-index: var(--b44-z-tooltip);
+}
+
+.b44-popover {
+  min-width: var(--b44-space-20);
+  padding: var(--b44-space-1);
+  background-color: var(--b44-color-surface-panel);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-md);
+  box-shadow: var(--b44-shadow-md);
+  color: var(--b44-color-text-default);
+  z-index: var(--b44-z-popover);
+}
+.b44-popover__item {
+  display: flex;
+  align-items: center;
+  gap: var(--b44-space-2);
+  width: 100%;
+  padding: var(--b44-space-1_5) var(--b44-space-2);
+  border: none;
+  border-radius: var(--b44-radius-sm);
+  background: none;
+  color: var(--b44-color-text-default);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--b44-duration-fast) var(--b44-ease-standard);
+}
+.b44-popover__item:hover { background-color: var(--b44-color-surface-hover); }
+.b44-popover__item--danger { color: var(--b44-color-error); }
+.b44-popover__separator { height: 1px; margin: var(--b44-space-1) 0; background-color: var(--b44-color-border-divider); }
+
+/* <<< ./components/popover.css */
+
+
+/* >>> ./components/modal.css */
+/* Base44 DS — Modal / Dialog
+   shadcn dialog: overlay black/60, content surface-panel, radius-lg, shadow-lg. */
+
+.b44-modal__overlay {
+  position: fixed;
+  inset: 0;
+  background-color: var(--b44-color-surface-overlay);
+  z-index: var(--b44-z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--b44-space-4);
+}
+
+.b44-modal {
+  position: relative;
+  width: 100%;
+  max-width: var(--b44-container-sm);
+  max-height: calc(100% - var(--b44-space-8));
+  overflow: auto;
+  background-color: var(--b44-color-surface-panel);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-lg);
+  box-shadow: var(--b44-shadow-lg);
+  color: var(--b44-color-text-default);
+  z-index: var(--b44-z-modal);
+}
+.b44-modal__header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--b44-space-1_5);
+  padding: var(--b44-space-6) var(--b44-space-6) 0;
+}
+.b44-modal__title { font-size: var(--b44-text-xl); font-weight: var(--b44-weight-semibold); line-height: var(--b44-leading-tight); letter-spacing: var(--b44-tracking-tight); margin: 0; }
+.b44-modal__desc  { font-size: var(--b44-text-sm); color: var(--b44-color-text-muted); margin: 0; }
+.b44-modal__body  { padding: var(--b44-space-6); }
+.b44-modal__footer{ display: flex; align-items: center; justify-content: flex-end; gap: var(--b44-space-3); padding: 0 var(--b44-space-6) var(--b44-space-6); }
+.b44-modal__close {
+  position: absolute;
+  top: var(--b44-space-4);
+  right: var(--b44-space-4);
+}
+
+/* <<< ./components/modal.css */
+
+
+/* >>> ./components/spinner.css */
+/* Base44 DS — Spinner */
+
+.b44-spinner {
+  display: inline-block;
+  width: var(--b44-icon-lg);
+  height: var(--b44-icon-lg);
+  border: 2px solid var(--b44-color-border-default);
+  border-top-color: var(--b44-color-text-default);
+  border-radius: var(--b44-radius-pill);
+  animation: b44-spin var(--b44-duration-slower) linear infinite;
+}
+.b44-spinner--sm { width: var(--b44-icon-md); height: var(--b44-icon-md); }
+.b44-spinner--on-action { border-color: var(--b44-white-a30); border-top-color: var(--b44-white); }
+
+@keyframes b44-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .b44-spinner { animation-duration: 1.5s; }
+}
+
+/* <<< ./components/spinner.css */
+
+
+/* >>> ./components/navbar.css */
+/* Base44 DS — Floating pill navbar (marketing header) */
+
+.b44-navbar {
+  display: flex;
+  align-items: center;
+  gap: var(--b44-space-6);
+  height: var(--b44-control-height-cta);
+  padding: var(--b44-space-1) var(--b44-space-1) var(--b44-space-1) var(--b44-space-5);
+  background-color: var(--b44-color-surface-app);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-pill);
+  box-shadow: var(--b44-shadow-sm);
+}
+.b44-navbar__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-2);
+  font-family: var(--b44-font-display);
+  font-size: var(--b44-text-xl);
+  font-weight: var(--b44-weight-bold);
+  color: var(--b44-color-text-default);
+}
+.b44-navbar__logo {
+  width: var(--b44-icon-lg);
+  height: var(--b44-icon-lg);
+  border-radius: var(--b44-radius-pill);
+  background-image: linear-gradient(135deg, var(--b44-orange-400), var(--b44-orange-700));
+}
+.b44-navbar__links { display: flex; align-items: center; gap: var(--b44-space-6); margin: 0 auto; }
+.b44-navbar__link {
+  color: var(--b44-color-text-default);
+  font-size: var(--b44-text-base);
+  text-decoration: none;
+  transition: opacity var(--b44-duration-base) var(--b44-ease-standard);
+}
+.b44-navbar__link:hover { opacity: 0.6; }
+
+/* <<< ./components/navbar.css */
+
+
+/* >>> ./components/prompt.css */
+/* Base44 DS — Prompt card (the signature "Turn your ideas into apps" composer) */
+
+.b44-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--b44-space-4);
+  width: 100%;
+  background-color: var(--b44-color-surface-app);
+  border: 1px solid var(--b44-color-border-default);
+  border-radius: var(--b44-radius-xl);
+  box-shadow: var(--b44-shadow-md);
+  padding: var(--b44-space-5) var(--b44-space-5) var(--b44-space-3);
+}
+.b44-prompt__input {
+  width: 100%;
+  min-height: var(--b44-space-16);
+  border: none;
+  background: transparent;
+  resize: none;
+  color: var(--b44-color-text-default);
+  font-family: var(--b44-font-sans);
+  font-size: var(--b44-text-base);
+  line-height: var(--b44-leading-normal);
+}
+.b44-prompt__input::placeholder { color: var(--b44-color-text-muted); }
+.b44-prompt__input:focus-visible { outline: none; }
+.b44-prompt__toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--b44-space-3);
+}
+.b44-prompt__spacer { margin-left: auto; }
+
+/* "Plan" pill toggle inside the toolbar */
+.b44-prompt__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--b44-space-2);
+  font-size: var(--b44-text-sm);
+  font-weight: var(--b44-weight-medium);
+  color: var(--b44-color-text-soft);
+}
+.b44-switch {
+  position: relative;
+  width: var(--b44-space-10);
+  height: var(--b44-space-6);
+  border-radius: var(--b44-radius-pill);
+  background-color: var(--b44-color-border-default);
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--b44-duration-base) var(--b44-ease-standard);
+}
+.b44-switch::after {
+  content: "";
+  position: absolute;
+  top: var(--b44-space-0_5);
+  left: var(--b44-space-0_5);
+  width: var(--b44-space-5);
+  height: var(--b44-space-5);
+  border-radius: var(--b44-radius-pill);
+  background-color: var(--b44-white);
+  box-shadow: var(--b44-shadow-xs);
+  transition: transform var(--b44-duration-base) var(--b44-ease-standard);
+}
+.b44-switch[aria-checked="true"],
+.b44-switch.is-on { background-color: var(--b44-color-action); }
+.b44-switch[aria-checked="true"]::after,
+.b44-switch.is-on::after { transform: translateX(var(--b44-space-4)); }
+
+/* <<< ./components/prompt.css */
+

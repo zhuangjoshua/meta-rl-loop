@@ -665,6 +665,68 @@ def test_operator_home_endpoint_combines_businesses_and_account(monkeypatch):
     assert captured["account_principal"] is principal
 
 
+def test_operator_billing_portal_route_creates_stripe_session(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.control_api as control_api
+    import psycopg
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeConn:
+        def close(self):
+            captured["closed"] = True
+
+    def _fake_connect(url, autocommit=True):
+        captured["database_url"] = url
+        captured["autocommit"] = autocommit
+        return _FakeConn()
+
+    def _fake_portal(conn, user_id, *, return_url):
+        captured["conn"] = conn
+        captured["user_id"] = user_id
+        captured["return_url"] = return_url
+        return {
+            "url": "https://billing.stripe.com/p/session/test_123",
+            "customer": "cus_test_123",
+        }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _request: "postgres://runtime-db")
+    monkeypatch.setattr(
+        web_server,
+        "_dashboard_absolute_url",
+        lambda _request, path: f"https://app.example.com{path}",
+    )
+    monkeypatch.setattr(psycopg, "connect", _fake_connect)
+    monkeypatch.setattr(control_api, "create_operator_billing_portal_session", _fake_portal)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.post(
+        "/api/takyon/operator/billing/portal",
+        json={"return_path": "/settings/billing"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "portal_url": "https://billing.stripe.com/p/session/test_123",
+        "customer_id": "cus_test_123",
+    }
+    assert captured["database_url"] == "postgres://runtime-db"
+    assert captured["autocommit"] is True
+    assert captured["user_id"] == "user-123"
+    assert captured["return_url"] == "https://app.example.com/settings/billing"
+    assert captured["closed"] is True
+
+
 def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -851,6 +913,57 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert isinstance(body["outputs"], list)
 
 
+def test_business_traction_endpoint_reads_owned_business_directly(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    class _FakeStore:
+        def __init__(self, *, operator_user_id):
+            captured["operator_user_id"] = operator_user_id
+
+        def traction_timeseries(self, business, *, range_key="M"):
+            captured["business"] = business
+            captured["range_key"] = range_key
+            return {
+                "business_slug": business,
+                "range": range_key,
+                "points": [{"label": "Mon", "revenue_cents": 1200, "users": 3, "usage_events": 8}],
+                "totals": {"revenue_cents": 1200, "users": 3, "usage_events": 8},
+                "previous_totals": {"revenue_cents": 800, "users": 2, "usage_events": 5},
+            }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/businesses/alpha/traction", params={"range": "W"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "business_slug": "alpha",
+        "range": "W",
+        "points": [{"label": "Mon", "revenue_cents": 1200, "users": 3, "usage_events": 8}],
+        "totals": {"revenue_cents": 1200, "users": 3, "usage_events": 8},
+        "previous_totals": {"revenue_cents": 800, "users": 2, "usage_events": 5},
+    }
+    assert captured == {
+        "operator_user_id": "user-123",
+        "business": "alpha",
+        "range_key": "W",
+    }
+
+
 def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -890,9 +1003,108 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
     assert captured == {"operator_user_id": "user-123", "business": "alpha"}
 
 
+def test_business_home_payload_reads_reddit_campaign_state(tmp_path, monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    business_root = tmp_path / "alpha"
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "actions").mkdir(parents=True, exist_ok=True)
+    (business_root / "metrics" / "reddit-ads" / "reddit-launch").mkdir(parents=True, exist_ok=True)
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "created_paused",
+                "campaign_name": "Reddit launch",
+                "created_at": "2026-06-07T08:00:00Z",
+                "post_url": "https://reddit.com/r/test/comments/abc123/demo",
+                "ids": {"campaign_id": "reddit-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "plan.json").write_text(
+        json.dumps({"campaign": {"name": "Reddit launch"}, "ad_group": {"daily_budget_usd": 15}}),
+        encoding="utf-8",
+    )
+    (business_root / "distribution" / "reddit-ads" / "reddit-launch" / "actions" / "activate-1.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "operation": "activate",
+                "status": "activated",
+                "created_at": "2026-06-07T09:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (business_root / "metrics" / "reddit-ads" / "reddit-launch" / "insights.jsonl").write_text(
+        '{"impressions":80,"clicks":3}\n',
+        encoding="utf-8",
+    )
+
+    class _FakeRows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            if "FROM fake_requests" in query:
+                return _FakeRows([])
+            if "FROM jobs" in query:
+                return _FakeRows([])
+            raise AssertionError(f"Unexpected query: {query}")
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None, *args, **kwargs):
+            self.operator_user_id = operator_user_id
+
+        def _connect(self):
+            return _FakeConn()
+
+        def _enforce_operator_business_access(self, conn, slug):
+            return None
+
+        def _ensure_business(self, conn, slug):
+            return {"slug": slug, "name": "Alpha", "goal": "Launch", "mode": "live"}
+
+        def _app_surface_contract(self, conn, slug):
+            return {}
+
+        def _work_requests_table(self):
+            return "fake_requests"
+
+        def _row_to_dict(self, row):
+            return dict(row)
+
+        def _business_root(self, slug, sync=False):
+            return business_root
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+
+    payload = web_server._takyon_business_home_payload("user-123", "alpha")
+
+    channels = payload["overview"]["artifacts"]["outreach"]["channels"]
+    assert channels["reddit"]["status"] == "activated"
+    assert channels["reddit"]["primary_action_label"] == "continue"
+    assert channels["reddit"]["campaign_count"] == 1
+    assert channels["reddit"]["campaigns"][0]["open_url"] == "https://reddit.com/r/test/comments/abc123/demo"
+    assert channels["reddit"]["campaigns"][0]["latest_metrics"]["impressions"] == 80
+    assert channels["reddit"]["campaigns"][0]["latest_action"]["operation"] == "activate"
+
+
 def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
+    import plugins.takyon.core as core
     import takyon_cli.web_server as web_server
 
     principal = types.SimpleNamespace(
@@ -914,6 +1126,12 @@ def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch)
         captured.update(args)
         return json.dumps({"success": True, "job": {"kind": args["kind"], "status": args["status"]}})
 
+    monkeypatch.setattr(core, "TakyonStore", lambda operator_user_id=None: object())
+    monkeypatch.setattr(
+        web_server,
+        "_takyon_collect_business_paid_campaigns",
+        lambda *_args, **_kwargs: [{"status": "created_paused"}],
+    )
     monkeypatch.setattr(web_server, "handle_business_enqueue_job", _fake_enqueue_job)
 
     client = TestClient(web_server.app)
@@ -930,6 +1148,47 @@ def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch)
     assert captured["scope"] == "business:alpha/distribution:campaign"
     assert captured["payload"]["channel"] == "reddit"
     assert captured["payload"]["requested_skill"] == "takyon-reddit-ads"
+    assert captured["payload"]["requested_action"] == "activate_or_continue_channel_campaign"
+    assert "paused Reddit campaign" in captured["payload"]["summary"]
+
+
+def test_outreach_start_endpoint_defaults_to_start_when_no_campaign_exists(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        web_server,
+        "_resolve_dashboard_principal",
+        lambda _user, runtime_database_url=None: principal,
+    )
+
+    def _fake_enqueue_job(args, **_kwargs):
+        captured.update(args)
+        return json.dumps({"success": True, "job": {"kind": args["kind"], "status": args["status"]}})
+
+    monkeypatch.setattr(core, "TakyonStore", lambda operator_user_id=None: object())
+    monkeypatch.setattr(web_server, "_takyon_collect_business_paid_campaigns", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(web_server, "handle_business_enqueue_job", _fake_enqueue_job)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.post("/api/takyon/businesses/alpha/outreach/start", json={"channel": "reddit"})
+
+    assert resp.status_code == 200
+    assert captured["payload"]["requested_action"] == "create_or_continue_channel_campaign"
+    assert captured["payload"]["summary"] == "Start or continue the Reddit outreach lane."
 
 
 def test_auth0_public_path_allows_machine_facing_pg_routes():
