@@ -7644,7 +7644,10 @@ def mount_spa(application: FastAPI):
         return
 
     _index_path = WEB_DIST / "index.html"
-    _litebulb_index_path = WEB_DIST / "litebulb" / "index.html"
+    _litebulb_index_candidates = (
+        WEB_DIST / "litebulb" / "litebulb.html",
+        WEB_DIST / "litebulb" / "index.html",
+    )
 
     def _serve_index(prefix: str = ""):
         """Return index.html with the session token + base-path injected.
@@ -7677,18 +7680,20 @@ def mount_spa(application: FastAPI):
     def _serve_litebulb_index(prefix: str = ""):
         """Serve the Litebulb operator workspace as the top-level document.
 
-        Litebulb is a self-contained ``index.html`` (vanilla JS + the
-        ``takyon-adapter.js`` data layer).  It used to be mounted in an iframe
-        by the SPA; serving it directly at the operator landing drops the frame
-        boundary and the React bundle entirely.  We inject the same session
-        token / base-path the SPA uses so the adapter authenticates and the
-        page's ``HAS_TAKYON_SESSION`` gate boots the live runtime instead of the
-        mock.  Falls back to the SPA index when the asset is missing (older
-        build), so the dashboard never hard-fails.
+        Litebulb is a self-contained HTML document. Older builds emitted
+        ``index.html`` while the newer unified bundle emits ``litebulb.html``.
+        Prefer the new artifact when present so ``/chat`` never serves a stale
+        legacy shell after a partial or mixed build directory sync. Falls back
+        to the SPA index when neither asset exists so the dashboard never
+        hard-fails.
         """
-        if not _litebulb_index_path.is_file():
+        litebulb_index_path = next(
+            (candidate for candidate in _litebulb_index_candidates if candidate.is_file()),
+            None,
+        )
+        if litebulb_index_path is None:
             return _serve_index(prefix)
-        html = _litebulb_index_path.read_text()
+        html = litebulb_index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         adapter_path = WEB_DIST / "litebulb" / "takyon-adapter.js"
         adapter_version = (
