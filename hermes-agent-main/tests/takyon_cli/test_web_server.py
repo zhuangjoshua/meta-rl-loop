@@ -1718,6 +1718,21 @@ def test_operator_root_redirects_to_chat(monkeypatch):
     assert response.headers["location"] == "/chat?business=dashboardsly"
 
 
+def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    client = TestClient(web_server.app)
+
+    response = client.get("/chat")
+
+    assert response.status_code == 200
+    assert 'src="/litebulb/assets/' in response.text
+    assert 'href="/litebulb/assets/' in response.text
+
+
 class TestWebServerEndpoints:
     """Test the FastAPI REST endpoints using Starlette TestClient."""
 

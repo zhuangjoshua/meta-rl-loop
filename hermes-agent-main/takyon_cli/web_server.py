@@ -7713,6 +7713,8 @@ def mount_spa(application: FastAPI):
             'src="./takyon-adapter.js"',
             f'src="{prefix}/litebulb/takyon-adapter.js?v={adapter_version}"',
         )
+        html = html.replace('src="./assets/', f'src="{prefix}/litebulb/assets/')
+        html = html.replace('href="./assets/', f'href="{prefix}/litebulb/assets/')
         html = html.replace("</head>", f"{token_script}</head>", 1)
         return HTMLResponse(
             html,
