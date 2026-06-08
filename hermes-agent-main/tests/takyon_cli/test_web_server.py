@@ -993,8 +993,12 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
             "background_run": None,
         }
 
+    async def _fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
-    monkeypatch.setattr(web_server, "_takyon_business_home_payload", _fake_home_payload)
+    monkeypatch.setattr(web_server, "_read_takyon_business_home", _fake_home_payload)
+    monkeypatch.setattr(web_server.asyncio, "to_thread", _fake_to_thread)
 
     client = TestClient(web_server.app)
     client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN

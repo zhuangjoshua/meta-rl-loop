@@ -226,6 +226,13 @@ export const api = {
       undefined,
       "takyon.dashboard.workspace",
     ),
+  getTakyonBusinessHome: (slug: string) =>
+    fetchJSONWithTimeout<TakyonBusinessWorkspaceResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/home`,
+      15_000,
+      undefined,
+      "takyon.dashboard.home",
+    ),
   getTakyonBusinessTraction: (slug: string, range = "M") =>
     fetchJSONWithTimeout<TakyonBusinessTractionResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/traction?range=${encodeURIComponent(range)}`,

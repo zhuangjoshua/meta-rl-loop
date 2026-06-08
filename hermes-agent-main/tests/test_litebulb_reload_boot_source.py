@@ -11,15 +11,18 @@ def test_workspace_api_supports_boot_view_reads():
 
     assert 'getTakyonBusinessWorkspace: (slug: string, limit = 50, view: "full" | "boot" = "full") =>' in source
     assert '&view=${encodeURIComponent(view)}' in source
+    assert 'getTakyonBusinessHome: (slug: string) =>' in source
+    assert '`/api/takyon/businesses/${encodeURIComponent(slug)}/home`' in source
 
 
 def test_open_business_boots_shell_before_full_workspace_refresh():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
-    assert 'const loadWorkspaceShell = useCallback(async (slug: string) => {' in source
-    assert 'api.getTakyonBusinessWorkspace(slug, 12, "boot")' in source
+    assert 'const loadBusinessHomeShell = useCallback(async (slug: string) => {' in source
+    assert 'api.getTakyonBusinessHome(slug)' in source
+    assert 'if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {' in source
     assert 'setChatMessages([]);' in source
-    assert 'loadWorkspaceShell(businessSlug).catch(() => undefined),' in source
+    assert 'loadBusinessHomeShell(businessSlug).catch(() => undefined),' in source
     assert 'void loadWorkspace(businessSlug).catch(() => undefined);' in source
 
 

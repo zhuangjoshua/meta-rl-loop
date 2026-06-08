@@ -357,9 +357,9 @@ export function useTakyonLitebulb() {
     }
   }, [auth.status]);
 
-  const loadWorkspaceShell = useCallback(async (slug: string) => {
+  const loadBusinessHomeShell = useCallback(async (slug: string) => {
     if (!slug) return;
-    const workspacePayload = await api.getTakyonBusinessWorkspace(slug, 12, "boot");
+    const workspacePayload = await api.getTakyonBusinessHome(slug);
     setWorkspace(workspacePayload);
   }, []);
 
@@ -704,9 +704,15 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
     if (openingBusinessRef.current === businessSlug) return;
-    openingBusinessRef.current = businessSlug;
     const matched = businesses.find((item) => item.slug === businessSlug)
       || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode" };
+    if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {
+      setActiveBusiness((current) => (
+        current?.slug === businessSlug ? { ...current, ...matched } : matched
+      ));
+      return;
+    }
+    openingBusinessRef.current = businessSlug;
     try {
       setWorkspace(null);
       setCreativeCredits(null);
@@ -717,7 +723,7 @@ export function useTakyonLitebulb() {
       setActiveBusiness(matched);
       await Promise.all([
         ensureSession(businessSlug),
-        loadWorkspaceShell(businessSlug).catch(() => undefined),
+        loadBusinessHomeShell(businessSlug).catch(() => undefined),
         loadCreativeCredits(businessSlug),
         loadTraction(businessSlug, tractionRange),
       ]);
@@ -727,7 +733,7 @@ export function useTakyonLitebulb() {
         openingBusinessRef.current = "";
       }
     }
-  }, [businesses, ensureSession, loadCreativeCredits, loadTraction, loadWorkspace, loadWorkspaceShell, tractionRange]);
+  }, [activeBusiness?.slug, businesses, ensureSession, loadBusinessHomeShell, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
 
   const sendPrompt = useCallback(async (text: string) => {
     const value = trimText(text);

@@ -3350,6 +3350,114 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
     }
 
 
+def _read_takyon_business_site_preview(
+    operator_user_id: str,
+    business: str,
+    requested_path: str,
+) -> dict[str, Any]:
+    from plugins.takyon.core import TakyonStore
+    from tui_gateway.server import _TAKYON_MAX_SITE_PREVIEW_BYTES, _takyon_inline_static_site
+
+    store = TakyonStore(operator_user_id=operator_user_id)
+    normalized_requested_path = requested_path.strip().strip("/") or "product/site"
+    if normalized_requested_path in {"product/site", "product/site/index.html"}:
+        try:
+            summary = store.read(
+                scope=f"business:{business}",
+                query="summary",
+                include=["app"],
+                limit=20,
+            )
+        except Exception:
+            summary = {}
+        app = summary.get("app") if isinstance(summary, dict) and isinstance(summary.get("app"), dict) else {}
+        surface = app.get("surface") or app.get("surface_contract") or {}
+        if isinstance(surface, dict):
+            publish_status = str(surface.get("publish_status") or "").strip().lower()
+            public_url = str(surface.get("public_url") or "").strip()
+            if re.match(r"^https?://", public_url, re.IGNORECASE):
+                return {
+                    "business_slug": business,
+                    "path": normalized_requested_path,
+                    "size": 0,
+                    "url": public_url,
+                    "mode": "live_url",
+                    "status": publish_status or "ready",
+                }
+    candidate = store._resolve_business_file(business, requested_path, sync=False)
+    if candidate.is_dir() or not candidate.suffix:
+        candidate = candidate / "index.html"
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail=f"site preview not found: {requested_path}")
+    if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
+        raise HTTPException(status_code=400, detail="site preview requires an HTML file or site directory")
+    size = candidate.stat().st_size
+    if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
+        raise HTTPException(status_code=413, detail=f"site preview is too large: {size} bytes")
+    business_root = store._business_root(business, sync=False)
+    source_root = (business_root / "product/site").resolve()
+    candidate_resolved = candidate.resolve()
+    html_text = _takyon_inline_static_site(
+        candidate,
+        site_root=source_root if source_root in (candidate_resolved, *candidate_resolved.parents) else None,
+    )
+    encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
+    rel = str(candidate.relative_to(business_root))
+    return {
+        "business_slug": business,
+        "path": rel,
+        "size": len(html_text.encode("utf-8")),
+        "url": f"data:text/html;charset=utf-8;base64,{encoded}",
+        "mode": "inline_html",
+        "status": "ready",
+    }
+
+
+def _read_takyon_business_workspace(
+    operator_user_id: str,
+    business: str,
+    *,
+    limit: int = 50,
+    view: str = "full",
+) -> dict[str, Any]:
+    from tui_gateway.server import _takyon_workspace_payload
+
+    payload = _takyon_workspace_payload(
+        {"takyon_operator_user_id": operator_user_id},
+        business,
+        output_limit=max(1, min(int(limit or 50), 100)),
+        view=str(view or "full").strip().lower() or "full",
+    )
+    return payload if isinstance(payload, dict) else {
+        "business_slug": business,
+        "current": {},
+        "overview": {},
+        "outputs": [],
+        "background_run": None,
+    }
+
+
+def _read_takyon_business_traction(
+    operator_user_id: str,
+    business: str,
+    *,
+    range_key: str = "M",
+) -> dict[str, Any]:
+    from plugins.takyon.core import TakyonStore
+
+    store = TakyonStore(operator_user_id=operator_user_id)
+    return store.traction_timeseries(business, range_key=str(range_key or "M"))
+
+
+def _read_takyon_business_home(operator_user_id: str, business: str) -> dict[str, Any]:
+    return _read_takyon_business_workspace(
+        operator_user_id,
+        business,
+        limit=12,
+        view="boot",
+    )
+
+
 @app.get("/api/takyon/operator/home")
 async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
     principal = _resolve_dashboard_request_principal(request)
@@ -3706,62 +3814,12 @@ async def get_takyon_business_site_preview(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
-        from plugins.takyon.core import TakyonStore
-        from tui_gateway.server import _TAKYON_MAX_SITE_PREVIEW_BYTES, _takyon_inline_static_site
-
-        store = TakyonStore(operator_user_id=str(principal.user_id))
-        normalized_requested_path = requested_path.strip().strip("/") or "product/site"
-        if normalized_requested_path in {"product/site", "product/site/index.html"}:
-            try:
-                summary = store.read(
-                    scope=f"business:{business}",
-                    query="summary",
-                    include=["app"],
-                    limit=20,
-                )
-            except Exception:
-                summary = {}
-            app = summary.get("app") if isinstance(summary, dict) and isinstance(summary.get("app"), dict) else {}
-            surface = app.get("surface") or app.get("surface_contract") or {}
-            if isinstance(surface, dict):
-                publish_status = str(surface.get("publish_status") or "").strip().lower()
-                public_url = str(surface.get("public_url") or "").strip()
-                if re.match(r"^https?://", public_url, re.IGNORECASE):
-                    return {
-                        "business_slug": business,
-                        "path": normalized_requested_path,
-                        "size": 0,
-                        "url": public_url,
-                        "mode": "live_url",
-                        "status": publish_status or "ready",
-                    }
-        candidate = store._resolve_business_file(business, requested_path, sync=False)
-        if candidate.is_dir() or not candidate.suffix:
-            candidate = candidate / "index.html"
-        if not candidate.exists() or not candidate.is_file():
-            raise HTTPException(status_code=404, detail=f"site preview not found: {requested_path}")
-        if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
-            raise HTTPException(status_code=400, detail="site preview requires an HTML file or site directory")
-        size = candidate.stat().st_size
-        if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
-            raise HTTPException(status_code=413, detail=f"site preview is too large: {size} bytes")
-        business_root = store._business_root(business, sync=False)
-        source_root = (business_root / "product/site").resolve()
-        candidate_resolved = candidate.resolve()
-        html_text = _takyon_inline_static_site(
-            candidate,
-            site_root=source_root if source_root in (candidate_resolved, *candidate_resolved.parents) else None,
+        return await asyncio.to_thread(
+            _read_takyon_business_site_preview,
+            str(principal.user_id),
+            business,
+            requested_path,
         )
-        encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
-        rel = str(candidate.relative_to(business_root))
-        return {
-            "business_slug": business,
-            "path": rel,
-            "size": len(html_text.encode("utf-8")),
-            "url": f"data:text/html;charset=utf-8;base64,{encoded}",
-            "mode": "inline_html",
-            "status": "ready",
-        }
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - preview should fail honestly
@@ -3790,21 +3848,13 @@ async def get_takyon_business_workspace(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
-        from tui_gateway.server import _takyon_workspace_payload
-
-        payload = _takyon_workspace_payload(
-            {"takyon_operator_user_id": str(principal.user_id)},
+        return await asyncio.to_thread(
+            _read_takyon_business_workspace,
+            str(principal.user_id),
             business,
-            output_limit=max(1, min(int(limit or 50), 100)),
-            view=str(view or "full").strip().lower() or "full",
+            limit=limit,
+            view=view,
         )
-        return payload if isinstance(payload, dict) else {
-            "business_slug": business,
-            "current": {},
-            "overview": {},
-            "outputs": [],
-            "background_run": None,
-        }
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - workspace should fail honestly
@@ -3827,10 +3877,12 @@ async def get_takyon_business_traction(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
-        from plugins.takyon.core import TakyonStore
-
-        store = TakyonStore(operator_user_id=str(principal.user_id))
-        return store.traction_timeseries(business, range_key=str(range or "M"))
+        return await asyncio.to_thread(
+            _read_takyon_business_traction,
+            str(principal.user_id),
+            business,
+            range_key=range,
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - traction should fail honestly
@@ -3853,7 +3905,11 @@ async def get_takyon_business_home(
     if business not in set(getattr(principal, "business_slugs", ()) or ()):
         raise HTTPException(status_code=404, detail="business not found")
     try:
-        return _takyon_business_home_payload(str(principal.user_id), business)
+        return await asyncio.to_thread(
+            _read_takyon_business_home,
+            str(principal.user_id),
+            business,
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - shell should fail honestly
