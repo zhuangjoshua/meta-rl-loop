@@ -135,6 +135,16 @@ function mapHistoryMessages(payload: HistoryPayload | null | undefined): ChatMes
   return mapped.map((item, index) => (index === realIndex ? { ...item, working: true } : item));
 }
 
+function historyHasPendingReply(payload: HistoryPayload | null | undefined) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const role = trimText(messages[index]?.role).toLowerCase();
+    if (role === "assistant") return false;
+    if (role === "user") return true;
+  }
+  return false;
+}
+
 function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
   if (!next.length) return prev;
   const hasAssistant = next.some((message) => message.who === "agent");
@@ -464,8 +474,9 @@ export function useTakyonLitebulb() {
     const gateway = ensureGateway();
     await gateway.connect();
     const applyHistory = (history: HistoryPayload) => {
-      setSessionRunning(Boolean(history.running));
-      setChatProgress(history.running ? { text: "Working…", live: true } : null);
+      const pending = Boolean(history.running) || historyHasPendingReply(history);
+      setSessionRunning(pending);
+      setChatProgress(pending ? { text: "Working…", live: true } : null);
       setChatMessages(mapHistoryMessages(history));
     };
     const loadHistory = async (sessionId: string, fallback?: HistoryPayload) => {
@@ -726,10 +737,11 @@ export function useTakyonLitebulb() {
         .request<HistoryPayload>("session.history", { session_id: sessionId }, 10_000)
         .then((history) => {
           if (cancelled) return;
+          const pending = Boolean(history.running) || historyHasPendingReply(history);
           setChatMessages((messages) => mergeHistoryMessages(messages, mapHistoryMessages(history)));
-          setSessionRunning(Boolean(history.running));
-          setChatProgress((current) => (history.running ? current || { text: "Working…", live: true } : null));
-          if (!history.running) {
+          setSessionRunning(pending);
+          setChatProgress((current) => (pending ? current || { text: "Working…", live: true } : null));
+          if (!pending) {
             setSubmitting(false);
           }
         })

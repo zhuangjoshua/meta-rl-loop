@@ -4062,6 +4062,49 @@ def _history_without_latest_user_message(messages: list[dict[str, Any]]) -> list
     return trimmed
 
 
+def _persist_inflight_user_message(
+    sid: str,
+    session: dict,
+    history: list[dict[str, Any]],
+    history_version: int,
+    content: Any,
+    *,
+    display_text: str | None = None,
+) -> int:
+    pending_message: dict[str, Any] = {"role": "user", "content": content}
+    if isinstance(display_text, str) and display_text.strip():
+        pending_message["display_text"] = display_text
+
+    with session["history_lock"]:
+        current_version = int(session.get("history_version", 0))
+        base_history = (
+            history if current_version == history_version else list(session.get("history", []))
+        )
+        session["history"] = [*base_history, pending_message]
+        next_version = current_version + 1
+        session["history_version"] = next_version
+
+    try:
+        agent = session.get("agent")
+        session_db = getattr(agent, "_session_db", None) or _get_db()
+        session_key = str(
+            getattr(agent, "session_id", "") or session.get("session_key") or sid
+        ).strip()
+        if session_db and session_key:
+            session_db.append_message(
+                session_id=session_key,
+                role="user",
+                content=content,
+            )
+    except Exception as exc:
+        print(
+            f"[tui_gateway] in-flight user history persist failed: {exc}",
+            file=sys.stderr,
+        )
+
+    return next_version
+
+
 def _start_streaming_session_turn(
     rid,
     sid: str,
@@ -4255,8 +4298,19 @@ def _run_prompt_submit(
                             file=sys.stderr,
                         )
                         run_message = _enrich_with_attached_images(prompt, images)
-                else:
-                    run_message = _enrich_with_attached_images(prompt, images)
+            else:
+                run_message = _enrich_with_attached_images(prompt, images)
+
+            persisted_history_version = history_version
+            if record_user_history:
+                persisted_history_version = _persist_inflight_user_message(
+                    sid,
+                    session,
+                    history,
+                    history_version,
+                    run_message,
+                    display_text=display_text,
+                )
 
             resolved_operator_user_id = _resolved_operator_user_id(
                 _takyon_operator_user_id(session)
@@ -4391,9 +4445,9 @@ def _run_prompt_submit(
                                 break
                     with session["history_lock"]:
                         current_version = int(session.get("history_version", 0))
-                        if current_version == history_version:
+                        if current_version == persisted_history_version:
                             session["history"] = result["messages"]
-                            session["history_version"] = history_version + 1
+                            session["history_version"] = persisted_history_version + 1
                         else:
                             # History mutated externally during the turn
                             # (undo/compress/retry/rollback now guard on
@@ -4405,7 +4459,7 @@ def _run_prompt_submit(
                             # not persisted.
                             print(
                                 f"[tui_gateway] prompt.submit: history_version mismatch "
-                                f"(expected={history_version} current={current_version}) — "
+                                f"(expected={persisted_history_version} current={current_version}) — "
                                 f"agent output NOT written to session history",
                                 file=sys.stderr,
                             )

@@ -2291,6 +2291,81 @@ def test_prompt_submit_keeps_raw_user_text_in_history(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_prompt_submit_persists_inflight_user_message_for_reload(monkeypatch):
+    captured = {}
+    appended: list[dict[str, object]] = []
+    session_ref = {"s": None}
+
+    class _DB:
+        def append_message(self, session_id, role, content=None, **kwargs):
+            appended.append(
+                {
+                    "session_id": session_id,
+                    "role": role,
+                    "content": content,
+                }
+            )
+            return 1
+
+    class _Agent:
+        session_id = "session-key"
+        _session_db = _DB()
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            captured["prompt"] = prompt
+            captured["history"] = list(session_ref["s"]["history"])
+            captured["history_version"] = session_ref["s"]["history_version"]
+            return {
+                "final_response": "ok",
+                "messages": [
+                    {"role": "user", "content": prompt, "display_text": "wire auth"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="probe-32864")
+    session_ref["s"] = server._sessions["sid"]
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+
+    try:
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "wire auth"},
+            }
+        )
+        inflight_history = captured["history"]
+        assert inflight_history[0]["display_text"] == "wire auth"
+        assert inflight_history[0]["content"].startswith("Scope: business:probe-32864")
+        assert server._history_to_messages(inflight_history)[0] == {
+            "role": "user",
+            "text": "wire auth",
+        }
+        assert appended == [
+            {
+                "session_id": "session-key",
+                "role": "user",
+                "content": captured["prompt"],
+            }
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_image_attach_appends_local_image(monkeypatch):
     fake_cli = types.ModuleType("cli")
     fake_cli._IMAGE_EXTENSIONS = {".png"}
