@@ -19509,8 +19509,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if not worker_session_bound and not refresh_surface:
             refresh_surface = workspace_targets_product_surface
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
+        reuse_session_workspace = bool(
+            docker_isolated_worker
+            and worker_session_bound
+            and getattr(store, "_workspace_root_override", None) is not None
+        )
         workspace_context = nullcontext(None)
-        if docker_isolated_worker:
+        if docker_isolated_worker and not reuse_session_workspace:
             from . import storage
 
             workspace_context = storage.mounted_business_workspace(
@@ -19590,7 +19595,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         agent_record: dict[str, Any] | None = None
         with workspace_context as mounted_home:
             active_store = store
-            if docker_isolated_worker:
+            if docker_isolated_worker and mounted_home is not None:
                 active_store = TakyonStore(root=mounted_home, operator_user_id=operator_user_id or None)
                 active_store._workspace_sync_cache.add(_slugify(business))
 

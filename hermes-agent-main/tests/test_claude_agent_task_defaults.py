@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 from plugins.takyon import core as takyon_core
+from plugins.takyon import storage as takyon_storage
 from plugins.takyon.core import handle_business_claude_agent_task
 
 
@@ -19,6 +20,7 @@ class _FakeConn:
 class _FakeStore:
     def __init__(self, root: Path):
         self.root = root
+        self._workspace_root_override = None
 
     def _connect(self):
         return _FakeConn()
@@ -141,3 +143,60 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
     payload = captured["payload"]
     assert result["success"] is True
     assert payload["maxTurns"] == 90
+
+
+def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_path, monkeypatch):
+    outer_home = tmp_path / "outer-home"
+    workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
+    workspace.mkdir(parents=True, exist_ok=True)
+    captured: dict[str, object] = {}
+    store = _FakeStore(outer_home)
+    store._workspace_root_override = outer_home
+
+    def fail_if_mounted(*args, **kwargs):
+        raise AssertionError("mounted_business_workspace should not be used when a session workspace root is active")
+
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+        captured["docker_workspace_path"] = workspace_path
+        captured["docker_timeout_ms"] = timeout_ms
+        return ["docker", "run"], payload, str(tmp_path), {}
+
+    def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
+        captured["payload"] = payload
+        captured["cwd"] = cwd
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: True)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(takyon_storage, "mounted_business_workspace", fail_if_mounted)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-reuse-outer-scratch",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["docker_workspace_path"] == workspace
+    assert captured["payload"]["cwd"] == str(workspace)
