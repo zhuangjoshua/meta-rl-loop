@@ -15700,9 +15700,9 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
 
 def _creative_credit_backend():
     try:
-        from . import business_credits as credits_backend
+        from . import safebox as credits_backend
     except Exception:
-        from plugins.takyon import business_credits as credits_backend
+        from plugins.takyon import safebox as credits_backend
     return credits_backend
 
 

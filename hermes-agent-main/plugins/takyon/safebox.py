@@ -45,6 +45,12 @@ from takyon_cli.config import (
 )
 
 from .user_api_keys import hash_api_key, is_well_formed, key_prefix
+from .business_credits import (
+    CreativeCreditBalances,
+    CreativeCreditReservation,
+    InsufficientCreativeCredits,
+    UnknownCreativeCreditReservation,
+)
 
 _EXACT_SENSITIVE_ENV_KEYS = frozenset(
     {
@@ -76,6 +82,15 @@ _USER_API_KEYS_STATE_VERSION = 1
 _USER_API_KEYS_MUTEX = threading.RLock()
 _SAFEBOX_REMOTE_URL_ENV = "TAKYON_SAFEBOX_URL"
 _SAFEBOX_REMOTE_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
+
+
+class RemoteSafeboxError(RuntimeError):
+    """A Safebox remote request failed with a concrete HTTP status/payload."""
+
+    def __init__(self, message: str, *, status_code: int, payload: dict[str, Any]):
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.payload = payload
 
 
 def is_sensitive_env_key(key: str) -> bool:
@@ -125,7 +140,151 @@ def _remote_json(method: str, path: str, payload: dict[str, Any] | None = None) 
             parsed = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
             parsed = {"detail": detail}
-        raise RuntimeError(f"Safebox remote {method.upper()} {path} failed: {parsed}") from exc
+        raise RemoteSafeboxError(
+            f"Safebox remote {method.upper()} {path} failed: {parsed}",
+            status_code=exc.code,
+            payload=parsed if isinstance(parsed, dict) else {"detail": detail},
+        ) from exc
+
+
+def _remote_error_detail(exc: RemoteSafeboxError) -> dict[str, Any]:
+    detail = exc.payload.get("detail")
+    if isinstance(detail, dict):
+        return detail
+    if isinstance(detail, str) and detail.strip():
+        return {"error": detail.strip()}
+    return exc.payload if isinstance(exc.payload, dict) else {}
+
+
+def _creative_credit_backend():
+    from . import business_credits
+
+    return business_credits
+
+
+@contextmanager
+def _creative_credit_conn(conn=None):
+    if conn is not None:
+        yield conn
+        return
+    from .runtime_app import resolve_database_url
+    import psycopg
+
+    raw_conn = psycopg.connect(
+        resolve_database_url(),
+        autocommit=True,
+        prepare_threshold=None,
+    )
+    try:
+        yield raw_conn
+    finally:
+        raw_conn.close()
+
+
+def _balances_from_payload(payload: dict[str, Any], *, business_slug: str) -> CreativeCreditBalances:
+    return CreativeCreditBalances(
+        business_slug=str(payload.get("business_slug") or business_slug),
+        balance_credits=int(payload.get("balance_credits") or 0),
+        reserved_credits=int(payload.get("reserved_credits") or 0),
+    )
+
+
+def _reservation_from_payload(
+    payload: dict[str, Any],
+    *,
+    reservation_key: str,
+) -> CreativeCreditReservation:
+    return CreativeCreditReservation(
+        key=str(payload.get("key") or payload.get("reservation_key") or reservation_key),
+        reserved_credits=int(payload.get("reserved_credits") or 0),
+    )
+
+
+def _local_open_business_credit_account(conn, business_slug: str) -> None:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        backend.open_business_credit_account(credit_conn, business_slug)
+
+
+def _local_get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        backend.open_business_credit_account(credit_conn, business_slug)
+        return backend.get_business_credit_balances(credit_conn, business_slug)
+
+
+def _local_grant_credits(
+    conn,
+    business_slug: str,
+    credits: int,
+    idempotency_key: str,
+    *,
+    metadata: dict | None = None,
+    stripe_ref: str | None = None,
+) -> CreativeCreditBalances:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        backend.open_business_credit_account(credit_conn, business_slug)
+        return backend.grant_credits(
+            credit_conn,
+            business_slug,
+            credits,
+            idempotency_key,
+            metadata=metadata,
+            stripe_ref=stripe_ref,
+        )
+
+
+def _local_reserve_credits(
+    conn,
+    business_slug: str,
+    credits: int,
+    reservation_key: str,
+    *,
+    metadata: dict | None = None,
+) -> CreativeCreditReservation:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        backend.open_business_credit_account(credit_conn, business_slug)
+        return backend.reserve_credits(
+            credit_conn,
+            business_slug,
+            credits,
+            reservation_key,
+            metadata=metadata,
+        )
+
+
+def _local_commit_credits(
+    conn,
+    reservation_key: str,
+    *,
+    actual_credits: int | None = None,
+    metadata: dict | None = None,
+) -> CreativeCreditBalances:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        return backend.commit_credits(
+            credit_conn,
+            reservation_key,
+            actual_credits=actual_credits,
+            metadata=metadata,
+        )
+
+
+def _local_release_credits(
+    conn,
+    reservation_key: str,
+    *,
+    metadata: dict | None = None,
+) -> CreativeCreditBalances:
+    backend = _creative_credit_backend()
+    with _creative_credit_conn(conn) as credit_conn:
+        return backend.release_credits(
+            credit_conn,
+            reservation_key,
+            metadata=metadata,
+        )
 
 
 def _require_sensitive(key: str) -> str:
@@ -399,6 +558,183 @@ def delete_user_api_key(key_id: str) -> bool:
         records = _user_api_key_records(state)
         deleted = records.pop(key_ref, None) is not None
     return deleted
+
+
+def open_business_credit_account(conn, business_slug: str) -> None:
+    """Ensure one business creative-credit account exists inside Safebox authority."""
+    slug = str(business_slug or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if _remote_enabled():
+        _remote_json(
+            "POST",
+            "/v1/creative-credits/accounts/open",
+            {"business_slug": slug},
+        )
+        return
+    _local_open_business_credit_account(conn, slug)
+
+
+def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
+    """Read one business creative-credit balance through Safebox authority."""
+    slug = str(business_slug or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if _remote_enabled():
+        payload = _remote_json(
+            "GET",
+            f"/v1/creative-credits/{urllib.parse.quote(slug, safe='')}",
+        )
+        return _balances_from_payload(payload, business_slug=slug)
+    return _local_get_business_credit_balances(conn, slug)
+
+
+def grant_credits(
+    conn,
+    business_slug: str,
+    credits: int,
+    idempotency_key: str,
+    *,
+    metadata: dict | None = None,
+    stripe_ref: str | None = None,
+) -> CreativeCreditBalances:
+    """Grant purchased business creative credits through Safebox authority."""
+    slug = str(business_slug or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if _remote_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/creative-credits/grant",
+            {
+                "business_slug": slug,
+                "credits": int(credits),
+                "idempotency_key": str(idempotency_key or "").strip(),
+                "metadata": metadata or {},
+                "stripe_ref": str(stripe_ref or "").strip() or None,
+            },
+        )
+        return _balances_from_payload(payload, business_slug=slug)
+    return _local_grant_credits(
+        conn,
+        slug,
+        credits,
+        idempotency_key,
+        metadata=metadata,
+        stripe_ref=stripe_ref,
+    )
+
+
+def reserve_credits(
+    conn,
+    business_slug: str,
+    credits: int,
+    reservation_key: str,
+    *,
+    metadata: dict | None = None,
+) -> CreativeCreditReservation:
+    """Reserve business creative credits through Safebox authority."""
+    slug = str(business_slug or "").strip()
+    key = str(reservation_key or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if _remote_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/creative-credits/reserve",
+                {
+                    "business_slug": slug,
+                    "credits": int(credits),
+                    "reservation_key": key,
+                    "metadata": metadata or {},
+                },
+            )
+        except RemoteSafeboxError as exc:
+            detail = _remote_error_detail(exc)
+            if exc.status_code == 402:
+                raise InsufficientCreativeCredits(
+                    requested_credits=int(detail.get("requested_credits") or credits),
+                    available_credits=int(detail.get("available_credits") or 0),
+                ) from exc
+            raise
+        return _reservation_from_payload(payload, reservation_key=key)
+    return _local_reserve_credits(
+        conn,
+        slug,
+        credits,
+        key,
+        metadata=metadata,
+    )
+
+
+def commit_credits(
+    conn,
+    reservation_key: str,
+    *,
+    actual_credits: int | None = None,
+    metadata: dict | None = None,
+) -> CreativeCreditBalances:
+    """Commit one business creative-credit reservation through Safebox authority."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("reservation_key is required")
+    if _remote_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/creative-credits/commit",
+                {
+                    "reservation_key": key,
+                    "actual_credits": (
+                        None if actual_credits is None else int(actual_credits)
+                    ),
+                    "metadata": metadata or {},
+                },
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 404:
+                raise UnknownCreativeCreditReservation(key) from exc
+            raise
+        return _balances_from_payload(payload, business_slug="")
+    return _local_commit_credits(
+        conn,
+        key,
+        actual_credits=actual_credits,
+        metadata=metadata,
+    )
+
+
+def release_credits(
+    conn,
+    reservation_key: str,
+    *,
+    metadata: dict | None = None,
+) -> CreativeCreditBalances:
+    """Release one business creative-credit reservation through Safebox authority."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("reservation_key is required")
+    if _remote_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/creative-credits/release",
+                {
+                    "reservation_key": key,
+                    "metadata": metadata or {},
+                },
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 404:
+                raise UnknownCreativeCreditReservation(key) from exc
+            raise
+        return _balances_from_payload(payload, business_slug="")
+    return _local_release_credits(
+        conn,
+        key,
+        metadata=metadata,
+    )
 
 
 def read_env_backed_value(key: str) -> str:

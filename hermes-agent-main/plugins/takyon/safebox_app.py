@@ -52,6 +52,36 @@ class _RestoreUserKeysBody(BaseModel):
     key_ids: list[str]
 
 
+class _OpenCreativeCreditAccountBody(BaseModel):
+    business_slug: str
+
+
+class _GrantCreativeCreditsBody(BaseModel):
+    business_slug: str
+    credits: int
+    idempotency_key: str
+    metadata: dict[str, Any] | None = None
+    stripe_ref: str | None = None
+
+
+class _ReserveCreativeCreditsBody(BaseModel):
+    business_slug: str
+    credits: int
+    reservation_key: str
+    metadata: dict[str, Any] | None = None
+
+
+class _CommitCreativeCreditsBody(BaseModel):
+    reservation_key: str
+    actual_credits: int | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class _ReleaseCreativeCreditsBody(BaseModel):
+    reservation_key: str
+    metadata: dict[str, Any] | None = None
+
+
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
     expected = str(os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
     if not expected:
@@ -160,6 +190,123 @@ def build_safebox_app() -> FastAPI:
     def delete_user_key(key_id: str, authorization: str | None = Header(default=None)) -> dict[str, bool]:
         _require_internal_token(authorization)
         return {"deleted": safebox.delete_user_api_key(key_id)}
+
+    @app.post("/v1/creative-credits/accounts/open")
+    def open_creative_credit_account(
+        body: _OpenCreativeCreditAccountBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        _require_internal_token(authorization)
+        safebox._local_open_business_credit_account(None, body.business_slug)
+        return {"ok": True}
+
+    @app.get("/v1/creative-credits/{business_slug}")
+    def get_creative_credit_balances(
+        business_slug: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        balances = safebox._local_get_business_credit_balances(None, business_slug)
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    @app.post("/v1/creative-credits/grant")
+    def grant_creative_credits(
+        body: _GrantCreativeCreditsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        balances = safebox._local_grant_credits(
+            None,
+            body.business_slug,
+            body.credits,
+            body.idempotency_key,
+            metadata=body.metadata,
+            stripe_ref=body.stripe_ref,
+        )
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    @app.post("/v1/creative-credits/reserve")
+    def reserve_creative_credits(
+        body: _ReserveCreativeCreditsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            reservation = safebox._local_reserve_credits(
+                None,
+                body.business_slug,
+                body.credits,
+                body.reservation_key,
+                metadata=body.metadata,
+            )
+        except safebox.InsufficientCreativeCredits as exc:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": str(exc),
+                    "requested_credits": exc.requested_credits,
+                    "available_credits": exc.available_credits,
+                },
+            ) from exc
+        return {
+            "key": reservation.key,
+            "reserved_credits": reservation.reserved_credits,
+        }
+
+    @app.post("/v1/creative-credits/commit")
+    def commit_creative_credits(
+        body: _CommitCreativeCreditsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            balances = safebox._local_commit_credits(
+                None,
+                body.reservation_key,
+                actual_credits=body.actual_credits,
+                metadata=body.metadata,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
+            ) from exc
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    @app.post("/v1/creative-credits/release")
+    def release_creative_credits(
+        body: _ReleaseCreativeCreditsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            balances = safebox._local_release_credits(
+                None,
+                body.reservation_key,
+                metadata=body.metadata,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
+            ) from exc
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
 
     return app
 

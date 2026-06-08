@@ -164,6 +164,53 @@ def test_remote_safebox_user_key_register_delegates_to_service(monkeypatch):
     ]
 
 
+def test_remote_safebox_creative_credit_balance_delegates_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {
+            "business_slug": "acme",
+            "balance_credits": 7,
+            "reserved_credits": 2,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    balances = safebox.get_business_credit_balances(None, "acme")
+
+    assert balances.business_slug == "acme"
+    assert balances.balance_credits == 7
+    assert balances.reserved_credits == 2
+    assert calls == [("GET", "/v1/creative-credits/acme", None)]
+
+
+def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+
+    def _fake_remote(method: str, path: str, payload=None):
+        raise safebox.RemoteSafeboxError(
+            "blocked",
+            status_code=402,
+            payload={
+                "detail": {
+                    "error": "insufficient_creative_credits: need 5, have 3",
+                    "requested_credits": 5,
+                    "available_credits": 3,
+                }
+            },
+        )
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    with pytest.raises(safebox.InsufficientCreativeCredits) as exc:
+        safebox.reserve_credits(None, "acme", 5, "resv-1")
+
+    assert exc.value.requested_credits == 5
+    assert exc.value.available_credits == 3
+
+
 def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
@@ -182,3 +229,30 @@ def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monke
     read_back = client.get("/v1/env/OPENAI_API_KEY", headers=headers)
     assert read_back.status_code == 200
     assert read_back.json() == {"value": "sk-live"}
+
+
+def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setattr(
+        safebox,
+        "_local_get_business_credit_balances",
+        lambda conn, business_slug: safebox.CreativeCreditBalances(
+            business_slug=business_slug,
+            balance_credits=9,
+            reserved_credits=4,
+        ),
+    )
+
+    client = TestClient(build_safebox_app())
+
+    unauthorized = client.get("/v1/creative-credits/acme")
+    assert unauthorized.status_code == 401
+
+    headers = {"Authorization": "Bearer shared-token"}
+    read_back = client.get("/v1/creative-credits/acme", headers=headers)
+    assert read_back.status_code == 200
+    assert read_back.json() == {
+        "business_slug": "acme",
+        "balance_credits": 9,
+        "reserved_credits": 4,
+    }

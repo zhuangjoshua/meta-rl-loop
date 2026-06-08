@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import billing, business_credits, custody, rate_limit, safebox, stripe_util
+from . import billing, custody, rate_limit, safebox, stripe_util
 from .control_plane import ResolvedPrincipal, resolve_api_key
 
 _BEARER_PREFIX = "Bearer "
@@ -705,7 +705,7 @@ def build_control_router() -> APIRouter:
         row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
-        balances = business_credits.get_business_credit_balances(conn, slug)
+        balances = safebox.get_business_credit_balances(conn, slug)
         return {
             "business_slug": slug,
             "balance_credits": balances.balance_credits,
@@ -851,7 +851,7 @@ def build_control_router() -> APIRouter:
             }
             if pack_id:
                 grant_metadata["pack_id"] = pack_id
-            balances = business_credits.grant_credits(
+            balances = safebox.grant_credits(
                 conn,
                 business_slug,
                 credits,
