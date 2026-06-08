@@ -29,3 +29,13 @@ def test_full_workspace_load_parallelizes_preview_fetch():
     assert "const [workspaceResult, previewResult] = await Promise.allSettled([" in source
     assert 'api.getTakyonBusinessWorkspace(slug, 60, "full")' in source
     assert "api.getTakyonBusinessSitePreview(slug)" in source
+
+
+def test_litebulb_reuses_stored_session_before_creating_a_new_one():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";' in source
+    assert 'const storedSessionId = readStoredLitebulbSession(businessSlug);' in source
+    assert 'gateway.request<SessionResumePayload>("session.resume"' in source
+    assert 'writeStoredLitebulbSession(' in source
+    assert 'clearStoredLitebulbSession(businessSlug);' in source

@@ -49,6 +49,14 @@ type HistoryPayload = {
   running?: boolean;
 };
 
+type SessionResumePayload = {
+  session_id?: string;
+  resumed?: string;
+  messages?: Array<{ role?: string; text?: string }>;
+};
+
+const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";
+
 function trimText(value: unknown) {
   return String(value || "").trim();
 }
@@ -137,6 +145,52 @@ function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMes
     base.push(message);
   }
   return base;
+}
+
+function readStoredLitebulbSessions(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(LITEBULB_SESSION_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+function readStoredLitebulbSession(slug: string) {
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return "";
+  return trimText(readStoredLitebulbSessions()[businessSlug]);
+}
+
+function writeStoredLitebulbSession(slug: string, sessionId: string) {
+  if (typeof window === "undefined") return;
+  const businessSlug = trimText(slug).toLowerCase();
+  const value = trimText(sessionId);
+  if (!businessSlug || !value) return;
+  try {
+    const next = readStoredLitebulbSessions();
+    next[businessSlug] = value;
+    window.sessionStorage.setItem(LITEBULB_SESSION_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* best effort */
+  }
+}
+
+function clearStoredLitebulbSession(slug: string) {
+  if (typeof window === "undefined") return;
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return;
+  try {
+    const next = readStoredLitebulbSessions();
+    if (!(businessSlug in next)) return;
+    delete next[businessSlug];
+    window.sessionStorage.setItem(LITEBULB_SESSION_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* best effort */
+  }
 }
 
 function createEmptyBuildState(): BuildState {
@@ -230,6 +284,16 @@ export function useTakyonLitebulb() {
     } catch {
       setCreativeCredits(null);
     }
+  }, []);
+
+  const saveChannelCreditBudgets = useCallback(async (
+    slug: string,
+    allocations: Record<"x" | "meta" | "reddit", number>,
+  ) => {
+    if (!slug) return null;
+    const payload = await api.setTakyonBusinessChannelCreditBudgets(slug, allocations);
+    setCreativeCredits(payload);
+    return payload;
   }, []);
 
   const loadTraction = useCallback(async (slug: string, range: "D" | "W" | "M" | "Y") => {
@@ -398,6 +462,43 @@ export function useTakyonLitebulb() {
     if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
       return sessionIdRef.current;
     }
+    const applyHistory = (history: HistoryPayload) => {
+      setSessionRunning(Boolean(history.running));
+      setChatProgress(history.running ? { text: "Working…", live: true } : null);
+      setChatMessages(mapHistoryMessages(history));
+    };
+    const loadHistory = async (sessionId: string, fallback?: HistoryPayload) => {
+      const history = await gateway.request<HistoryPayload>("session.history", {
+        session_id: sessionId,
+      }).catch<HistoryPayload>(() => fallback ?? { messages: [], running: false });
+      applyHistory(history);
+    };
+
+    if (businessSlug) {
+      const storedSessionId = readStoredLitebulbSession(businessSlug);
+      if (storedSessionId) {
+        const resumed = await gateway.request<SessionResumePayload>("session.resume", {
+          session_id: storedSessionId,
+          cols: 100,
+        }).catch<SessionResumePayload | null>(() => null);
+        if (resumed?.session_id) {
+          sessionIdRef.current = trimText(resumed.session_id);
+          sessionBusinessRef.current = businessSlug;
+          assistantMessageIdRef.current = "";
+          writeStoredLitebulbSession(
+            businessSlug,
+            trimText(resumed.resumed) || storedSessionId,
+          );
+          await loadHistory(sessionIdRef.current, {
+            messages: resumed.messages || [],
+            running: true,
+          });
+          return sessionIdRef.current;
+        }
+        clearStoredLitebulbSession(businessSlug);
+      }
+    }
+
     const result = await gateway.request<{ session_id?: string }>("session.create", {
       cols: 100,
       _takyon_boot_business: businessSlug || undefined,
@@ -405,13 +506,9 @@ export function useTakyonLitebulb() {
     sessionIdRef.current = trimText(result?.session_id);
     sessionBusinessRef.current = businessSlug;
     assistantMessageIdRef.current = "";
-    if (businessSlug) {
-      const history = await gateway.request<HistoryPayload>("session.history", {
-        session_id: sessionIdRef.current,
-      }).catch<HistoryPayload>(() => ({ messages: [], running: false }));
-      setSessionRunning(Boolean(history.running));
-      setChatProgress(history.running ? { text: "Working…", live: true } : null);
-      setChatMessages(mapHistoryMessages(history));
+    if (businessSlug && sessionIdRef.current) {
+      writeStoredLitebulbSession(businessSlug, sessionIdRef.current);
+      await loadHistory(sessionIdRef.current);
     } else {
       setChatMessages([]);
       setChatProgress(null);
@@ -673,6 +770,7 @@ export function useTakyonLitebulb() {
     openBusiness,
     sendPrompt,
     createBusiness,
+    saveChannelCreditBudgets,
     openBillingPortal,
     startTopup,
   };

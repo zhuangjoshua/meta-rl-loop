@@ -5810,10 +5810,12 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
     class _FakeStore:
         pass
 
+    captured: dict[str, object] = {}
+
     monkeypatch.setattr(
         server,
         "_takyon_business_home_snapshot",
-        lambda store, slug: {
+        lambda store, slug, sync_files=True: captured.update({"sync_files": sync_files}) or {
             "current": {"name": "Demo", "goal": "Fast workspace", "mode": "test"},
             "overview": {"metrics": {"users": 3}, "product": {"public_url": "https://demo.test"}},
         },
@@ -5835,6 +5837,7 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
         "outputs": [],
         "background_run": None,
     }
+    assert captured["sync_files"] is False
 
 
 def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tmp_path):

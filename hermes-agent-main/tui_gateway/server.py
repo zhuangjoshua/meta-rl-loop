@@ -5812,7 +5812,12 @@ def _takyon_business_payload(store: Any, slug: str) -> dict[str, Any] | None:
         return None
 
 
-def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
+def _takyon_business_home_snapshot(
+    store: Any,
+    slug: str,
+    *,
+    sync_files: bool = True,
+) -> dict[str, Any]:
     business_slug = str(slug or "").strip().lower()
     if not business_slug:
         return {"current": {}, "overview": {}}
@@ -6053,8 +6058,12 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
     public_url = as_text(surface.get("public_url"))
     source_path = as_text(surface.get("source_path"))
     spent_microusd = as_int((usage["actual"] if usage else 0) or (usage["estimated"] if usage else 0))
+    try:
+        business_root = store._business_root(business_slug, sync=sync_files)
+    except TypeError:
+        business_root = store._business_root(business_slug)
     receipt = _read_product_surface_receipt(
-        store._business_root(business_slug),
+        business_root,
         as_text(surface.get("publish_receipt_path")),
     )
     receipt_inventory = receipt.get("inventory") if isinstance(receipt.get("inventory"), dict) else {}
@@ -8353,7 +8362,7 @@ def _takyon_workspace_boot_payload(
         }
     store = _takyon_store(session)
     try:
-        snapshot = _takyon_business_home_snapshot(store, slug)
+        snapshot = _takyon_business_home_snapshot(store, slug, sync_files=False)
     except Exception:
         snapshot = {}
     current = snapshot.get("current") if isinstance(snapshot, dict) else {}
