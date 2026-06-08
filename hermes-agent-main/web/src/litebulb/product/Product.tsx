@@ -36,6 +36,23 @@ function siteHost(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "") + ".app";
 }
 
+function backgroundRunProgress(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+): ChatProgress | null {
+  const run = workspace?.background_run;
+  if (!run || typeof run !== "object") return null;
+  const payload = run as Record<string, unknown>;
+  const status = String(payload.status || "").trim().toLowerCase();
+  if (!status || ["done", "completed", "success", "failed", "error", "blocked", "cancelled"].includes(status)) {
+    return null;
+  }
+  const detail = String(payload.detail || "").trim();
+  return {
+    text: detail || (status === "queued" ? "Queued CEO bootstrap job." : "Working…"),
+    live: true,
+  };
+}
+
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
   const ch = (name.trim()[0] || "C").toUpperCase();
   let h = 0;
@@ -350,6 +367,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
+  const effectiveProgress = chatProgress ?? backgroundRunProgress(workspace);
 
   useEffect(() => {
     setTab("company");
@@ -371,7 +389,7 @@ export function Product({
           <AgentChat
             business={business}
             messages={chatMessages}
-            progress={chatProgress}
+            progress={effectiveProgress}
             tab={tab}
             sending={sending}
             onTab={setTab}
