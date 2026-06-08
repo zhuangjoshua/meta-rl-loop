@@ -76,6 +76,15 @@ function backgroundRunProgress(
     const progress = liveProgress(payload.status, payload.detail, payload.next_action, payload.headline);
     if (progress) return progress;
   }
+  const tasks = (overview as Record<string, unknown>).tasks;
+  if (Array.isArray(tasks)) {
+    for (const task of tasks) {
+      if (!task || typeof task !== "object") continue;
+      const payload = task as Record<string, unknown>;
+      const progress = liveProgress(payload.status, payload.detail, payload.label);
+      if (progress) return progress;
+    }
+  }
   return null;
 }
 
