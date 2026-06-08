@@ -49,16 +49,23 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert "api.getSessionLatestDescendant(candidate)" in source
     assert 'const readDurableSessionId = async (sessionId: string) => {' in source
     assert 'gateway.request<SessionTitlePayload>("session.title"' in source
+    assert "function isBusyError(error: unknown) {" in source
+    assert "function isMissingSessionError(error: unknown) {" in source
+    assert "function wait(ms: number) {" in source
+    assert "const chatMessagesRef = useRef<ChatMessage[]>([]);" in source
+    assert "const sessionRunningRef = useRef(false);" in source
     assert "const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;" in source
     assert "const storedSessionId = await resolveStoredSessionId(" in source
     assert "readStoredLitebulbSession(businessSlug)" in source
     assert 'gateway.request<SessionResumePayload>("session.resume"' in source
+    assert "_takyon_boot_business: businessSlug || undefined," in source
     assert "const replayPendingTurn = useCallback(async (" in source
     assert 'writeStoredPendingTurn(activeBusiness.slug, pendingTurn);' in source
-    assert 'userCountBefore: chatMessages.filter((message) => message.who === "user").length,' in source
+    assert 'userCountBefore: chatMessagesRef.current.filter((message) => message.who === "user").length,' in source
     assert 'const openingBusinessRef = useRef("");' in source
     assert 'if (openingBusinessRef.current === businessSlug) return;' in source
     assert "void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);" in source
     assert 'writeStoredLitebulbSession(' in source
     assert 'clearStoredPendingTurn(sessionBusinessRef.current);' in source
     assert 'clearStoredLitebulbSession(businessSlug);' in source
+    assert 'await gateway.request("session.interrupt", {' in source

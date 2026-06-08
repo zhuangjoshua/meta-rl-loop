@@ -2857,6 +2857,8 @@ def _sanitize_user_history_display_text(text: str) -> str:
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
+    previous_user_text = ""
+    previous_user_was_wrapped = False
 
     for m in history:
         if not isinstance(m, dict):
@@ -2869,7 +2871,16 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         else:
             content_text = _content_display_text(m.get("content"))
         if role == "user":
+            raw_user_text = content_text
             content_text = _sanitize_user_history_display_text(content_text)
+            user_was_wrapped = content_text != raw_user_text
+            if (
+                content_text.strip()
+                and previous_user_text == content_text
+                and (user_was_wrapped or previous_user_was_wrapped)
+            ):
+                previous_user_was_wrapped = previous_user_was_wrapped or user_was_wrapped
+                continue
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})
@@ -2894,6 +2905,12 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if not content_text.strip():
             continue
         messages.append({"role": role, "text": content_text})
+        if role == "user":
+            previous_user_text = content_text
+            previous_user_was_wrapped = user_was_wrapped
+        else:
+            previous_user_text = ""
+            previous_user_was_wrapped = False
 
     return messages
 
@@ -3146,6 +3163,7 @@ def _(rid, params: dict) -> dict:
 @method("session.resume")
 def _(rid, params: dict) -> dict:
     target = params.get("session_id", "")
+    boot_business = str(params.get("_takyon_boot_business") or "").strip()
     if not target:
         return _err(rid, 4006, "session_id required")
     db = _get_db()
@@ -3173,6 +3191,15 @@ def _(rid, params: dict) -> dict:
         finally:
             _clear_session_context(tokens)
         _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        if boot_business:
+            try:
+                from plugins.takyon.cli import _slugify
+
+                slug = _slugify(boot_business)
+                if _takyon_can_access_business(_sessions.get(sid), slug):
+                    _sessions[sid]["takyon_current_business"] = slug
+            except Exception:
+                pass
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
     return _ok(

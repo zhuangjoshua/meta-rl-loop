@@ -607,6 +607,27 @@ def test_history_to_messages_hides_budget_guarded_global_wrapper():
     ]
 
 
+def test_history_to_messages_collapses_adjacent_raw_and_scoped_duplicate_user_prompt():
+    history = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "user",
+            "content": (
+                "Scope: global\n"
+                "CEO role: account/root-scope operator. Global is not the CEO; it is the top-level Takyon scope.\n\n"
+                "Operator request:\n"
+                "hello\n\n"
+                "Use global reads for businesses, credentials, policy, skills, and budgets. "
+                "For any business/product/customer state change, create or select the business and use concrete business_* tools."
+            ),
+        },
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "hello"}
+    ]
+
+
 def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     captured = {}
 
@@ -655,6 +676,59 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
         {"role": "assistant", "text": "root answer"},
     ]
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
+
+
+def test_session_resume_restores_requested_business_scope(monkeypatch):
+    created_sessions: list[str] = []
+
+    class FakeDB:
+        def get_session(self, target):
+            return {"id": target}
+
+        def reopen_session(self, target):
+            return None
+
+        def get_messages_as_conversation(self, target, include_ancestors=False):
+            return []
+
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(model="test"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda agent: {"model": "test", "tools": {}, "skills": {}},
+    )
+
+    def fake_init_session(sid, key, agent, history, cols=80):
+        created_sessions.append(sid)
+        server._sessions[sid] = _session(agent=agent, session_key=key, history=list(history))
+
+    monkeypatch.setattr(server, "_init_session", fake_init_session)
+    monkeypatch.setattr(server, "_takyon_can_access_business", lambda session, slug: slug == "mathify")
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.resume",
+                "params": {
+                    "session_id": "tip",
+                    "_takyon_boot_business": "Mathify",
+                },
+            }
+        )
+        resumed_sid = resp["result"]["session_id"]
+        assert server._sessions[resumed_sid]["takyon_current_business"] == "mathify"
+    finally:
+        for sid in created_sessions:
+            server._sessions.pop(sid, None)
 
 
 def test_status_callback_emits_kind_and_text():

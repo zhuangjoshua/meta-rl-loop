@@ -59,32 +59,6 @@ function backgroundRunProgress(
     const progress = liveProgress(payload.status, payload.detail);
     if (progress) return progress;
   }
-
-  const overview = workspace?.overview;
-  if (!overview || typeof overview !== "object") {
-    return null;
-  }
-  const currentAction = (overview as Record<string, unknown>).current_action;
-  if (currentAction && typeof currentAction === "object") {
-    const payload = currentAction as Record<string, unknown>;
-    const progress = liveProgress(payload.status, payload.detail, payload.label);
-    if (progress) return progress;
-  }
-  const ceoLoop = (overview as Record<string, unknown>).ceo_loop;
-  if (ceoLoop && typeof ceoLoop === "object") {
-    const payload = ceoLoop as Record<string, unknown>;
-    const progress = liveProgress(payload.status, payload.detail, payload.next_action, payload.headline);
-    if (progress) return progress;
-  }
-  const tasks = (overview as Record<string, unknown>).tasks;
-  if (Array.isArray(tasks)) {
-    for (const task of tasks) {
-      if (!task || typeof task !== "object") continue;
-      const payload = task as Record<string, unknown>;
-      const progress = liveProgress(payload.status, payload.detail, payload.label);
-      if (progress) return progress;
-    }
-  }
   return null;
 }
 
