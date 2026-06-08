@@ -161,6 +161,18 @@ export const api = {
     fetchJSON<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits`,
     ),
+  setTakyonBusinessChannelCreditBudgets: (
+    slug: string,
+    allocations: Record<"x" | "meta" | "reddit", number>,
+  ) =>
+    fetchJSON<TakyonBusinessCreativeCreditsResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/budgets`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allocations }),
+      },
+    ),
   getTakyonBusinessCreativeCreditPacks: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditPacksResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/packs`,
@@ -679,7 +691,21 @@ export interface TakyonBusinessCreativeCreditsResponse {
   business_slug: string;
   balance_credits?: number;
   reserved_credits?: number;
+  channels?: Record<string, TakyonBusinessCreativeCreditChannelBudget>;
+  channel_budgets?: Record<string, TakyonBusinessCreativeCreditChannelBudget>;
+  total_allocated_credits?: number;
+  total_used_credits?: number;
+  budget_capacity_credits?: number;
+  unallocated_credits?: number;
+  unbucketed_used_credits?: number;
   reason?: string;
+}
+
+export interface TakyonBusinessCreativeCreditChannelBudget {
+  allocated_credits?: number;
+  used_credits?: number;
+  reserved_credits?: number;
+  remaining_credits?: number;
 }
 
 export interface TakyonBusinessCreativeCreditPack {
