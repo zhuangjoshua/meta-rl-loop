@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { TakyonBusinessTractionResponse, TakyonBusinessWorkspaceResponse } from "@/lib/api";
+import type {
+  TakyonBusinessCreativeCreditsResponse,
+  TakyonBusinessTractionResponse,
+  TakyonBusinessWorkspaceResponse,
+} from "@/lib/api";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
@@ -267,6 +271,7 @@ function ProductPreview({
 export function Product({
   business,
   workspace,
+  creativeCredits,
   previewUrl,
   traction,
   tractionRange,
@@ -282,6 +287,7 @@ export function Product({
 }: {
   business: LitebulbBusiness;
   workspace: TakyonBusinessWorkspaceResponse | null;
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   previewUrl: string;
   traction: TakyonBusinessTractionResponse | null;
   tractionRange: "D" | "W" | "M" | "Y";
@@ -295,11 +301,15 @@ export function Product({
   onSendPrompt: (text: string) => void;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
-  const [tab, setTab] = useState<TabKey>("product");
+  const [tab, setTab] = useState<TabKey>("company");
   const [chatOpen, setChatOpen] = useState(true);
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
+
+  useEffect(() => {
+    setTab("company");
+  }, [business.slug]);
 
   return (
     <div className="lb-view lb-product">
@@ -332,6 +342,7 @@ export function Product({
             <CompanyTab
               business={business}
               workspace={workspace}
+              creativeCredits={creativeCredits}
               traction={traction}
               tractionRange={tractionRange}
               onTractionRangeChange={onTractionRangeChange}

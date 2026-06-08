@@ -1,8 +1,12 @@
-import { useMemo, useState } from "react";
-import type {
-  TakyonBusinessTractionPoint,
-  TakyonBusinessTractionResponse,
-  TakyonBusinessWorkspaceResponse,
+import { useCallback, useMemo, useState } from "react";
+import {
+  TAKYON_BASE_PATH,
+  api,
+  type TakyonBusinessCreativeCreditsResponse,
+  type TakyonBusinessFileReadResponse,
+  type TakyonBusinessTractionPoint,
+  type TakyonBusinessTractionResponse,
+  type TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
 import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import "./companytab.css";
@@ -13,16 +17,25 @@ const S = (d: string, w = 15) => (
 
 const I = {
   doc: S("M4 1.6h5l3 3V14.4H4zM9 1.6V4.6h3"),
+  ext: S("M9 3h4v4M13 3l-6 6M11 9.5V13H3V5h3.5"),
   mail: S("M2 4h12v8H2zM2.5 4.5L8 8.5l5.5-4"),
   mega: S("M2.5 6.4v3.2l7.5 2.9V3.5zM10 5.4a2.6 2.6 0 010 5.2"),
   play: <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.4l8 4.6-8 4.6z" /></svg>,
   reply: S("M2.5 3.6h11v6.2H6.7L4 12.2V9.8H2.5z", 14),
   rt: S("M4.5 5L3 6.5 4.5 8M3 6.5h7.5a1.5 1.5 0 011.5 1.5v1M11.5 11l1.5-1.5L11.5 8M13 9.5H5.5A1.5 1.5 0 014 8V7", 14),
   like: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 13.7S2.6 10.3 2.6 6.5A2.6 2.6 0 018 4a2.6 2.6 0 015.4 2.5c0 3.8-5.4 7.2-5.4 7.2z" /></svg>,
+  close: S("M4 4l8 8M12 4l-8 8"),
 };
 
 type Metric = "revenue" | "users" | "usage";
 type DistTab = "x" | "video" | "ads" | "email";
+
+type DocumentPreviewState = {
+  output: Record<string, unknown>;
+  file: TakyonBusinessFileReadResponse | null;
+  loading: boolean;
+  error: string;
+};
 
 const METRICS: Array<{ key: Metric; label: string; prefix: string }> = [
   { key: "revenue", label: "Revenue", prefix: "$" },
@@ -36,6 +49,9 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
   M: "this month",
   Y: "this year",
 };
+
+const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
+const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -72,6 +88,141 @@ function metricValue(point: TakyonBusinessTractionPoint, metric: Metric) {
 
 function seriesForMetric(points: TakyonBusinessTractionPoint[], metric: Metric) {
   return points.map((point) => metricValue(point, metric));
+}
+
+function readInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.round(number));
+}
+
+function pickFirstInt(...values: unknown[]) {
+  for (const value of values) {
+    const next = readInt(value);
+    if (next !== null) return next;
+  }
+  return null;
+}
+
+function statusLabel(value: unknown) {
+  const status = asText(value).toLowerCase();
+  if (!status) return "idle";
+  if (status === "published_local" || status === "suppressed_test_mode") return "local preview";
+  if (status === "draft_only") return "draft ready";
+  if (status === "created_paused") return "paused";
+  if (status === "activated" || status === "externally_launched" || status === "live") return "live";
+  return status.replace(/_/g, " ");
+}
+
+function outputSuffix(path: string) {
+  const clean = asText(path).toLowerCase();
+  const index = clean.lastIndexOf(".");
+  return index >= 0 ? clean.slice(index) : "";
+}
+
+function buildAssetUrl(slug: string, path: string) {
+  return `${TAKYON_BASE_PATH}/api/takyon/businesses/${encodeURIComponent(slug)}/asset?path=${encodeURIComponent(path)}`;
+}
+
+function channelAllocatedCredits(channel: Record<string, unknown>) {
+  const campaigns = asList(channel.campaigns);
+  const latestCampaign = asRecord(campaigns[0]);
+  const latestJob = asRecord(channel.latest_job);
+  const direct = pickFirstInt(
+    channel.allocated_credits,
+    channel.allocation_credits,
+    channel.credits_allocated,
+    channel.budget_credits,
+    channel.channel_budget_credits,
+    channel.creative_credit_allocation,
+    channel.requested_credits,
+    channel.reserved_credits,
+    asRecord(channel.allocation).credits,
+    asRecord(channel.budget).credits,
+    asRecord(channel.channel_budget).credits,
+    latestCampaign.allocated_credits,
+    latestCampaign.allocation_credits,
+    latestCampaign.credits_allocated,
+    latestCampaign.requested_credits,
+    latestCampaign.reserved_credits,
+    latestJob.allocated_credits,
+    latestJob.allocation_credits,
+    latestJob.requested_credits,
+    latestJob.reserved_credits,
+  );
+  if (direct !== null) return direct;
+  const campaignTotal = campaigns.reduce((sum, campaign) => {
+    const next = pickFirstInt(
+      campaign.allocated_credits,
+      campaign.allocation_credits,
+      campaign.credits_allocated,
+      campaign.requested_credits,
+      campaign.reserved_credits,
+      campaign.credits_charged,
+    );
+    return sum + (next || 0);
+  }, 0);
+  if (campaignTotal > 0) return campaignTotal;
+  return pickFirstInt(
+    channel.credits_charged,
+    latestCampaign.credits_charged,
+    latestJob.credits_charged,
+    latestJob.requested_credits,
+  ) || 0;
+}
+
+function channelStatLine(channelKey: "x" | "meta" | "reddit", channel: Record<string, unknown>) {
+  if (channelKey === "x") {
+    const pieces: string[] = [];
+    const publishedCount = readInt(channel.published_count) || 0;
+    if (publishedCount > 0) pieces.push(`${formatCount(publishedCount)} posts`);
+    const charged = pickFirstInt(channel.credits_charged);
+    if (charged) pieces.push(`${charged} credits charged`);
+    const status = statusLabel(channel.status);
+    if (!pieces.length || status !== "idle") pieces.push(status);
+    return pieces.join(" · ");
+  }
+  const latestCampaign = asRecord(asList(channel.campaigns)[0]);
+  const latestMetrics = asRecord(latestCampaign.latest_metrics);
+  const pieces: string[] = [];
+  const campaignCount = readInt(channel.campaign_count) || 0;
+  if (campaignCount > 0) pieces.push(`${formatCount(campaignCount)} campaign${campaignCount === 1 ? "" : "s"}`);
+  const impressions = readInt(latestMetrics.impressions);
+  if (impressions) pieces.push(`${formatCount(impressions)} impressions`);
+  const clicks = readInt(latestMetrics.clicks);
+  if (clicks) pieces.push(`${formatCount(clicks)} clicks`);
+  const charged = pickFirstInt(channel.credits_charged, latestCampaign.credits_charged);
+  if (charged) pieces.push(`${charged} credits charged`);
+  const status = statusLabel(latestCampaign.status || channel.status);
+  if (!pieces.length || status !== "idle") pieces.push(status);
+  return pieces.join(" · ");
+}
+
+function Modal({
+  title,
+  sub,
+  wide,
+  onClose,
+  children,
+}: {
+  title: string;
+  sub?: React.ReactNode;
+  wide?: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="lb-tmod-scrim" onClick={onClose}>
+      <div className={`lb-tmod${wide ? " lb-tmod--wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
+        <header className="lb-tmod__head">
+          <h3 className="lb-tmod__title">{title}{sub && <span className="lb-tmod__sub2">{sub}</span>}</h3>
+          <button className="lb-tmod__x" type="button" onClick={onClose} aria-label="Close">{I.close}</button>
+        </header>
+        <div className="lb-tmod__body">{children}</div>
+      </div>
+    </div>
+  );
 }
 
 function Chart({ values, up }: { values: number[]; up: boolean }) {
@@ -121,7 +272,7 @@ function Traction({
       <div className="lb-trac__top">
         <div className="lb-seg lb-trac__metrics">
           {METRICS.map((item) => (
-            <button key={item.key} className={metric === item.key ? "is-on" : ""} onClick={() => setMetric(item.key)}>
+            <button key={item.key} className={metric === item.key ? "is-on" : ""} type="button" onClick={() => setMetric(item.key)}>
               {item.label}
             </button>
           ))}
@@ -135,7 +286,7 @@ function Traction({
       <Chart values={values} up={up} />
       <div className="lb-seg lb-trac__ranges">
         {(["D", "W", "M", "Y"] as const).map((item) => (
-          <button key={item} className={range === item ? "is-on" : ""} onClick={() => onRangeChange(item)}>
+          <button key={item} className={range === item ? "is-on" : ""} type="button" onClick={() => onRangeChange(item)}>
             {item}
           </button>
         ))}
@@ -176,80 +327,172 @@ function Activity({ tasks }: { tasks: Array<Record<string, unknown>> }) {
   );
 }
 
-function ChannelBudget({ workspace }: { workspace: TakyonBusinessWorkspaceResponse | null }) {
+function ChannelBudget({
+  workspace,
+  creativeCredits,
+}: {
+  workspace: TakyonBusinessWorkspaceResponse | null;
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
+}) {
   const overview = asRecord(workspace?.overview);
   const outreach = asRecord(asRecord(asRecord(overview.artifacts).outreach).channels);
-  const cronJobs = asList(overview.cron);
-  const metaCampaigns = asList(asRecord(outreach.meta).campaigns);
-  const redditCampaigns = asList(asRecord(outreach.reddit).campaigns);
+  const xChannel = asRecord(outreach.x);
+  const metaChannel = asRecord(outreach.meta);
+  const redditChannel = asRecord(outreach.reddit);
   const rows = [
     {
       key: "x",
       label: "X",
-      value: `${formatCount(Number(asRecord(outreach.x).published_count || 0))} posts`,
-      note: asText(asRecord(outreach.x).status) || "idle",
       color: "#1d9bf0",
+      value: channelAllocatedCredits(xChannel),
+      stat: channelStatLine("x", xChannel),
     },
     {
       key: "meta",
       label: "Meta ads",
-      value: metaCampaigns[0] ? `$${Number(metaCampaigns[0].actual_daily_budget_usd || metaCampaigns[0].daily_budget_usd || 0)}/day` : "No campaigns",
-      note: asText(metaCampaigns[0]?.status) || "idle",
-      color: "#2563eb",
+      color: "#1d6ff0",
+      value: channelAllocatedCredits(metaChannel),
+      stat: channelStatLine("meta", metaChannel),
     },
     {
       key: "reddit",
       label: "Reddit ads",
-      value: redditCampaigns[0] ? `$${Number(redditCampaigns[0].actual_daily_budget_usd || redditCampaigns[0].daily_budget_usd || 0)}/day` : "No campaigns",
-      note: asText(redditCampaigns[0]?.status) || "idle",
       color: "#fb8024",
+      value: channelAllocatedCredits(redditChannel),
+      stat: channelStatLine("reddit", redditChannel),
     },
-  ];
+  ] as const;
+  const totalAllocated = rows.reduce((sum, row) => sum + row.value, 0);
+  const availableCredits = readInt(creativeCredits?.balance_credits) || 0;
+  const sliderMax = Math.max(100, totalAllocated, availableCredits, ...rows.map((row) => row.value));
 
   return (
     <section className="lb-card lb-bud">
-      <div className="lb-h">Channels<span className="lb-h__c">read-only current allocation</span></div>
-      <div className="lb-bud__list">
+      <div className="lb-h">Channel budget<span className="lb-h__c">{totalAllocated.toLocaleString()} credits allocated</span></div>
+      <div className="lb-bud__bar" aria-hidden="true">
         {rows.map((row) => (
-          <div key={row.key} className="lb-alloc">
-            <div className="lb-alloc__top"><span className="lb-alloc__dot" style={{ background: row.color }} /><span className="lb-alloc__name">{row.label}</span><span className="lb-alloc__val">{row.value}</span></div>
-            <div className="lb-alloc__stat">{row.note}</div>
-          </div>
+          <span
+            key={row.key}
+            style={{
+              width: `${totalAllocated > 0 ? (row.value / totalAllocated) * 100 : 0}%`,
+              background: row.color,
+            }}
+          />
         ))}
       </div>
-      <div className="lb-set__rule" />
-      <div className="lb-h">Wake schedule</div>
       <div className="lb-bud__list">
-        {cronJobs.slice(0, 3).map((job, index) => (
-          <div key={asText(job.id) || index} className="lb-alloc">
-            <div className="lb-alloc__top"><span className="lb-alloc__name">{asText(job.name) || "Scheduled wake"}</span><span className="lb-alloc__val">{asText(job.state) || "scheduled"}</span></div>
-            <div className="lb-alloc__stat">{asText(job.schedule_display) || asText(asRecord(job.schedule).display) || "Scheduled CEO check"}</div>
-          </div>
-        ))}
-        {!cronJobs.length && <div className="lb-empty">No wake schedule recorded yet.</div>}
+        {rows.map((row) => {
+          const progress = sliderMax > 0 ? (row.value / sliderMax) * 100 : 0;
+          return (
+            <div key={row.key} className="lb-alloc">
+              <div className="lb-alloc__top">
+                <span className="lb-alloc__dot" style={{ background: row.color }} />
+                <span className="lb-alloc__name">{row.label}</span>
+                <span className="lb-alloc__val">{row.value.toLocaleString()}<i> credits</i></span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={sliderMax}
+                step={1}
+                value={row.value}
+                disabled
+                aria-label={`${row.label} credits allocated`}
+                style={{
+                  ["--p" as string]: `${progress}%`,
+                  ["--fillc" as string]: row.color,
+                  ["--thumbc" as string]: row.color,
+                }}
+              />
+              <div className="lb-alloc__stat">{row.stat}</div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 }
 
-function Documents({ outputs }: { outputs: Array<Record<string, unknown>> }) {
+function Documents({
+  business,
+  outputs,
+}: {
+  business: LitebulbBusiness;
+  outputs: Array<Record<string, unknown>>;
+}) {
+  const [preview, setPreview] = useState<DocumentPreviewState | null>(null);
   const visible = outputs.slice(0, 6);
+
+  const openDocument = useCallback(async (output: Record<string, unknown>) => {
+    const path = asText(output.path);
+    if (!path) return;
+    const suffix = outputSuffix(path);
+    if (MEDIA_OUTPUT_SUFFIXES.has(suffix)) {
+      window.open(buildAssetUrl(business.slug, path), "_blank", "noopener,noreferrer");
+      return;
+    }
+    setPreview({ output, file: null, loading: true, error: "" });
+    try {
+      const file = await api.getTakyonBusinessFile(business.slug, path);
+      setPreview({ output, file, loading: false, error: "" });
+    } catch (error) {
+      setPreview({
+        output,
+        file: null,
+        loading: false,
+        error: error instanceof Error ? error.message : "Failed to load file preview.",
+      });
+    }
+  }, [business.slug]);
+
   return (
-    <section className="lb-card lb-docs">
-      <div className="lb-h">Documents<span className="lb-h__c">{outputs.length} generated</span></div>
-      <div className="lb-docs__grid">
-        {visible.map((output, index) => (
-          <div key={asText(output.id) || index} className="lb-docrow">
-            <span className="lb-docrow__ic">{I.doc}</span>
-            <span className="lb-docrow__main">
-              <span className="lb-docrow__name">{asText(output.title) || asText(output.path) || "Output"}</span>
-              <span className="lb-docrow__meta">{asText(output.detail) || asText(output.kind) || "Business artifact"}</span>
-            </span>
+    <>
+      <section className="lb-card lb-docs">
+        <div className="lb-h">Documents<span className="lb-h__c">{outputs.length} generated</span></div>
+        <div className="lb-docs__grid">
+          {visible.map((output, index) => (
+            <button
+              key={asText(output.id) || index}
+              type="button"
+              className="lb-docrow"
+              onClick={() => void openDocument(output)}
+            >
+              <span className="lb-docrow__ic">{I.doc}</span>
+              <span className="lb-docrow__main">
+                <span className="lb-docrow__name">{asText(output.title) || asText(output.path) || "Output"}</span>
+                <span className="lb-docrow__meta">{asText(output.detail) || asText(output.kind) || "Business artifact"}</span>
+              </span>
+              <span className="lb-docrow__open" aria-hidden="true">{I.ext}</span>
+            </button>
+          ))}
+          {!visible.length && <div className="lb-empty">No deliverables yet.</div>}
+        </div>
+      </section>
+
+      {preview && (
+        <Modal
+          title={asText(preview.output.title) || asText(preview.output.path) || "Document"}
+          sub={asText(preview.output.path)}
+          wide
+          onClose={() => setPreview(null)}
+        >
+          <div className="lb-docview">
+            {preview.loading && <div className="lb-empty">Loading file preview…</div>}
+            {!preview.loading && preview.error && <div className="lb-docview__error">{preview.error}</div>}
+            {!preview.loading && !preview.error && (
+              <>
+                <pre className={`lb-docview__code${TEXT_OUTPUT_SUFFIXES.has(outputSuffix(asText(preview.file?.path || preview.output.path))) ? "" : " is-plain"}`}>
+                  {asText(preview.file?.content) || "File is empty."}
+                </pre>
+                {preview.file?.truncated && (
+                  <div className="lb-docview__note">Preview truncated to the first portion of the file.</div>
+                )}
+              </>
+            )}
           </div>
-        ))}
-        {!visible.length && <div className="lb-empty">No deliverables yet.</div>}
-      </div>
-    </section>
+        </Modal>
+      )}
+    </>
   );
 }
 
@@ -298,13 +541,11 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
   const posts = asList(overview.posts);
   const outputs = asList(workspace?.outputs);
   const outreachChannels = asRecord(asRecord(asRecord(overview.artifacts).outreach).channels);
-  const xItems = [
-    ...posts.filter((item) => {
-      const source = asText(item.source).toLowerCase();
-      return source === "x" || source.startsWith("x-") || source.includes("twitter");
-    }),
-    ...asList(asRecord(outreachChannels.x).items),
-  ];
+  const xChannelItems = asList(asRecord(outreachChannels.x).items);
+  const xItems = xChannelItems.length ? xChannelItems : posts.filter((item) => {
+    const source = asText(item.source).toLowerCase();
+    return source === "x" || source.startsWith("x-") || source.includes("twitter");
+  });
   const videoItems = outputs.filter((item) => {
     const kind = asText(item.kind).toLowerCase();
     return kind === "video" || (kind === "image" && asText(item.detail).toLowerCase().includes("asset"));
@@ -324,7 +565,7 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
         Distribution<span className="lb-h__c">current channel outputs for {business.name}</span>
         <div className="lb-seg lb-dist__tabs">
           {(["x", "video", "ads", "email"] as DistTab[]).map((item) => (
-            <button key={item} className={tab === item ? "is-on" : ""} onClick={() => setTab(item)}>
+            <button key={item} className={tab === item ? "is-on" : ""} type="button" onClick={() => setTab(item)}>
               {item === "x" ? "Posts" : item === "video" ? "Video" : item === "ads" ? "Ads" : "Email"}
             </button>
           ))}
@@ -373,12 +614,14 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
 export function CompanyTab({
   business,
   workspace,
+  creativeCredits,
   traction,
   tractionRange,
   onTractionRangeChange,
 }: {
   business: LitebulbBusiness;
   workspace: TakyonBusinessWorkspaceResponse | null;
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   traction: TakyonBusinessTractionResponse | null;
   tractionRange: "D" | "W" | "M" | "Y";
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
@@ -393,10 +636,10 @@ export function CompanyTab({
         <Traction traction={traction} range={tractionRange} onRangeChange={onTractionRangeChange} />
         <div className="lb-comp__fold">
           <Activity tasks={tasks} />
-          <ChannelBudget workspace={workspace} />
+          <ChannelBudget workspace={workspace} creativeCredits={creativeCredits} />
         </div>
         <Distribution business={business} workspace={workspace} />
-        <Documents outputs={outputs} />
+        <Documents business={business} outputs={outputs} />
       </div>
     </div>
   );

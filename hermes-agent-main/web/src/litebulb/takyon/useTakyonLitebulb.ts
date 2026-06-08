@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  type TakyonBusinessCreativeCreditsResponse,
   type TakyonBusinessTractionResponse,
   type TakyonBusinessWorkspaceResponse,
   type TakyonOperatorAccountResponse,
@@ -108,6 +109,7 @@ export function useTakyonLitebulb() {
   const [account, setAccount] = useState<TakyonOperatorAccountResponse | null>(null);
   const [activeBusiness, setActiveBusiness] = useState<LitebulbBusiness | null>(null);
   const [workspace, setWorkspace] = useState<TakyonBusinessWorkspaceResponse | null>(null);
+  const [creativeCredits, setCreativeCredits] = useState<TakyonBusinessCreativeCreditsResponse | null>(null);
   const [sitePreviewUrl, setSitePreviewUrl] = useState("");
   const [tractionRange, setTractionRange] = useState<"D" | "W" | "M" | "Y">("M");
   const [traction, setTraction] = useState<TakyonBusinessTractionResponse | null>(null);
@@ -154,6 +156,16 @@ export function useTakyonLitebulb() {
     ]);
     setWorkspace(workspacePayload);
     setSitePreviewUrl(trimText(previewPayload.url));
+  }, []);
+
+  const loadCreativeCredits = useCallback(async (slug: string) => {
+    if (!slug) return;
+    try {
+      const payload = await api.getTakyonBusinessCreativeCredits(slug);
+      setCreativeCredits(payload);
+    } catch {
+      setCreativeCredits(null);
+    }
   }, []);
 
   const loadTraction = useCallback(async (slug: string, range: "D" | "W" | "M" | "Y") => {
@@ -318,9 +330,10 @@ export function useTakyonLitebulb() {
     await Promise.all([
       ensureSession(businessSlug),
       loadWorkspace(businessSlug),
+      loadCreativeCredits(businessSlug),
       loadTraction(businessSlug, tractionRange),
     ]);
-  }, [businesses, ensureSession, loadTraction, loadWorkspace, tractionRange]);
+  }, [businesses, ensureSession, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
 
   const sendPrompt = useCallback(async (text: string) => {
     const value = trimText(text);
@@ -398,6 +411,7 @@ export function useTakyonLitebulb() {
       });
       await Promise.all([
         loadWorkspace(businessSlug).catch(() => undefined),
+        loadCreativeCredits(businessSlug).catch(() => undefined),
         loadTraction(businessSlug, tractionRange).catch(() => undefined),
       ]);
       setBuildState((state) => ({
@@ -419,7 +433,7 @@ export function useTakyonLitebulb() {
       setSubmitting(false);
       return "";
     }
-  }, [ensureGateway, ensureSession, loadHome, loadTraction, loadWorkspace, tractionRange]);
+  }, [ensureGateway, ensureSession, loadCreativeCredits, loadHome, loadTraction, loadWorkspace, tractionRange]);
 
   const openBillingPortal = useCallback(async () => {
     if (billingBusy) return;
@@ -461,6 +475,7 @@ export function useTakyonLitebulb() {
     setAccount(null);
     setActiveBusiness(null);
     setWorkspace(null);
+    setCreativeCredits(null);
     setSitePreviewUrl("");
     setTraction(null);
     setChatMessages([]);
@@ -474,6 +489,7 @@ export function useTakyonLitebulb() {
     if (!activeBusiness?.slug || auth.status !== "in") return;
     workspacePollRef.current = window.setInterval(() => {
       void loadWorkspace(activeBusiness.slug);
+      void loadCreativeCredits(activeBusiness.slug);
       void loadTraction(activeBusiness.slug, tractionRange);
     }, 8000);
     return () => {
@@ -482,7 +498,7 @@ export function useTakyonLitebulb() {
         workspacePollRef.current = null;
       }
     };
-  }, [activeBusiness?.slug, auth.status, loadTraction, loadWorkspace, tractionRange]);
+  }, [activeBusiness?.slug, auth.status, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
 
   const walletBalance = useMemo(() => {
     if (!account?.available) return null;
@@ -498,6 +514,7 @@ export function useTakyonLitebulb() {
     walletBalance,
     activeBusiness,
     workspace,
+    creativeCredits,
     sitePreviewUrl,
     traction,
     tractionRange,

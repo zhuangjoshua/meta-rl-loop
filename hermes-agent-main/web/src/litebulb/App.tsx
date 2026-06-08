@@ -59,6 +59,7 @@ function Router() {
     account,
     activeBusiness,
     workspace,
+    creativeCredits,
     sitePreviewUrl,
     traction,
     tractionRange,
@@ -181,6 +182,7 @@ function Router() {
       <Product
         business={activeBusiness}
         workspace={workspace}
+        creativeCredits={creativeCredits}
         previewUrl={sitePreviewUrl}
         traction={traction}
         tractionRange={tractionRange}

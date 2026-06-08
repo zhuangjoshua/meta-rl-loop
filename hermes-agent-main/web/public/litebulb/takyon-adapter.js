@@ -85,6 +85,7 @@
     historyPollTimer: null,
     historyPollMs: 0,
     historySeen: new Set(),
+    historyAssistantReplayLocked: false,
     historyRunning: false,
     refreshTimer: null,
     refreshController: null,
@@ -903,6 +904,19 @@
     if (raw === "business_claude_agent_task") return clean || "Running the delegated product/site worker.";
     if (raw === "skill_view") return clean || "Loading the most relevant skill.";
     return clean || friendlyToolLabel(name, name || "tool");
+  }
+
+  function toolFileActivityList(payload) {
+    if (!payload || !Array.isArray(payload.file_activity)) return [];
+    return payload.file_activity
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const action = String(item.action || "").trim();
+        const path = String(item.path || "").trim();
+        if (!action || !path) return null;
+        return { action, path };
+      })
+      .filter(Boolean);
   }
 
   function friendlyActivityHeadline(phase, message, target) {
@@ -1736,14 +1750,19 @@
     }
   }
 
+  function liveTurnOwnsActivity() {
+    return !!(RT.live && LIVE.activityTurnStartedAt && LIVE.historyRunning);
+  }
+
   function syncOverviewActivity(snapshot) {
     if (!snapshot) return;
     const overview = snapshot.overview || {};
     const backgroundRun = snapshot.background_run || {};
+    const activeLiveTurn = liveTurnOwnsActivity();
 
     const backgroundDetail = String(backgroundRun.detail || "").trim();
     if (backgroundDetail && backgroundDetail !== LIVE.lastBackgroundDetail) {
-      if (RT.live && LIVE.activityTurnStartedAt) {
+      if (RT.live && LIVE.activityTurnStartedAt && !activeLiveTurn) {
         setActivitySummary({
           phase: "running",
           headline: friendlyActivityHeadline("running", backgroundDetail, ""),
@@ -1776,7 +1795,7 @@
       const summary = currentAction.label || currentAction.detail || "Business is synced.";
       const detail = blocker || currentAction.detail;
       if (RT.live) {
-        if (LIVE.activityTurnStartedAt) {
+        if (LIVE.activityTurnStartedAt && !activeLiveTurn) {
           const note = cleanActivityText(detail || summary);
           setActivitySummary({
             phase: /recover|block|fix|error/i.test(statusLabel) ? "fixing" : /done|sync|ready/i.test(statusLabel) ? "done" : "running",
@@ -2391,6 +2410,7 @@
     if (value === "published_local" || value === "suppressed_test_mode") return "local preview";
     if (value === "draft_only") return "draft ready";
     if (value === "created_paused") return "paused";
+    if (value === "activated") return "live";
     if (value === "ready_for_manual_launch") return "manual handoff";
     if (value === "externally_launched") return "live";
     if (value === "queued") return "queued";
@@ -2404,6 +2424,7 @@
       label: String(channel.label || outreachChannelLabel(key)).trim(),
       status: String(channel.status || "missing").trim() || "missing",
       updatedAt: String(channel.updated_at || "").trim(),
+      primaryActionLabel: String(channel.primary_action_label || "start").trim() || "start",
       draftPath: String(channel.draft_path || "").trim(),
       items: Array.isArray(channel.items) ? channel.items : [],
       campaigns: Array.isArray(channel.campaigns) ? channel.campaigns : [],
@@ -2423,6 +2444,12 @@
       reddit: normalizeOutreachChannel("reddit", channels.reddit),
       meta: normalizeOutreachChannel("meta", channels.meta),
     };
+  }
+
+  function outreachPrimaryActionLabel(channel) {
+    const raw = String(channel && channel.primaryActionLabel || "").trim().toLowerCase();
+    if (!raw) return "start";
+    return raw;
   }
 
   function outreachMetricsSummary(metrics) {
@@ -2592,7 +2619,7 @@
       <div class="lab">${esc(channel.label)} lane</div>
       <div class="meta" style="margin:6px 0 11px">${esc(outreachChannelSummary(channel))}</div>
       <div class="wallet-inline" style="margin-bottom:12px">
-        <button class="cbtn go" data-channel-start="${esc(channel.key)}" type="button">start</button>
+        <button class="cbtn go" data-channel-start="${esc(channel.key)}" type="button">${esc(outreachPrimaryActionLabel(channel))}</button>
         <span class="wallet-note" id="outreach-channel-error"></span>
       </div>
       ${renderOutreachJobCard(channel.latestJob)}
@@ -2692,7 +2719,7 @@
           <div class="chan-top"><span class="chan-nm">${esc(channel.label)}</span><span class="chan-st${stClass}">${esc(outreachStatusLabel(status))}</span></div>
           <div class="meta" style="margin-top:6px">${esc(outreachChannelSummary(channel))}</div>
           <div class="wallet-inline" style="margin-top:8px">
-            <button class="cbtn go" data-channel-start="${key}" type="button">start</button>
+            <button class="cbtn go" data-channel-start="${key}" type="button">${esc(outreachPrimaryActionLabel(channel))}</button>
           </div>
         </div>`;
       }).join("")}
@@ -2849,6 +2876,7 @@
     LIVE.runtimeSeen = new Set();
     LIVE.historyRunning = false;
     LIVE.historySeen = new Set();
+    LIVE.historyAssistantReplayLocked = false;
     LIVE.historyPollMs = 0;
     LIVE.canonicalWorkspaceAt = 0;
   }
@@ -3242,6 +3270,7 @@
     container.innerHTML = `<div class="who">litebulb · ceo</div><div class="bubble"></div>`;
     msgs().appendChild(container);
     LIVE.assistantBubble = $(".bubble", container);
+    placeActivityCardAfterLatestMessage();
     scrollChat();
     return LIVE.assistantBubble;
   }
@@ -3291,6 +3320,7 @@
     LIVE.assistantText = "";
     LIVE.assistantDeltaSeen = false;
     LIVE.assistantBubble = null;
+    placeActivityCardAfterLatestMessage();
     if (opts.clearStarterActivity) removeActivityCard();
     scrollChat();
   }
@@ -3309,7 +3339,10 @@
         return;
       }
       if (role === "assistant") {
-        if (!allowAssistantReplay) return;
+        if (!allowAssistantReplay) {
+          if (opts.rememberSuppressedAssistant) rememberHistoryMessage("assistant", text);
+          return;
+        }
         finishAssistantText(text);
         return;
       }
@@ -3333,8 +3366,10 @@
       const res = await rpc("session.history", { session_id: LIVE.sessionId }, 10000);
       const wasRunning = LIVE.historyRunning;
       LIVE.historyRunning = Boolean(res && res.running);
+      if (LIVE.historyRunning) LIVE.historyAssistantReplayLocked = true;
       mergeHistoryMessages(res && res.messages, {
-        allowAssistantReplay: !LIVE.historyRunning,
+        allowAssistantReplay: !LIVE.historyRunning && !LIVE.historyAssistantReplayLocked,
+        rememberSuppressedAssistant: LIVE.historyAssistantReplayLocked,
       });
       if (wasRunning && !LIVE.historyRunning && LIVE.activityTurnStartedAt) {
         const messages = Array.isArray(res && res.messages) ? res.messages : [];
@@ -3429,6 +3464,7 @@
     }
     const payload = ev.payload || {};
     if (ev.type === "message.start") {
+      LIVE.historyAssistantReplayLocked = true;
       primeLiveTurnUi();
       LIVE.activeTurnTraceId = `turn:session:${LIVE.sessionId || "live"}:${Date.now()}`;
       upsertLiveTrace({
@@ -3444,10 +3480,12 @@
       return;
     }
     if (ev.type === "message.delta") {
+      LIVE.historyAssistantReplayLocked = true;
       appendAssistantText(payload.text || "");
       return;
     }
     if (ev.type === "message.complete") {
+      LIVE.historyAssistantReplayLocked = true;
       if (LIVE.activeTurnTraceId) {
         const turnStatus = String(payload.status || "").trim().toLowerCase() === "complete" ? "completed" : "failed";
         upsertLiveTrace({
@@ -3559,18 +3597,41 @@
     if (ev.type === "tool.complete") {
       const key = String(payload.tool_id || "");
       const ref = LIVE.toolEls.get(key);
+      const fileActivity = toolFileActivityList(payload);
+      const primaryFileActivity = fileActivity[0] || null;
+      const extraFileCount = Math.max(0, fileActivity.length - 1);
+      const completedLabel = primaryFileActivity
+        ? primaryFileActivity.action
+        : friendlyToolLabel(payload.name || ref?.toolName || "", payload.summary || payload.name || "tool");
+      const completedDetail = primaryFileActivity
+        ? `${primaryFileActivity.path}${extraFileCount > 0 ? ` (+${extraFileCount} more)` : ""}`
+        : friendlyToolNote(payload.name || ref?.toolName || "", payload.summary || "");
       if (ref) {
         upsertActivityItem(String(ref.entryKey || `tool:${key}`), {
-          label: friendlyToolLabel(payload.name || ref.toolName || "", payload.summary || payload.name || "tool"),
-          detail: friendlyToolNote(payload.name || ref.toolName || "", payload.summary || ""),
+          label: completedLabel,
+          detail: completedDetail,
           status: "completed",
         });
       }
       if (key) {
         const trace = liveToolTrace(payload, "completed") || {};
-        if (String(payload.summary || "").trim()) trace.detail = String(payload.summary || "").trim();
+        if (primaryFileActivity) {
+          trace.label = completedLabel;
+          trace.detail = completedDetail;
+        } else if (String(payload.summary || "").trim()) {
+          trace.detail = String(payload.summary || "").trim();
+        }
         trace.updated_at = new Date().toISOString();
         upsertLiveTrace(Object.assign({ entry_key: `tool:${key}`, status: "completed" }, trace));
+      }
+      if (primaryFileActivity) {
+        LIVE.activityHasMeaningfulUpdate = true;
+        setActivitySummary({
+          phase: "editing",
+          headline: completedLabel,
+          note: completedDetail,
+          state: "running",
+        });
       }
       scheduleLiveRefresh(150);
       void refreshBusinessData(LIVE.activeBusiness, {
@@ -3817,21 +3878,25 @@
       setStatus("running", "run");
     }
     const sessionPromise = ensureSession(business).catch(() => "");
-    await refreshBusinessData(business, {
+    void refreshBusinessData(business, {
       skipAccount: true,
       skipCredits: true,
       skipDashboardState: true,
       skipBoard: true,
       view: LIVE_WORKSPACE_VIEW,
+    }).catch(() => {
+      /* best effort first paint refresh */
     });
-    const sessionId = await sessionPromise;
-    if (sessionId && LIVE.activeBusiness === business) {
-      await refreshBusinessData(business, {
+    void sessionPromise.then((sessionId) => {
+      if (!sessionId || LIVE.activeBusiness !== business) return;
+      return refreshBusinessData(business, {
         skipAccount: true,
         skipBoard: false,
         view: LIVE_WORKSPACE_VIEW,
       });
-    }
+    }).catch(() => {
+      /* best effort live-session refresh */
+    });
   }
 
   function mountLiveShell(biz) {
@@ -3889,6 +3954,10 @@
     LIVE.assistantBubble = null;
     LIVE.assistantText = "";
     LIVE.assistantDeltaSeen = false;
+    LIVE.historySeen = new Set();
+    LIVE.historyAssistantReplayLocked = false;
+    LIVE.historyRunning = false;
+    LIVE.activityTurnStartedAt = 0;
     msgs().innerHTML = "";
     flushGatewayEventBuffer();
     RT.logBuf = [];

@@ -809,6 +809,74 @@ def test_session_request_reattaches_current_transport_on_reconnect():
         server._sessions.pop("sid", None)
 
 
+def test_on_tool_complete_extracts_file_activity_from_commit_results(monkeypatch):
+    events: list[tuple[str, str, dict]] = []
+    server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload: events.append((event, sid, payload)))
+    monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: True)
+
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "business_write_file",
+            {},
+            json.dumps(
+                {
+                    "success": True,
+                    "results": [
+                        {"action": "artifact.write", "path": "research/market.md"}
+                    ],
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert events
+    event, sid, payload = events[-1]
+    assert event == "tool.complete"
+    assert sid == "sid"
+    assert payload["file_activity"] == [
+        {"action": "file.write", "path": "research/market.md"}
+    ]
+    assert payload["summary"] == "file.write -> research/market.md"
+
+
+def test_on_tool_complete_extracts_workspace_upsert_activity(monkeypatch):
+    events: list[tuple[str, str, dict]] = []
+    server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_emit", lambda event, sid, payload: events.append((event, sid, payload)))
+    monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: True)
+
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-2",
+            "business_create_workspace",
+            {},
+            json.dumps(
+                {
+                    "success": True,
+                    "results": [
+                        {"action": "workspace.upsert", "workspace": "product/site"}
+                    ],
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert events
+    event, sid, payload = events[-1]
+    assert event == "tool.complete"
+    assert sid == "sid"
+    assert payload["file_activity"] == [
+        {"action": "workspace.upsert", "path": "product/site"}
+    ]
+    assert payload["summary"] == "workspace.upsert -> product/site"
+
+
 def test_prompt_context_wraps_plain_text_in_business_scope(monkeypatch):
     server._sessions["sid"] = _session(takyon_current_business="laser-crm")
     calls = {"scope": 0}
@@ -5372,6 +5440,10 @@ def test_business_overview_exposes_modular_outreach_channels(tmp_path):
                 "status": "created_paused",
                 "campaign_name": "Meta launch",
                 "daily_budget_usd": 25,
+                "requested_credits": 3,
+                "credits_charged": 3,
+                "balance_credits": 12,
+                "reserved_credits": 0,
                 "created_at": "2026-06-04T10:00:00Z",
                 "ids": {"campaign_id": "meta-1"},
             }
@@ -5387,6 +5459,10 @@ def test_business_overview_exposes_modular_outreach_channels(tmp_path):
             {
                 "status": "suppressed_test_mode",
                 "campaign_name": "Reddit launch",
+                "requested_credits": 5,
+                "credits_charged": 0,
+                "balance_credits": 12,
+                "reserved_credits": 5,
                 "created_at": "2026-06-04T11:00:00Z",
                 "ids": {"campaign_id": "reddit-1"},
             }
@@ -5471,9 +5547,13 @@ def test_business_overview_exposes_modular_outreach_channels(tmp_path):
     assert channels["x"]["items"][0]["artifact_path"] == "distribution/local-published/x-launch.md"
     assert channels["meta"]["campaign_count"] == 1
     assert channels["meta"]["campaigns"][0]["latest_metrics"]["impressions"] == 120
+    assert channels["meta"]["campaigns"][0]["requested_credits"] == 3
+    assert channels["meta"]["allocated_credits"] == 3
     assert channels["meta"]["latest_job"]["kind"] == "meta.campaign_start"
     assert channels["reddit"]["campaign_count"] == 1
     assert channels["reddit"]["campaigns"][0]["status"] == "suppressed_test_mode"
+    assert channels["reddit"]["campaigns"][0]["reserved_credits"] == 5
+    assert channels["reddit"]["allocated_credits"] == 5
 
 
 def test_workspace_payload_reuses_summary_for_current_and_overview(monkeypatch):
@@ -5631,6 +5711,21 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
             )
             self.conn.execute(
                 """
+                INSERT INTO work_requests (id, business_slug, kind, status, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job-2",
+                    "demo",
+                    "x.publish_outreach",
+                    "completed",
+                    json.dumps({"channel": "x", "provider": "x"}),
+                    "2026-06-04T10:04:00Z",
+                    "2026-06-04T10:06:00Z",
+                ),
+            )
+            self.conn.execute(
+                """
                 INSERT INTO events (id, business_slug, event_type, payload_json, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
@@ -5701,6 +5796,33 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
         def _business_root(self, slug):
             return self.root / "businesses" / slug
 
+        def read(self, *, scope, query, **_kwargs):
+            if scope == "business:demo" and query == "summary":
+                return {
+                    "conversations": {
+                        "threads": [
+                            {
+                                "id": "thread-x-1",
+                                "source": "x",
+                                "title": "Launch thread",
+                                "url": "https://x.com/vaalapp/status/2063725765531701534",
+                                "status": "active",
+                                "created_at": "2026-06-04T10:04:00Z",
+                                "updated_at": "2026-06-04T10:05:00Z",
+                            }
+                        ],
+                        "unresolved": [
+                            {
+                                "thread_id": "thread-x-1",
+                            }
+                        ],
+                    },
+                }
+            return {}
+
+        def _conversation_thread_relpath(self, thread_dict):
+            return "metrics/conversations/x/2063725765531701534.md"
+
     snapshot = server._takyon_business_home_snapshot(_SnapshotStore(tmp_path), "demo")
 
     assert snapshot["current"] == {
@@ -5722,5 +5844,10 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     assert snapshot["overview"]["product"]["latest_check_command"] == "npm run build"
     assert snapshot["overview"]["product"]["latest_check_error"] == "Missing CSS asset manifest"
     assert snapshot["overview"]["product"]["detected_frameworks"] == ["vite"]
+    assert snapshot["overview"]["posts"][0]["url"] == "https://x.com/vaalapp/status/2063725765531701534"
+    assert snapshot["overview"]["artifacts"]["outreach"]["channels"]["x"]["published_count"] == 1
+    assert snapshot["overview"]["artifacts"]["outreach"]["channels"]["x"]["latest_job"]["kind"] == "x.publish_outreach"
+    assert snapshot["overview"]["conversations"]["active_threads"] == 1
+    assert snapshot["overview"]["conversations"]["unresolved_messages"] == 1
     assert any(task["status"] == "running" and task["label"] == "CEO bootstrap" for task in snapshot["overview"]["tasks"])
     assert any(task["status"] == "blocked" and task["label"] == "Product publish blocker" for task in snapshot["overview"]["tasks"])

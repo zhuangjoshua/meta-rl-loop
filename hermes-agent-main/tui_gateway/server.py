@@ -1572,6 +1572,52 @@ def _count_list(obj: object, *path: str) -> int | None:
     return len(cur) if isinstance(cur, list) else None
 
 
+def _tool_file_activity(result: str) -> list[dict[str, str]]:
+    try:
+        data = json.loads(result)
+    except Exception:
+        return []
+
+    def _coerce(item: object) -> dict[str, str] | None:
+        if not isinstance(item, dict):
+            return None
+        action = str(item.get("action") or "").strip()
+        if action in {"artifact.write", "memory.write"}:
+            path = str(item.get("path") or "").strip()
+            if path:
+                return {"action": "file.write", "path": path}
+        if action == "artifact.patch":
+            path = str(item.get("path") or "").strip()
+            if path:
+                return {"action": "file.patch", "path": path}
+        if action == "workspace.upsert":
+            workspace = str(item.get("workspace") or item.get("path") or "").strip()
+            if workspace:
+                return {"action": "workspace.upsert", "path": workspace}
+        return None
+
+    items: list[dict[str, str]] = []
+    if isinstance(data, dict):
+        top_level = _coerce(data)
+        if top_level:
+            items.append(top_level)
+        results = data.get("results")
+        if isinstance(results, list):
+            for raw in results:
+                entry = _coerce(raw)
+                if entry:
+                    items.append(entry)
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        key = (item["action"], item["path"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _tool_summary(name: str, result: str, duration_s: float | None) -> str | None:
     try:
         data = json.loads(result)
@@ -1732,6 +1778,15 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
+    file_activity = _tool_file_activity(result)
+    if file_activity:
+        payload["file_activity"] = file_activity
+        if not payload.get("summary"):
+            primary = file_activity[0]
+            extra = len(file_activity) - 1
+            payload["summary"] = f"{primary['action']} -> {primary['path']}"
+            if extra > 0:
+                payload["summary"] += f" (+{extra} more)"
     if name == "todo":
         try:
             data = json.loads(result)
@@ -5553,6 +5608,12 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
     if not business_slug:
         return {"current": {}, "overview": {}}
 
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
     def as_int(value: Any) -> int:
         try:
             return int(value or 0)
@@ -5561,6 +5622,16 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
 
     def as_text(value: Any) -> str:
         return str(value or "").strip()
+
+    def openable_url(value: Any) -> str:
+        text = as_text(value)
+        if not text:
+            return ""
+        if re.match(r"^(https?://|data:)", text, re.I):
+            return text
+        if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.I):
+            return text
+        return ""
 
     def headline(kind: str, status: str) -> str:
         label = {
@@ -5791,6 +5862,158 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
         as_text(latest_job.get("kind")),
         as_text(latest_job.get("status")),
     )
+
+    try:
+        summary = as_dict(store.read(scope=f"business:{business_slug}", query="summary", limit=12))
+    except Exception:
+        summary = {}
+    conversations = as_dict(summary.get("conversations"))
+    unresolved_by_thread: dict[str, int] = {}
+    for message in as_list(conversations.get("unresolved")):
+        message_dict = as_dict(message)
+        thread_id = as_text(message_dict.get("thread_id"))
+        if thread_id:
+            unresolved_by_thread[thread_id] = unresolved_by_thread.get(thread_id, 0) + 1
+    posts: list[dict[str, Any]] = []
+    for thread in as_list(conversations.get("threads")):
+        thread_dict = as_dict(thread)
+        source = as_text(thread_dict.get("source"))
+        raw_url = as_text(thread_dict.get("url"))
+        source_l = source.lower()
+        postish = (
+            source_l.startswith("test-")
+            or bool(raw_url)
+            or source_l == "x"
+            or source_l.startswith("x-")
+            or any(
+                marker in source_l
+                for marker in (
+                    "post",
+                    "outreach",
+                    "reddit",
+                    "hacker",
+                    "twitter",
+                    "linkedin",
+                    "forum",
+                    "social",
+                )
+            )
+        )
+        if not postish:
+            continue
+        url = openable_url(raw_url)
+        artifact_path = ""
+        if not url and raw_url:
+            try:
+                artifact_candidate = store._resolve_business_file(business_slug, raw_url, sync=False)
+                if artifact_candidate.exists() and artifact_candidate.is_file():
+                    artifact_path = raw_url
+            except Exception:
+                artifact_path = ""
+        try:
+            conversation_file = as_text(store._conversation_thread_relpath(thread_dict))
+        except Exception:
+            conversation_file = ""
+        mode = "test" if source_l.startswith("test-") or artifact_path.startswith(("distribution/local-published/", "outreach/local-published/")) else "live"
+        thread_id = as_text(thread_dict.get("id"))
+        posts.append(
+            {
+                "id": thread_id,
+                "title": as_text(thread_dict.get("title") or thread_dict.get("external_id") or source),
+                "source": source,
+                "status": as_text(thread_dict.get("status")),
+                "mode": mode,
+                "url": url,
+                "artifact_path": artifact_path,
+                "conversation_file": conversation_file,
+                "created_at": as_text(thread_dict.get("created_at")),
+                "updated_at": as_text(thread_dict.get("updated_at")),
+                "unresolved_messages": unresolved_by_thread.get(thread_id, 0),
+            }
+        )
+
+    def latest_channel_job(*needles: str) -> dict[str, Any] | None:
+        names = {str(item or "").strip().lower() for item in needles if str(item or "").strip()}
+        for job in latest_jobs:
+            kind = as_text(job.get("kind")).lower()
+            payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+            channels = {
+                as_text(payload.get("channel")).lower(),
+                as_text(payload.get("provider")).lower(),
+            }
+            matched = any(
+                name
+                and (
+                    name in channels
+                    or kind.startswith(f"{name}.")
+                    or kind.startswith(f"{name}_")
+                    or f".{name}" in kind
+                    or name in kind
+                )
+                for name in names
+            )
+            if not matched:
+                continue
+            return {
+                "id": as_text(job.get("id")),
+                "kind": as_text(job.get("kind")),
+                "status": as_text(job.get("status")),
+                "label": job_label(as_text(job.get("kind"))),
+                "detail": headline(as_text(job.get("kind")), as_text(job.get("status"))),
+                "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
+                "created_at": as_text(job.get("created_at")),
+            }
+        return None
+
+    x_items = [
+        post
+        for post in posts
+        if (
+            as_text(post.get("source")).lower().replace("test-", "", 1) == "x"
+            or as_text(post.get("source")).lower().startswith("x-")
+            or "twitter" in as_text(post.get("source")).lower()
+        )
+    ]
+    x_job = latest_channel_job("x", "twitter")
+    outreach_channels = {
+        "x": {
+            "channel": "x",
+            "label": "X",
+            "status": (
+                "published_local"
+                if any(as_text(item.get("mode")).lower() == "test" for item in x_items)
+                else "published"
+                if x_items
+                else as_text((x_job or {}).get("status")) or "missing"
+            ),
+            "updated_at": as_text((x_items[0] if x_items else {}).get("updated_at") or (x_job or {}).get("updated_at")),
+            "draft_path": "",
+            "items": x_items[:8],
+            "latest_job": x_job,
+            "published_count": len(x_items),
+        },
+        "reddit": {
+            "channel": "reddit",
+            "label": "Reddit",
+            "status": "missing",
+            "updated_at": "",
+            "campaigns": [],
+            "latest_job": latest_channel_job("reddit"),
+            "campaign_count": 0,
+            "metrics_count": 0,
+        },
+        "meta": {
+            "channel": "meta",
+            "label": "Meta",
+            "status": "missing",
+            "updated_at": "",
+            "campaigns": [],
+            "latest_job": latest_channel_job("meta", "facebook", "instagram"),
+            "campaign_count": 0,
+            "metrics_count": 0,
+        },
+    }
+
     task_cards: list[dict[str, Any]] = []
     for entry in trace_entries[:8]:
         task_cards.append(
@@ -5921,7 +6144,7 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
                 "app_spent_microusd": spent_microusd,
                 "app_remaining_microusd": as_int(budget.get("hard_limit_microusd")) - spent_microusd,
             },
-            "posts": [],
+            "posts": posts[:12],
             "cron": [],
             "files": [],
             "jobs": latest_jobs[:6],
@@ -5970,13 +6193,14 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
                     "publish_source_path": as_text(product_facts.get("publish_source_path")),
                 },
                 "outreach": {
-                    "status": "missing",
+                    "status": as_text(outreach_channels["x"].get("status")) or "missing",
                     "path": "",
                     "receipt": "",
-                    "updated_at": "",
-                    "published_count": 0,
+                    "updated_at": as_text(outreach_channels["x"].get("updated_at")),
+                    "published_count": as_int(outreach_channels["x"].get("published_count")),
                     "items": [],
                     "receipts": [],
+                    "channels": outreach_channels,
                 },
                 "creative_assets": {
                     "status": "missing",
@@ -5987,8 +6211,8 @@ def _takyon_business_home_snapshot(store: Any, slug: str) -> dict[str, Any]:
                 },
             },
             "conversations": {
-                "active_threads": 0,
-                "unresolved_messages": 0,
+                "active_threads": len(as_list(conversations.get("threads"))),
+                "unresolved_messages": sum(unresolved_by_thread.values()),
                 "latest_message_at": "",
             },
             "generated_at": "",
@@ -6787,8 +7011,25 @@ def _takyon_business_overview_payload(
                     "detail": brief_text(job_dict.get("detail") or payload.get("summary")),
                     "updated_at": brief_text(job_dict.get("updated_at") or job_dict.get("created_at")),
                     "created_at": brief_text(job_dict.get("created_at")),
+                    "requested_credits": payload.get("requested_credits"),
+                    "credits_charged": payload.get("credits_charged"),
+                    "reserved_credits": payload.get("reserved_credits"),
                 }
         return None
+
+    def sum_credit_field(items: list[dict[str, Any]], field: str) -> int | None:
+        total = 0
+        seen = False
+        for item in items:
+            value = item.get(field)
+            if value in (None, ""):
+                continue
+            try:
+                total += int(value)
+                seen = True
+            except Exception:
+                continue
+        return total if seen else None
 
     def collect_paid_campaigns(
         publication_root: str,
@@ -6855,6 +7096,10 @@ def _takyon_business_overview_payload(
                     "tracked_link": brief_text(receipt.get("tracked_link") or ad_block.get("tracked_link")),
                     "call_to_action": brief_text(receipt.get("call_to_action") or ad_block.get("call_to_action")),
                     "ids": as_dict(receipt.get("ids")),
+                    "requested_credits": receipt.get("requested_credits"),
+                    "credits_charged": receipt.get("credits_charged"),
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
                     "latest_metrics": latest_metrics,
                     "open_url": openable_url(
                         brief_text(receipt.get("preview_url") or receipt.get("post_url") or receipt.get("link"))
@@ -6985,6 +7230,11 @@ def _takyon_business_overview_payload(
             "latest_job": reddit_job,
             "campaign_count": len(reddit_campaigns),
             "metrics_count": sum(1 for item in reddit_campaigns if as_dict(item.get("latest_metrics"))),
+            "allocated_credits": sum_credit_field(reddit_campaigns, "requested_credits") or sum_credit_field(reddit_campaigns, "credits_charged") or 0,
+            "requested_credits": sum_credit_field(reddit_campaigns, "requested_credits"),
+            "credits_charged": sum_credit_field(reddit_campaigns, "credits_charged"),
+            "reserved_credits": sum_credit_field(reddit_campaigns, "reserved_credits"),
+            "balance_credits": (reddit_campaigns[0] if reddit_campaigns else {}).get("balance_credits"),
         },
         "meta": {
             "channel": "meta",
@@ -6998,6 +7248,11 @@ def _takyon_business_overview_payload(
             "latest_job": meta_job,
             "campaign_count": len(meta_campaigns),
             "metrics_count": sum(1 for item in meta_campaigns if as_dict(item.get("latest_metrics"))),
+            "allocated_credits": sum_credit_field(meta_campaigns, "requested_credits") or sum_credit_field(meta_campaigns, "credits_charged") or 0,
+            "requested_credits": sum_credit_field(meta_campaigns, "requested_credits"),
+            "credits_charged": sum_credit_field(meta_campaigns, "credits_charged"),
+            "reserved_credits": sum_credit_field(meta_campaigns, "reserved_credits"),
+            "balance_credits": (meta_campaigns[0] if meta_campaigns else {}).get("balance_credits"),
         },
     }
     creative_latest = (
@@ -7474,6 +7729,32 @@ def _takyon_unique_business_slug(store: Any, base_slug: str) -> str:
         if candidate not in existing:
             return candidate
         suffix += 1
+
+
+def _takyon_require_durable_business(
+    store: Any,
+    slug: str,
+    *,
+    context: str,
+    command_result: Any = None,
+) -> dict[str, Any]:
+    if isinstance(command_result, dict) and command_result.get("success") is False:
+        detail = (
+            str(command_result.get("error") or "").strip()
+            or str(command_result.get("output") or "").strip()
+            or json.dumps(command_result, ensure_ascii=False)
+        )
+        raise RuntimeError(f"{context} failed for business:{slug}: {detail}")
+    try:
+        summary = store.read(scope=f"business:{slug}", query="summary", limit=1)
+    except Exception as exc:
+        raise RuntimeError(
+            f"{context} did not persist business:{slug}: {exc}"
+        ) from exc
+    business = summary.get("business") if isinstance(summary, dict) else {}
+    if str((business or {}).get("slug") or "").strip() != slug:
+        raise RuntimeError(f"{context} did not persist business:{slug}")
+    return summary if isinstance(summary, dict) else {}
 
 
 def _takyon_detached_shell_target(line: str, current_business: str | None) -> tuple[str, str, str] | None:
@@ -8547,6 +8828,12 @@ def _(rid, params: dict) -> dict:
             shell_history=None,
             operator_user_id=operator_user_id,
         )
+        create_summary = _takyon_require_durable_business(
+            store,
+            slug,
+            context="dashboard create",
+            command_result=command_result,
+        )
         active_mode = "live"
         config = read_model_config(store)
         schedule = str(config.get("default_ceo_schedule") or "every 6h").strip() or "every 6h"
@@ -8561,6 +8848,8 @@ def _(rid, params: dict) -> dict:
             view="boot",
         )
         current = dict(workspace.get("current") or {})
+        if not current and isinstance(create_summary, dict):
+            current = _takyon_business_payload_from_summary(create_summary) or {}
         if resolved_name and not str(current.get("name") or "").strip():
             current["name"] = resolved_name
         if slug and not str(current.get("slug") or "").strip():
@@ -8644,9 +8933,23 @@ def _(rid, params: dict) -> dict:
             from plugins.takyon.worker import _refresh_business_surface_after_bootstrap
 
             warning_parts: list[str] = []
+            try:
+                _takyon_require_durable_business(
+                    store,
+                    slug,
+                    context="bootstrap finalization",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "bootstrap finalization skipped for business:%s: %s",
+                    slug,
+                    exc,
+                )
+                return str(exc)
             surface_refresh = _refresh_business_surface_after_bootstrap(
                 slug,
                 job_id=f"session:{session.get('session_key') or sid or slug}",
+                operator_user_id=operator_user_id,
             )
             if isinstance(surface_refresh, dict):
                 publish = (
@@ -8675,6 +8978,7 @@ def _(rid, params: dict) -> dict:
                             "action": "cron.ensure_ceo_wakeup",
                             "business": slug,
                             "schedule": schedule,
+                            "defer_first_run": True,
                         }
                     ],
                     idempotency_key=(
