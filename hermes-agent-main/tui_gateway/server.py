@@ -3939,6 +3939,7 @@ def _(rid, params: dict) -> dict:
                 "ephemeral_system_prompt": combined_prompt or skill_lab_prompt
             }
     current_business = str(session.get("takyon_current_business") or "").strip()
+    _append_user_message_to_session_db(sid, session, text)
 
     _start_streaming_session_turn(
         rid,
@@ -3949,6 +3950,7 @@ def _(rid, params: dict) -> dict:
         contextualize_takyon=bool(current_business) or not bool(skill_lab_prompt),
         create_in_test_mode=create_in_test_mode,
         agent_config_overrides=skill_lab_agent_overrides,
+        persist_user_message_to_db=False,
     )
     return _ok(rid, {"status": "streaming"})
 
@@ -4062,28 +4064,7 @@ def _history_without_latest_user_message(messages: list[dict[str, Any]]) -> list
     return trimmed
 
 
-def _persist_inflight_user_message(
-    sid: str,
-    session: dict,
-    history: list[dict[str, Any]],
-    history_version: int,
-    content: Any,
-    *,
-    display_text: str | None = None,
-) -> int:
-    pending_message: dict[str, Any] = {"role": "user", "content": content}
-    if isinstance(display_text, str) and display_text.strip():
-        pending_message["display_text"] = display_text
-
-    with session["history_lock"]:
-        current_version = int(session.get("history_version", 0))
-        base_history = (
-            history if current_version == history_version else list(session.get("history", []))
-        )
-        session["history"] = [*base_history, pending_message]
-        next_version = current_version + 1
-        session["history_version"] = next_version
-
+def _append_user_message_to_session_db(sid: str, session: dict, content: Any) -> None:
     try:
         agent = session.get("agent")
         session_db = getattr(agent, "_session_db", None) or _get_db()
@@ -4101,6 +4082,33 @@ def _persist_inflight_user_message(
             f"[tui_gateway] in-flight user history persist failed: {exc}",
             file=sys.stderr,
         )
+
+
+def _persist_inflight_user_message(
+    sid: str,
+    session: dict,
+    history: list[dict[str, Any]],
+    history_version: int,
+    content: Any,
+    *,
+    display_text: str | None = None,
+    persist_db: bool = True,
+) -> int:
+    pending_message: dict[str, Any] = {"role": "user", "content": content}
+    if isinstance(display_text, str) and display_text.strip():
+        pending_message["display_text"] = display_text
+
+    with session["history_lock"]:
+        current_version = int(session.get("history_version", 0))
+        base_history = (
+            history if current_version == history_version else list(session.get("history", []))
+        )
+        session["history"] = [*base_history, pending_message]
+        next_version = current_version + 1
+        session["history_version"] = next_version
+
+    if persist_db:
+        _append_user_message_to_session_db(sid, session, content)
 
     return next_version
 
@@ -4120,6 +4128,7 @@ def _start_streaming_session_turn(
     agent_config_overrides: dict[str, Any] | None = None,
     post_complete_callback: Callable[[], str | None] | None = None,
     start_delay_ms: int = 0,
+    persist_user_message_to_db: bool = True,
 ) -> None:
     _start_agent_build(sid, session)
 
@@ -4153,6 +4162,7 @@ def _start_streaming_session_turn(
             max_iterations_override=max_iterations_override,
             agent_config_overrides=agent_config_overrides,
             post_complete_callback=post_complete_callback,
+            persist_user_message_to_db=persist_user_message_to_db,
         )
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
@@ -4172,6 +4182,7 @@ def _run_prompt_submit(
     max_iterations_override: int | None = None,
     agent_config_overrides: dict[str, Any] | None = None,
     post_complete_callback: Callable[[], str | None] | None = None,
+    persist_user_message_to_db: bool = True,
 ) -> None:
     with session["history_lock"]:
         history = list(session["history"])
@@ -4310,6 +4321,7 @@ def _run_prompt_submit(
                     history_version,
                     run_message,
                     display_text=display_text,
+                    persist_db=persist_user_message_to_db,
                 )
 
             resolved_operator_user_id = _resolved_operator_user_id(

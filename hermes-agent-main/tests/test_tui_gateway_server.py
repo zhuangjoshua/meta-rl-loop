@@ -2359,7 +2359,58 @@ def test_prompt_submit_persists_inflight_user_message_for_reload(monkeypatch):
             {
                 "session_id": "session-key",
                 "role": "user",
-                "content": captured["prompt"],
+                "content": "wire auth",
+            }
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_persists_user_message_before_worker_starts(monkeypatch):
+    appended: list[dict[str, object]] = []
+
+    class _DB:
+        def append_message(self, session_id, role, content=None, **kwargs):
+            appended.append(
+                {
+                    "session_id": session_id,
+                    "role": role,
+                    "content": content,
+                }
+            )
+            return 1
+
+    class _Agent:
+        session_id = "session-key"
+        _session_db = _DB()
+
+    class _DeferredThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            return None
+
+    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="probe-32864")
+    monkeypatch.setattr(server.threading, "Thread", _DeferredThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args, **_kwargs: None)
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "wire auth"},
+            }
+        )
+        assert resp["result"]["status"] == "streaming"
+        assert server._sessions["sid"]["history"] == []
+        assert appended == [
+            {
+                "session_id": "session-key",
+                "role": "user",
+                "content": "wire auth",
             }
         ]
     finally:
