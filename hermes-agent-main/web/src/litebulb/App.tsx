@@ -69,6 +69,7 @@ function Router() {
     submitting,
     billingBusy,
     topupBusy,
+    resetBuildState,
     openBusiness,
     sendPrompt,
     createBusiness,
@@ -125,9 +126,14 @@ function Router() {
     if (auth.status !== "in") return;
     if (path !== "/building") return;
     if (!pendingIdea) return;
+    if ((buildState.status === "ready" || buildState.status === "error") && buildState.goal !== pendingIdea) {
+      // A fresh build request must not inherit the previous company's redirect state.
+      resetBuildState();
+      return;
+    }
     if (buildState.status !== "idle") return;
     void createBusiness(pendingIdea);
-  }, [auth.status, buildState.status, createBusiness, path, pendingIdea]);
+  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState]);
 
   useEffect(() => {
     if (path !== "/building") return;
@@ -144,6 +150,7 @@ function Router() {
   const startBuild = (idea: string) => {
     const text = idea.trim();
     if (!text) return;
+    resetBuildState();
     setPendingIdea(text);
     if (auth.status !== "in") {
       setAuthModal("signup");

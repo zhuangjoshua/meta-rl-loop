@@ -139,6 +139,18 @@ function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMes
   return base;
 }
 
+function createEmptyBuildState(): BuildState {
+  return {
+    status: "idle",
+    goal: "",
+    businessSlug: "",
+    businessName: "",
+    narration: [],
+    terminal: [],
+    error: "",
+  };
+}
+
 export function useTakyonLitebulb() {
   const auth = useAuth();
   const [homeLoading, setHomeLoading] = useState(false);
@@ -153,15 +165,7 @@ export function useTakyonLitebulb() {
   const [traction, setTraction] = useState<TakyonBusinessTractionResponse | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatProgress, setChatProgress] = useState<ChatProgress | null>(null);
-  const [buildState, setBuildState] = useState<BuildState>({
-    status: "idle",
-    goal: "",
-    businessSlug: "",
-    businessName: "",
-    narration: [],
-    terminal: [],
-    error: "",
-  });
+  const [buildState, setBuildState] = useState<BuildState>(() => createEmptyBuildState());
   const [submitting, setSubmitting] = useState(false);
   const [sessionRunning, setSessionRunning] = useState(false);
   const [billingBusy, setBillingBusy] = useState(false);
@@ -273,6 +277,10 @@ export function useTakyonLitebulb() {
 
   const clearChatProgress = useCallback(() => {
     setChatProgress(null);
+  }, []);
+
+  const resetBuildState = useCallback(() => {
+    setBuildState(createEmptyBuildState());
   }, []);
 
   const pushBuildNarration = useCallback((text: string) => {
@@ -641,6 +649,7 @@ export function useTakyonLitebulb() {
     chatMessages,
     chatProgress,
     buildState,
+    resetBuildState,
     submitting,
     billingBusy,
     topupBusy,
