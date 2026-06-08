@@ -170,10 +170,33 @@ function historyHasPendingReply(payload: HistoryPayload | null | undefined) {
   return false;
 }
 
+function latestAssistantReply(messages: ChatMessage[]) {
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.who === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.who !== "agent") continue;
+    if (index < lastUserIndex) return null;
+    return message;
+  }
+  return null;
+}
+
 function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
   if (!next.length) return prev;
-  const hasAssistant = next.some((message) => message.who === "agent");
-  const base = hasAssistant
+  const liveWorkingAssistant = [...prev].reverse().find((message) => message.who === "agent" && message.working);
+  const trailingAssistant = latestAssistantReply(next);
+  const replaceWorkingAssistant = Boolean(
+    liveWorkingAssistant
+      && trailingAssistant
+      && trimText(trailingAssistant.text).length >= trimText(liveWorkingAssistant.text).length,
+  );
+  const base = replaceWorkingAssistant
     ? prev.filter((message) => !(message.who === "agent" && message.working))
     : [...prev];
   const seen = new Set(base.map((message) => `${message.who}\n${message.text}`));

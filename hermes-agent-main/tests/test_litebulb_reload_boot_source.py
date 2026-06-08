@@ -56,7 +56,11 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert "function historyHasPendingReply(payload: HistoryPayload | null | undefined) {" in source
     assert "function historyUserTexts(payload: HistoryPayload | null | undefined) {" in source
     assert "function historyHasPendingTurn(" in source
+    assert "function latestAssistantReply(messages: ChatMessage[]) {" in source
     assert "const nextUserText = userTexts[pendingTurn.userCountBefore];" in source
+    assert 'const liveWorkingAssistant = [...prev].reverse().find((message) => message.who === "agent" && message.working);' in source
+    assert "const trailingAssistant = latestAssistantReply(next);" in source
+    assert "&& trimText(trailingAssistant.text).length >= trimText(liveWorkingAssistant.text).length" in source
     assert 'if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {' in source
     assert "const loaded = await loadHistory(sessionIdRef.current);" in source
     assert "const resolveStoredSessionId = async (storedSessionId: string) => {" in source
