@@ -66,6 +66,7 @@ type PendingTurn = {
   id: string;
   text: string;
   createdAt: number;
+  userCountBefore: number;
 };
 
 function trimText(value: unknown) {
@@ -192,6 +193,9 @@ function readStoredPendingTurn(slug: string): PendingTurn | null {
     id,
     text,
     createdAt: Number(pending.createdAt || 0) || Date.now(),
+    userCountBefore: Number.isFinite(Number((pending as { userCountBefore?: unknown }).userCountBefore))
+      ? Math.max(0, Number((pending as { userCountBefore?: unknown }).userCountBefore))
+      : -1,
   };
 }
 
@@ -222,14 +226,27 @@ function clearStoredPendingTurn(slug: string) {
   }
 }
 
-function historyHasUserText(payload: HistoryPayload | null | undefined, text: string) {
-  const target = trimText(text);
-  if (!target) return false;
+function historyUserTexts(payload: HistoryPayload | null | undefined) {
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-  return messages.some((item) => (
-    trimText(item?.role).toLowerCase() === "user"
-      && trimText(item?.text) === target
-  ));
+  return messages
+    .filter((item) => trimText(item?.role).toLowerCase() === "user")
+    .map((item) => trimText(item?.text))
+    .filter(Boolean);
+}
+
+function historyHasPendingTurn(
+  payload: HistoryPayload | null | undefined,
+  pendingTurn: PendingTurn | null,
+) {
+  const target = trimText(pendingTurn?.text);
+  if (!target) return false;
+  if (!pendingTurn) return false;
+  const userTexts = historyUserTexts(payload);
+  if (!Number.isFinite(pendingTurn.userCountBefore) || pendingTurn.userCountBefore < 0) {
+    return false;
+  }
+  const nextUserText = userTexts[pendingTurn.userCountBefore];
+  return nextUserText === target;
 }
 
 function pendingTurnMessage(pendingTurn: PendingTurn): ChatMessage {
@@ -323,6 +340,7 @@ export function useTakyonLitebulb() {
   const sessionBusinessRef = useRef("");
   const assistantMessageIdRef = useRef("");
   const workspacePollRef = useRef<number | null>(null);
+  const openingBusinessRef = useRef("");
 
   const loadHome = useCallback(async () => {
     if (auth.status !== "in") return;
@@ -581,7 +599,7 @@ export function useTakyonLitebulb() {
     await gateway.connect();
     const applyHistory = (history: HistoryPayload) => {
       const pendingTurn = readStoredPendingTurn(businessSlug);
-      const pendingTurnInHistory = historyHasUserText(history, pendingTurn?.text || "");
+      const pendingTurnInHistory = historyHasPendingTurn(history, pendingTurn);
       if (pendingTurn && pendingTurnInHistory) {
         clearStoredPendingTurn(businessSlug);
       }
@@ -685,22 +703,30 @@ export function useTakyonLitebulb() {
   const openBusiness = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
+    if (openingBusinessRef.current === businessSlug) return;
+    openingBusinessRef.current = businessSlug;
     const matched = businesses.find((item) => item.slug === businessSlug)
       || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode" };
-    setWorkspace(null);
-    setCreativeCredits(null);
-    setTraction(null);
-    setSitePreviewUrl("");
-    setChatMessages([]);
-    setChatProgress(null);
-    setActiveBusiness(matched);
-    await Promise.all([
-      ensureSession(businessSlug),
-      loadWorkspaceShell(businessSlug).catch(() => undefined),
-      loadCreativeCredits(businessSlug),
-      loadTraction(businessSlug, tractionRange),
-    ]);
-    void loadWorkspace(businessSlug).catch(() => undefined);
+    try {
+      setWorkspace(null);
+      setCreativeCredits(null);
+      setTraction(null);
+      setSitePreviewUrl("");
+      setChatMessages([]);
+      setChatProgress(null);
+      setActiveBusiness(matched);
+      await Promise.all([
+        ensureSession(businessSlug),
+        loadWorkspaceShell(businessSlug).catch(() => undefined),
+        loadCreativeCredits(businessSlug),
+        loadTraction(businessSlug, tractionRange),
+      ]);
+      void loadWorkspace(businessSlug).catch(() => undefined);
+    } finally {
+      if (openingBusinessRef.current === businessSlug) {
+        openingBusinessRef.current = "";
+      }
+    }
   }, [businesses, ensureSession, loadCreativeCredits, loadTraction, loadWorkspace, loadWorkspaceShell, tractionRange]);
 
   const sendPrompt = useCallback(async (text: string) => {
@@ -710,6 +736,7 @@ export function useTakyonLitebulb() {
       id: `pending-user-${Date.now()}`,
       text: value,
       createdAt: Date.now(),
+      userCountBefore: chatMessages.filter((message) => message.who === "user").length,
     };
     writeStoredPendingTurn(activeBusiness.slug, pendingTurn);
     setSubmitting(true);
@@ -728,7 +755,7 @@ export function useTakyonLitebulb() {
       clearStoredPendingTurn(activeBusiness.slug);
       setSubmitting(false);
     }
-  }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, startChatProgress]);
+  }, [activeBusiness, chatMessages, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, startChatProgress]);
 
   const createBusiness = useCallback(async (goal: string) => {
     const idea = trimText(goal);
@@ -874,7 +901,7 @@ export function useTakyonLitebulb() {
         .then((history) => {
           if (cancelled) return;
           const pendingTurn = readStoredPendingTurn(businessSlug);
-          const pendingTurnInHistory = historyHasUserText(history, pendingTurn?.text || "");
+          const pendingTurnInHistory = historyHasPendingTurn(history, pendingTurn);
           if (pendingTurn && pendingTurnInHistory) {
             clearStoredPendingTurn(businessSlug);
           }

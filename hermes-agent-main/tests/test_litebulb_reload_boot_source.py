@@ -37,7 +37,9 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert 'const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";' in source
     assert 'const LITEBULB_PENDING_TURN_STORAGE_KEY = "takyon.litebulb.pendingTurns.v1";' in source
     assert "function historyHasPendingReply(payload: HistoryPayload | null | undefined) {" in source
-    assert "function historyHasUserText(payload: HistoryPayload | null | undefined, text: string) {" in source
+    assert "function historyUserTexts(payload: HistoryPayload | null | undefined) {" in source
+    assert "function historyHasPendingTurn(" in source
+    assert "const nextUserText = userTexts[pendingTurn.userCountBefore];" in source
     assert 'if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {' in source
     assert "const loaded = await loadHistory(sessionIdRef.current);" in source
     assert "const resolveStoredSessionId = async (storedSessionId: string) => {" in source
@@ -50,6 +52,9 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert 'gateway.request<SessionResumePayload>("session.resume"' in source
     assert "const replayPendingTurn = useCallback(async (" in source
     assert 'writeStoredPendingTurn(activeBusiness.slug, pendingTurn);' in source
+    assert 'userCountBefore: chatMessages.filter((message) => message.who === "user").length,' in source
+    assert 'const openingBusinessRef = useRef("");' in source
+    assert 'if (openingBusinessRef.current === businessSlug) return;' in source
     assert "void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);" in source
     assert 'writeStoredLitebulbSession(' in source
     assert 'clearStoredPendingTurn(sessionBusinessRef.current);' in source
