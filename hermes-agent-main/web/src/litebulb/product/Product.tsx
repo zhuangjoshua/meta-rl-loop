@@ -39,18 +39,44 @@ function siteHost(name: string) {
 function backgroundRunProgress(
   workspace: TakyonBusinessWorkspaceResponse | null,
 ): ChatProgress | null {
+  const liveProgress = (statusValue: unknown, ...parts: unknown[]): ChatProgress | null => {
+    const status = String(statusValue || "").trim().toLowerCase();
+    if (!status || ["done", "completed", "success", "failed", "error", "blocked", "cancelled", "idle"].includes(status)) {
+      return null;
+    }
+    const detail = parts
+      .map((part) => String(part || "").trim())
+      .find(Boolean);
+    return {
+      text: detail || (["queued", "scheduled", "pending"].includes(status) ? "Queued CEO bootstrap job." : "Working…"),
+      live: true,
+    };
+  };
+
   const run = workspace?.background_run;
-  if (!run || typeof run !== "object") return null;
-  const payload = run as Record<string, unknown>;
-  const status = String(payload.status || "").trim().toLowerCase();
-  if (!status || ["done", "completed", "success", "failed", "error", "blocked", "cancelled"].includes(status)) {
+  if (run && typeof run === "object") {
+    const payload = run as Record<string, unknown>;
+    const progress = liveProgress(payload.status, payload.detail);
+    if (progress) return progress;
+  }
+
+  const overview = workspace?.overview;
+  if (!overview || typeof overview !== "object") {
     return null;
   }
-  const detail = String(payload.detail || "").trim();
-  return {
-    text: detail || (status === "queued" ? "Queued CEO bootstrap job." : "Working…"),
-    live: true,
-  };
+  const currentAction = (overview as Record<string, unknown>).current_action;
+  if (currentAction && typeof currentAction === "object") {
+    const payload = currentAction as Record<string, unknown>;
+    const progress = liveProgress(payload.status, payload.detail, payload.label);
+    if (progress) return progress;
+  }
+  const ceoLoop = (overview as Record<string, unknown>).ceo_loop;
+  if (ceoLoop && typeof ceoLoop === "object") {
+    const payload = ceoLoop as Record<string, unknown>;
+    const progress = liveProgress(payload.status, payload.detail, payload.next_action, payload.headline);
+    if (progress) return progress;
+  }
+  return null;
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
