@@ -60,6 +60,13 @@ type SessionTitlePayload = {
 };
 
 const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";
+const LITEBULB_PENDING_TURN_STORAGE_KEY = "takyon.litebulb.pendingTurns.v1";
+
+type PendingTurn = {
+  id: string;
+  text: string;
+  createdAt: number;
+};
 
 function trimText(value: unknown) {
   return String(value || "").trim();
@@ -159,6 +166,78 @@ function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMes
     base.push(message);
   }
   return base;
+}
+
+function readStoredPendingTurns(): Record<string, PendingTurn> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(LITEBULB_PENDING_TURN_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, PendingTurn> : {};
+  } catch {
+    return {};
+  }
+}
+
+function readStoredPendingTurn(slug: string): PendingTurn | null {
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return null;
+  const pending = readStoredPendingTurns()[businessSlug];
+  if (!pending || typeof pending !== "object") return null;
+  const text = trimText(pending.text);
+  const id = trimText(pending.id);
+  if (!text || !id) return null;
+  return {
+    id,
+    text,
+    createdAt: Number(pending.createdAt || 0) || Date.now(),
+  };
+}
+
+function writeStoredPendingTurn(slug: string, pendingTurn: PendingTurn) {
+  if (typeof window === "undefined") return;
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return;
+  try {
+    const next = readStoredPendingTurns();
+    next[businessSlug] = pendingTurn;
+    window.sessionStorage.setItem(LITEBULB_PENDING_TURN_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* best effort */
+  }
+}
+
+function clearStoredPendingTurn(slug: string) {
+  if (typeof window === "undefined") return;
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return;
+  try {
+    const next = readStoredPendingTurns();
+    if (!(businessSlug in next)) return;
+    delete next[businessSlug];
+    window.sessionStorage.setItem(LITEBULB_PENDING_TURN_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* best effort */
+  }
+}
+
+function historyHasUserText(payload: HistoryPayload | null | undefined, text: string) {
+  const target = trimText(text);
+  if (!target) return false;
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  return messages.some((item) => (
+    trimText(item?.role).toLowerCase() === "user"
+      && trimText(item?.text) === target
+  ));
+}
+
+function pendingTurnMessage(pendingTurn: PendingTurn): ChatMessage {
+  return {
+    id: pendingTurn.id,
+    who: "user",
+    text: pendingTurn.text,
+  };
 }
 
 function readStoredLitebulbSessions(): Record<string, string> {
@@ -371,6 +450,27 @@ export function useTakyonLitebulb() {
     setChatProgress(null);
   }, []);
 
+  const replayPendingTurn = useCallback(async (
+    sessionId: string,
+    slug: string,
+    pendingTurn: PendingTurn | null,
+  ) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    const text = trimText(pendingTurn?.text);
+    if (!sessionId || !businessSlug || !text) return;
+    setSubmitting(true);
+    startChatProgress();
+    try {
+      const gateway = ensureGateway();
+      await gateway.request("prompt.submit", {
+        session_id: sessionId,
+        text,
+      });
+    } catch {
+      /* best effort replay on reload */
+    }
+  }, [ensureGateway, startChatProgress]);
+
   const resetBuildState = useCallback(() => {
     setBuildState(createEmptyBuildState());
   }, []);
@@ -411,6 +511,9 @@ export function useTakyonLitebulb() {
       setSessionRunning(false);
       clearChatProgress();
       if (sessionBusinessRef.current) {
+        clearStoredPendingTurn(sessionBusinessRef.current);
+      }
+      if (sessionBusinessRef.current) {
         void loadWorkspace(sessionBusinessRef.current);
         void loadTraction(sessionBusinessRef.current, tractionRange);
       }
@@ -444,6 +547,9 @@ export function useTakyonLitebulb() {
       setSubmitting(false);
       setSessionRunning(false);
       clearChatProgress();
+      if (sessionBusinessRef.current) {
+        clearStoredPendingTurn(sessionBusinessRef.current);
+      }
     });
     return () => {
       offStart();
@@ -474,16 +580,30 @@ export function useTakyonLitebulb() {
     const gateway = ensureGateway();
     await gateway.connect();
     const applyHistory = (history: HistoryPayload) => {
-      const pending = Boolean(history.running) || historyHasPendingReply(history);
+      const pendingTurn = readStoredPendingTurn(businessSlug);
+      const pendingTurnInHistory = historyHasUserText(history, pendingTurn?.text || "");
+      if (pendingTurn && pendingTurnInHistory) {
+        clearStoredPendingTurn(businessSlug);
+      }
+      const pendingTurnMissing = Boolean(pendingTurn && !pendingTurnInHistory);
+      const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
+      const nextMessages = pendingTurnMissing
+        ? mergeHistoryMessages(mapHistoryMessages(history), [pendingTurnMessage(pendingTurn!)])
+        : mapHistoryMessages(history);
       setSessionRunning(pending);
       setChatProgress(pending ? { text: "Working…", live: true } : null);
-      setChatMessages(mapHistoryMessages(history));
+      setChatMessages(nextMessages);
+      return {
+        pendingTurn,
+        pendingTurnMissing,
+      };
     };
     const loadHistory = async (sessionId: string, fallback?: HistoryPayload) => {
       const history = await gateway.request<HistoryPayload>("session.history", {
         session_id: sessionId,
       }).catch<HistoryPayload>(() => fallback ?? { messages: [], running: false });
-      applyHistory(history);
+      const applied = applyHistory(history);
+      return { history, ...applied };
     };
     const resolveStoredSessionId = async (storedSessionId: string) => {
       const candidate = trimText(storedSessionId);
@@ -499,7 +619,10 @@ export function useTakyonLitebulb() {
     };
 
     if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
-      await loadHistory(sessionIdRef.current);
+      const loaded = await loadHistory(sessionIdRef.current);
+      if (loaded?.pendingTurnMissing) {
+        void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
+      }
       return sessionIdRef.current;
     }
 
@@ -520,10 +643,13 @@ export function useTakyonLitebulb() {
             businessSlug,
             trimText(resumed.resumed) || storedSessionId,
           );
-          await loadHistory(sessionIdRef.current, {
+          const loaded = await loadHistory(sessionIdRef.current, {
             messages: resumed.messages || [],
             running: true,
           });
+          if (loaded?.pendingTurnMissing) {
+            void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
+          }
           return sessionIdRef.current;
         }
         clearStoredLitebulbSession(businessSlug);
@@ -544,14 +670,17 @@ export function useTakyonLitebulb() {
       } else {
         clearStoredLitebulbSession(businessSlug);
       }
-      await loadHistory(sessionIdRef.current);
+      const loaded = await loadHistory(sessionIdRef.current);
+      if (loaded?.pendingTurnMissing) {
+        void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
+      }
     } else {
       setChatMessages([]);
       setChatProgress(null);
       setSessionRunning(false);
     }
     return sessionIdRef.current;
-  }, [ensureGateway]);
+  }, [ensureGateway, replayPendingTurn]);
 
   const openBusiness = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
@@ -577,9 +706,15 @@ export function useTakyonLitebulb() {
   const sendPrompt = useCallback(async (text: string) => {
     const value = trimText(text);
     if (!value || !activeBusiness) return;
+    const pendingTurn: PendingTurn = {
+      id: `pending-user-${Date.now()}`,
+      text: value,
+      createdAt: Date.now(),
+    };
+    writeStoredPendingTurn(activeBusiness.slug, pendingTurn);
     setSubmitting(true);
     startChatProgress();
-    setChatMessages((messages) => [...messages, { id: `user-${Date.now()}`, who: "user", text: value }]);
+    setChatMessages((messages) => [...messages, pendingTurnMessage(pendingTurn)]);
     try {
       const sessionId = await ensureSession(activeBusiness.slug);
       const gateway = ensureGateway();
@@ -590,6 +725,7 @@ export function useTakyonLitebulb() {
     } catch (error) {
       completeAssistantText(error instanceof Error ? error.message : "Failed to send message.");
       clearChatProgress();
+      clearStoredPendingTurn(activeBusiness.slug);
       setSubmitting(false);
     }
   }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, startChatProgress]);
@@ -737,8 +873,19 @@ export function useTakyonLitebulb() {
         .request<HistoryPayload>("session.history", { session_id: sessionId }, 10_000)
         .then((history) => {
           if (cancelled) return;
-          const pending = Boolean(history.running) || historyHasPendingReply(history);
-          setChatMessages((messages) => mergeHistoryMessages(messages, mapHistoryMessages(history)));
+          const pendingTurn = readStoredPendingTurn(businessSlug);
+          const pendingTurnInHistory = historyHasUserText(history, pendingTurn?.text || "");
+          if (pendingTurn && pendingTurnInHistory) {
+            clearStoredPendingTurn(businessSlug);
+          }
+          const pendingTurnMissing = Boolean(pendingTurn && !pendingTurnInHistory);
+          const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
+          setChatMessages((messages) => {
+            const mergedHistory = mergeHistoryMessages(messages, mapHistoryMessages(history));
+            return pendingTurnMissing
+              ? mergeHistoryMessages(mergedHistory, [pendingTurnMessage(pendingTurn!)])
+              : mergedHistory;
+          });
           setSessionRunning(pending);
           setChatProgress((current) => (pending ? current || { text: "Working…", live: true } : null));
           if (!pending) {

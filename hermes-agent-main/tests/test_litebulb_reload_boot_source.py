@@ -35,16 +35,22 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";' in source
+    assert 'const LITEBULB_PENDING_TURN_STORAGE_KEY = "takyon.litebulb.pendingTurns.v1";' in source
     assert "function historyHasPendingReply(payload: HistoryPayload | null | undefined) {" in source
+    assert "function historyHasUserText(payload: HistoryPayload | null | undefined, text: string) {" in source
     assert 'if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {' in source
-    assert "await loadHistory(sessionIdRef.current);" in source
+    assert "const loaded = await loadHistory(sessionIdRef.current);" in source
     assert "const resolveStoredSessionId = async (storedSessionId: string) => {" in source
     assert "api.getSessionLatestDescendant(candidate)" in source
     assert 'const readDurableSessionId = async (sessionId: string) => {' in source
     assert 'gateway.request<SessionTitlePayload>("session.title"' in source
-    assert "const pending = Boolean(history.running) || historyHasPendingReply(history);" in source
+    assert "const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;" in source
     assert "const storedSessionId = await resolveStoredSessionId(" in source
     assert "readStoredLitebulbSession(businessSlug)" in source
     assert 'gateway.request<SessionResumePayload>("session.resume"' in source
+    assert "const replayPendingTurn = useCallback(async (" in source
+    assert 'writeStoredPendingTurn(activeBusiness.slug, pendingTurn);' in source
+    assert "void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);" in source
     assert 'writeStoredLitebulbSession(' in source
+    assert 'clearStoredPendingTurn(sessionBusinessRef.current);' in source
     assert 'clearStoredLitebulbSession(businessSlug);' in source
