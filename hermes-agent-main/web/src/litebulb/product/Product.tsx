@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import type {
   TakyonBusinessCreativeCreditsResponse,
   TakyonBusinessTractionResponse,
@@ -90,6 +93,21 @@ const MENU_SETTINGS: Record<string, SettingsSection> = {
   Billing: "billing",
   "Profile settings": "profile",
 };
+
+function AgentMessageMarkdown({ text }: { text: string }) {
+  return (
+    <div className="lb-msg__md">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
 
 function ProfileMenu({ onClose, onSelect }: { onClose: () => void; onSelect: (label: string) => void }) {
   return (
@@ -217,7 +235,11 @@ function AgentChat({
       <div className="lb-chat__log">
         {messages.map((message) => (
           <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
-            <div className="lb-msg__bubble">{message.text}</div>
+            <div className="lb-msg__bubble">
+              {message.who === "agent" && !message.working
+                ? <AgentMessageMarkdown text={message.text} />
+                : message.text}
+            </div>
           </div>
         ))}
         {progressText && (
