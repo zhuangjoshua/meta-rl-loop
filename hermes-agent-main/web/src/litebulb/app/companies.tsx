@@ -45,7 +45,6 @@ export function CompaniesGrid({
         <button key={c.slug || c.name || i} className="lb-coCard" onClick={() => onOpen(c.slug)}>
           <span className="lb-coCard__thumb"><LandingThumb name={c.name} tagline={c.tagline || c.goal || c.name} /></span>
           <span className="lb-coCard__name">{c.name}</span>
-          <span className="lb-coCard__meta">{c.meta}</span>
         </button>
       ))}
       <button className="lb-coCard lb-coCard--new" onClick={onNew}>

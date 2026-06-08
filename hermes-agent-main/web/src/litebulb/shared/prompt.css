@@ -13,6 +13,5 @@
 .lb-prompt2__input { width: 100%; min-height: 66px; max-height: 340px; padding: 4px 6px 0; border: 0; background: transparent; resize: none; outline: none; font-family: var(--cds-font-sans); font-size: 20px; line-height: 30px; color: var(--cds-color-text-default); }
 .lb-prompt2__input::placeholder { color: var(--cds-color-text-muted); }
 .lb-prompt2__bar { display: flex; align-items: center; gap: 12px; }
-.lb-prompt2__attach { color: var(--cds-color-text-faint); display: inline-flex; padding-left: 4px; }
 .lb-prompt2__spacer { flex: 1; }
 .lb-prompt2__cta { height: 52px; gap: 8px; font-size: 17px; padding: 0 28px; }

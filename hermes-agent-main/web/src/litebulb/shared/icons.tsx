@@ -62,12 +62,6 @@ export const Plus = ({ size = 24, ...rest }: IconProps) => (
   </Stroke>
 );
 
-export const Paperclip = ({ size = 24, ...rest }: IconProps) => (
-  <Stroke size={size} {...rest}>
-    <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10 18" />
-  </Stroke>
-);
-
 export const Mic = ({ size = 24, ...rest }: IconProps) => (
   <Stroke size={size} {...rest}>
     <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />

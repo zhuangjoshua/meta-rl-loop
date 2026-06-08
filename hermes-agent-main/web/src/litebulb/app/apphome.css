@@ -26,7 +26,36 @@
 .lb-homenav { position: relative; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: none; margin: 0; padding: clamp(18px, 2vw, 28px) clamp(24px, 3.6vw, 64px); }
 .lb-homenav__brand { display: inline-flex; align-items: center; gap: 9px; border: 0; background: none; cursor: pointer; padding: 4px; color: var(--cds-color-text-default); font-family: var(--cds-font-sans); font-size: var(--cds-text-md); font-weight: var(--cds-weight-bold); letter-spacing: -0.01em; }
 .lb-homenav__brand:hover { opacity: 0.72; }
-.lb-homenav__acct { position: relative; }
+.lb-homenav__acct { position: relative; display: flex; align-items: center; gap: 10px; }
+.lb-homenav__wallet {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px solid rgba(166, 222, 18, 0.35);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cds-color-surface-card) 82%, #eff8bf 18%);
+  box-shadow: 0 10px 20px -16px rgba(84, 98, 8, 0.65);
+  color: var(--cds-color-text-default);
+  cursor: pointer;
+  font-family: inherit;
+}
+.lb-homenav__wallet:hover {
+  border-color: rgba(166, 222, 18, 0.55);
+  box-shadow: 0 14px 24px -18px rgba(84, 98, 8, 0.72);
+}
+.lb-homenav__wallet-label {
+  font-size: 11px;
+  font-weight: var(--cds-weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cds-color-text-muted);
+}
+.lb-homenav__wallet-value {
+  font-size: var(--cds-text-sm);
+  font-weight: var(--cds-weight-bold);
+  letter-spacing: -0.01em;
+}
 .lb-homenav__avatar { display: inline-flex; align-items: center; gap: 9px; border: 1px solid transparent; background: none; cursor: pointer; padding: 5px 9px 5px 6px; border-radius: var(--cds-radius-pill); color: var(--cds-color-text-default); }
 .lb-homenav__avatar:hover, .lb-homenav__avatar.is-open { background: var(--cds-color-surface-card); border-color: var(--cds-color-border-default); box-shadow: var(--cds-shadow-xs); }
 .lb-homenav__face { flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--cds-color-surface-dark); color: #fff; display: grid; place-items: center; font-size: var(--cds-text-xs); font-weight: var(--cds-weight-bold); }
@@ -36,6 +65,12 @@
 .lb-homenav__menu button { display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer; padding: 8px 11px; border-radius: var(--cds-radius-sm); font-family: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); color: var(--cds-color-text-soft); }
 .lb-homenav__menu button:hover { background: var(--cds-color-surface-sunken); color: var(--cds-color-text-default); }
 .lb-homenav__menu-sep { height: 1px; background: var(--cds-color-border-divider); margin: 5px 0; }
+
+@media (max-width: 720px) {
+  .lb-homenav__wallet-label { display: none; }
+  .lb-homenav__wallet { padding-inline: 10px; }
+  .lb-homenav__name { display: none; }
+}
 
 .lb-aph__hero {
   display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;

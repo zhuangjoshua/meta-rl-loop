@@ -1,6 +1,4 @@
-import { useMemo } from "react";
 import type { BuildState } from "../takyon/useTakyonLitebulb";
-import { deriveCompany } from "../shared/company";
 import { BulbMark } from "../shared/icons";
 import "./building.css";
 
@@ -23,14 +21,13 @@ export function Building({
   state: BuildState;
   onDone: () => void;
 }) {
-  const derived = useMemo(() => deriveCompany(idea), [idea]);
-  const narration = state.narration.length ? state.narration : [`Reading your idea — ${idea || derived.tagline}.`];
+  const narration = state.narration.length ? state.narration : [`Reading your idea — ${idea}.`];
   const terminal = state.terminal.length ? state.terminal : ["Booting Litebulb CEO…"];
   const done = state.status === "ready";
   const errored = state.status === "error";
   const activeIdx = Math.min(PHASES.length - 1, Math.max(0, narration.length - 1));
   const pct = done ? 100 : Math.min(95, Math.max(8, narration.length * 12));
-  const title = state.businessName || derived.name || "Building your company";
+  const title = state.businessName.trim();
 
   return (
     <div className="lb-bld">
@@ -39,7 +36,7 @@ export function Building({
           <span className="lb-bld__mark"><BulbMark size={26} tone="ink" /></span>
           <div className="lb-bld__head-txt">
             <span className="lb-bld__status"><span className="lb-bld__pulse" />{done ? "Workspace ready" : errored ? "Build blocked" : "Litebulb is building"}</span>
-            <h1 className="lb-bld__name">{title}</h1>
+            {title ? <h1 className="lb-bld__name">{title}</h1> : null}
           </div>
         </header>
 
@@ -74,7 +71,7 @@ export function Building({
         <div className="lb-bld__foot">
           <div className="lb-bld__bar"><span style={{ width: `${pct}%` }} /></div>
           {done
-            ? <button className="b44-btn b44-btn--brand lb-bld__enter" onClick={onDone}>Enter {title} →</button>
+            ? <button className="b44-btn b44-btn--brand lb-bld__enter" onClick={onDone}>{title ? `Enter ${title} →` : "Enter workspace →"}</button>
             : errored
               ? <span className="lb-bld__pct">blocked</span>
               : <span className="lb-bld__pct">{pct}%</span>}

@@ -191,14 +191,7 @@ function AgentChat({
       <div className="lb-chat__log">
         {messages.map((message) => (
           <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
-            <div className="lb-msg__bubble">
-              {message.text}
-              {message.working && (
-                <span className="lb-msg__work">
-                  <span className="lb-typing"><i /><i /><i /></span>
-                </span>
-              )}
-            </div>
+            <div className="lb-msg__bubble">{message.text}</div>
           </div>
         ))}
         {progressText && (
@@ -254,7 +247,7 @@ function ProductPreview({
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  const frameUrl = previewUrl || publicUrl || "";
+  const frameUrl = publicUrl || previewUrl || "";
   const hasLocalSource = Boolean(
     sourcePath
     || outputs.some((item) => {
@@ -304,7 +297,7 @@ function ProductPreview({
             </div>
           ) : (
             <div className="lb-browser__empty">
-              <h3>No local product preview yet</h3>
+              <h3>No product preview yet</h3>
               <p>{detail}</p>
               {productStatus && productStatus !== "missing" && (
                 <p className="lb-browser__hint">Current status: {productStatus}</p>

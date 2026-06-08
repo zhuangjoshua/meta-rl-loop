@@ -9,14 +9,16 @@ import { CompaniesGrid } from "./companies";
 import { BulbMark } from "../shared/icons";
 import { Prompt } from "../shared/Prompt";
 import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import type { TakyonOperatorAccountResponse } from "@/lib/api";
 import "./apphome.css";
 
 const caret = (
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4" /></svg>
 );
 
-function HomeNav({ user, onNav, onOpenSettings, onLogout }: {
+function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
   user: { name: string; email: string } | null;
+  account: TakyonOperatorAccountResponse | null;
   onNav: (hash: string) => void;
   onOpenSettings: (s: SettingsSection) => void;
   onLogout: () => void;
@@ -24,12 +26,19 @@ function HomeNav({ user, onNav, onOpenSettings, onLogout }: {
   const [menu, setMenu] = useState(false);
   const initial = (user?.name?.[0] ?? "U").toUpperCase();
   const close = () => setMenu(false);
+  const walletLabel = typeof account?.spendable_cents === "number"
+    ? `$${(account.spendable_cents / 100).toFixed(2)}`
+    : "Wallet";
   return (
     <header className="lb-homenav">
       <button className="lb-homenav__brand" onClick={() => onNav("/")} aria-label="Litebulb home">
         <BulbMark size={26} tone="ink" /> <span>Litebulb</span>
       </button>
       <div className="lb-homenav__acct">
+        <button className="lb-homenav__wallet" onClick={() => { onOpenSettings("billing"); close(); }} aria-label="Open billing">
+          <span className="lb-homenav__wallet-label">Wallet</span>
+          <span className="lb-homenav__wallet-value">{walletLabel}</span>
+        </button>
         <button className={`lb-homenav__avatar${menu ? " is-open" : ""}`} onClick={() => setMenu((m) => !m)} aria-haspopup="menu" aria-expanded={menu}>
           <span className="lb-homenav__face">{initial}</span>
           <span className="lb-homenav__name">{user?.name ?? "Account"}</span>
@@ -54,9 +63,11 @@ function HomeNav({ user, onNav, onOpenSettings, onLogout }: {
 
 export function AppHome({
   companies,
+  account,
   onNav, onStart, onOpen, onNew, onLogout, onOpenSettings,
 }: {
   companies: LitebulbBusiness[];
+  account: TakyonOperatorAccountResponse | null;
   onNav: (hash: string) => void;
   onStart: (idea: string) => void;
   onOpen: (slug: string) => void;
@@ -71,7 +82,7 @@ export function AppHome({
 
   return (
     <div className="lb-aph">
-      <HomeNav user={user} onNav={onNav} onOpenSettings={onOpenSettings} onLogout={onLogout} />
+      <HomeNav user={user} account={account} onNav={onNav} onOpenSettings={onOpenSettings} onLogout={onLogout} />
 
       <section className="lb-aph__hero">
         <h1 className="lb-aph__greet">Ready to build{user?.name ? `, ${user.name}` : ""}?</h1>

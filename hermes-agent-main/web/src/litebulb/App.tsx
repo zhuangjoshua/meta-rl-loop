@@ -163,6 +163,7 @@ function Router() {
       ? (
           <AppHome
             companies={businesses}
+            account={account}
             onNav={nav}
             onStart={startBuild}
             onOpen={(slug) => nav(`/app/c/${slug}`)}
@@ -192,8 +193,8 @@ function Router() {
         tractionRange={tractionRange}
         theme={theme}
         chatMessages={chatMessages}
-        sending={submitting}
         chatProgress={chatProgress}
+        sending={submitting}
         onTheme={setTheme}
         onNav={nav}
         onLogout={auth.logout}
