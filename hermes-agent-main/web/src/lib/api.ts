@@ -207,9 +207,9 @@ export const api = {
       undefined,
       "takyon.site.preview",
     ),
-  getTakyonBusinessWorkspace: (slug: string, limit = 50) =>
+  getTakyonBusinessWorkspace: (slug: string, limit = 50, view: "full" | "boot" = "full") =>
     fetchJSONWithTimeout<TakyonBusinessWorkspaceResponse>(
-      `/api/takyon/businesses/${encodeURIComponent(slug)}/workspace?limit=${encodeURIComponent(String(limit))}`,
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/workspace?limit=${encodeURIComponent(String(limit))}&view=${encodeURIComponent(view)}`,
       15_000,
       undefined,
       "takyon.dashboard.workspace",

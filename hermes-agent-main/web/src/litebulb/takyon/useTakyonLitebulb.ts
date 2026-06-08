@@ -192,20 +192,34 @@ export function useTakyonLitebulb() {
     }
   }, [auth.status]);
 
+  const loadWorkspaceShell = useCallback(async (slug: string) => {
+    if (!slug) return;
+    const workspacePayload = await api.getTakyonBusinessWorkspace(slug, 12, "boot");
+    setWorkspace(workspacePayload);
+  }, []);
+
   const loadWorkspace = useCallback(async (slug: string) => {
     if (!slug) return;
-    const workspacePayload = await api.getTakyonBusinessWorkspace(slug, 60);
-    setWorkspace(workspacePayload);
-    try {
-      const previewPayload = await api.getTakyonBusinessSitePreview(slug);
-      const nextPreviewUrl = trimText(previewPayload.url);
+    const [workspaceResult, previewResult] = await Promise.allSettled([
+      api.getTakyonBusinessWorkspace(slug, 60, "full"),
+      api.getTakyonBusinessSitePreview(slug),
+    ]);
+
+    if (workspaceResult.status === "fulfilled") {
+      setWorkspace(workspaceResult.value);
+    }
+    if (previewResult.status === "fulfilled") {
+      const nextPreviewUrl = trimText(previewResult.value.url);
       if (nextPreviewUrl) {
         setSitePreviewUrl(nextPreviewUrl);
       }
-    } catch {
-      // Keep the last good preview URL instead of blanking the product pane
-      // on transient preview read failures.
     }
+
+    if (workspaceResult.status === "rejected") {
+      throw workspaceResult.reason;
+    }
+    // Keep the last good preview URL instead of blanking the product pane
+    // on transient preview read failures.
   }, []);
 
   const loadCreativeCredits = useCallback(async (slug: string) => {
@@ -415,15 +429,17 @@ export function useTakyonLitebulb() {
     setCreativeCredits(null);
     setTraction(null);
     setSitePreviewUrl("");
+    setChatMessages([]);
     setChatProgress(null);
     setActiveBusiness(matched);
     await Promise.all([
       ensureSession(businessSlug),
-      loadWorkspace(businessSlug),
+      loadWorkspaceShell(businessSlug).catch(() => undefined),
       loadCreativeCredits(businessSlug),
       loadTraction(businessSlug, tractionRange),
     ]);
-  }, [businesses, ensureSession, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
+    void loadWorkspace(businessSlug).catch(() => undefined);
+  }, [businesses, ensureSession, loadCreativeCredits, loadTraction, loadWorkspace, loadWorkspaceShell, tractionRange]);
 
   const sendPrompt = useCallback(async (text: string) => {
     const value = trimText(text);

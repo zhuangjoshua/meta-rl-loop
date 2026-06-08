@@ -1,0 +1,31 @@
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+API_SOURCE = REPO_ROOT / "web" / "src" / "lib" / "api.ts"
+HOOK_SOURCE = REPO_ROOT / "web" / "src" / "litebulb" / "takyon" / "useTakyonLitebulb.ts"
+
+
+def test_workspace_api_supports_boot_view_reads():
+    source = API_SOURCE.read_text(encoding="utf-8")
+
+    assert 'getTakyonBusinessWorkspace: (slug: string, limit = 50, view: "full" | "boot" = "full") =>' in source
+    assert '&view=${encodeURIComponent(view)}' in source
+
+
+def test_open_business_boots_shell_before_full_workspace_refresh():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'const loadWorkspaceShell = useCallback(async (slug: string) => {' in source
+    assert 'api.getTakyonBusinessWorkspace(slug, 12, "boot")' in source
+    assert 'setChatMessages([]);' in source
+    assert 'loadWorkspaceShell(businessSlug).catch(() => undefined),' in source
+    assert 'void loadWorkspace(businessSlug).catch(() => undefined);' in source
+
+
+def test_full_workspace_load_parallelizes_preview_fetch():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert "const [workspaceResult, previewResult] = await Promise.allSettled([" in source
+    assert 'api.getTakyonBusinessWorkspace(slug, 60, "full")' in source
+    assert "api.getTakyonBusinessSitePreview(slug)" in source
