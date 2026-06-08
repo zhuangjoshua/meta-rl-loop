@@ -35,6 +35,8 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";' in source
+    assert 'if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {' in source
+    assert "await loadHistory(sessionIdRef.current);" in source
     assert 'const storedSessionId = readStoredLitebulbSession(businessSlug);' in source
     assert 'gateway.request<SessionResumePayload>("session.resume"' in source
     assert 'writeStoredLitebulbSession(' in source

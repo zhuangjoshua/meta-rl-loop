@@ -459,9 +459,6 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     const gateway = ensureGateway();
     await gateway.connect();
-    if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
-      return sessionIdRef.current;
-    }
     const applyHistory = (history: HistoryPayload) => {
       setSessionRunning(Boolean(history.running));
       setChatProgress(history.running ? { text: "Working…", live: true } : null);
@@ -473,6 +470,11 @@ export function useTakyonLitebulb() {
       }).catch<HistoryPayload>(() => fallback ?? { messages: [], running: false });
       applyHistory(history);
     };
+
+    if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
+      await loadHistory(sessionIdRef.current);
+      return sessionIdRef.current;
+    }
 
     if (businessSlug) {
       const storedSessionId = readStoredLitebulbSession(businessSlug);
