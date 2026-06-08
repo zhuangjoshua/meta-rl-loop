@@ -76,6 +76,9 @@ function Router() {
     setTractionRange,
   } = useTakyonLitebulb();
   const path = usePath();
+  const businessRouteSlug = path.startsWith("/app/c/")
+    ? path.slice("/app/c/".length).split("/")[0].trim().toLowerCase()
+    : "";
 
   const [theme, setThemeState] = useState<Theme>(() => {
     try {
@@ -113,10 +116,9 @@ function Router() {
 
   useEffect(() => {
     if (auth.status !== "in") return;
-    if (!path.startsWith("/app/c/")) return;
-    const slug = path.slice("/app/c/".length).split("/")[0];
-    if (slug) void openBusiness(slug);
-  }, [auth.status, openBusiness, path]);
+    if (!businessRouteSlug) return;
+    void openBusiness(businessRouteSlug);
+  }, [auth.status, businessRouteSlug, openBusiness]);
 
   useEffect(() => {
     if (auth.status !== "in") return;
@@ -178,8 +180,9 @@ function Router() {
   } else if (path === "/building") {
     view = <Building idea={pendingIdea} state={buildState} onDone={() => buildState.businessSlug && nav(`/app/c/${buildState.businessSlug}`)} />;
   } else if (path.startsWith("/app/c/")) {
-    view = activeBusiness ? (
+    view = activeBusiness && activeBusiness.slug === businessRouteSlug ? (
       <Product
+        key={businessRouteSlug}
         business={activeBusiness}
         workspace={workspace}
         creativeCredits={creativeCredits}

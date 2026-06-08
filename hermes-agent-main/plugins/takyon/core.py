@@ -19530,7 +19530,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "javascript runtime unavailable for Claude Agent SDK tasks: "
                     f"{ensure_runtime.get('error') or 'node is missing'}"
                 )
-        budget_usd = _clamp_float(args.get("budget_usd"), default=2.0, minimum=0.05, maximum=25.0)
+        budget_usd = _clamp_float(
+            args.get("budget_usd"),
+            default=8.0 if customer_facing_product_workspace else 2.0,
+            minimum=0.05,
+            maximum=25.0,
+        )
         operator_budget = _reserve_operator_task_budget(
             business=business,
             operator_user_id=operator_user_id,
@@ -19540,13 +19545,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 
         max_turns = _clamp_int(
             args.get("max_turns"),
-            default=24 if customer_facing_product_workspace else 12,
+            default=60 if customer_facing_product_workspace else 12,
             minimum=1,
-            maximum=40,
+            maximum=90 if customer_facing_product_workspace else 40,
         )
         timeout_ms = _clamp_int(
             args.get("timeout_ms"),
-            default=420_000 if customer_facing_product_workspace else 300_000,
+            default=1_200_000 if customer_facing_product_workspace else 300_000,
             minimum=30_000,
             maximum=1_800_000,
         )
@@ -19573,7 +19578,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         install_surface = _boolish(args.get("install"), default=True)
         refresh_timeout_seconds = _clamp_int(
             args.get("refresh_timeout_seconds"),
-            default=180 if customer_facing_product_workspace else 300,
+            default=600 if customer_facing_product_workspace else 300,
             minimum=15,
             maximum=900,
         )
@@ -20785,14 +20790,14 @@ TAKYON_TOOL_DEFINITIONS = [
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work"},
-                "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 2.0 and capped at 25.0"},
+                "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-4-6; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
-                "max_turns": {"type": "integer", "description": "SDK turn cap, default 24 for product/site work and 12 otherwise"},
-                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 420000 for product/site work and 300000 otherwise"},
+                "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},
+                "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 1200000 for product/site work and 300000 otherwise"},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
-                "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 180 for product/site work and 300 otherwise"},
+                "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 600 for product/site work and 300 otherwise"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

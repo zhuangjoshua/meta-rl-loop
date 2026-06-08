@@ -180,7 +180,7 @@ function AgentChat({
           className="lb-viewtabs lb-chat__tabs"
           value={tab}
           onChange={(value) => onTab(value as TabKey)}
-          options={[{ value: "product", label: "Product" }, { value: "company", label: "Company" }]}
+          options={[{ value: "company", label: "Company" }, { value: "product", label: "Product" }]}
         />
         <button className="lb-chat__collapse" onClick={onClose} aria-label="Hide chat" title="Hide chat">{Icon.collapse}</button>
       </div>
@@ -222,15 +222,40 @@ function AgentChat({
 
 function ProductPreview({
   business,
+  workspace,
   previewUrl,
   publicUrl,
 }: {
   business: LitebulbBusiness;
+  workspace: TakyonBusinessWorkspaceResponse | null;
   previewUrl: string;
   publicUrl?: string;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
   const site = publicUrl || siteHost(business.name);
+  const overview = (workspace?.overview || {}) as Record<string, unknown>;
+  const product = (overview.product || {}) as Record<string, unknown>;
+  const outputs = Array.isArray(workspace?.outputs) ? workspace.outputs : [];
+  const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
+  const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
+  const productStatus = typeof product.status === "string" ? product.status : "";
+  const frameUrl = previewUrl || publicUrl || "";
+  const hasLocalSource = Boolean(
+    sourcePath
+    || outputs.some((item) => {
+      const output = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      const path = typeof output.path === "string" ? output.path : "";
+      return path.startsWith("product/site/");
+    }),
+  );
+  const isLoading = !workspace;
+  const isBuilding = !frameUrl && !isLoading && hasLocalSource && publishStatus !== "published";
+  const detail = isLoading
+    ? "Loading the product workspace and preview surface."
+    : isBuilding
+    ? "Waiting for the product build or publish step to produce a previewable surface."
+    : "Once the CEO ships `product/site`, the preview appears here.";
+
   return (
     <section className="lb-stage">
       <div className={`lb-browser lb-browser--${device}`}>
@@ -250,16 +275,25 @@ function ProductPreview({
           </span>
         </div>
         <div className="lb-browser__view">
-          {previewUrl ? (
+          {frameUrl ? (
             <iframe
               className="lb-browser__iframe"
               title={`${business.name} preview`}
-              src={previewUrl}
+              src={frameUrl}
             />
+          ) : isLoading || isBuilding ? (
+            <div className="lb-browser__empty">
+              <div className="lb-browser__loader" aria-hidden="true" />
+              <h3>{isLoading ? "Loading product preview" : "Building product preview"}</h3>
+              <p>{detail}</p>
+            </div>
           ) : (
             <div className="lb-browser__empty">
               <h3>No local product preview yet</h3>
-              <p>Once the CEO ships `product/site`, the live preview appears here.</p>
+              <p>{detail}</p>
+              {productStatus && productStatus !== "missing" && (
+                <p className="lb-browser__hint">Current status: {productStatus}</p>
+              )}
             </div>
           )}
         </div>
@@ -337,7 +371,7 @@ export function Product({
 
         <div className={`lb-main${tab === "product" ? " lb-main--preview" : ""}`}>
           {tab === "product" ? (
-            <ProductPreview business={business} previewUrl={previewUrl} publicUrl={publicUrl} />
+            <ProductPreview business={business} workspace={workspace} previewUrl={previewUrl} publicUrl={publicUrl} />
           ) : (
             <CompanyTab
               business={business}

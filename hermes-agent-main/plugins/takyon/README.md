@@ -31,11 +31,21 @@ Plain text in the shell goes to the scoped CEO by default. `/ceo` is only a focu
 
 ## Storage
 
-Takyon control/business authority lives in Supabase Postgres. Takyon-managed business files still live under `TAKYON_HOME`. In the parent workspace launcher this is `/Users/Zygote/Downloads/takyon/.takyon`.
+Takyon control/business authority lives in Supabase Postgres. The canonical durable per-business file
+store is the configured object-storage backend; on the tracked operator runtime this is Supabase
+Storage over the S3-compatible API. The local host copy is cache/scratch, not the durable source of
+truth.
 
 ```text
 $TAKYON_HOME/
-  businesses/
+  cache/
+    businesses/
+      <business>/
+        product/
+        distribution/
+        research/
+        metrics/
+  businesses/        # only for local-backend/dev or explicit scratch homes
     <business>/
       product/
       distribution/

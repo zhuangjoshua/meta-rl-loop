@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+import cron.jobs as cron_jobs
+
 from plugins.takyon import cli as takyon_cli
+from plugins.takyon.core import TakyonStore
 
 
 def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
@@ -114,3 +119,55 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
         "schedule": "every 6h",
         "max_turns": 20,
     }
+
+
+def test_ensure_ceo_wakeup_can_defer_first_run(monkeypatch, tmp_path):
+    store = TakyonStore(tmp_path)
+
+    class _FakeConn:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    created: dict[str, object] = {}
+
+    def _fake_create_job(**kwargs):
+        created["create_kwargs"] = dict(kwargs)
+        return {
+            "id": "job-123",
+            "schedule_display": "every 360m",
+            "next_run_at": "",
+        }
+
+    def _fake_update_job(job_id, updates):
+        created["update_job_id"] = job_id
+        created["update_payload"] = dict(updates)
+        return {
+            "id": job_id,
+            "schedule_display": "every 360m",
+            "next_run_at": str(updates.get("next_run_at") or ""),
+        }
+
+    monkeypatch.setattr(store, "_connect", lambda: _FakeConn())
+    monkeypatch.setattr(store, "_control_blocker", lambda conn, scope: None)
+    monkeypatch.setattr("plugins.takyon.core._db_backend", lambda: "sqlite")
+    monkeypatch.setattr(cron_jobs, "list_jobs", lambda include_disabled=True: [])
+    monkeypatch.setattr(cron_jobs, "create_job", _fake_create_job)
+    monkeypatch.setattr(cron_jobs, "update_job", _fake_update_job)
+
+    before = datetime.now(timezone.utc)
+    result = store._ensure_ceo_cron(
+        "crm",
+        schedule="every 6h",
+        reason="bootstrap completed and enabled CEO wake loop",
+        defer_first_run=True,
+    )
+
+    deferred = datetime.fromisoformat(str(result["next_run_at"]))
+    assert deferred >= before + timedelta(hours=5, minutes=59)
+    assert deferred <= before + timedelta(hours=6, minutes=1)
+    assert created["update_job_id"] == "job-123"
+    assert created["update_payload"] == {"next_run_at": str(result["next_run_at"])}
+    assert result["defer_first_run"] is True

@@ -40,7 +40,23 @@ def test_bootstrap_prompt_pins_canonical_business_name():
     )
 
     assert "Canonical business name: Longer" in prompt
-    assert "Use exactly this business name on the first pass." in prompt
+    assert "Use exactly the business name above. Do not invent a second company, umbrella brand, or product name." in prompt
+
+
+def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface():
+    prompt = _business_bootstrap_instruction(
+        "crm",
+        "construction CRM",
+        "live",
+        business_name="CRM",
+    )
+
+    assert "Use the Hermes app kit materialized in the workspace as the implementation base for both / and /app." in prompt
+    assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
+    assert "Do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows on this first pass." in prompt
+    assert "The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like." in prompt
+    assert "Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI." in prompt
+    assert "The result should be publishable and product-specific on the first pass." in prompt
 
 
 def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):

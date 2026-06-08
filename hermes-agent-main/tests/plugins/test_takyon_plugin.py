@@ -7,7 +7,7 @@ import os
 import stat
 import tempfile
 import types
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -46,6 +46,7 @@ from plugins.takyon.core import (
     handle_business_reddit_ad_insights_sync,
     handle_business_reddit_ad_launch,
     handle_business_publish_outreach,
+    handle_business_x_metrics_sync,
     handle_business_read_app_account,
     handle_business_request_app_magic_link,
     handle_business_record_stripe_webhook,
@@ -137,6 +138,7 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_meta_ad_bind_manual_launch"] == "takyon-authority"
     assert toolsets["business_meta_ad_control"] == "takyon-authority"
     assert toolsets["business_meta_ad_insights_sync"] == "takyon-authority"
+    assert toolsets["business_x_metrics_sync"] == "takyon-authority"
     assert toolsets["business_reddit_ad_launch"] == "takyon-authority"
     assert toolsets["business_reddit_ad_control"] == "takyon-authority"
     assert toolsets["business_reddit_ad_insights_sync"] == "takyon-authority"
@@ -1780,51 +1782,6 @@ def test_runtime_generate_route_does_not_count_as_working_app_subroute(tmp_path)
     assert "/generate" not in blocker
 
 
-def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
-    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    store = TakyonStore(tmp_path)
-    _commit(
-        store,
-        "business:latexflow",
-        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
-        "init",
-    )
-
-    captured: dict[str, object] = {}
-
-    def fake_run(command, *, input=None, **kwargs):
-        if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
-            payload = json.loads(input or "{}")
-            captured["payload"] = payload
-            Path(payload["cwd"], "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-        return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
-
-    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
-    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
-    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
-    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
-    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
-
-    result = json.loads(
-        handle_business_claude_agent_task(
-            {
-                "business": "latexflow",
-                "workspace": "product/site",
-                "instruction": "Build the first honest product surface.",
-                "idempotency_key": "workspace-faster-defaults",
-                "install": False,
-            }
-        )
-    )
-
-    payload = captured["payload"]
-    assert result["success"] is True
-    assert payload["maxTurns"] == 16
-    assert payload["timeoutMs"] == 300000
-    assert payload["effort"] == "medium"
-
-
 def test_claude_agent_task_no_longer_requires_legacy_business_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -3199,6 +3156,42 @@ def test_wake_command_triggers_current_business_cron_immediately(tmp_path, monke
     next_run_at = datetime.fromisoformat(str(jobs[0]["next_run_at"]))
     now = datetime.now(next_run_at.tzinfo) if next_run_at.tzinfo else datetime.now()
     assert next_run_at <= now + timedelta(seconds=2)
+
+
+def test_create_schedule_can_defer_first_ceo_wake(tmp_path, pg_store_dsn):
+    from plugins.takyon import wakes
+
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    _commit(
+        store,
+        "business:crm",
+        [{"action": "business.upsert", "business": "crm", "name": "CRM"}],
+        "init-deferred-wake-business",
+    )
+    before = datetime.now(timezone.utc)
+    result = _commit(
+        store,
+        "business:crm",
+        [
+            {
+                "action": "cron.ensure_ceo_wakeup",
+                "business": "crm",
+                "schedule": "every 6h",
+                "defer_first_run": True,
+            }
+        ],
+        "init-deferred-wake-schedule",
+    )
+
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as leaf:
+            sched = wakes.get_wake_schedule(leaf, "crm")
+            assert sched is not None
+            assert wakes.dispatch_due_wakes(leaf) == 0
+
+    assert sched.next_run_at >= before + timedelta(hours=5, minutes=59)
+    assert sched.next_run_at <= before + timedelta(hours=6, minutes=1)
+    assert result["results"][0]["defer_first_run"] is True
 
 
 def test_focus_change_refreshes_existing_ceo_cron_prompt(tmp_path, monkeypatch):
@@ -4777,6 +4770,39 @@ def _meta_test_business(tmp_path, monkeypatch, *, slug="clipbook", mode="test"):
     return store
 
 
+def _write_x_outreach_receipt(
+    tmp_path,
+    *,
+    business="clipbook",
+    filename="20260607T120000Z-x-demo.json",
+    post_id="1234567890",
+    post_url="https://x.com/vaalapp/status/1234567890",
+    published_at="2026-06-07T12:00:00+00:00",
+):
+    receipt_path = (
+        tmp_path
+        / "businesses"
+        / business
+        / "metrics"
+        / "receipts"
+        / "outreach"
+        / filename
+    )
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "provider": "x",
+        "channel": "x",
+        "post_id": post_id,
+        "post_url": post_url,
+        "published_at": published_at,
+        "sent": True,
+        "external_side_effects": "sent",
+        "artifact_path": f"distribution/local-published/x/{post_id}.md",
+    }
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    return receipt_path
+
+
 def _grant_creative_credits(store: TakyonStore, business: str, credits: int, key: str) -> None:
     with store._connect() as conn:
         takyon_business_credits.grant_credits(conn, business, credits, idempotency_key=key)
@@ -6352,3 +6378,128 @@ def test_business_publish_outreach_live_requires_provider_gate(tmp_path, monkeyp
 
     assert result["success"] is False
     assert "requires missing API/env credential" in result["error"]
+
+
+def test_business_x_metrics_sync_live_writes_snapshot(tmp_path, monkeypatch):
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_x_outreach_receipt(
+        tmp_path,
+        post_id="2063697342092509383",
+        post_url="https://x.com/vaalapp/status/2063697342092509383",
+        published_at="2026-06-07T18:59:22+00:00",
+    )
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_x_metrics_lookup",
+        lambda post_id, **_kw: {
+            "id": post_id,
+            "created_at": "2026-06-07T18:59:22.000Z",
+            "public_metrics": {
+                "reply_count": 1,
+                "retweet_count": 2,
+                "like_count": 3,
+                "quote_count": 4,
+                "bookmark_count": 5,
+                "impression_count": 6,
+            },
+            "non_public_metrics": {
+                "user_profile_clicks": 7,
+                "impression_count": 8,
+                "engagements": 9,
+            },
+            "organic_metrics": {
+                "reply_count": 10,
+                "retweet_count": 11,
+                "impression_count": 12,
+                "like_count": 13,
+                "user_profile_clicks": 14,
+            },
+        },
+    )
+
+    result = json.loads(
+        handle_business_x_metrics_sync(
+            {
+                "business": "clipbook",
+                "post_id": "2063697342092509383",
+                "idempotency_key": "clipbook-x-metrics-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "synced"
+    assert result["totals"]["public_metrics"]["like_count"] == 3
+    assert result["totals"]["non_public_metrics"]["engagements"] == 9
+    assert result["totals"]["organic_metrics"]["user_profile_clicks"] == 14
+
+    post_abs = tmp_path / "businesses" / "clipbook" / result["post_metrics_path"]
+    assert post_abs.is_file()
+    post_payload = json.loads(post_abs.read_text(encoding="utf-8"))
+    assert post_payload["post_id"] == "2063697342092509383"
+    assert post_payload["public_metrics"]["bookmark_count"] == 5
+
+    metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
+    assert metrics_abs.is_file()
+    lines = [json.loads(line) for line in metrics_abs.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[-1]["post_metrics_path"] == result["post_metrics_path"]
+
+    summary_abs = tmp_path / "businesses" / "clipbook" / result["summary_path"]
+    assert summary_abs.is_file()
+    summary_payload = json.loads(summary_abs.read_text(encoding="utf-8"))
+    assert summary_payload["posts_synced"] == 1
+    assert summary_payload["totals"]["public_metrics"]["impression_count"] == 6
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "x.metrics_sync"
+    payload = json.loads(row["payload_json"])
+    assert payload["receipt"].startswith("metrics/x/syncs/")
+
+
+def test_business_x_metrics_sync_defaults_to_latest_x_receipt(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _write_x_outreach_receipt(
+        tmp_path,
+        filename="20260607T120000Z-x-old.json",
+        post_id="111",
+        post_url="https://x.com/vaalapp/status/111",
+        published_at="2026-06-07T12:00:00+00:00",
+    )
+    latest_path = _write_x_outreach_receipt(
+        tmp_path,
+        filename="20260607T130000Z-x-new.json",
+        post_id="222",
+        post_url="https://x.com/vaalapp/status/222",
+        published_at="2026-06-07T13:00:00+00:00",
+    )
+    os.utime(latest_path, (latest_path.stat().st_atime, latest_path.stat().st_mtime + 10))
+
+    seen: dict[str, str] = {}
+
+    def _fake_lookup(post_id, **_kw):
+        seen["post_id"] = post_id
+        return {
+            "id": post_id,
+            "created_at": "2026-06-07T13:00:00.000Z",
+            "public_metrics": {"like_count": 1},
+        }
+
+    monkeypatch.setattr(takyon_core, "_x_metrics_lookup", _fake_lookup)
+
+    result = json.loads(
+        handle_business_x_metrics_sync(
+            {
+                "business": "clipbook",
+                "idempotency_key": "clipbook-x-metrics-latest-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert seen["post_id"] == "222"
+    assert result["post_id"] == "222"

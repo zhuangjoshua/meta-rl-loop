@@ -297,6 +297,11 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
     monkeypatch.setattr(
         server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "latexflow", "name": "Latexflow", "mode": "live"}},
+    )
+    monkeypatch.setattr(
+        server,
         "_takyon_workspace_payload",
         lambda *_args, **_kwargs: {
             "business_slug": "latexflow",
@@ -376,6 +381,13 @@ def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(s
     )
     monkeypatch.setattr(
         server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {
+            "business": {"slug": "cat-app-0602012413", "name": "Cat App", "mode": "live"},
+        },
+    )
+    monkeypatch.setattr(
+        server,
         "_takyon_workspace_payload",
         lambda *_args, **_kwargs: {
             "business_slug": "cat-app-0602012413",
@@ -448,6 +460,11 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
     fake_cli.run_takyon_command = fake_run_takyon_command
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
+    monkeypatch.setattr(
+        server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "longer", "name": "Longer", "mode": "live"}},
+    )
     monkeypatch.setattr(
         server,
         "_takyon_workspace_payload",
@@ -523,6 +540,11 @@ def test_takyon_dashboard_create_seeds_current_name_on_first_response(server, mo
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
     monkeypatch.setattr(
         server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "longer", "name": "Longer", "mode": "live"}},
+    )
+    monkeypatch.setattr(
+        server,
         "_takyon_workspace_payload",
         lambda *_args, **_kwargs: {
             "business_slug": "longer",
@@ -554,6 +576,66 @@ def test_takyon_dashboard_create_seeds_current_name_on_first_response(server, mo
     assert current["name"] == "Longer"
     assert current["slug"] == "longer"
     assert current["mode"] == "live"
+
+
+def test_takyon_dashboard_create_requires_durable_business_before_streaming(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "",
+        "takyon_operator_user_id": "user-1",
+        "agent_ready": threading.Event(),
+    }
+    started = {"value": False}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+        def read(self, *, scope="global", query="summary", **_kwargs):
+            if scope == "global":
+                return {"businesses": []}
+            if scope == "business:ghost":
+                return {"success": True, "business": {}}
+            return {"success": True}
+
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+        assert name == "Ghost"
+        assert goal == "ghost goal"
+        assert slug_hint == "ghost"
+        assert operator_user_id == "user-1"
+        return "Ghost", "ghost"
+
+    def fake_run_takyon_command(*_args, **_kwargs):
+        return {"success": True, "business": "ghost", "mode": "live"}
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "ghost")
+    monkeypatch.setattr(
+        server,
+        "_start_streaming_session_turn",
+        lambda *_args, **_kwargs: started.__setitem__("value", True),
+    )
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-stream-missing-1",
+        {
+            "session_id": sid,
+            "business": "ghost",
+            "business_name": "Ghost",
+            "goal": "ghost goal",
+            "mode": "live",
+        },
+    )
+
+    assert response["error"]["code"] == 5051
+    assert "did not persist business:ghost" in response["error"]["message"]
+    assert started["value"] is False
+    assert server._sessions[sid]["running"] is False
 
 
 def test_takyon_dashboard_workspace_uses_explicit_business_slug(server, monkeypatch):

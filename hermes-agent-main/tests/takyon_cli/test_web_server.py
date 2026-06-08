@@ -911,6 +911,11 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert body["current"]["name"] == "Alpha"
     assert isinstance(body["overview"], dict)
     assert isinstance(body["outputs"], list)
+    surface_output = next(
+        item for item in body["outputs"] if item.get("path") == "product/surface.md"
+    )
+    assert surface_output["preview_content"] == "# Alpha\n"
+    assert surface_output["preview_truncated"] is False
 
 
 def test_business_traction_endpoint_reads_owned_business_directly(monkeypatch):
@@ -1001,6 +1006,118 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
     assert body["current"]["name"] == "Alpha"
     assert body["overview"]["product"]["public_url"] == "https://alpha.example.com"
     assert captured == {"operator_user_id": "user-123", "business": "alpha"}
+
+
+def test_business_site_preview_falls_back_to_published_public_url_when_local_html_is_missing(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    business_root = tmp_path / "businesses" / "alpha"
+    (business_root / "product" / "site").mkdir(parents=True, exist_ok=True)
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None):
+            self.operator_user_id = operator_user_id
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            assert slug == "alpha"
+            return business_root / rel
+
+        def _business_root(self, slug, sync=False):
+            assert slug == "alpha"
+            return business_root
+
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:alpha"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "published",
+                        "public_url": "https://alpha.example.com/",
+                    }
+                }
+            }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/businesses/alpha/site-preview")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "business_slug": "alpha",
+        "path": "product/site",
+        "size": 0,
+        "url": "https://alpha.example.com/",
+        "mode": "live_url",
+        "status": "published",
+    }
+
+
+def test_business_site_preview_does_not_mask_missing_explicit_html_path_with_public_url(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    business_root = tmp_path / "businesses" / "alpha"
+    (business_root / "product" / "site").mkdir(parents=True, exist_ok=True)
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None):
+            self.operator_user_id = operator_user_id
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            assert slug == "alpha"
+            return business_root / rel
+
+        def _business_root(self, slug, sync=False):
+            assert slug == "alpha"
+            return business_root
+
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:alpha"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "published",
+                        "public_url": "https://alpha.example.com/",
+                    }
+                }
+            }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get(
+        "/api/takyon/businesses/alpha/site-preview",
+        params={"path": "product/site/missing-preview.html"},
+    )
+
+    assert resp.status_code == 404
+    assert "site preview not found" in resp.json()["detail"]
 
 
 def test_business_home_payload_reads_reddit_campaign_state(tmp_path, monkeypatch):

@@ -3683,6 +3683,31 @@ async def get_takyon_business_site_preview(
         if candidate.is_dir() or not candidate.suffix:
             candidate = candidate / "index.html"
         if not candidate.exists() or not candidate.is_file():
+            normalized_requested_path = requested_path.strip().strip("/") or "product/site"
+            if normalized_requested_path in {"product/site", "product/site/index.html"}:
+                try:
+                    summary = store.read(
+                        scope=f"business:{business}",
+                        query="summary",
+                        include=["app"],
+                        limit=20,
+                    )
+                except Exception:
+                    summary = {}
+                app = summary.get("app") if isinstance(summary, dict) and isinstance(summary.get("app"), dict) else {}
+                surface = app.get("surface") or app.get("surface_contract") or {}
+                if isinstance(surface, dict):
+                    publish_status = str(surface.get("publish_status") or "").strip().lower()
+                    public_url = str(surface.get("public_url") or "").strip()
+                    if publish_status == "published" and re.match(r"^https?://", public_url, re.IGNORECASE):
+                        return {
+                            "business_slug": business,
+                            "path": normalized_requested_path,
+                            "size": 0,
+                            "url": public_url,
+                            "mode": "live_url",
+                            "status": "published",
+                        }
             raise HTTPException(status_code=404, detail=f"site preview not found: {requested_path}")
         if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
             raise HTTPException(status_code=400, detail="site preview requires an HTML file or site directory")
@@ -3703,6 +3728,8 @@ async def get_takyon_business_site_preview(
             "path": rel,
             "size": len(html_text.encode("utf-8")),
             "url": f"data:text/html;charset=utf-8;base64,{encoded}",
+            "mode": "inline_html",
+            "status": "ready",
         }
     except HTTPException:
         raise

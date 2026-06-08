@@ -326,6 +326,10 @@ export function useTakyonLitebulb() {
     if (!businessSlug) return;
     const matched = businesses.find((item) => item.slug === businessSlug)
       || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode" };
+    setWorkspace(null);
+    setCreativeCredits(null);
+    setTraction(null);
+    setSitePreviewUrl("");
     setActiveBusiness(matched);
     await Promise.all([
       ensureSession(businessSlug),
@@ -402,6 +406,7 @@ export function useTakyonLitebulb() {
         tagline: idea,
         meta: "Live mode",
       });
+      setSitePreviewUrl("");
       setWorkspace({
         business_slug: businessSlug,
         current: result?.current || {},
@@ -409,11 +414,6 @@ export function useTakyonLitebulb() {
         outputs: result?.outputs || [],
         background_run: result?.background_run || null,
       });
-      await Promise.all([
-        loadWorkspace(businessSlug).catch(() => undefined),
-        loadCreativeCredits(businessSlug).catch(() => undefined),
-        loadTraction(businessSlug, tractionRange).catch(() => undefined),
-      ]);
       setBuildState((state) => ({
         ...state,
         status: "ready",
@@ -421,6 +421,11 @@ export function useTakyonLitebulb() {
         businessName,
         terminal: pushUniqueLine(state.terminal, "Workspace ready."),
       }));
+      void Promise.all([
+        loadWorkspace(businessSlug).catch(() => undefined),
+        loadCreativeCredits(businessSlug).catch(() => undefined),
+        loadTraction(businessSlug, tractionRange).catch(() => undefined),
+      ]);
       setSubmitting(false);
       return businessSlug;
     } catch (error) {

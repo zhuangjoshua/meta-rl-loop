@@ -168,9 +168,11 @@
 .lb-seg2 button.is-on { background: var(--cds-color-surface-sunken); color: var(--cds-color-text-default); }
 .lb-browser__view { flex: 1; min-height: 0; overflow: auto; background: #fbfcfd; }
 .lb-browser__iframe { width: 100%; height: 100%; border: 0; background: #fff; }
-.lb-browser__empty { height: 100%; display: grid; place-items: center; padding: 32px; text-align: center; color: var(--cds-color-text-soft); }
+.lb-browser__empty { height: 100%; display: grid; place-items: center; align-content: center; gap: 12px; padding: 32px; text-align: center; color: var(--cds-color-text-soft); }
 .lb-browser__empty h3 { margin: 0 0 8px; font-size: var(--cds-text-lg); color: var(--cds-color-text-default); }
 .lb-browser__empty p { margin: 0; max-width: 420px; }
+.lb-browser__hint { font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); }
+.lb-browser__loader { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--cds-color-border-default); border-top-color: var(--cds-color-brand-primary); animation: lb-spin 0.9s linear infinite; }
 
 /* deployed app mock — fixed light palette (it's a real site) */
 .lb-mock { display: grid; grid-template-columns: 168px 1fr; min-height: 100%; color: #101516; font-size: 13px; }

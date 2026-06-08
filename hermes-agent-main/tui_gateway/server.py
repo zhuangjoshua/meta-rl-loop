@@ -7561,9 +7561,24 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
 _TAKYON_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TAKYON_MEDIA_SUFFIXES = _TAKYON_VIDEO_SUFFIXES | _TAKYON_IMAGE_SUFFIXES
+_TAKYON_TEXT_OUTPUT_SUFFIXES = {
+    ".md",
+    ".txt",
+    ".json",
+    ".js",
+    ".css",
+    ".html",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".yml",
+    ".yaml",
+}
 _TAKYON_MAX_MEDIA_BYTES = 64 * 1024 * 1024
 _TAKYON_MAX_FILE_READ_BYTES = 512 * 1024
 _TAKYON_MAX_SITE_PREVIEW_BYTES = 8 * 1024 * 1024
+_TAKYON_INLINE_OUTPUT_PREVIEW_BYTES = 24 * 1024
+_TAKYON_INLINE_OUTPUT_PREVIEW_LIMIT = 8
 
 
 def _takyon_site_asset_data_url(index_path: Path, raw_url: str, *, site_root: Path | None = None) -> str | None:
@@ -7647,7 +7662,7 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         "outreach/local-published",
         "product/site",
     ]
-    allowed_suffixes = {".md", ".html", ".css", ".js", ".txt", ".json", *_TAKYON_MEDIA_SUFFIXES}
+    allowed_suffixes = {*_TAKYON_TEXT_OUTPUT_SUFFIXES, *_TAKYON_MEDIA_SUFFIXES}
     for rel_root in recursive_roots:
         directory = root / rel_root
         if not directory.exists() or not directory.is_dir():
@@ -7679,6 +7694,26 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
         )
 
     outputs.sort(key=lambda item: int(item.get("at") or 0), reverse=True)
+    preview_budget = _TAKYON_INLINE_OUTPUT_PREVIEW_LIMIT
+    for item in outputs:
+        if preview_budget <= 0:
+            break
+        rel = str(item.get("path") or "").strip()
+        if not rel:
+            continue
+        if Path(rel).suffix.lower() not in _TAKYON_TEXT_OUTPUT_SUFFIXES:
+            continue
+        path = root / rel
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as fh:
+                raw = fh.read(min(size, _TAKYON_INLINE_OUTPUT_PREVIEW_BYTES))
+        except Exception:
+            continue
+        item["preview_content"] = raw.decode("utf-8", errors="replace")
+        item["preview_truncated"] = size > _TAKYON_INLINE_OUTPUT_PREVIEW_BYTES
+        item["preview_size"] = size
+        preview_budget -= 1
     return outputs[: max(1, min(int(limit or 40), 100))]
 
 

@@ -194,7 +194,14 @@ export const api = {
       "takyon.file.read",
     ),
   getTakyonBusinessSitePreview: (slug: string, path = "") =>
-    fetchJSONWithTimeout<{ business_slug?: string; path?: string; size?: number; url?: string }>(
+    fetchJSONWithTimeout<{
+      business_slug?: string;
+      path?: string;
+      size?: number;
+      url?: string;
+      mode?: "inline_html" | "live_url";
+      status?: string;
+    }>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/site-preview?path=${encodeURIComponent(path)}`,
       15_000,
       undefined,

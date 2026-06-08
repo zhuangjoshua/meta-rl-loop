@@ -874,11 +874,15 @@ def _resolve_dashboard_create_identity(
                 goal_text,
                 operator_user_id=operator_user_id,
             )
+        except TakyonError as exc:
+            if "operator budget exhausted" in str(exc).lower():
+                raise
+        except Exception:
+            resolved_name = ""
+        else:
+            resolved_name = _collapse_whitespace(resolved_name)
             if resolved_name:
                 return resolved_name, _slugify(resolved_name)
-        except Exception as exc:
-            if isinstance(exc, TakyonError) and "operator budget exhausted" in str(exc).lower():
-                raise
         return _resolve_create_identity("", goal_text, slug_hint)
     return _resolve_create_identity("", "", slug_hint)
 
@@ -1225,7 +1229,39 @@ def _business_bootstrap_instruction(
         "",
         "Then call business_claude_agent_task with:",
         "- workspace: product/site",
-        "- instruction: build the landing page at / and the app shell at /app with sign-in, subscription, and account access using the Hermes app kit materialized in the workspace",
+        "- instruction: Use the Hermes app kit materialized in the workspace as the implementation base for both / and /app.",
+        "",
+        "Build the landing page at / now.",
+        "",
+        "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell.",
+        'Do not leave generic copy such as "membership pricing", "what is included", "simple pricing", "offer", or similar starter text anywhere customer-visible.',
+        "Keep Hermes/Takyon runtime rails for auth, account, profile, and checkout intact.",
+        "But replace generic starter copy, generic starter sections, and generic starter-shell presentation with product-specific content and UI on the first pass.",
+        "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access.",
+        "Do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows on this first pass.",
+        "",
+        "For /:",
+        "- Write ICP-specific copy immediately.",
+        "- The hero, problem, features, pricing, and CTA must reflect the researched customer and pain.",
+        "- The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like.",
+        "",
+        "For /app:",
+        "- Keep the existing AppKit auth, checkout/subscription, account, and profile flows.",
+        "- Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI.",
+        "- You may restyle and refine those surfaces so they match the landing page brand.",
+        "- Do not invent product-specific tabs, custom product workflows, domain objects, or unsupported backend capabilities.",
+        "- Do not fake persistence, fake synced records, fake AI results, or fake customer data.",
+        "",
+        "Implementation bias:",
+        "- Edit the existing starter surface in place first.",
+        "- Preserve `_takyon/*`, `starter-context.js`, and the existing runtime rail behavior.",
+        "- Prefer restyling and upgrading the existing auth/account/profile shell over creating a new app architecture.",
+        "",
+        "Constraints:",
+        "- Keep auth, account, profile, and checkout wired to Hermes/Takyon rails.",
+        "- Do not expose runtime-internal wording to customers.",
+        "- Do not invent unsupported backend capabilities.",
+        "- The result should be publishable and product-specific on the first pass.",
         "- refresh_surface: true",
         "",
         "Do not inspect the worker result. Do not call business_read_file or business_list_files to verify output.",
@@ -1240,6 +1276,8 @@ def _business_bootstrap_instruction(
         "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
         "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked.",
         "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
+        "If any business_* tool says the business does not exist, stop immediately and report a platform provisioning failure.",
+        "Do not retry business_write_file, and do not call business_create_workspace to paper over a missing business row.",
         "If something is blocked, record the blocker in research/strategy.md and continue with the next step.",
         "",
         "## Final response",
@@ -1560,7 +1598,7 @@ def _render_harness_command(command: dict[str, Any], *, business: str | None, ar
     argument_text = " ".join(args).strip()
     workspace_root = ""
     if business:
-        workspace_root = str((store.root / "businesses" / business).resolve())
+        workspace_root = str(store._business_root(business).resolve())
     body = str(command["body"])
     body = body.replace("$ARGUMENTS", argument_text)
     body = body.replace("$BUSINESS", business or "")
@@ -3351,7 +3389,14 @@ def run_takyon_command(
             return business_result
         cron_result = store.commit(
             scope=_scope_for_business(slug),
-            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+            operations=[
+                {
+                    "action": "cron.ensure_ceo_wakeup",
+                    "business": slug,
+                    "schedule": schedule,
+                    "defer_first_run": True,
+                }
+            ],
             idempotency_key=_idempotency_key("operator-init-wake-v3", slug, schedule),
             reason="operator initialized business CEO wake loop",
             actor="operator",

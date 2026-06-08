@@ -1,11 +1,10 @@
-"""Externalized per-business filesystem (Phase 7) — the leaf that makes the host stateless.
+"""Externalized per-business filesystem (Phase 7) — the leaf that makes the durable host state small.
 
-Today the per-business workspace (the four canonical roots ``product/``, ``distribution/``,
-``research/``, ``metrics/``) lives only on the local disk of whichever box ran the CEO. That makes the
-host *stateful*: a second runtime on an empty disk cannot resume a business. Phase 7 externalizes that
-workspace to an object store so the contract becomes **sync-down → run → sync-up**, with local disk as
-pure scratch. A second host then resumes a business from Postgres (its identity/jobs/ledger/schedule)
-+ the object store (its files) — the "no-fleet proof".
+The per-business workspace (the four canonical roots ``product/``, ``distribution/``, ``research/``,
+``metrics/``) is designed to live in one durable object-store prefix per business, with local disk as
+cache/scratch. The contract is **sync-down → run → sync-up**. A second host then resumes a business
+from Postgres (its identity/jobs/ledger/schedule) + the object store (its files) — the "no-fleet
+proof".
 
 This is a pure leaf, shaped like ``jobs``/``wakes`` and seamed like the AI gateway's
 ``get_provider_caller``:
@@ -18,9 +17,9 @@ This is a pure leaf, shaped like ``jobs``/``wakes`` and seamed like the AI gatew
         Selected only by an explicit ``TAKYON_STORAGE_BACKEND=supabase_s3`` switch + the ``SUPABASE_S3_*``
         creds. If selected while unconfigured (creds or ``boto3`` missing) it raises
         :class:`StorageUnconfigured` — a `blocked`-with-reason, NEVER a silent fall back to local and
-        NEVER a fake "synced" (invariant #8). This backend is wired but **unverified against live
-        Supabase** (no live creds in this environment); the operator must provision the keys recorded in
-        ``mediationplan.md`` Gate 2 before live cutover.
+        NEVER a fake "synced" (invariant #8). This backend is live-verified against Supabase Storage;
+        production still depends on the real ``SUPABASE_S3_*`` + ``TAKYON_STORAGE_BUCKET`` values being
+        provisioned in the operator env.
 
   * :func:`sync_up` / :func:`sync_down` are content-**digest incremental** (unchanged files are skipped)
     and **integrity-checked** (a downloaded blob whose sha256 ≠ the recorded digest raises rather than

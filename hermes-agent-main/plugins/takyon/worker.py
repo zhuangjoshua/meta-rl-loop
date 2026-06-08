@@ -447,7 +447,12 @@ def _record_runtime_event(
         _log.debug("failed to record worker runtime event for %s: %s", slug, exc)
 
 
-def _refresh_business_surface_after_bootstrap(slug: str, *, job_id: str) -> dict[str, Any] | None:
+def _refresh_business_surface_after_bootstrap(
+    slug: str,
+    *,
+    job_id: str,
+    operator_user_id: str | None = None,
+) -> dict[str, Any] | None:
     """After scratch sync-up, refresh the durable product surface if this bootstrap declared one.
 
     This closes the gap where a bootstrap turn writes final `product/site/*` files late in the turn
@@ -459,7 +464,7 @@ def _refresh_business_surface_after_bootstrap(slug: str, *, job_id: str) -> dict
 
     from .core import TakyonStore, handle_business_refresh_product_surface
 
-    store = TakyonStore()
+    store = TakyonStore(operator_user_id=str(operator_user_id or "").strip() or None)
     summary = store.read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
     app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
     surface = app.get("surface") or app.get("surface_contract") or {}
@@ -998,7 +1003,11 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         if tokens:
             clear_session_vars(tokens)
 
-    surface_refresh = _refresh_business_surface_after_bootstrap(slug, job_id=str(job.id))
+    surface_refresh = _refresh_business_surface_after_bootstrap(
+        slug,
+        job_id=str(job.id),
+        operator_user_id=owner_user_id,
+    )
     if surface_refresh:
         publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
         publish_status = str(publish.get("status") or surface_refresh.get("status") or "").strip() or "unknown"
@@ -1028,7 +1037,14 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     if schedule:
         wake_result = store.commit(
             scope=f"business:{slug}",
-            operations=[{"action": "cron.ensure_ceo_wakeup", "business": slug, "schedule": schedule}],
+            operations=[
+                {
+                    "action": "cron.ensure_ceo_wakeup",
+                    "business": slug,
+                    "schedule": schedule,
+                    "defer_first_run": True,
+                }
+            ],
             idempotency_key=f"{job.id}:bootstrap-wake:{schedule}",
             reason="bootstrap completed and enabled CEO wake loop",
             actor="worker",

@@ -98,6 +98,52 @@ def _count_list(obj: object, *path: str) -> int | None:
     return len(cur) if isinstance(cur, list) else None
 
 
+def _tool_file_activity(result: str) -> list[dict[str, str]]:
+    try:
+        data = json.loads(result)
+    except Exception:
+        return []
+
+    def _coerce(item: object) -> dict[str, str] | None:
+        if not isinstance(item, dict):
+            return None
+        action = str(item.get("action") or "").strip()
+        if action in {"artifact.write", "memory.write"}:
+            path = str(item.get("path") or "").strip()
+            if path:
+                return {"action": "file.write", "path": path}
+        if action == "artifact.patch":
+            path = str(item.get("path") or "").strip()
+            if path:
+                return {"action": "file.patch", "path": path}
+        if action == "workspace.upsert":
+            workspace = str(item.get("workspace") or item.get("path") or "").strip()
+            if workspace:
+                return {"action": "workspace.upsert", "path": workspace}
+        return None
+
+    items: list[dict[str, str]] = []
+    if isinstance(data, dict):
+        top_level = _coerce(data)
+        if top_level:
+            items.append(top_level)
+        results = data.get("results")
+        if isinstance(results, list):
+            for raw in results:
+                entry = _coerce(raw)
+                if entry:
+                    items.append(entry)
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        key = (item["action"], item["path"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _tool_summary(name: str, result: str, duration_s: float | None) -> str | None:
     try:
         data = json.loads(result)
@@ -263,6 +309,15 @@ def _build_agent(payload: dict[str, Any], workspace_root: str):
         summary = _tool_summary(name, result, duration_s)
         if summary:
             payload["summary"] = summary
+        file_activity = _tool_file_activity(result)
+        if file_activity:
+            payload["file_activity"] = file_activity
+            if not payload.get("summary"):
+                primary = file_activity[0]
+                extra = len(file_activity) - 1
+                payload["summary"] = f"{primary['action']} -> {primary['path']}"
+                if extra > 0:
+                    payload["summary"] += f" (+{extra} more)"
         if name == "todo":
             try:
                 data = json.loads(result)

@@ -24,6 +24,7 @@ TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER:-}"
 TAKYON_SMOKE_CONNECT_TIMEOUT="${TAKYON_SMOKE_CONNECT_TIMEOUT:-5}"
 TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -97,12 +98,17 @@ scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   "$WORKER_SERVICE_FILE" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_WORKER_SERVICE_FILE"
 
-TARGET_HOST="$TAKYON_VPS_HOST" \
-TARGET_KEY="$TAKYON_VPS_KEY" \
-TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
-TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
-TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
-  "$SEED_XURL_AUTH_SCRIPT"
+if ! TARGET_HOST="$TAKYON_VPS_HOST" \
+  TARGET_KEY="$TAKYON_VPS_KEY" \
+  TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+  TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
+  TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
+    "$SEED_XURL_AUTH_SCRIPT"; then
+  if [[ "$TAKYON_REQUIRE_XURL_AUTH" == "1" ]]; then
+    exit 1
+  fi
+  echo "warning: xurl auth seed failed; continuing deploy" >&2
+fi
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
@@ -122,6 +128,22 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
     docker pull '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE'
   fi
   docker run --rm --entrypoint node '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' --version >/dev/null
+  if grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null \
+    || grep -F -- 'TAKYON_STORAGE_BACKEND=supabase_s3' '$TAKYON_REMOTE_WORKER_SERVICE_FILE' >/dev/null; then
+    if ! '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -c 'import boto3' >/dev/null 2>&1; then
+      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -m pip install 'boto3==1.42.89'
+    fi
+    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_STORAGE_BACKEND=supabase_s3 \
+      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from plugins.takyon.core import load_takyon_env
+from plugins.takyon import storage
+
+load_takyon_env()
+backend = storage.get_storage_backend()
+if getattr(backend, 'name', '') != 'supabase_s3':
+    raise SystemExit('unexpected storage backend: %r' % (getattr(backend, 'name', ''),))
+PY
+  fi
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator \

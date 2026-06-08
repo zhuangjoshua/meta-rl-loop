@@ -32,6 +32,7 @@ psycopg = pytest.importorskip("psycopg")
 
 from plugins.takyon import storage  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
+from plugins.takyon.core import TakyonStore  # noqa: E402
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────────────
@@ -253,6 +254,12 @@ def test_unknown_backend_kind_is_rejected(monkeypatch):
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "ftp")
     with pytest.raises(storage.StorageError, match="unknown TAKYON_STORAGE_BACKEND"):
         storage.get_storage_backend()
+
+
+def test_supabase_backend_uses_cache_business_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "supabase_s3")
+    store = TakyonStore(root=tmp_path)
+    assert store._business_root("Acme", sync=False) == (tmp_path / "cache" / "businesses" / "acme")
 
 
 # ── worker integration seam + crash discipline ───────────────────────────────────────────────────

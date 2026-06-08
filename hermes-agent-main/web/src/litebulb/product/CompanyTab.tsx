@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   TAKYON_BASE_PATH,
   api,
@@ -119,6 +119,23 @@ function outputSuffix(path: string) {
   const clean = asText(path).toLowerCase();
   const index = clean.lastIndexOf(".");
   return index >= 0 ? clean.slice(index) : "";
+}
+
+function inlinePreviewFile(
+  businessSlug: string,
+  output: Record<string, unknown>,
+): TakyonBusinessFileReadResponse | null {
+  const path = asText(output.path);
+  const content = output.preview_content;
+  if (!path || typeof content !== "string") return null;
+  const size = Number(output.preview_size);
+  return {
+    business_slug: businessSlug,
+    path,
+    size: Number.isFinite(size) ? size : content.length,
+    content,
+    truncated: Boolean(output.preview_truncated),
+  };
 }
 
 function buildAssetUrl(slug: string, path: string) {
@@ -421,7 +438,26 @@ function Documents({
   outputs: Array<Record<string, unknown>>;
 }) {
   const [preview, setPreview] = useState<DocumentPreviewState | null>(null);
+  const fileCacheRef = useRef<Map<string, TakyonBusinessFileReadResponse>>(new Map());
+  const pendingReadsRef = useRef<Map<string, Promise<TakyonBusinessFileReadResponse>>>(new Map());
   const visible = outputs.slice(0, 6);
+
+  const loadDocument = useCallback((path: string) => {
+    const cached = fileCacheRef.current.get(path);
+    if (cached) return Promise.resolve(cached);
+    const pending = pendingReadsRef.current.get(path);
+    if (pending) return pending;
+    const request = api.getTakyonBusinessFile(business.slug, path)
+      .then((file) => {
+        fileCacheRef.current.set(path, file);
+        return file;
+      })
+      .finally(() => {
+        pendingReadsRef.current.delete(path);
+      });
+    pendingReadsRef.current.set(path, request);
+    return request;
+  }, [business.slug]);
 
   const openDocument = useCallback(async (output: Record<string, unknown>) => {
     const path = asText(output.path);
@@ -431,9 +467,38 @@ function Documents({
       window.open(buildAssetUrl(business.slug, path), "_blank", "noopener,noreferrer");
       return;
     }
+    const cached = fileCacheRef.current.get(path);
+    if (cached) {
+      setPreview({ output, file: cached, loading: false, error: "" });
+      return;
+    }
+    const inlineFile = inlinePreviewFile(business.slug, output);
+    if (inlineFile) {
+      const shouldHydrateFullFile = inlineFile.truncated || Number(output.preview_size || 0) > String(inlineFile.content || "").length;
+      setPreview({ output, file: inlineFile, loading: shouldHydrateFullFile, error: "" });
+      if (!shouldHydrateFullFile) return;
+      try {
+        const file = await loadDocument(path);
+        setPreview((current) => {
+          if (!current || asText(current.output.path) !== path) return current;
+          return { output, file, loading: false, error: "" };
+        });
+      } catch (error) {
+        setPreview((current) => {
+          if (!current || asText(current.output.path) !== path) return current;
+          return {
+            output,
+            file: current.file,
+            loading: false,
+            error: error instanceof Error ? error.message : "Failed to load file preview.",
+          };
+        });
+      }
+      return;
+    }
     setPreview({ output, file: null, loading: true, error: "" });
     try {
-      const file = await api.getTakyonBusinessFile(business.slug, path);
+      const file = await loadDocument(path);
       setPreview({ output, file, loading: false, error: "" });
     } catch (error) {
       setPreview({
@@ -443,7 +508,21 @@ function Documents({
         error: error instanceof Error ? error.message : "Failed to load file preview.",
       });
     }
-  }, [business.slug]);
+  }, [business.slug, loadDocument]);
+
+  useEffect(() => {
+    const candidates = visible
+      .map((output) => asText(output.path))
+      .filter((path) => path && !MEDIA_OUTPUT_SUFFIXES.has(outputSuffix(path)));
+    if (!candidates.length) return;
+    const timer = window.setTimeout(() => {
+      candidates.forEach((path) => {
+        if (fileCacheRef.current.has(path) || pendingReadsRef.current.has(path)) return;
+        void loadDocument(path).catch(() => {});
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [loadDocument, visible]);
 
   return (
     <>
@@ -477,13 +556,15 @@ function Documents({
           onClose={() => setPreview(null)}
         >
           <div className="lb-docview">
-            {preview.loading && <div className="lb-empty">Loading file preview…</div>}
-            {!preview.loading && preview.error && <div className="lb-docview__error">{preview.error}</div>}
-            {!preview.loading && !preview.error && (
+            {!preview.file && preview.loading && <div className="lb-empty">Loading file preview…</div>}
+            {!preview.file && !preview.loading && preview.error && <div className="lb-docview__error">{preview.error}</div>}
+            {preview.file && (
               <>
                 <pre className={`lb-docview__code${TEXT_OUTPUT_SUFFIXES.has(outputSuffix(asText(preview.file?.path || preview.output.path))) ? "" : " is-plain"}`}>
                   {asText(preview.file?.content) || "File is empty."}
                 </pre>
+                {preview.loading && <div className="lb-docview__note">Loading the rest of the file…</div>}
+                {!preview.loading && preview.error && <div className="lb-docview__note">{preview.error}</div>}
                 {preview.file?.truncated && (
                   <div className="lb-docview__note">Preview truncated to the first portion of the file.</div>
                 )}
@@ -496,11 +577,19 @@ function Documents({
   );
 }
 
-function TweetCard({ title, source, status }: { title: string; source: string; status: string }) {
+function TweetCard({
+  businessName,
+  source,
+  text,
+}: {
+  businessName: string;
+  source: string;
+  text: string;
+}) {
   return (
     <article className="lb-tweet">
-      <div className="lb-tweet__head"><span className="lb-tweet__face">{title[0]?.toUpperCase() || "X"}</span><span className="lb-tweet__who"><b>{title}</b><span>{source}</span></span><span className="lb-tweet__logo">𝕏</span></div>
-      <p className="lb-tweet__body">{status || "Recorded in Takyon."}</p>
+      <div className="lb-tweet__head"><span className="lb-tweet__face">{businessName[0]?.toUpperCase() || "X"}</span><span className="lb-tweet__who"><b>{businessName}</b><span>{source}</span></span><span className="lb-tweet__logo">𝕏</span></div>
+      <p className="lb-tweet__body">{text || "Recorded in Takyon."}</p>
       <div className="lb-tweet__foot"><span>{I.reply}</span><span>{I.rt}</span><span className="lb-tweet__like">{I.like}</span></div>
     </article>
   );
@@ -574,7 +663,14 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
 
       {tab === "x" && (
         <div className="lb-tweets">
-          {xItems.slice(0, 4).map((item, index) => <TweetCard key={asText(item.id) || index} title={asText(item.title) || "X post"} source={asText(item.source) || "@x"} status={asText(item.status)} />)}
+          {xItems.slice(0, 4).map((item, index) => (
+            <TweetCard
+              key={asText(item.id) || index}
+              businessName={business.name}
+              source={asText(item.source) || "X"}
+              text={asText(item.title) || asText(item.status) || "X post"}
+            />
+          ))}
           {!xItems.length && <div className="lb-empty">No X posts recorded yet.</div>}
         </div>
       )}
