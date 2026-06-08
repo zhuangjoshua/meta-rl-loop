@@ -17,6 +17,11 @@ export type ChatMessage = {
   working?: boolean;
 };
 
+export type ChatProgress = {
+  text: string;
+  live: boolean;
+};
+
 export type BuildStatus = "idle" | "creating" | "ready" | "error";
 
 export type BuildState = {
@@ -41,10 +46,15 @@ export type LitebulbBusiness = {
 
 type HistoryPayload = {
   messages?: Array<{ role?: string; text?: string }>;
+  running?: boolean;
 };
 
 function trimText(value: unknown) {
   return String(value || "").trim();
+}
+
+function rawText(value: unknown) {
+  return value == null ? "" : String(value);
 }
 
 function titleCaseSlug(value: string) {
@@ -83,9 +93,14 @@ function pushUniqueLine(lines: string[], next: string, limit = 18) {
   return [...lines, text].slice(-limit);
 }
 
+function shouldMirrorStatusInChat(kind: unknown) {
+  const value = trimText(kind).toLowerCase();
+  return !value || value === "takyon" || value === "process" || value === "status";
+}
+
 function mapHistoryMessages(payload: HistoryPayload | null | undefined): ChatMessage[] {
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-  return messages
+  const mapped = messages
     .map((item, index) => {
       const role = trimText(item?.role).toLowerCase();
       const text = trimText(item?.text);
@@ -99,6 +114,29 @@ function mapHistoryMessages(payload: HistoryPayload | null | undefined): ChatMes
       return null;
     })
     .filter((item): item is ChatMessage => Boolean(item));
+
+  if (!payload?.running) return mapped;
+
+  const lastAssistantIndex = [...mapped].reverse().findIndex((item) => item.who === "agent");
+  if (lastAssistantIndex === -1) return mapped;
+  const realIndex = mapped.length - 1 - lastAssistantIndex;
+  return mapped.map((item, index) => (index === realIndex ? { ...item, working: true } : item));
+}
+
+function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
+  if (!next.length) return prev;
+  const hasAssistant = next.some((message) => message.who === "agent");
+  const base = hasAssistant
+    ? prev.filter((message) => !(message.who === "agent" && message.working))
+    : [...prev];
+  const seen = new Set(base.map((message) => `${message.who}\n${message.text}`));
+  for (const message of next) {
+    const key = `${message.who}\n${message.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    base.push(message);
+  }
+  return base;
 }
 
 export function useTakyonLitebulb() {
@@ -114,6 +152,7 @@ export function useTakyonLitebulb() {
   const [tractionRange, setTractionRange] = useState<"D" | "W" | "M" | "Y">("M");
   const [traction, setTraction] = useState<TakyonBusinessTractionResponse | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatProgress, setChatProgress] = useState<ChatProgress | null>(null);
   const [buildState, setBuildState] = useState<BuildState>({
     status: "idle",
     goal: "",
@@ -124,6 +163,7 @@ export function useTakyonLitebulb() {
     error: "",
   });
   const [submitting, setSubmitting] = useState(false);
+  const [sessionRunning, setSessionRunning] = useState(false);
   const [billingBusy, setBillingBusy] = useState(false);
   const [topupBusy, setTopupBusy] = useState(false);
 
@@ -193,29 +233,41 @@ export function useTakyonLitebulb() {
   }, []);
 
   const appendAssistantText = useCallback((text: string) => {
-    const delta = trimText(text);
-    if (!delta) return;
+    const delta = rawText(text);
+    if (!delta.length) return;
     const id = ensureAssistantMessage();
     setChatMessages((messages) => messages.map((message) => (
       message.id === id
-        ? { ...message, text: `${message.text}${text}`, working: true }
+        ? { ...message, text: `${message.text}${delta}`, working: true }
         : message
     )));
   }, [ensureAssistantMessage]);
 
   const completeAssistantText = useCallback((text?: string) => {
-    const id = assistantMessageIdRef.current || ensureAssistantMessage();
-    const finalText = text ?? "";
+    const finalText = trimText(text);
+    const id = assistantMessageIdRef.current || (finalText ? ensureAssistantMessage() : "");
+    if (!id) return;
     setChatMessages((messages) => messages.map((message) => {
       if (message.id !== id) return message;
       return {
         ...message,
-        text: trimText(finalText) || message.text,
+        text: finalText || message.text,
         working: false,
       };
     }));
     assistantMessageIdRef.current = "";
   }, [ensureAssistantMessage]);
+
+  const startChatProgress = useCallback((text = "Working…") => {
+    const line = trimText(text) || "Working…";
+    setChatProgress((current) => (
+      current?.text === line && current.live ? current : { text: line, live: true }
+    ));
+  }, []);
+
+  const clearChatProgress = useCallback(() => {
+    setChatProgress(null);
+  }, []);
 
   const pushBuildNarration = useCallback((text: string) => {
     setBuildState((state) => (
@@ -236,11 +288,12 @@ export function useTakyonLitebulb() {
   useEffect(() => {
     const gateway = ensureGateway();
     const offStart = gateway.on("message.start", () => {
-      ensureAssistantMessage();
+      setSessionRunning(true);
+      startChatProgress();
     });
     const offDelta = gateway.on("message.delta", (event) => {
-      const text = trimText((event.payload as { text?: string } | undefined)?.text);
-      if (!text) return;
+      const text = rawText((event.payload as { text?: string } | undefined)?.text);
+      if (!text.length) return;
       appendAssistantText(text);
       pushBuildNarration(text);
     });
@@ -249,6 +302,8 @@ export function useTakyonLitebulb() {
       completeAssistantText(text);
       if (text) pushBuildNarration(text);
       setSubmitting(false);
+      setSessionRunning(false);
+      clearChatProgress();
       if (sessionBusinessRef.current) {
         void loadWorkspace(sessionBusinessRef.current);
         void loadTraction(sessionBusinessRef.current, tractionRange);
@@ -257,12 +312,17 @@ export function useTakyonLitebulb() {
     const offThinking = gateway.onAny((event) => {
       if (!["thinking.delta", "reasoning.delta", "reasoning.available"].includes(event.type)) return;
       const text = trimText((event.payload as { text?: string } | undefined)?.text);
-      if (text) pushBuildNarration(text);
+      if (!text) return;
+      pushBuildNarration(text);
+      startChatProgress(text);
     });
     const offStatus = gateway.on("status.update", (event) => {
       const payload = (event.payload as { text?: string; kind?: string } | undefined) || {};
       const text = trimText(payload.text);
       if (text) pushBuildTerminal(text);
+      if (text && shouldMirrorStatusInChat(payload.kind)) {
+        startChatProgress(text);
+      }
     });
     const offToolStart = gateway.on("tool.start", (event) => {
       const payload = (event.payload as { name?: string; context?: string } | undefined) || {};
@@ -274,6 +334,11 @@ export function useTakyonLitebulb() {
       const text = trimText(payload.summary || payload.name || "Tool complete");
       pushBuildTerminal(text);
     });
+    const offError = gateway.on("error", () => {
+      setSubmitting(false);
+      setSessionRunning(false);
+      clearChatProgress();
+    });
     return () => {
       offStart();
       offDelta();
@@ -282,17 +347,19 @@ export function useTakyonLitebulb() {
       offStatus();
       offToolStart();
       offToolComplete();
+      offError();
       gateway.close();
     };
   }, [
     appendAssistantText,
+    clearChatProgress,
     completeAssistantText,
-    ensureAssistantMessage,
     ensureGateway,
     loadTraction,
     loadWorkspace,
     pushBuildNarration,
     pushBuildTerminal,
+    startChatProgress,
     tractionRange,
   ]);
 
@@ -313,10 +380,14 @@ export function useTakyonLitebulb() {
     if (businessSlug) {
       const history = await gateway.request<HistoryPayload>("session.history", {
         session_id: sessionIdRef.current,
-      }).catch(() => ({ messages: [] }));
+      }).catch<HistoryPayload>(() => ({ messages: [], running: false }));
+      setSessionRunning(Boolean(history.running));
+      setChatProgress(history.running ? { text: "Working…", live: true } : null);
       setChatMessages(mapHistoryMessages(history));
     } else {
       setChatMessages([]);
+      setChatProgress(null);
+      setSessionRunning(false);
     }
     return sessionIdRef.current;
   }, [ensureGateway]);
@@ -330,6 +401,7 @@ export function useTakyonLitebulb() {
     setCreativeCredits(null);
     setTraction(null);
     setSitePreviewUrl("");
+    setChatProgress(null);
     setActiveBusiness(matched);
     await Promise.all([
       ensureSession(businessSlug),
@@ -343,8 +415,8 @@ export function useTakyonLitebulb() {
     const value = trimText(text);
     if (!value || !activeBusiness) return;
     setSubmitting(true);
+    startChatProgress();
     setChatMessages((messages) => [...messages, { id: `user-${Date.now()}`, who: "user", text: value }]);
-    ensureAssistantMessage();
     try {
       const sessionId = await ensureSession(activeBusiness.slug);
       const gateway = ensureGateway();
@@ -354,9 +426,10 @@ export function useTakyonLitebulb() {
       });
     } catch (error) {
       completeAssistantText(error instanceof Error ? error.message : "Failed to send message.");
+      clearChatProgress();
       setSubmitting(false);
     }
-  }, [activeBusiness, completeAssistantText, ensureAssistantMessage, ensureGateway, ensureSession]);
+  }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, startChatProgress]);
 
   const createBusiness = useCallback(async (goal: string) => {
     const idea = trimText(goal);
@@ -427,6 +500,7 @@ export function useTakyonLitebulb() {
         loadTraction(businessSlug, tractionRange).catch(() => undefined),
       ]);
       setSubmitting(false);
+      setSessionRunning(Boolean(result?.streaming));
       return businessSlug;
     } catch (error) {
       setBuildState((state) => ({
@@ -436,6 +510,7 @@ export function useTakyonLitebulb() {
         terminal: pushUniqueLine(state.terminal, error instanceof Error ? error.message : "Failed to create company."),
       }));
       setSubmitting(false);
+      setSessionRunning(false);
       return "";
     }
   }, [ensureGateway, ensureSession, loadCreativeCredits, loadHome, loadTraction, loadWorkspace, tractionRange]);
@@ -484,7 +559,40 @@ export function useTakyonLitebulb() {
     setSitePreviewUrl("");
     setTraction(null);
     setChatMessages([]);
+    setChatProgress(null);
+    setSessionRunning(false);
   }, [auth.status, loadHome]);
+
+  useEffect(() => {
+    const sessionId = sessionIdRef.current;
+    const businessSlug = sessionBusinessRef.current;
+    if (!sessionId || !businessSlug || (!sessionRunning && !submitting)) return;
+    let cancelled = false;
+
+    const refresh = () => {
+      void ensureGateway()
+        .request<HistoryPayload>("session.history", { session_id: sessionId }, 10_000)
+        .then((history) => {
+          if (cancelled) return;
+          setChatMessages((messages) => mergeHistoryMessages(messages, mapHistoryMessages(history)));
+          setSessionRunning(Boolean(history.running));
+          setChatProgress((current) => (history.running ? current || { text: "Working…", live: true } : null));
+          if (!history.running) {
+            setSubmitting(false);
+          }
+        })
+        .catch(() => {
+          /* best effort while live session is active */
+        });
+    };
+
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [ensureGateway, sessionRunning, submitting]);
 
   useEffect(() => {
     if (workspacePollRef.current !== null) {
@@ -525,6 +633,7 @@ export function useTakyonLitebulb() {
     tractionRange,
     setTractionRange,
     chatMessages,
+    chatProgress,
     buildState,
     submitting,
     billingBusy,

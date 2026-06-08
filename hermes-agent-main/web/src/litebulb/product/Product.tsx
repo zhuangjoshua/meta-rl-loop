@@ -7,7 +7,7 @@ import type {
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
-import type { ChatMessage, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import type { ChatMessage, ChatProgress, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { CompanyTab } from "./CompanyTab";
 import { BulbMark } from "../shared/icons";
 import "./product.css";
@@ -142,6 +142,7 @@ type TabKey = "product" | "company";
 function AgentChat({
   business,
   messages,
+  progress,
   tab,
   sending,
   onTab,
@@ -150,6 +151,7 @@ function AgentChat({
 }: {
   business: LitebulbBusiness;
   messages: ChatMessage[];
+  progress: ChatProgress | null;
   tab: TabKey;
   sending: boolean;
   onTab: (tab: TabKey) => void;
@@ -158,10 +160,11 @@ function AgentChat({
 }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const progressText = (progress?.text || "").trim() || (progress?.live ? "Working…" : "");
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  }, [messages, progressText]);
 
   const submit = () => {
     const text = draft.trim();
@@ -198,6 +201,18 @@ function AgentChat({
             </div>
           </div>
         ))}
+        {progressText && (
+          <div className="lb-msg lb-msg--agent lb-msg--progress">
+            <div className="lb-msg__bubble">
+              {progressText}
+              {progress?.live && (
+                <span className="lb-msg__work">
+                  <span className="lb-typing"><i /><i /><i /></span>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <div ref={endRef} />
       </div>
 
@@ -311,6 +326,7 @@ export function Product({
   tractionRange,
   theme,
   chatMessages,
+  chatProgress,
   sending,
   onTheme,
   onNav,
@@ -327,6 +343,7 @@ export function Product({
   tractionRange: "D" | "W" | "M" | "Y";
   theme: Theme;
   chatMessages: ChatMessage[];
+  chatProgress: ChatProgress | null;
   sending: boolean;
   onTheme: (theme: Theme) => void;
   onNav: (hash: string) => void;
@@ -361,6 +378,7 @@ export function Product({
           <AgentChat
             business={business}
             messages={chatMessages}
+            progress={chatProgress}
             tab={tab}
             sending={sending}
             onTab={setTab}
