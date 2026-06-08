@@ -58,4 +58,10 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
+  for _ in \$(seq 1 30); do
+    if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then
+      exit 0
+    fi
+    sleep 1
+  done
   curl -fsS http://127.0.0.1:8000/healthz >/dev/null"
