@@ -133,7 +133,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
     if ! '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -c 'import boto3' >/dev/null 2>&1; then
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -m pip install 'boto3==1.42.89'
     fi
-    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_STORAGE_BACKEND=supabase_s3 \
+    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_STORAGE_BACKEND=supabase_s3 TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon import storage
