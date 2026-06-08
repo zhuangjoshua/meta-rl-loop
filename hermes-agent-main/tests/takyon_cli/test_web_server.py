@@ -1613,6 +1613,14 @@ def test_normalize_product_rail_route_handles_path_variants():
     assert norm("/auth/login") is None
 
 
+def test_reserved_public_host_does_not_resolve_as_product_business():
+    import takyon_cli.web_server as web_server
+
+    assert web_server._business_slug_from_product_host("skills.fourmanifold.com") == ""
+    assert web_server._business_slug_from_product_host("app.fourmanifold.com") == ""
+    assert web_server._business_slug_from_product_host("mathflow.fourmanifold.com") == "mathflow"
+
+
 def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monkeypatch):
     """A generated front-end that calls a bare/short rail path on a product
     host resolves to the host's business instead of 404'ing ("rail not

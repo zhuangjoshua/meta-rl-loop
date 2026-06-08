@@ -434,6 +434,7 @@ _DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
 _RESERVED_PUBLIC_SUBDOMAINS = frozenset(
     {
         "app",
+        "skills",
         "www",
         "admin",
         "dashboard",
