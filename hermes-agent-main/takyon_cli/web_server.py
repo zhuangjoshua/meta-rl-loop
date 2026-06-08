@@ -820,6 +820,22 @@ def _configured_public_host() -> str:
     return _host_without_port(parsed.netloc)
 
 
+def _configured_skill_lab_host() -> str:
+    base = _company_base_domain()
+    return f"skills.{base}" if base else ""
+
+
+def _configured_public_hosts() -> frozenset[str]:
+    hosts: set[str] = set()
+    public_host = _configured_public_host()
+    if public_host:
+        hosts.add(public_host)
+    skill_lab_host = _configured_skill_lab_host()
+    if skill_lab_host:
+        hosts.add(skill_lab_host)
+    return frozenset(hosts)
+
+
 def _request_host(headers: Any) -> str:
     return _host_without_port(
         headers.get("x-forwarded-host")
@@ -834,8 +850,7 @@ def _auth0_required_for_host(headers: Any) -> bool:
     force = _env_flag("TAKYON_DASHBOARD_AUTH0")
     if force is True:
         return True
-    public_host = _configured_public_host()
-    return bool(public_host and _request_host(headers) == public_host)
+    return _request_host(headers) in _configured_public_hosts()
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -1256,8 +1271,8 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        public_host = _configured_public_host() if _auth0_locally_enabled() else ""
-        if public_host and host_only == public_host:
+        public_hosts = _configured_public_hosts() if _auth0_locally_enabled() else frozenset()
+        if host_only in public_hosts:
             return True
         return host_only in _LOOPBACK_HOST_VALUES
 
@@ -7785,8 +7800,10 @@ def mount_spa(application: FastAPI):
         )
         if product_business:
             return await _serve_product_site_file(product_business, full_path)
+        request_host = _request_host(request.headers)
+        skill_lab_host = request_host == _configured_skill_lab_host()
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "":
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "" and not skill_lab_host:
             target_path = f"{prefix}/chat" if prefix else "/chat"
             query = str(request.url.query or "").strip()
             if query:
@@ -7804,7 +7821,7 @@ def mount_spa(application: FastAPI):
         # Operator landing: in embedded/--tui mode the business workspace IS
         # the Litebulb UI, served directly (no iframe, no React bundle).  Every
         # other route still renders the SPA shell for client-side routing.
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path in ("", "chat"):
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path in ("", "chat") and not skill_lab_host:
             return _serve_litebulb_index(prefix)
         return _serve_index(prefix)
 

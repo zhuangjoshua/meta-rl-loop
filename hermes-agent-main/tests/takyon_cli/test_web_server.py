@@ -1621,6 +1621,19 @@ def test_reserved_public_host_does_not_resolve_as_product_business():
     assert web_server._business_slug_from_product_host("mathflow.fourmanifold.com") == "mathflow"
 
 
+def test_auth0_required_for_skill_lab_host_when_public_dashboard_auth_is_enabled(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+
+    assert web_server._auth0_required_for_host({"host": "app.fourmanifold.com"}) is True
+    assert web_server._auth0_required_for_host({"host": "skills.fourmanifold.com"}) is True
+    assert web_server._auth0_required_for_host({"host": "mathflow.fourmanifold.com"}) is False
+
+
 def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monkeypatch):
     """A generated front-end that calls a bare/short rail path on a product
     host resolves to the host's business instead of 404'ing ("rail not
@@ -2014,6 +2027,20 @@ def test_operator_root_redirects_to_chat(monkeypatch):
 
     assert response.status_code == 307
     assert response.headers["location"] == "/chat?business=dashboardsly"
+
+
+def test_skill_lab_root_serves_spa_shell_instead_of_chat_redirect(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    client = TestClient(web_server.app)
+
+    response = client.get("/", headers={"Host": "skills.fourmanifold.com"}, follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'window.__TAKYON_SESSION_TOKEN__="' in response.text
 
 
 def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
