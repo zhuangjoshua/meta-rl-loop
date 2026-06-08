@@ -358,8 +358,14 @@ export function useTakyonLitebulb() {
   const assistantMessageIdRef = useRef("");
   const workspacePollRef = useRef<number | null>(null);
   const openingBusinessRef = useRef("");
+  const visibleBusinessRef = useRef("");
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const sessionRunningRef = useRef(false);
+
+  const isVisibleBusiness = useCallback((slug: string) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    return Boolean(businessSlug) && visibleBusinessRef.current === businessSlug;
+  }, []);
 
   const loadHome = useCallback(async () => {
     if (auth.status !== "in") return;
@@ -377,22 +383,25 @@ export function useTakyonLitebulb() {
   }, [auth.status]);
 
   const loadBusinessHomeShell = useCallback(async (slug: string) => {
-    if (!slug) return;
-    const workspacePayload = await api.getTakyonBusinessHome(slug);
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
+    const workspacePayload = await api.getTakyonBusinessHome(businessSlug);
+    if (!isVisibleBusiness(businessSlug)) return;
     setWorkspace(workspacePayload);
-  }, []);
+  }, [isVisibleBusiness]);
 
   const loadWorkspace = useCallback(async (slug: string) => {
-    if (!slug) return;
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
     const [workspaceResult, previewResult] = await Promise.allSettled([
-      api.getTakyonBusinessWorkspace(slug, 60, "full"),
-      api.getTakyonBusinessSitePreview(slug),
+      api.getTakyonBusinessWorkspace(businessSlug, 60, "full"),
+      api.getTakyonBusinessSitePreview(businessSlug),
     ]);
 
-    if (workspaceResult.status === "fulfilled") {
+    if (workspaceResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {
       setWorkspace(workspaceResult.value);
     }
-    if (previewResult.status === "fulfilled") {
+    if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {
       const nextPreviewUrl = trimText(previewResult.value.url);
       if (nextPreviewUrl) {
         setSitePreviewUrl(nextPreviewUrl);
@@ -404,37 +413,45 @@ export function useTakyonLitebulb() {
     }
     // Keep the last good preview URL instead of blanking the product pane
     // on transient preview read failures.
-  }, []);
+  }, [isVisibleBusiness]);
 
   const loadCreativeCredits = useCallback(async (slug: string) => {
-    if (!slug) return;
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
     try {
-      const payload = await api.getTakyonBusinessCreativeCredits(slug);
+      const payload = await api.getTakyonBusinessCreativeCredits(businessSlug);
+      if (!isVisibleBusiness(businessSlug)) return;
       setCreativeCredits(payload);
     } catch {
+      if (!isVisibleBusiness(businessSlug)) return;
       setCreativeCredits(null);
     }
-  }, []);
+  }, [isVisibleBusiness]);
 
   const saveChannelCreditBudgets = useCallback(async (
     slug: string,
     allocations: Record<"x" | "meta" | "reddit", number>,
   ) => {
-    if (!slug) return null;
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return null;
     const payload = await api.setTakyonBusinessChannelCreditBudgets(slug, allocations);
+    if (!isVisibleBusiness(businessSlug)) return payload;
     setCreativeCredits(payload);
     return payload;
-  }, []);
+  }, [isVisibleBusiness]);
 
   const loadTraction = useCallback(async (slug: string, range: "D" | "W" | "M" | "Y") => {
-    if (!slug) return;
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
     try {
-      const payload = await api.getTakyonBusinessTraction(slug, range);
+      const payload = await api.getTakyonBusinessTraction(businessSlug, range);
+      if (!isVisibleBusiness(businessSlug)) return;
       setTraction(payload);
     } catch {
+      if (!isVisibleBusiness(businessSlug)) return;
       setTraction(null);
     }
-  }, []);
+  }, [isVisibleBusiness]);
 
   const ensureGateway = useCallback(() => {
     if (gatewayRef.current) return gatewayRef.current;
@@ -635,7 +652,14 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     const gateway = ensureGateway();
     await gateway.connect();
+    if (!isVisibleBusiness(businessSlug)) return "";
     const applyHistory = (history: HistoryPayload) => {
+      if (!isVisibleBusiness(businessSlug)) {
+        return {
+          pendingTurn: null,
+          pendingTurnMissing: false,
+        };
+      }
       const pendingTurn = readStoredPendingTurn(businessSlug);
       const pendingTurnInHistory = historyHasPendingTurn(history, pendingTurn);
       if (pendingTurn && pendingTurnInHistory) {
@@ -678,6 +702,7 @@ export function useTakyonLitebulb() {
 
     if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
       const loaded = await loadHistory(sessionIdRef.current);
+      if (!isVisibleBusiness(businessSlug)) return "";
       if (loaded?.pendingTurnMissing) {
         void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
       }
@@ -688,12 +713,14 @@ export function useTakyonLitebulb() {
       const storedSessionId = await resolveStoredSessionId(
         readStoredLitebulbSession(businessSlug),
       );
+      if (!isVisibleBusiness(businessSlug)) return "";
       if (storedSessionId) {
         const resumed = await gateway.request<SessionResumePayload>("session.resume", {
           session_id: storedSessionId,
           cols: 100,
           _takyon_boot_business: businessSlug || undefined,
         }).catch<SessionResumePayload | null>(() => null);
+        if (!isVisibleBusiness(businessSlug)) return "";
         if (resumed?.session_id) {
           sessionIdRef.current = trimText(resumed.session_id);
           sessionBusinessRef.current = businessSlug;
@@ -706,6 +733,7 @@ export function useTakyonLitebulb() {
             messages: resumed.messages || [],
             running: true,
           });
+          if (!isVisibleBusiness(businessSlug)) return "";
           if (loaded?.pendingTurnMissing) {
             void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
           }
@@ -719,17 +747,20 @@ export function useTakyonLitebulb() {
       cols: 100,
       _takyon_boot_business: businessSlug || undefined,
     });
+    if (!isVisibleBusiness(businessSlug)) return "";
     sessionIdRef.current = trimText(result?.session_id);
     sessionBusinessRef.current = businessSlug;
     assistantMessageIdRef.current = "";
     if (businessSlug && sessionIdRef.current) {
       const durableSessionId = await readDurableSessionId(sessionIdRef.current);
+      if (!isVisibleBusiness(businessSlug)) return "";
       if (durableSessionId) {
         writeStoredLitebulbSession(businessSlug, durableSessionId);
       } else {
         clearStoredLitebulbSession(businessSlug);
       }
       const loaded = await loadHistory(sessionIdRef.current);
+      if (!isVisibleBusiness(businessSlug)) return "";
       if (loaded?.pendingTurnMissing) {
         void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
       }
@@ -741,7 +772,7 @@ export function useTakyonLitebulb() {
       setSessionRunning(false);
     }
     return sessionIdRef.current;
-  }, [ensureGateway, replayPendingTurn]);
+  }, [ensureGateway, isVisibleBusiness, replayPendingTurn]);
 
   const openBusiness = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
@@ -757,6 +788,10 @@ export function useTakyonLitebulb() {
     }
     openingBusinessRef.current = businessSlug;
     try {
+      visibleBusinessRef.current = businessSlug;
+      assistantMessageIdRef.current = "";
+      sessionIdRef.current = "";
+      sessionBusinessRef.current = "";
       setWorkspace(null);
       setCreativeCredits(null);
       setTraction(null);

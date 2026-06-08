@@ -71,6 +71,7 @@ If `distribution/voice/x.md` is missing, stale, or weak and X is a repeated lane
 - Publication paths: `distribution/voice/x.md`, `distribution/campaign/`, `distribution/local-published/`, `metrics/conversations/`
 - Best call points: X posting, X replies, X thread handling, X voice maintenance
 - Tools: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_list_conversation_messages`, `business_read_conversation_thread`, `business_write_file`, `business_patch_file`, `business_publish_outreach`, `business_publish_test_outreach`, `business_record_conversation_message`, `business_update_conversation_message_status`, `business_enqueue_job`
+- Live budget rule: live X publication spends the fixed X creative-credit price from the business X bucket; a business with at least 1 total creative credit starts with 1 credit allocated to X by default
 
 **Copy engine (how to write):**
 
@@ -133,6 +134,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 - Keep in-progress X drafts visible under `distribution/campaign/` when the turn is not publishing immediately.
 - Draft with the copy engine (hooks → build → refine → de-Claude/humanize → set edge dial), then ship one send-ready piece.
 - Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
+- In live mode, treat `business_publish_outreach` as a spendful path: the actual worker-backed X publish charges the X bucket, so leave enough X channel budget before asking it to send.
 - Use `business_record_conversation_message` and `business_update_conversation_message_status` so the thread state stays truthful after a draft, suppressed publication, or real publish outcome.
 
 ## Procedure

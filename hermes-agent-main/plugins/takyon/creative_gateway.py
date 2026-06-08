@@ -213,21 +213,45 @@ def build_creative_gateway_router() -> APIRouter:
         if body.get("workdir"):
             cmd.extend(["--workdir", str(body.get("workdir"))])
 
+        ad_metadata = body.get("ad_metadata") if isinstance(body.get("ad_metadata"), dict) else {}
+        budget_bucket = core._normalize_creative_credit_bucket(
+            body.get("budget_bucket") or ad_metadata.get("channel") or body.get("channel")
+        )
+        if not budget_bucket:
+            raise HTTPException(status_code=400, detail="budget_bucket or ad_metadata.channel is required")
         reservation_key = f"{idempotency_key}:creative-credits"
         try:
-            credits.open_business_credit_account(conn, business)
-            credits.reserve_credits(
-                conn,
+            reservation = core._reserve_creative_credits(
                 business,
-                core._creative_credit_total_cost("ugc_ad_generate"),
-                reservation_key,
+                action="ugc_ad_generate",
+                reservation_key=reservation_key,
+                budget_bucket=budget_bucket,
                 metadata={
+                    "business": business,
                     "action": "ugc_ad_generate",
                     "slug": slug,
                     "brief_path": brief_rel,
                     "script_path": script_rel or None,
                 },
+                ad_metadata=ad_metadata,
             )
+        except core.CreativeCreditBudgetExceeded as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_channel_budget_exhausted",
+                "requested_credits": core._creative_credit_total_cost("ugc_ad_generate"),
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": exc.bucket,
+                "channel_budget": {
+                    "allocated_credits": exc.allocated_credits,
+                    "used_credits": exc.used_credits,
+                    "reserved_credits": exc.reserved_credits,
+                    "remaining_credits": exc.remaining_credits,
+                },
+                "error": str(exc),
+            }
         except credits.InsufficientCreativeCredits as exc:
             balances = credits.get_business_credit_balances(conn, business)
             return {
@@ -249,14 +273,17 @@ def build_creative_gateway_router() -> APIRouter:
                 check=False,
             )
             if run.returncode != 0:
-                balances = credits.release_credits(
-                    conn,
+                balances = core._release_creative_credits(
                     reservation_key,
+                    action="ugc_ad_generate",
+                    budget_bucket=budget_bucket,
                     metadata={
+                        "business": business,
                         "action": "ugc_ad_generate",
                         "slug": slug,
                         "error": run.stderr or run.stdout or f"exit {run.returncode}",
                     },
+                    ad_metadata=ad_metadata,
                 )
                 finalized = True
                 return {
@@ -265,19 +292,23 @@ def build_creative_gateway_router() -> APIRouter:
                     "stdout": run.stdout,
                     "stderr": run.stderr,
                     "error": run.stderr or run.stdout or f"ugc-video-ad exited {run.returncode}",
-                    "balance_credits": balances.balance_credits,
-                    "reserved_credits": balances.reserved_credits,
+                    "balance_credits": balances["balance_credits"],
+                    "reserved_credits": balances["reserved_credits"],
+                    "channel_budget": balances.get("channel_budget"),
                 }
 
             payload = core._parse_ugc_write_payload(run.stdout)
-            balances = credits.commit_credits(
-                conn,
+            balances = core._commit_creative_credits(
                 reservation_key,
+                action="ugc_ad_generate",
+                budget_bucket=budget_bucket,
                 metadata={
+                    "business": business,
                     "action": "ugc_ad_generate",
                     "slug": slug,
                     "provider": "openai+fal",
                 },
+                ad_metadata=ad_metadata,
             )
             finalized = True
             return {
@@ -285,22 +316,27 @@ def build_creative_gateway_router() -> APIRouter:
                 "status": "created",
                 "write_payload": payload,
                 "credits_charged": core._creative_credit_total_cost("ugc_ad_generate"),
-                "balance_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
+                "balance_credits": balances["balance_credits"],
+                "reserved_credits": balances["reserved_credits"],
+                "budget_bucket": reservation.get("budget_bucket"),
+                "channel_budget": balances.get("channel_budget"),
                 "stdout": run.stdout,
                 "stderr": run.stderr,
             }
         except Exception as exc:
             if not finalized:
                 try:
-                    credits.release_credits(
-                        conn,
+                    core._release_creative_credits(
                         reservation_key,
+                        action="ugc_ad_generate",
+                        budget_bucket=budget_bucket,
                         metadata={
+                            "business": business,
                             "action": "ugc_ad_generate",
                             "slug": slug,
                             "error": str(exc),
                         },
+                        ad_metadata=ad_metadata,
                     )
                 except Exception:
                     pass
@@ -361,22 +397,47 @@ def build_creative_gateway_router() -> APIRouter:
         if body.get("max"):
             cmd.extend(["--max", str(body.get("max"))])
 
+        ad_metadata = body.get("ad_metadata") if isinstance(body.get("ad_metadata"), dict) else {}
+        budget_bucket = core._normalize_creative_credit_bucket(
+            body.get("budget_bucket") or ad_metadata.get("channel") or body.get("channel")
+        )
+        if not budget_bucket:
+            raise HTTPException(status_code=400, detail="budget_bucket or ad_metadata.channel is required")
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("static_ad_generate", units=requested)
         try:
-            credits.open_business_credit_account(conn, business)
-            credits.reserve_credits(
-                conn,
+            reservation = core._reserve_creative_credits(
                 business,
-                requested_credits,
-                reservation_key,
+                action="static_ad_generate",
+                reservation_key=reservation_key,
+                units=requested,
+                budget_bucket=budget_bucket,
                 metadata={
+                    "business": business,
                     "action": "static_ad_generate",
                     "slug": slug,
                     "input_path": input_rel,
                     "requested_creatives": requested,
                 },
+                ad_metadata=ad_metadata,
             )
+        except core.CreativeCreditBudgetExceeded as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_channel_budget_exhausted",
+                "requested_credits": requested_credits,
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": exc.bucket,
+                "channel_budget": {
+                    "allocated_credits": exc.allocated_credits,
+                    "used_credits": exc.used_credits,
+                    "reserved_credits": exc.reserved_credits,
+                    "remaining_credits": exc.remaining_credits,
+                },
+                "error": str(exc),
+            }
         except credits.InsufficientCreativeCredits as exc:
             balances = credits.get_business_credit_balances(conn, business)
             return {
@@ -409,29 +470,33 @@ def build_creative_gateway_router() -> APIRouter:
             failed = int(manifest.get("failed") or 0)
             if run.returncode != 0:
                 if succeeded > 0:
-                    balances = credits.commit_credits(
-                        conn,
+                    balances = core._commit_creative_credits(
                         reservation_key,
-                        actual_credits=core._creative_credit_total_cost(
-                            "static_ad_generate", units=succeeded
-                        ),
+                        action="static_ad_generate",
+                        actual_units=succeeded,
+                        budget_bucket=budget_bucket,
                         metadata={
+                            "business": business,
                             "action": "static_ad_generate",
                             "slug": slug,
                             "input_path": input_rel,
                             "requested_creatives": requested,
                             "succeeded_creatives": succeeded,
                         },
+                        ad_metadata=ad_metadata,
                     )
                 else:
-                    balances = credits.release_credits(
-                        conn,
+                    balances = core._release_creative_credits(
                         reservation_key,
+                        action="static_ad_generate",
+                        budget_bucket=budget_bucket,
                         metadata={
+                            "business": business,
                             "action": "static_ad_generate",
                             "slug": slug,
                             "error": run.stderr or run.stdout or f"exit {run.returncode}",
                         },
+                        ad_metadata=ad_metadata,
                     )
                 finalized = True
                 return {
@@ -444,21 +509,23 @@ def build_creative_gateway_router() -> APIRouter:
                     "credits_charged": core._creative_credit_total_cost(
                         "static_ad_generate", units=succeeded
                     ),
-                    "balance_credits": balances.balance_credits,
-                    "reserved_credits": balances.reserved_credits,
+                    "balance_credits": balances["balance_credits"],
+                    "reserved_credits": balances["reserved_credits"],
+                    "budget_bucket": reservation.get("budget_bucket"),
+                    "channel_budget": balances.get("channel_budget"),
                     "stdout": run.stdout,
                     "stderr": run.stderr,
                     "error": run.stderr or run.stdout or f"static ad generator exited {run.returncode}",
                 }
 
             charged_units = max(1, succeeded or requested)
-            balances = credits.commit_credits(
-                conn,
+            balances = core._commit_creative_credits(
                 reservation_key,
-                actual_credits=core._creative_credit_total_cost(
-                    "static_ad_generate", units=charged_units
-                ),
+                action="static_ad_generate",
+                actual_units=charged_units,
+                budget_bucket=budget_bucket,
                 metadata={
+                    "business": business,
                     "action": "static_ad_generate",
                     "slug": slug,
                     "input_path": input_rel,
@@ -466,6 +533,7 @@ def build_creative_gateway_router() -> APIRouter:
                     "succeeded_creatives": charged_units,
                     "provider": backend,
                 },
+                ad_metadata=ad_metadata,
             )
             finalized = True
             return {
@@ -477,22 +545,27 @@ def build_creative_gateway_router() -> APIRouter:
                 "credits_charged": core._creative_credit_total_cost(
                     "static_ad_generate", units=charged_units
                 ),
-                "balance_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
+                "balance_credits": balances["balance_credits"],
+                "reserved_credits": balances["reserved_credits"],
+                "budget_bucket": reservation.get("budget_bucket"),
+                "channel_budget": balances.get("channel_budget"),
                 "stdout": run.stdout,
                 "stderr": run.stderr,
             }
         except Exception as exc:
             if not finalized:
                 try:
-                    credits.release_credits(
-                        conn,
+                    core._release_creative_credits(
                         reservation_key,
+                        action="static_ad_generate",
+                        budget_bucket=budget_bucket,
                         metadata={
+                            "business": business,
                             "action": "static_ad_generate",
                             "slug": slug,
                             "error": str(exc),
                         },
+                        ad_metadata=ad_metadata,
                     )
                 except Exception:
                     pass
@@ -555,14 +628,15 @@ def build_creative_gateway_router() -> APIRouter:
         acct = core._meta_account_path(plan["ad_account_id"])
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("meta_ad_launch")
+        reservation: dict[str, Any] | None = None
         try:
-            credits.open_business_credit_account(conn, business)
-            credits.reserve_credits(
-                conn,
+            reservation = core._reserve_creative_credits(
                 business,
-                requested_credits,
-                reservation_key,
+                action="meta_ad_launch",
+                reservation_key=reservation_key,
+                budget_bucket="meta",
                 metadata={
+                    "business": business,
                     "action": "meta_ad_launch",
                     "slug": plan["slug"],
                     "asset_kind": plan["asset_kind"],
@@ -578,6 +652,15 @@ def build_creative_gateway_router() -> APIRouter:
                 "requested_credits": requested_credits,
                 "available_credits": balances.balance_credits,
                 "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+        except core.CreativeCreditBudgetExceeded as exc:
+            return {
+                "success": False,
+                "status": "blocked_channel_budget_exhausted",
+                "requested_credits": requested_credits,
+                "budget_bucket": exc.bucket,
+                "channel_budget": exc.channel_budget,
                 "error": str(exc),
             }
 
@@ -655,10 +738,12 @@ def build_creative_gateway_router() -> APIRouter:
             }, cfg)
             created["ad_id"] = str(ad.get("id") or "").strip()
 
-            balances = credits.commit_credits(
-                conn,
+            balances = core._commit_creative_credits(
                 reservation_key,
+                action="meta_ad_launch",
+                budget_bucket="meta",
                 metadata={
+                    "business": business,
                     "action": "meta_ad_launch",
                     "slug": plan["slug"],
                     "asset_kind": plan["asset_kind"],
@@ -677,16 +762,20 @@ def build_creative_gateway_router() -> APIRouter:
                 "ad_account_id": acct,
                 "page_id": plan["page_id"],
                 "credits_charged": requested_credits,
-                "balance_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
+                "balance_credits": balances["balance_credits"],
+                "reserved_credits": balances["reserved_credits"],
+                "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "meta",
+                "channel_budget": balances.get("channel_budget", {}),
             }
         except Exception as exc:
             try:
                 if created:
-                    balances = credits.commit_credits(
-                        conn,
+                    balances = core._commit_creative_credits(
                         reservation_key,
+                        action="meta_ad_launch",
+                        budget_bucket="meta",
                         metadata={
+                            "business": business,
                             "action": "meta_ad_launch",
                             "status": "partial_failed",
                             "created": created,
@@ -694,10 +783,12 @@ def build_creative_gateway_router() -> APIRouter:
                         },
                     )
                 else:
-                    balances = credits.release_credits(
-                        conn,
+                    balances = core._release_creative_credits(
                         reservation_key,
+                        action="meta_ad_launch",
+                        budget_bucket="meta",
                         metadata={
+                            "business": business,
                             "action": "meta_ad_launch",
                             "status": "failed",
                             "error": str(exc),
@@ -711,8 +802,10 @@ def build_creative_gateway_router() -> APIRouter:
                     "ids": created or None,
                     "error": str(exc),
                     "credits_charged": requested_credits if created else 0,
-                    "balance_credits": balances.balance_credits,
-                    "reserved_credits": balances.reserved_credits,
+                    "balance_credits": balances["balance_credits"],
+                    "reserved_credits": balances["reserved_credits"],
+                    "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "meta",
+                    "channel_budget": balances.get("channel_budget", {}),
                 }
             except Exception as release_exc:
                 if not finalized:
@@ -924,14 +1017,15 @@ def build_creative_gateway_router() -> APIRouter:
 
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("reddit_ad_launch")
+        reservation: dict[str, Any] | None = None
         try:
-            credits.open_business_credit_account(conn, business)
-            credits.reserve_credits(
-                conn,
+            reservation = core._reserve_creative_credits(
                 business,
-                requested_credits,
-                reservation_key,
+                action="reddit_ad_launch",
+                reservation_key=reservation_key,
+                budget_bucket="reddit",
                 metadata={
+                    "business": business,
                     "action": "reddit_ad_launch",
                     "slug": plan.get("slug"),
                     "asset_kind": plan.get("asset_kind"),
@@ -947,6 +1041,15 @@ def build_creative_gateway_router() -> APIRouter:
                 "requested_credits": requested_credits,
                 "available_credits": balances.balance_credits,
                 "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+        except core.CreativeCreditBudgetExceeded as exc:
+            return {
+                "success": False,
+                "status": "blocked_channel_budget_exhausted",
+                "requested_credits": requested_credits,
+                "budget_bucket": exc.bucket,
+                "channel_budget": exc.channel_budget,
                 "error": str(exc),
             }
 
@@ -1040,10 +1143,12 @@ def build_creative_gateway_router() -> APIRouter:
             preview_expiry = str(ad_data.get("preview_expiry") or "").strip() or None
             post_url = post_url or (str(ad_data.get("post_url") or "").strip() or None)
 
-            balances = credits.commit_credits(
-                conn,
+            balances = core._commit_creative_credits(
                 reservation_key,
+                action="reddit_ad_launch",
+                budget_bucket="reddit",
                 metadata={
+                    "business": business,
                     "action": "reddit_ad_launch",
                     "slug": plan.get("slug"),
                     "asset_kind": plan.get("asset_kind"),
@@ -1067,16 +1172,20 @@ def build_creative_gateway_router() -> APIRouter:
                 "preview_expiry": preview_expiry,
                 "post_url": post_url,
                 "credits_charged": requested_credits,
-                "balance_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
+                "balance_credits": balances["balance_credits"],
+                "reserved_credits": balances["reserved_credits"],
+                "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "reddit",
+                "channel_budget": balances.get("channel_budget", {}),
             }
         except Exception as exc:
             try:
                 if created:
-                    balances = credits.commit_credits(
-                        conn,
+                    balances = core._commit_creative_credits(
                         reservation_key,
+                        action="reddit_ad_launch",
+                        budget_bucket="reddit",
                         metadata={
+                            "business": business,
                             "action": "reddit_ad_launch",
                             "status": "partial_failed",
                             "created": created,
@@ -1084,10 +1193,12 @@ def build_creative_gateway_router() -> APIRouter:
                         },
                     )
                 else:
-                    balances = credits.release_credits(
-                        conn,
+                    balances = core._release_creative_credits(
                         reservation_key,
+                        action="reddit_ad_launch",
+                        budget_bucket="reddit",
                         metadata={
+                            "business": business,
                             "action": "reddit_ad_launch",
                             "status": "failed",
                             "error": str(exc),
@@ -1110,8 +1221,10 @@ def build_creative_gateway_router() -> APIRouter:
                     "post_url": post_url,
                     "error": str(exc),
                     "credits_charged": requested_credits if created else 0,
-                    "balance_credits": balances.balance_credits,
-                    "reserved_credits": balances.reserved_credits,
+                    "balance_credits": balances["balance_credits"],
+                    "reserved_credits": balances["reserved_credits"],
+                    "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "reddit",
+                    "channel_budget": balances.get("channel_budget", {}),
                 }
             except Exception as release_exc:
                 if not finalized:
@@ -1241,7 +1354,7 @@ def build_creative_gateway_router() -> APIRouter:
             "CLICKS",
             "CTR",
             "CPC",
-            "CPM",
+            "ECPM",
         ]
         breakdowns = body.get("breakdowns") if isinstance(body.get("breakdowns"), list) else ["DATE"]
         filter_value = str(body.get("filter") or f"{level}:id=={object_id}").strip()

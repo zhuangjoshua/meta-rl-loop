@@ -33,12 +33,40 @@ from unittest.mock import patch
 
 import pytest
 
+_BLOCKED_TEST_PG_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
+
+
+def _normalized_host_role() -> str:
+    raw = str(os.environ.get("TAKYON_HOST_ROLE") or "").strip().lower()
+    aliases = {
+        "": "",
+        "all": "combined",
+        "combined": "combined",
+        "default": "combined",
+        "operator": "operator",
+        "dashboard": "operator",
+        "subuser": "subuser",
+        "app": "subuser",
+        "product": "subuser",
+        "safebox": "safebox",
+    }
+    return aliases.get(raw, raw)
+
+
+def _resolve_test_pg_dsn() -> str | None:
+    dsn = str(os.environ.get("TAKYON_TEST_PG_DSN") or "").strip()
+    if dsn and _normalized_host_role() in _BLOCKED_TEST_PG_HOST_ROLES:
+        raise RuntimeError(
+            f"Refusing to run Postgres integration tests on managed TAKYON_HOST_ROLE={_normalized_host_role()}."
+        )
+    return dsn or None
+
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-_TAKYON_TEST_PG_DSN = os.environ.get("TAKYON_TEST_PG_DSN")
+_TAKYON_TEST_PG_DSN = _resolve_test_pg_dsn()
 
 
 def _apply_takyon_pg_migrations(conn) -> None:

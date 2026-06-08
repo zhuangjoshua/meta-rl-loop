@@ -483,12 +483,17 @@ function formatBudgetCents(value?: number | null): string {
   return BUDGET_FORMATTER.format(cents / 100);
 }
 
-function operatorSpendableCents(
+function formatPercent(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+function operatorUsageRemainingPercent(
   account?: TakyonOperatorAccountResponse | null,
 ): number | null {
   if (!account?.available) return null;
-  const cents = Number(account.spendable_cents ?? 0);
-  return Number.isFinite(cents) ? Math.max(0, cents) : 0;
+  const percent = Number(account.allowance_percent_remaining ?? NaN);
+  return Number.isFinite(percent) ? Math.max(0, percent) : null;
 }
 
 function businessCountLabel(count: number): string {
@@ -3328,13 +3333,16 @@ function GlobalLaunchpad({
     "";
   const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
   const displayError = friendlyError(error);
-  const spendableCents = operatorSpendableCents(operatorAccount);
+  const usageRemainingPercent = operatorUsageRemainingPercent(operatorAccount);
+  const topupBalanceCents = operatorAccount?.available
+    ? Math.max(0, Number(operatorAccount.topup_balance_cents || 0))
+    : null;
   const operatorBudgetNote =
-    spendableCents === null
+    usageRemainingPercent === null
       ? "Auto wake follows Takyon's default cadence. Operator budget state is unavailable in this dashboard mode."
-      : spendableCents === 0
+      : usageRemainingPercent === 0
         ? "Auto wake follows Takyon's default cadence. Business creation still works, but CEO turns and wakes will block until budget is added."
-        : `Auto wake follows Takyon's default cadence. Operator budget: ${formatBudgetCents(spendableCents)} spendable for CEO turns and wakes.`;
+        : `Auto wake follows Takyon's default cadence. Operator usage: ${formatPercent(usageRemainingPercent)} remaining this week${topupBalanceCents && topupBalanceCents > 0 ? ` with ${formatBudgetCents(topupBalanceCents)} in top-ups` : ""}.`;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();

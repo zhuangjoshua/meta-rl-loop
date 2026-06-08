@@ -73,6 +73,7 @@ function Router() {
     openBusiness,
     sendPrompt,
     createBusiness,
+    saveChannelCreditBudgets,
     openBillingPortal,
     startTopup,
     setTractionRange,
@@ -207,6 +208,7 @@ function Router() {
         onLogout={auth.logout}
         onOpenSettings={openSettings}
         onSendPrompt={sendPrompt}
+        onSaveChannelCreditBudgets={saveChannelCreditBudgets}
         onTractionRangeChange={setTractionRange}
       />
     ) : null;

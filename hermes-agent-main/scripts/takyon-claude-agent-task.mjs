@@ -265,6 +265,8 @@ async function main() {
 
   let timeout = null;
   let text = "";
+  let totalCostUsd = null;
+  let finalUsage = null;
   try {
     await Promise.race([
       (async () => {
@@ -322,6 +324,14 @@ async function main() {
           emitProgress(progressEventFromSdkMessage(message));
           const chunk = textFromSdkMessage(message);
           if (chunk) text += `${chunk}\n`;
+          if (message && typeof message === "object" && message.type === "result") {
+            if (typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd)) {
+              totalCostUsd = message.total_cost_usd;
+            }
+            if (message.usage && typeof message.usage === "object") {
+              finalUsage = message.usage;
+            }
+          }
         }
       })(),
       new Promise((_, reject) => {
@@ -339,7 +349,10 @@ async function main() {
     success: true,
     source: "claude-agent-sdk",
     model,
-    summary: redact(text).trim()
+    summary: redact(text).trim(),
+    total_cost_usd: typeof totalCostUsd === "number" ? totalCostUsd : null,
+    actual_cost_cents: typeof totalCostUsd === "number" ? Math.max(0, Math.round(totalCostUsd * 100)) : null,
+    usage: finalUsage,
   }));
 }
 

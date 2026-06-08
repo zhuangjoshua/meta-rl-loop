@@ -83,7 +83,7 @@ Three hard layers stay separate:
 
 The **launch** tool never activates anything; it only creates `PAUSED` objects. Activation,
 pausing, and daily-budget changes are explicit follow-up control actions. Insights sync records
-Reddit delivery metrics like spend, impressions, clicks, CTR, CPC, and CPM, but it does **not**
+Reddit delivery metrics like spend, impressions, clicks, CTR, CPC, and ECPM/derived CPM, but it does **not**
 invent business attribution.
 
 ## When to Use
@@ -123,6 +123,7 @@ Do **not** treat "wait for API approval" as the default explanation unless Reddi
   **`business_reddit_ad_control`** (activate, pause, set_budget),
   **`business_reddit_ad_insights_sync`** (delivery metrics sync)
 - Upstream assets: an existing promoted `post_id`, a public image/video/carousel URL bundle, or a local business image/video bundle under `product/` that Takyon can stage to `product/public-assets/`
+- Upstream creative budget rule: when this skill routes upstream to `ugc-video-ad` or `static-ad-creative-generator`, pass `budget_bucket: "reddit"` or `ad_metadata.channel: "reddit"` so the creative spend lands on the Reddit business budget bucket
 - Safety: launch always creates `PAUSED`; `daily_budget_usd` is capped by
   `TAKYON_REDDIT_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Reddit; metrics sync is ad-platform only and does not imply business attribution.
 

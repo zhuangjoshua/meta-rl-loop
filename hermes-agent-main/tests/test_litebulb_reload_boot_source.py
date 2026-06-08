@@ -19,7 +19,7 @@ def test_open_business_boots_shell_before_full_workspace_refresh():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'const loadBusinessHomeShell = useCallback(async (slug: string) => {' in source
-    assert 'api.getTakyonBusinessHome(slug)' in source
+    assert 'api.getTakyonBusinessHome(businessSlug)' in source
     assert 'if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {' in source
     assert 'setChatMessages([]);' in source
     assert 'loadBusinessHomeShell(businessSlug).catch(() => undefined),' in source
@@ -30,8 +30,22 @@ def test_full_workspace_load_parallelizes_preview_fetch():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert "const [workspaceResult, previewResult] = await Promise.allSettled([" in source
-    assert 'api.getTakyonBusinessWorkspace(slug, 60, "full")' in source
-    assert "api.getTakyonBusinessSitePreview(slug)" in source
+    assert 'api.getTakyonBusinessWorkspace(businessSlug, 60, "full")' in source
+    assert "api.getTakyonBusinessSitePreview(businessSlug)" in source
+
+
+def test_business_switch_ignores_stale_workspace_preview_and_session_writes():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'const visibleBusinessRef = useRef("");' in source
+    assert "const isVisibleBusiness = useCallback((slug: string) => {" in source
+    assert "if (!isVisibleBusiness(businessSlug)) return;" in source
+    assert 'if (workspaceResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
+    assert 'if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
+    assert 'if (!isVisibleBusiness(businessSlug)) return "";' in source
+    assert "visibleBusinessRef.current = businessSlug;" in source
+    assert 'sessionIdRef.current = "";' in source
+    assert 'sessionBusinessRef.current = "";' in source
 
 
 def test_litebulb_reuses_stored_session_before_creating_a_new_one():

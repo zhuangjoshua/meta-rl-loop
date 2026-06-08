@@ -324,6 +324,9 @@ def _record_x_publish_result(
     post_id: str,
     post_url: str,
     provider_response: Mapping[str, Any] | None,
+    credits_charged: int = 0,
+    budget_bucket: str = "",
+    channel_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     from .core import TakyonStore
 
@@ -350,6 +353,9 @@ def _record_x_publish_result(
         "thread_external_id": thread_external_id,
         "post_id": post_id,
         "post_url": post_url,
+        "credits_charged": max(0, int(credits_charged or 0)),
+        "budget_bucket": str(budget_bucket or payload.get("channel") or "x").strip() or "x",
+        "channel_budget": dict(channel_budget or {}),
         "published_at": published_at,
         "sent": True,
         "external_side_effects": "sent",
@@ -1152,6 +1158,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
 
 
 def x_publish_outreach_handler(job: Job) -> JobRunResult:
+    from . import business_credits as takyon_business_credits
+    from . import core as takyon_core
+
     payload = job.payload or {}
     slug = job.business_slug
     body = str(payload.get("body") or "").strip()
@@ -1161,6 +1170,10 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     work_request_id = str(payload.get("work_request_id") or "").strip()
     reply_to = str(payload.get("thread_external_id") or "").strip()
     home = _xurl_home()
+    reservation_key = f"x-publish:{job.id}"
+    reservation: dict[str, Any] | None = None
+    credit_result: dict[str, Any] | None = None
+    finalized = False
     if work_request_id:
         _update_outreach_work_request(
             slug,
@@ -1170,6 +1183,47 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         )
 
     try:
+        reservation = takyon_core._reserve_creative_credits(
+            slug,
+            action="x_publish_outreach",
+            reservation_key=reservation_key,
+            budget_bucket="x",
+            metadata={
+                "business": slug,
+                "action": "x_publish_outreach",
+                "job_id": str(job.id),
+                "work_request_id": work_request_id or None,
+                "channel": "x",
+                "provider": "x",
+                "thread_external_id": reply_to or None,
+            },
+        )
+    except takyon_business_credits.InsufficientCreativeCredits as exc:
+        if work_request_id:
+            _update_outreach_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={"worker_error": str(exc), "budget_bucket": "x"},
+            )
+        raise RuntimeError(str(exc)) from exc
+    except takyon_core.CreativeCreditBudgetExceeded as exc:
+        if work_request_id:
+            _update_outreach_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={
+                    "worker_error": str(exc),
+                    "budget_bucket": exc.bucket,
+                    "channel_budget": exc.channel_budget,
+                },
+            )
+        raise RuntimeError(str(exc)) from exc
+
+    post_id = ""
+    thread_posts: list[dict[str, Any]] = []
+    try:
         xurl, _auth_path = _ensure_local_xurl_auth()
         app_name, username = _xurl_identity_flags(home=home)
         auth_mode = _xurl_auth_mode(home=home)
@@ -1177,9 +1231,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         if not segments:
             raise RuntimeError("x publish job is missing a body")
         provider_response: dict[str, Any] = {}
-        thread_posts: list[dict[str, Any]] = []
         current_reply_to = reply_to
-        post_id = ""
         for index, segment in enumerate(segments):
             command = [xurl]
             if app_name:
@@ -1209,6 +1261,22 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             current_reply_to = current_post_id
         if len(thread_posts) > 1:
             provider_response["thread_posts"] = thread_posts
+        credit_result = takyon_core._commit_creative_credits(
+            reservation_key,
+            action="x_publish_outreach",
+            budget_bucket="x",
+            metadata={
+                "business": slug,
+                "action": "x_publish_outreach",
+                "job_id": str(job.id),
+                "work_request_id": work_request_id or None,
+                "channel": "x",
+                "provider": "x",
+                "post_id": post_id,
+                "thread_post_count": len(thread_posts),
+            },
+        )
+        finalized = True
         whoami_command = [xurl]
         if app_name:
             whoami_command.extend(["--app", app_name])
@@ -1231,6 +1299,18 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             post_id=post_id,
             post_url=post_url,
             provider_response=provider_response,
+            credits_charged=int(
+                (credit_result or {}).get("actual_credits")
+                or (reservation or {}).get("requested_credits")
+                or 0
+            ),
+            budget_bucket=str(
+                (credit_result or {}).get("budget_bucket")
+                or (reservation or {}).get("budget_bucket")
+                or "x"
+            ).strip()
+            or "x",
+            channel_budget=(credit_result or {}).get("channel_budget"),
         )
         if work_request_id:
             _update_outreach_work_request(
@@ -1242,6 +1322,18 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                     "receipt_path": artifacts["receipt"],
                     "post_id": post_id,
                     "post_url": post_url,
+                    "credits_charged": int(
+                        (credit_result or {}).get("actual_credits")
+                        or (reservation or {}).get("requested_credits")
+                        or 0
+                    ),
+                    "budget_bucket": str(
+                        (credit_result or {}).get("budget_bucket")
+                        or (reservation or {}).get("budget_bucket")
+                        or "x"
+                    ).strip()
+                    or "x",
+                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
                 },
             )
         _persist_xurl_shared_auth_best_effort(home)
@@ -1253,17 +1345,91 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 "post_url": post_url,
                 "artifact_path": artifacts["artifact"],
                 "receipt_path": artifacts["receipt"],
+                "credits_charged": int(
+                    (credit_result or {}).get("actual_credits")
+                    or (reservation or {}).get("requested_credits")
+                    or 0
+                ),
+                "balance_credits": (credit_result or {}).get("balance_credits"),
+                "reserved_credits": (credit_result or {}).get("reserved_credits"),
+                "budget_bucket": str(
+                    (credit_result or {}).get("budget_bucket")
+                    or (reservation or {}).get("budget_bucket")
+                    or "x"
+                ).strip()
+                or "x",
+                "channel_budget": (credit_result or {}).get("channel_budget", {}),
             },
             actual_cost_cents=0,
         )
     except Exception as exc:
+        finalization_error: Exception | None = None
+        if reservation is not None and not finalized:
+            try:
+                if thread_posts:
+                    credit_result = takyon_core._commit_creative_credits(
+                        reservation_key,
+                        action="x_publish_outreach",
+                        budget_bucket="x",
+                        metadata={
+                            "business": slug,
+                            "action": "x_publish_outreach",
+                            "status": "partial_failed",
+                            "job_id": str(job.id),
+                            "work_request_id": work_request_id or None,
+                            "channel": "x",
+                            "provider": "x",
+                            "post_id": post_id or None,
+                            "thread_post_count": len(thread_posts),
+                            "thread_posts": thread_posts,
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    credit_result = takyon_core._release_creative_credits(
+                        reservation_key,
+                        action="x_publish_outreach",
+                        budget_bucket="x",
+                        metadata={
+                            "business": slug,
+                            "action": "x_publish_outreach",
+                            "status": "failed",
+                            "job_id": str(job.id),
+                            "work_request_id": work_request_id or None,
+                            "channel": "x",
+                            "provider": "x",
+                            "error": str(exc),
+                        },
+                    )
+                finalized = True
+            except Exception as release_exc:
+                finalization_error = release_exc
         if work_request_id:
             _update_outreach_work_request(
                 slug,
                 work_request_id,
                 status="failed",
-                payload_updates={"worker_error": str(exc)},
+                payload_updates={
+                    "worker_error": str(exc),
+                    "post_id": post_id or None,
+                    "credits_charged": int(
+                        (credit_result or {}).get("actual_credits")
+                        or ((reservation or {}).get("requested_credits") if thread_posts else 0)
+                        or 0
+                    ),
+                    "budget_bucket": str(
+                        (credit_result or {}).get("budget_bucket")
+                        or (reservation or {}).get("budget_bucket")
+                        or "x"
+                    ).strip()
+                    or "x",
+                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
+                },
             )
+        if finalization_error is not None:
+            raise RuntimeError(
+                f"{exc} (credit finalization also failed: {finalization_error})"
+            ) from exc
         raise
 
 

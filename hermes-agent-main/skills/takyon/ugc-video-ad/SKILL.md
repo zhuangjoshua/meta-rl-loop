@@ -68,6 +68,7 @@ multi-business assets (this skill is business-scoped).
 - Primary root: `product/`
 - Publication paths: `product/ugc-ads/<slug>/ad.mp4`, `.../script.json`, `.../reference.png`
 - Tool used by this skill: **`business_ugc_ad_generate`** for the live path (`business_ugc_ad_write` is committed internally by that tool)
+- Live budget rule: if the creative is meant for Meta, Reddit, or X, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel` so the spend lands on the right business channel budget
 - Main entrypoint: `${HERMES_SKILL_DIR}/scripts/build_ad.py`
 - Free planning: `build_ad.py --brief <brief> --dry-run` (no API calls, no spend)
 
@@ -80,6 +81,7 @@ multi-business assets (this skill is business-scoped).
 - The **`business_ugc_ad_generate`** tool must be registered (gated in frontmatter
   `metadata.hermes.requires_tools`). Use it for any live spendful generation so creative
   credits and the canonical receipt path stay truthful.
+- For live spendful runs, do not omit channel budget context. If the destination channel is known, pass `budget_bucket` directly or include it in `ad_metadata.channel`.
 
 ## References
 
@@ -109,6 +111,7 @@ python ${HERMES_SKILL_DIR}/scripts/build_ad.py \
   --brief assets/example-brief.json --dry-run
 
 # 2) LIVE / CANONICAL: call business_ugc_ad_generate so credits + receipt are enforced.
+#    When the destination channel is already known, include budget_bucket or ad_metadata.channel.
 ```
 
 Useful flags: `--jumpcuts` (extra silence-drop reframe cuts in post), `--skip-post`,
@@ -134,8 +137,9 @@ agent then calls that tool to record the asset (the script does not).
    compiled prompts before spending.
 5. **Build** — run `build_ad.py` to generate the reference image, per-clip Kling i2v with
    either last-frame continuity or jumpcut re-anchoring, then stitch and post-process.
-6. **Publish** — outputs are written under `product/ugc-ads/<slug>/`.
-7. **Record** — call **`business_ugc_ad_write`** with the printed payload to commit the
+6. **Charge the right bucket** — when this creative is being built for a known downstream ad or channel, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel`, plus any useful launch metadata such as campaign slug.
+7. **Publish** — outputs are written under `product/ugc-ads/<slug>/`.
+8. **Record** — call **`business_ugc_ad_write`** with the printed payload to commit the
    durable Takyon asset record (idempotent).
 
 ## Output Format

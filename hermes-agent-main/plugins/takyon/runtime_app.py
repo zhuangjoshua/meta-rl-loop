@@ -154,7 +154,10 @@ def resolve_database_url(explicit: str | None = None) -> str:
     everywhere → ``RuntimeNotConfigured``."""
     if explicit and explicit.strip():
         return _enforce_database_url_policy(explicit)
-    value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
+    try:
+        value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
+    except safebox.SafeboxAuthorityUnavailable:
+        value = ""
     if value:
         return _enforce_database_url_policy(value)
     raise RuntimeNotConfigured(

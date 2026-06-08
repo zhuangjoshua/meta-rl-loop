@@ -352,6 +352,7 @@ export function Product({
   onLogout,
   onOpenSettings,
   onSendPrompt,
+  onSaveChannelCreditBudgets,
   onTractionRangeChange,
 }: {
   business: LitebulbBusiness;
@@ -369,6 +370,10 @@ export function Product({
   onLogout: () => void;
   onOpenSettings: (section: SettingsSection) => void;
   onSendPrompt: (text: string) => void;
+  onSaveChannelCreditBudgets: (
+    slug: string,
+    allocations: Record<"x" | "meta" | "reddit", number>,
+  ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const [tab, setTab] = useState<TabKey>("company");
@@ -417,6 +422,7 @@ export function Product({
               creativeCredits={creativeCredits}
               traction={traction}
               tractionRange={tractionRange}
+              onSaveChannelCreditBudgets={onSaveChannelCreditBudgets}
               onTractionRangeChange={onTractionRangeChange}
             />
           )}

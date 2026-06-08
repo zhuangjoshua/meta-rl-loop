@@ -17,12 +17,17 @@ function formatBudgetCents(value?: number | null): string {
   return BUDGET_FORMATTER.format(cents / 100);
 }
 
-function operatorSpendableCents(
+function formatPercent(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+function operatorUsageRemainingPercent(
   account?: TakyonOperatorAccountResponse | null,
 ): number | null {
   if (!account?.available) return null;
-  const cents = Number(account.spendable_cents ?? 0);
-  return Number.isFinite(cents) ? Math.max(0, cents) : 0;
+  const percent = Number(account.allowance_percent_remaining ?? NaN);
+  return Number.isFinite(percent) ? Math.max(0, percent) : null;
 }
 
 function currentDashboardReturnPath(): string {
@@ -110,7 +115,7 @@ export function SidebarOperatorBillingStrip() {
     }
   }, [refreshAccount]);
 
-  const spendableCents = operatorSpendableCents(account);
+  const usageRemainingPercent = operatorUsageRemainingPercent(account);
   const payoutStatus = account?.available
     ? String(account.stripe_connect_status || "none")
     : "none";
@@ -129,9 +134,17 @@ export function SidebarOperatorBillingStrip() {
 
       <div className="space-y-1">
         <p className="break-words">
-          <span className="text-muted-foreground/45">budget</span>{" "}
+          <span className="text-muted-foreground/45">weekly usage</span>{" "}
           <span className="font-medium text-midground">
-            {spendableCents === null ? "—" : formatBudgetCents(spendableCents)}
+            {formatPercent(usageRemainingPercent)}
+          </span>
+        </p>
+        <p className="break-words">
+          <span className="text-muted-foreground/45">top-ups</span>{" "}
+          <span className="font-medium text-midground">
+            {account?.available
+              ? formatBudgetCents(account.topup_balance_cents)
+              : "—"}
           </span>
         </p>
         <p className="break-words">

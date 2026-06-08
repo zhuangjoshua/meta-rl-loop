@@ -26,8 +26,8 @@ function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
   const [menu, setMenu] = useState(false);
   const initial = (user?.name?.[0] ?? "U").toUpperCase();
   const close = () => setMenu(false);
-  const walletLabel = typeof account?.spendable_cents === "number"
-    ? `$${(account.spendable_cents / 100).toFixed(2)}`
+  const walletLabel = typeof account?.allowance_percent_remaining === "number"
+    ? `${account.allowance_percent_remaining.toFixed(1)}%`
     : "Wallet";
   return (
     <header className="lb-homenav">

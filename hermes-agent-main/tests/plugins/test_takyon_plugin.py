@@ -9,6 +9,7 @@ import tempfile
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,6 +57,7 @@ from plugins.takyon.core import (
     handle_business_ugc_ad_write,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
+    handle_business_set_channel_credit_budgets,
     handle_business_list_conversation_messages,
     handle_business_read_conversation_thread,
     handle_business_upsert_app_surface_contract,
@@ -2031,6 +2033,8 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Frontend-local, non-authoritative behavior may look live when it runs entirely in the browser" in instruction
     assert "`account` is the canonical paid-state read rail." in instruction
     assert "No app plans are configured yet. Do not render pricing cards" in instruction
+    assert "This is a paid monthly app surface. Customer-facing pricing language must stay paid-only" in instruction
+    assert "Do not write or imply `Free`, `Start free`, `Try free`, `free tier`, `trial`, `freemium`, `starter plan`, or `$0/month` copy" in instruction
 
 
 def test_claude_agent_task_uses_docker_lane_for_product_site_when_terminal_env_is_docker(tmp_path, monkeypatch):
@@ -4047,6 +4051,36 @@ def test_delete_business_removes_remote_workspace_copy(tmp_path):
     assert not (emptied / "research" / "spec.md").exists()
 
 
+def test_sync_business_workspace_remote_skips_supabase_push_on_local_mac(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "supabase_s3")
+    monkeypatch.delenv("TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS", raising=False)
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.setattr(takyon_core.platform, "system", lambda: "Darwin")
+
+    store = TakyonStore(tmp_path)
+    workspace = store._business_root("latexflow", sync=False)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "research").mkdir(parents=True, exist_ok=True)
+    (workspace / "research" / "spec.md").write_text("# Spec\n", encoding="utf-8")
+
+    sync_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    monkeypatch.setattr(
+        TakyonStore,
+        "_workspace_storage_backend",
+        lambda self: types.SimpleNamespace(name="supabase_s3"),
+    )
+    monkeypatch.setattr(
+        storage,
+        "sync_up",
+        lambda *args, **kwargs: sync_calls.append((args, kwargs)),
+    )
+
+    store._sync_business_workspace_remote("latexflow")
+
+    assert sync_calls == []
+
+
 def test_tool_handlers_return_json(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     create = json.loads(
@@ -4628,6 +4662,12 @@ def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch)
             "reserved_credits": 0,
         },
     )
+    synced: list[str] = []
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
+    )
 
     result = json.loads(
         handle_business_static_ad_generate(
@@ -4635,6 +4675,7 @@ def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch)
                 "business": "frameforge",
                 "input_path": "research/example-spec.json",
                 "slug": "frameforge-static-live",
+                "budget_bucket": "meta",
                 "idempotency_key": "frameforge-static-live-v1",
             }
         )
@@ -4643,6 +4684,7 @@ def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch)
     assert result["success"] is True
     assert result["status"] == "created"
     assert result["balance_credits"] == 8
+    assert synced == ["frameforge"]
     receipt = json.loads(
         (
             tmp_path
@@ -4655,6 +4697,65 @@ def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch)
         ).read_text(encoding="utf-8")
     )
     assert receipt["credits_charged"] == 2
+
+
+def test_business_set_channel_credit_budgets_persists_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "live"}],
+        "init-frameforge-budgets",
+    )
+    _grant_creative_credits(store, "frameforge", 5, "frameforge-budget-grant")
+
+    result = _set_channel_credit_budgets(
+        "frameforge",
+        {"x": 1, "meta": 3, "reddit": 1},
+        key="frameforge-channel-budgets-v1",
+    )
+
+    assert result["success"] is True
+    assert result["value"]["channels"]["x"]["allocated_credits"] == 1
+    assert result["value"]["channels"]["meta"]["allocated_credits"] == 3
+    assert result["value"]["channels"]["reddit"]["allocated_credits"] == 1
+    assert result["value"]["budget_capacity_credits"] == 5
+    assert (
+        tmp_path
+        / "businesses"
+        / "frameforge"
+        / "metrics"
+        / "channel-credit-budgets.json"
+    ).is_file()
+
+
+def test_business_ugc_ad_generate_live_requires_channel_budget_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:clipbook",
+        [{"action": "business.upsert", "business": "clipbook", "name": "Clipbook", "mode": "live"}],
+        "init-clipbook-live-budget-context",
+    )
+    brief_path = tmp_path / "businesses" / "clipbook" / "research" / "brief.json"
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text(json.dumps({"business": "clipbook", "product": "demo"}), encoding="utf-8")
+
+    result = json.loads(
+        handle_business_ugc_ad_generate(
+            {
+                "business": "clipbook",
+                "brief_path": "research/brief.json",
+                "slug": "clipbook-demo",
+                "idempotency_key": "clipbook-ugc-live-missing-budget-context-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "budget_bucket or ad_metadata.channel" in result["error"]
 
 
 def test_business_ugc_ad_generate_blocks_without_credits(tmp_path, monkeypatch):
@@ -4689,6 +4790,7 @@ def test_business_ugc_ad_generate_blocks_without_credits(tmp_path, monkeypatch):
                 "business": "clipbook",
                 "brief_path": "research/brief.json",
                 "slug": "clipbook-demo",
+                "budget_bucket": "meta",
                 "idempotency_key": "clipbook-ugc-live-v1",
             }
         )
@@ -4740,6 +4842,12 @@ def test_business_ugc_ad_generate_live_charges_credits_and_records_asset(tmp_pat
         }
 
     monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+    synced: list[str] = []
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
+    )
 
     result = json.loads(
         handle_business_ugc_ad_generate(
@@ -4748,6 +4856,7 @@ def test_business_ugc_ad_generate_live_charges_credits_and_records_asset(tmp_pat
                 "brief_path": "research/brief.json",
                 "script_path": "research/script.json",
                 "slug": "clipbook-demo",
+                "ad_metadata": {"channel": "meta", "campaign_slug": "clipbook-demo"},
                 "idempotency_key": "clipbook-ugc-live-success-v1",
             }
         )
@@ -4757,6 +4866,7 @@ def test_business_ugc_ad_generate_live_charges_credits_and_records_asset(tmp_pat
     assert result["status"] == "created"
     assert result["path"] == "product/ugc-ads/clipbook-demo/ad.mp4"
     assert result["balance_credits"] == 12
+    assert synced == ["clipbook", "clipbook"]
 
 
 def _meta_test_business(tmp_path, monkeypatch, *, slug="clipbook", mode="test"):
@@ -4806,6 +4916,23 @@ def _write_x_outreach_receipt(
 def _grant_creative_credits(store: TakyonStore, business: str, credits: int, key: str) -> None:
     with store._connect() as conn:
         takyon_business_credits.grant_credits(conn, business, credits, idempotency_key=key)
+
+
+def _set_channel_credit_budgets(
+    business: str,
+    allocations: dict[str, int],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    return json.loads(
+        handle_business_set_channel_credit_budgets(
+            {
+                "business": business,
+                "allocations": allocations,
+                "idempotency_key": key,
+            }
+        )
+    )
 
 
 def _meta_launch_args(**overrides):
@@ -5899,6 +6026,12 @@ def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
             "reserved_credits": 0,
         },
     )
+    synced: list[str] = []
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
+    )
 
     result = json.loads(
         handle_business_reddit_ad_launch(
@@ -5915,6 +6048,7 @@ def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["status"] == "created_paused"
     assert result["balance_credits"] == 4
+    assert synced == ["clipbook"]
 
 
 def test_reddit_launch_plan_passes_structured_post_payload(tmp_path, monkeypatch):
@@ -6065,6 +6199,7 @@ def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkey
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_reddit_launch_receipt(tmp_path)
     calls: list[tuple[str, dict]] = []
+    synced: list[str] = []
 
     def fake_gateway(endpoint, payload):
         calls.append((endpoint, payload))
@@ -6079,6 +6214,11 @@ def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkey
         }
 
     monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
+    )
 
     result = json.loads(
         handle_business_reddit_ad_control(
@@ -6095,6 +6235,7 @@ def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkey
     assert result["status"] == "activated"
     assert calls[0][0] == "reddit-control"
     assert calls[0][1]["campaign_id"] == "campaign-1"
+    assert synced == ["clipbook"]
 
     with store._connect() as conn:
         row = conn.execute(
@@ -6130,11 +6271,12 @@ def test_business_reddit_ad_control_rejects_over_cap_budget(tmp_path, monkeypatc
 def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_reddit_launch_receipt(tmp_path)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    synced: list[str] = []
 
-    monkeypatch.setattr(
-        takyon_core,
-        "_call_creative_runtime_gateway",
-        lambda endpoint, payload: {
+    def fake_gateway(endpoint, payload):
+        calls.append((endpoint, payload))
+        return {
             "success": True,
             "status": "synced",
             "rows": [
@@ -6148,7 +6290,13 @@ def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeyp
                     "cpm": 12340000,
                 }
             ],
-        },
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
     )
 
     result = json.loads(
@@ -6168,6 +6316,9 @@ def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeyp
     assert result["status"] == "synced"
     assert result["totals"]["spend_micros"] == 12340000
     assert result["totals"]["clicks"] == 25
+    assert calls[0][0] == "reddit-insights"
+    assert calls[0][1]["fields"] == ["SPEND", "IMPRESSIONS", "CLICKS", "CTR", "CPC", "ECPM"]
+    assert synced == ["clipbook"]
 
     metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
     assert metrics_abs.is_file()

@@ -1662,6 +1662,106 @@ def _running_tui_turn_session_ids() -> set[str]:
     return running
 
 
+def _operator_reservation_stale_seconds() -> int:
+    raw = str(os.getenv("TAKYON_OPERATOR_RESERVATION_STALE_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(300, int(raw))
+        except ValueError:
+            pass
+    return 86400
+
+
+def _job_reservation_job_id(reservation_key: str) -> str:
+    key = str(reservation_key or "").strip()
+    if not key.startswith("job:"):
+        return ""
+    parts = key.split(":", 3)
+    if len(parts) < 3:
+        return ""
+    return str(parts[1] or "").strip()
+
+
+def _reservation_age_seconds(created_at: Any) -> float | None:
+    if created_at is None or not hasattr(created_at, "timestamp"):
+        return None
+    try:
+        return max(0.0, time.time() - float(created_at.timestamp()))
+    except Exception:
+        return None
+
+
+def _release_stale_operator_reservations(conn, user_id: str) -> int:
+    """Refund orphaned operator holds before rendering the billing snapshot.
+
+    This keeps the operator account honest across the known reservation families:
+    live TUI turns, queued/running jobs, and bounded Claude/create-name inline tasks.
+    """
+    operator_user_id = str(user_id or "").strip()
+    if not operator_user_id:
+        return 0
+
+    from plugins.takyon import billing
+
+    stale_seconds = _operator_reservation_stale_seconds()
+    running_session_ids = _running_tui_turn_session_ids()
+    rows = conn.execute(
+        "select r.reservation_key, min(r.created_at) "
+        "from billing_entries r "
+        "where r.user_id = %s "
+        "  and r.kind = 'reserve' "
+        "  and r.reservation_key is not null "
+        "  and not exists ("
+        "    select 1 from billing_entries f "
+        "    where f.reservation_key = r.reservation_key "
+        "      and f.kind in ('settle', 'refund')"
+        "  ) "
+        "group by r.reservation_key",
+        (operator_user_id,),
+    ).fetchall()
+    released = 0
+    for row in rows:
+        key = str(row[0] or "").strip()
+        if not key:
+            continue
+        created_at = row[1] if len(row) > 1 else None
+        keep = False
+        if key.startswith("tui-turn:"):
+            session_id = _tui_turn_session_id(key)
+            keep = bool(session_id) and session_id in running_session_ids
+        elif key.startswith("job:"):
+            job_id = _job_reservation_job_id(key)
+            job_row = (
+                conn.execute(
+                    "select status, reserved_billing_entry_id, locked_at from jobs where id = %s",
+                    (job_id,),
+                ).fetchone()
+                if job_id
+                else None
+            )
+            if job_row is not None:
+                status = str(job_row[0] or "").strip().lower()
+                reserved_key = str(job_row[1] or "").strip()
+                age_seconds = _reservation_age_seconds(job_row[2])
+                keep = (
+                    status == "running"
+                    and reserved_key == key
+                    and age_seconds is not None
+                    and age_seconds < stale_seconds
+                )
+        else:
+            age_seconds = _reservation_age_seconds(created_at)
+            keep = age_seconds is None or age_seconds < stale_seconds
+        if keep:
+            continue
+        try:
+            billing.refund(conn, key)
+            released += 1
+        except billing.UnknownReservation:
+            continue
+    return released
+
+
 def _release_stale_tui_turn_reservations(conn, user_id: str) -> int:
     """Refund orphaned dashboard-turn holds for this operator.
 
@@ -2835,7 +2935,10 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
 def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon import billing
-        from plugins.takyon.control_api import get_operator_payout_state
+        from plugins.takyon.control_api import (
+            get_operator_payout_state,
+            sync_operator_subscription_allowance,
+        )
         from plugins.takyon.core import _db_backend
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
@@ -2865,13 +2968,18 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
 
         conn = psycopg.connect(url, autocommit=True)
         try:
-            released = _release_stale_tui_turn_reservations(conn, str(principal.user_id))
+            released = _release_stale_operator_reservations(conn, str(principal.user_id))
             if released:
                 _log.info(
-                    "released %s stale dashboard-turn reservation(s) for operator %s",
+                    "released %s stale operator reservation(s) for operator %s",
                     released,
                     principal.user_id,
                 )
+            subscription_state = sync_operator_subscription_allowance(
+                conn,
+                str(principal.user_id),
+                refresh_live=True,
+            )
             balances = billing.get_billing_balances(conn, str(principal.user_id))
             reconciled = billing.reconcile_billing(conn, str(principal.user_id))
             payout_state = get_operator_payout_state(
@@ -2880,19 +2988,46 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
         finally:
             conn.close()
 
+        allowance_included = max(0, int(balances.allowance_included_cents))
+        allowance_used = max(0, int(balances.allowance_used_cents))
         allowance_remaining = max(0, int(balances.allowance_remaining_cents))
         topup_balance = max(0, int(balances.topup_balance_cents))
         reserved = max(0, int(reconciled.get("reserved_cents", balances.reserved_cents)))
+        allowance_percent_remaining = (
+            round((allowance_remaining / allowance_included) * 100, 1)
+            if allowance_included > 0
+            else None
+        )
+        allowance_percent_used = (
+            round((allowance_used / allowance_included) * 100, 1)
+            if allowance_included > 0
+            else None
+        )
         return {
             "available": True,
-            "allowance_included_cents": int(balances.allowance_included_cents),
+            "allowance_included_cents": allowance_included,
             "allowance_remaining_cents": allowance_remaining,
-            "allowance_used_cents": int(balances.allowance_used_cents),
+            "allowance_used_cents": allowance_used,
+            "allowance_percent_remaining": allowance_percent_remaining,
+            "allowance_percent_used": allowance_percent_used,
+            "allowance_period_start": (
+                balances.allowance_period_start.isoformat()
+                if getattr(balances, "allowance_period_start", None) is not None
+                else subscription_state.allowance_period_start
+            ),
+            "allowance_resets_at": (
+                balances.allowance_resets_at.isoformat()
+                if getattr(balances, "allowance_resets_at", None) is not None
+                else subscription_state.allowance_resets_at
+            ),
             "owned_business_count": len(principal.business_slugs),
             "reserved_cents": reserved,
+            "reserved_allowance_cents": int(reconciled.get("reserved_allowance_cents", 0) or 0),
+            "reserved_topup_cents": int(reconciled.get("reserved_topup_cents", 0) or 0),
             "spendable_cents": allowance_remaining + topup_balance,
             "status": principal.status,
             "topup_balance_cents": topup_balance,
+            "operator_subscription_status": subscription_state.subscription_status,
             "owed_balance_cents": int(payout_state.owed_balance_cents),
             "paid_out_cents": int(payout_state.paid_out_cents),
             "payout_currency": payout_state.payout_currency,
@@ -3935,7 +4070,11 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
         }
     try:
         from plugins.takyon import business_credits
-        from plugins.takyon.core import _db_backend
+        from plugins.takyon.core import (
+            TakyonStore,
+            _creative_credit_budget_snapshot_from_conn,
+            _db_backend,
+        )
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
         if _db_backend() != "postgres":
@@ -3956,11 +4095,17 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
                 "reason": "database_unconfigured",
             }
 
-        import psycopg
-
-        conn = psycopg.connect(url, autocommit=True)
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        conn = store._connect()
         try:
+            business_credits.open_business_credit_account(conn, slug)
             balances = business_credits.get_business_credit_balances(conn, slug)
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                slug,
+                balances=balances,
+            )
         finally:
             conn.close()
 
@@ -3969,6 +4114,13 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "business_slug": slug,
             "balance_credits": int(balances.balance_credits),
             "reserved_credits": int(balances.reserved_credits),
+            "channels": snapshot.get("channels", {}),
+            "channel_budgets": snapshot.get("channels", {}),
+            "total_allocated_credits": int(snapshot.get("total_allocated_credits") or 0),
+            "total_used_credits": int(snapshot.get("total_used_credits") or 0),
+            "budget_capacity_credits": int(snapshot.get("budget_capacity_credits") or 0),
+            "unallocated_credits": int(snapshot.get("unallocated_credits") or 0),
+            "unbucketed_used_credits": int(snapshot.get("unbucketed_used_credits") or 0),
         }
     except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
         _log.warning("dashboard business creative credits read failed for %s: %s", slug, exc)
@@ -3977,6 +4129,85 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "business_slug": slug,
             "reason": "read_failed",
         }
+
+
+@app.post("/api/takyon/businesses/{slug}/creative-credits/budgets")
+async def set_takyon_business_creative_credit_budgets(request: Request, slug: str) -> dict[str, Any]:
+    """Persist the business's channel credit allocations for X / Meta / Reddit."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_allocations = body.get("allocations")
+    if not isinstance(raw_allocations, dict):
+        raw_allocations = body.get("channels")
+    if not isinstance(raw_allocations, dict):
+        raise HTTPException(status_code=400, detail="allocations is required")
+    try:
+        from uuid import uuid4
+
+        from plugins.takyon import business_credits
+        from plugins.takyon.core import (
+            TakyonStore,
+            _creative_credit_budget_payload,
+            _creative_credit_budget_relpath,
+            _creative_credit_budget_snapshot_from_conn,
+            _db_backend,
+            _validate_creative_credit_channel_allocations,
+        )
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        with store._connect() as conn:
+            business_credits.open_business_credit_account(conn, slug)
+            balances = business_credits.get_business_credit_balances(conn, slug)
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                slug,
+                balances=balances,
+            )
+        allocations = _validate_creative_credit_channel_allocations(
+            raw_allocations,
+            snapshot=snapshot,
+        )
+        store.commit(
+            scope=f"business:{slug}/metrics:channel-credit-budgets",
+            operations=[
+                {
+                    "action": "artifact.write",
+                    "business": slug,
+                    "path": _creative_credit_budget_relpath(),
+                    "content": _creative_credit_budget_payload(allocations),
+                }
+            ],
+            idempotency_key=str(body.get("idempotency_key") or f"dashboard-channel-credit-budgets:{slug}:{uuid4().hex}"),
+            reason=str(body.get("reason") or "dashboard set channel creative credit budgets"),
+            actor="dashboard",
+        )
+        return await get_takyon_business_creative_credits(request, slug)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business creative credit budgets update failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/takyon/operator/meta-campaigns")

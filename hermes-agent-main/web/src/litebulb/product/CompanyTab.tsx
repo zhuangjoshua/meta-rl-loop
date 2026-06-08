@@ -29,6 +29,7 @@ const I = {
 
 type Metric = "revenue" | "users" | "usage";
 type DistTab = "x" | "video" | "ads" | "email";
+type ChannelBudgetKey = "x" | "meta" | "reddit";
 
 type DocumentPreviewState = {
   output: Record<string, unknown>;
@@ -52,6 +53,9 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
 
 const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
 const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
+const DOCUMENT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ...MEDIA_OUTPUT_SUFFIXES]);
+const DOCUMENT_OUTPUT_KINDS = new Set(["image", "video", "receipt", "report"]);
+const CHANNEL_BUDGET_KEYS: ChannelBudgetKey[] = ["x", "meta", "reddit"];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -121,6 +125,13 @@ function outputSuffix(path: string) {
   return index >= 0 ? clean.slice(index) : "";
 }
 
+function isDocumentDeliverable(output: Record<string, unknown>) {
+  const path = asText(output.path);
+  const suffix = outputSuffix(path);
+  const kind = asText(output.kind).toLowerCase();
+  return DOCUMENT_OUTPUT_KINDS.has(kind) || DOCUMENT_OUTPUT_SUFFIXES.has(suffix);
+}
+
 function inlinePreviewFile(
   businessSlug: string,
   output: Record<string, unknown>,
@@ -187,6 +198,14 @@ function channelAllocatedCredits(channel: Record<string, unknown>) {
     latestJob.credits_charged,
     latestJob.requested_credits,
   ) || 0;
+}
+
+function channelBudgetSnapshot(
+  creativeCredits: TakyonBusinessCreativeCreditsResponse | null,
+  key: ChannelBudgetKey,
+) {
+  const container = asRecord(creativeCredits?.channel_budgets ?? creativeCredits?.channels);
+  return asRecord(container[key]);
 }
 
 function channelStatLine(channelKey: "x" | "meta" | "reddit", channel: Record<string, unknown>) {
@@ -320,11 +339,15 @@ function normalizeTaskStatus(value: string) {
 }
 
 function Activity({ tasks }: { tasks: Array<Record<string, unknown>> }) {
-  const visible = tasks.slice(0, 6);
+  const visible = [
+    ...tasks.filter((task) => normalizeTaskStatus(asText(task.status)) !== "done"),
+    ...tasks.filter((task) => normalizeTaskStatus(asText(task.status)) === "done"),
+  ];
   const running = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "live").length;
+  const queued = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
   return (
     <section className="lb-card lb-act">
-      <div className="lb-h"><span className="lb-act__pulse" />Activity<span className="lb-h__c">{running} running · {Math.max(0, visible.length - running)} queued</span></div>
+      <div className="lb-h"><span className="lb-act__pulse" />Activity<span className="lb-h__c">{running} running · {queued} queued</span></div>
       <div className="lb-act__list">
         {visible.map((task, index) => {
           const state = normalizeTaskStatus(asText(task.status));
@@ -347,45 +370,138 @@ function Activity({ tasks }: { tasks: Array<Record<string, unknown>> }) {
 function ChannelBudget({
   workspace,
   creativeCredits,
+  onSaveChannelCreditBudgets,
 }: {
   workspace: TakyonBusinessWorkspaceResponse | null;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
+  onSaveChannelCreditBudgets: (
+    slug: string,
+    allocations: Record<ChannelBudgetKey, number>,
+  ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
 }) {
   const overview = asRecord(workspace?.overview);
   const outreach = asRecord(asRecord(asRecord(overview.artifacts).outreach).channels);
   const xChannel = asRecord(outreach.x);
   const metaChannel = asRecord(outreach.meta);
   const redditChannel = asRecord(outreach.reddit);
+  const xBudget = channelBudgetSnapshot(creativeCredits, "x");
+  const metaBudget = channelBudgetSnapshot(creativeCredits, "meta");
+  const redditBudget = channelBudgetSnapshot(creativeCredits, "reddit");
+  const savedAllocations = useMemo<Record<ChannelBudgetKey, number>>(() => ({
+    x: pickFirstInt(xBudget.allocated_credits, channelAllocatedCredits(xChannel)) || 0,
+    meta: pickFirstInt(metaBudget.allocated_credits, channelAllocatedCredits(metaChannel)) || 0,
+    reddit: pickFirstInt(redditBudget.allocated_credits, channelAllocatedCredits(redditChannel)) || 0,
+  }), [
+    metaBudget.allocated_credits,
+    metaChannel,
+    redditBudget.allocated_credits,
+    redditChannel,
+    xBudget.allocated_credits,
+    xChannel,
+  ]);
+  const rowFloors = useMemo<Record<ChannelBudgetKey, number>>(() => ({
+    x: (readInt(xBudget.used_credits) || 0) + (readInt(xBudget.reserved_credits) || 0),
+    meta: (readInt(metaBudget.used_credits) || 0) + (readInt(metaBudget.reserved_credits) || 0),
+    reddit: (readInt(redditBudget.used_credits) || 0) + (readInt(redditBudget.reserved_credits) || 0),
+  }), [
+    metaBudget.reserved_credits,
+    metaBudget.used_credits,
+    redditBudget.reserved_credits,
+    redditBudget.used_credits,
+    xBudget.reserved_credits,
+    xBudget.used_credits,
+  ]);
+  const businessSlug = asText(workspace?.business_slug || creativeCredits?.business_slug);
+  const [draftAllocations, setDraftAllocations] = useState<Record<ChannelBudgetKey, number>>(savedAllocations);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const syncedBusinessRef = useRef(businessSlug);
+  const hasChanges = CHANNEL_BUDGET_KEYS.some((key) => draftAllocations[key] !== savedAllocations[key]);
+
+  useEffect(() => {
+    if (syncedBusinessRef.current !== businessSlug) {
+      syncedBusinessRef.current = businessSlug;
+      setDraftAllocations(savedAllocations);
+      setSaveError("");
+      return;
+    }
+    if (!saving && !hasChanges) {
+      setDraftAllocations(savedAllocations);
+      setSaveError("");
+    }
+  }, [businessSlug, hasChanges, savedAllocations, saving]);
+
+  const budgetCapacity = Math.max(
+    readInt(creativeCredits?.budget_capacity_credits) || 0,
+    ...CHANNEL_BUDGET_KEYS.map((key) => rowFloors[key]),
+    ...CHANNEL_BUDGET_KEYS.map((key) => draftAllocations[key]),
+  );
+  const spendableCredits = readInt(creativeCredits?.balance_credits) || 0;
+  const totalAllocated = CHANNEL_BUDGET_KEYS.reduce((sum, key) => sum + draftAllocations[key], 0);
+  const unallocatedCredits = Math.max(0, budgetCapacity - totalAllocated);
+  const sliderMax = Math.max(1, budgetCapacity, totalAllocated);
+  const canEdit = Boolean(creativeCredits?.available && businessSlug);
   const rows = [
     {
       key: "x",
       label: "X",
       color: "#1d9bf0",
-      value: channelAllocatedCredits(xChannel),
+      value: draftAllocations.x,
+      used: readInt(xBudget.used_credits) || 0,
+      reserved: readInt(xBudget.reserved_credits) || 0,
       stat: channelStatLine("x", xChannel),
     },
     {
       key: "meta",
       label: "Meta ads",
       color: "#1d6ff0",
-      value: channelAllocatedCredits(metaChannel),
+      value: draftAllocations.meta,
+      used: readInt(metaBudget.used_credits) || 0,
+      reserved: readInt(metaBudget.reserved_credits) || 0,
       stat: channelStatLine("meta", metaChannel),
     },
     {
       key: "reddit",
       label: "Reddit ads",
       color: "#fb8024",
-      value: channelAllocatedCredits(redditChannel),
+      value: draftAllocations.reddit,
+      used: readInt(redditBudget.used_credits) || 0,
+      reserved: readInt(redditBudget.reserved_credits) || 0,
       stat: channelStatLine("reddit", redditChannel),
     },
   ] as const;
-  const totalAllocated = rows.reduce((sum, row) => sum + row.value, 0);
-  const availableCredits = readInt(creativeCredits?.balance_credits) || 0;
-  const sliderMax = Math.max(100, totalAllocated, availableCredits, ...rows.map((row) => row.value));
+
+  const setAllocation = useCallback((key: ChannelBudgetKey, nextRaw: number) => {
+    setDraftAllocations((current) => {
+      const minimum = rowFloors[key];
+      const otherTotal = CHANNEL_BUDGET_KEYS.reduce((sum, bucket) => (
+        bucket === key ? sum : sum + current[bucket]
+      ), 0);
+      const maxForBucket = Math.max(minimum, budgetCapacity - otherTotal);
+      return {
+        ...current,
+        [key]: Math.max(minimum, Math.min(Math.round(nextRaw), maxForBucket)),
+      };
+    });
+    setSaveError("");
+  }, [budgetCapacity, rowFloors]);
+
+  const saveBudgets = useCallback(async () => {
+    if (!canEdit || !businessSlug || saving || !hasChanges) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSaveChannelCreditBudgets(businessSlug, draftAllocations);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Failed to save channel budgets.");
+    } finally {
+      setSaving(false);
+    }
+  }, [businessSlug, canEdit, draftAllocations, hasChanges, onSaveChannelCreditBudgets, saving]);
 
   return (
     <section className="lb-card lb-bud">
-      <div className="lb-h">Channel budget<span className="lb-h__c">{totalAllocated.toLocaleString()} credits allocated</span></div>
+      <div className="lb-h">Channel budget<span className="lb-h__c">{totalAllocated.toLocaleString()} credits allocated · {unallocatedCredits.toLocaleString()} unassigned</span></div>
       <div className="lb-bud__bar" aria-hidden="true">
         {rows.map((row) => (
           <span
@@ -400,6 +516,10 @@ function ChannelBudget({
       <div className="lb-bud__list">
         {rows.map((row) => {
           const progress = sliderMax > 0 ? (row.value / sliderMax) * 100 : 0;
+          const remaining = Math.max(0, row.value - row.used - row.reserved);
+          const detail = [row.stat, `${row.used} used`, row.reserved ? `${row.reserved} reserved` : "", `${remaining} free`]
+            .filter(Boolean)
+            .join(" · ");
           return (
             <div key={row.key} className="lb-alloc">
               <div className="lb-alloc__top">
@@ -409,22 +529,39 @@ function ChannelBudget({
               </div>
               <input
                 type="range"
-                min={0}
+                min={rowFloors[row.key]}
                 max={sliderMax}
                 step={1}
                 value={row.value}
-                disabled
+                disabled={!canEdit || saving || budgetCapacity <= 0}
                 aria-label={`${row.label} credits allocated`}
+                onChange={(event) => setAllocation(row.key, Number(event.target.value || 0))}
                 style={{
                   ["--p" as string]: `${progress}%`,
                   ["--fillc" as string]: row.color,
                   ["--thumbc" as string]: row.color,
                 }}
               />
-              <div className="lb-alloc__stat">{row.stat}</div>
+              <div className="lb-alloc__stat">{detail}</div>
             </div>
           );
         })}
+      </div>
+      <div className="lb-bud__foot">
+        <div className="lb-bud__note">
+          {creativeCredits?.available
+            ? `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope`
+            : "Creative credits are unavailable right now, so channel budgets cannot be edited."}
+          {saveError ? <span className="lb-bud__error">{saveError}</span> : null}
+        </div>
+        <button
+          type="button"
+          className="lb-bud__save"
+          disabled={!canEdit || saving || !hasChanges}
+          onClick={() => { void saveBudgets(); }}
+        >
+          {saving ? "Saving..." : hasChanges ? "Save budgets" : "Saved"}
+        </button>
       </div>
     </section>
   );
@@ -440,7 +577,8 @@ function Documents({
   const [preview, setPreview] = useState<DocumentPreviewState | null>(null);
   const fileCacheRef = useRef<Map<string, TakyonBusinessFileReadResponse>>(new Map());
   const pendingReadsRef = useRef<Map<string, Promise<TakyonBusinessFileReadResponse>>>(new Map());
-  const visible = outputs.slice(0, 6);
+  const documentOutputs = outputs.filter(isDocumentDeliverable);
+  const visible = documentOutputs.slice(0, 6);
 
   const loadDocument = useCallback((path: string) => {
     const cached = fileCacheRef.current.get(path);
@@ -527,7 +665,7 @@ function Documents({
   return (
     <>
       <section className="lb-card lb-docs">
-        <div className="lb-h">Documents<span className="lb-h__c">{outputs.length} generated</span></div>
+        <div className="lb-h">Documents<span className="lb-h__c">{documentOutputs.length} generated</span></div>
         <div className="lb-docs__grid">
           {visible.map((output, index) => (
             <button
@@ -713,6 +851,7 @@ export function CompanyTab({
   creativeCredits,
   traction,
   tractionRange,
+  onSaveChannelCreditBudgets,
   onTractionRangeChange,
 }: {
   business: LitebulbBusiness;
@@ -720,6 +859,10 @@ export function CompanyTab({
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   traction: TakyonBusinessTractionResponse | null;
   tractionRange: "D" | "W" | "M" | "Y";
+  onSaveChannelCreditBudgets: (
+    slug: string,
+    allocations: Record<ChannelBudgetKey, number>,
+  ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const overview = useMemo(() => asRecord(workspace?.overview), [workspace]);
@@ -732,7 +875,11 @@ export function CompanyTab({
         <Traction traction={traction} range={tractionRange} onRangeChange={onTractionRangeChange} />
         <div className="lb-comp__fold">
           <Activity tasks={tasks} />
-          <ChannelBudget workspace={workspace} creativeCredits={creativeCredits} />
+          <ChannelBudget
+            workspace={workspace}
+            creativeCredits={creativeCredits}
+            onSaveChannelCreditBudgets={onSaveChannelCreditBudgets}
+          />
         </div>
         <Distribution business={business} workspace={workspace} />
         <Documents business={business} outputs={outputs} />

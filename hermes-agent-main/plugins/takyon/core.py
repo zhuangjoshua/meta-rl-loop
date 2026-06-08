@@ -9,6 +9,7 @@ import hmac
 import json
 import mimetypes
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -70,6 +71,22 @@ CURRENT_BUSINESS_SCHEMA_VERSION = 1
 CURRENT_BUSINESS_CAPABILITY_VERSION = 1
 BUSINESS_UPGRADE_RECEIPT = "metrics/receipts/upgrades/takyon-business-upgrade-v1.json"
 TAKYON_BUSINESS_ROOTS = ("product", "distribution", "research", "metrics")
+_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS"
+_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
+_HOST_ROLE_ALIASES = {
+    "": "",
+    "all": "combined",
+    "combined": "combined",
+    "default": "combined",
+    "operator": "operator",
+    "dashboard": "operator",
+    "subuser": "subuser",
+    "app": "subuser",
+    "product": "subuser",
+    "safebox": "safebox",
+}
+_APPROVED_REMOTE_WORKSPACE_SYNC_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
+_APPROVED_REMOTE_WORKSPACE_HOME_PREFIXES = (Path("/opt/takyon/.takyon"),)
 TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
     {
         "business_list_businesses",
@@ -91,6 +108,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_create_app_checkout",
         "business_record_stripe_webhook",
         "business_record_app_usage",
+        "business_set_channel_credit_budgets",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
         "business_meta_ad_launch",
@@ -107,6 +125,40 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_upgrade_businesses",
     }
 )
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalized_host_role() -> str:
+    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
+    return _HOST_ROLE_ALIASES.get(raw, raw)
+
+
+def _resolved_takyon_home() -> Path | None:
+    raw = str(os.getenv("TAKYON_HOME") or "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except Exception:
+        return None
+
+
+def _remote_workspace_sync_allowed(backend_name: str) -> bool:
+    if str(backend_name or "").strip().lower() != "supabase_s3":
+        return True
+    if _env_truthy(_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS_ENV):
+        return True
+    if platform.system().lower() != "linux":
+        return False
+    if _normalized_host_role() not in _APPROVED_REMOTE_WORKSPACE_SYNC_HOST_ROLES:
+        return False
+    home = _resolved_takyon_home()
+    if home is None:
+        return False
+    return any(home == prefix or prefix in home.parents for prefix in _APPROVED_REMOTE_WORKSPACE_HOME_PREFIXES)
 NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
 - You are not allowed to invent backend behavior.
 - Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
@@ -179,6 +231,7 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
 }
+_DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS: tuple[str, ...] = ("claude-design", "claude-design-openai")
 _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -544,6 +597,29 @@ class TakyonError(RuntimeError):
     pass
 
 
+class CreativeCreditBudgetExceeded(TakyonError):
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        requested_credits: int,
+        remaining_credits: int,
+        allocated_credits: int,
+        used_credits: int,
+        reserved_credits: int,
+    ) -> None:
+        self.bucket = str(bucket or "").strip()
+        self.requested_credits = max(0, int(requested_credits or 0))
+        self.remaining_credits = max(0, int(remaining_credits or 0))
+        self.allocated_credits = max(0, int(allocated_credits or 0))
+        self.used_credits = max(0, int(used_credits or 0))
+        self.reserved_credits = max(0, int(reserved_credits or 0))
+        super().__init__(
+            f"channel_budget_exhausted:{self.bucket}: need {self.requested_credits}, "
+            f"remaining {self.remaining_credits}"
+        )
+
+
 def _effective_business_mode(value: Any) -> str:
     mode = str(value or "").strip().lower()
     return "live" if mode != "live" else mode
@@ -652,6 +728,14 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
         seen.add(key)
         normalized.append(text)
     return normalized
+
+
+def _resolve_worker_guidance_skills(args: dict[str, Any], workspace_raw: str) -> list[str]:
+    if "guidance_skills" in args:
+        return _normalize_guidance_skills(args.get("guidance_skills"))
+    if _workspace_needs_runtime_ui_contract(workspace_raw):
+        return list(_DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS)
+    return []
 
 
 def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
@@ -4460,6 +4544,9 @@ def _subuser_app_worker_contract_block(
         )
         lines.append("- On a first monthly bootstrap, `/app` may stop at sign-in, subscribe, and account access. Do not invent product tabs, generators, or extra in-app workflow until the contract explicitly asks for them.")
         lines.append("- If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
+        if _surface_disallows_free_tier_copy(surface):
+            lines.append("- This is a paid monthly app surface. Customer-facing pricing language must stay paid-only: one real monthly subscription path backed by the canonical `monthly` plan.")
+            lines.append("- Do not write or imply `Free`, `Start free`, `Try free`, `free tier`, `trial`, `freemium`, `starter plan`, or `$0/month` copy unless the operator explicitly changes the contract.")
 
     if "auth" in runtime_features:
         lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
@@ -4490,6 +4577,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
     elif shape.get("subscription_style") == "monthly":
         lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
+        lines.append("- Treat the product as paid-only by default. Do not invent a free plan, free tier, trial, waitlist tier, or limited starter offer in customer-facing pricing copy unless the operator explicitly records that change first.")
         lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
         lines.append("- Keep product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
 
@@ -4512,6 +4600,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
+        "- When `subscription_style` is `monthly`, treat that as a paid-only monthly subscription contract unless the operator explicitly records otherwise. Do not invent free-tier, trial, freemium, or `$0` pricing language on your own.",
         "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
@@ -6194,6 +6283,14 @@ def _product_source_is_skipped(path: Path) -> bool:
 
 def _source_has_runtime_backing(text: str) -> bool:
     return any(pattern.search(text) for pattern in _RUNTIME_BACKED_PATTERNS)
+
+
+def _surface_disallows_free_tier_copy(surface: dict[str, Any] | None) -> bool:
+    kind = _surface_contract_kind(surface)
+    if not kind["app_like"] or kind["landing_only"]:
+        return False
+    shape = _surface_subuser_app_shape(surface)
+    return str(shape.get("subscription_style") or "").strip() == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE
 
 
 def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
@@ -9942,6 +10039,8 @@ class TakyonStore:
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
             return
+        if not _remote_workspace_sync_allowed(backend_name):
+            return
         workspace = self._business_root(slug, sync=False)
         if not workspace.exists():
             return
@@ -9951,6 +10050,9 @@ class TakyonStore:
         from . import storage
 
         backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if not _remote_workspace_sync_allowed(backend_name):
+            return
         prefix = storage.object_prefix(_slugify(slug))
         for key in sorted(backend.list_digests(prefix)):
             backend.delete(key)
@@ -15728,6 +15830,372 @@ def _creative_credit_balances(business: str) -> Any:
         return credits_backend.get_business_credit_balances(conn, business)
 
 
+def _creative_credit_budget_relpath() -> str:
+    return "metrics/channel-credit-budgets.json"
+
+
+def _creative_credit_bucket_keys() -> tuple[str, ...]:
+    return ("x", "meta", "reddit")
+
+
+def _creative_credit_capacity_credits(
+    *,
+    balance_credits: int,
+    reserved_credits: int,
+    used_credits: int,
+    unbucketed_used_credits: int = 0,
+) -> int:
+    return max(
+        0,
+        int(balance_credits or 0)
+        + int(reserved_credits or 0)
+        + int(used_credits or 0)
+        + int(unbucketed_used_credits or 0),
+    )
+
+
+def _creative_credit_default_channel_allocations(total_capacity_credits: int = 0) -> dict[str, int]:
+    return {
+        "x": 1 if int(total_capacity_credits or 0) >= 1 else 0,
+        "meta": 0,
+        "reddit": 0,
+    }
+
+
+def _creative_credit_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_creative_credit_bucket(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text in {"x", "twitter"} or text.startswith("x-") or "twitter" in text:
+        return "x"
+    if text in {"meta", "facebook", "instagram", "fb", "ig"}:
+        return "meta"
+    if text == "reddit":
+        return "reddit"
+    return ""
+
+
+def _creative_credit_row_get(row: Any, key: str, index: int = 0) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[index]
+        except Exception:
+            return None
+
+
+def _creative_credit_default_bucket_for_action(action: Any) -> str:
+    return _CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS.get(str(action or "").strip().lower(), "")
+
+
+def _creative_credit_bucket_from_metadata(metadata: Any, *, action: Any = "") -> str:
+    data = metadata if isinstance(metadata, Mapping) else {}
+    bucket = _normalize_creative_credit_bucket(
+        data.get("budget_bucket")
+        or data.get("channel_budget_bucket")
+        or data.get("bucket")
+    )
+    if bucket:
+        return bucket
+    ad_metadata = data.get("ad_metadata") if isinstance(data.get("ad_metadata"), Mapping) else {}
+    for candidate in (
+        ad_metadata.get("channel"),
+        ad_metadata.get("budget_bucket"),
+        data.get("channel"),
+        data.get("provider"),
+        data.get("intended_channel"),
+        data.get("target_channel"),
+    ):
+        bucket = _normalize_creative_credit_bucket(candidate)
+        if bucket:
+            return bucket
+    return _creative_credit_default_bucket_for_action(action or data.get("action"))
+
+
+def _creative_credit_budget_metadata(
+    *,
+    action: str,
+    budget_bucket: Any = "",
+    metadata: Mapping[str, Any] | None = None,
+    ad_metadata: Mapping[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    payload = dict(metadata or {})
+    existing_ad_metadata = (
+        payload.get("ad_metadata")
+        if isinstance(payload.get("ad_metadata"), Mapping)
+        else {}
+    )
+    merged_ad_metadata = {
+        **(existing_ad_metadata if isinstance(existing_ad_metadata, Mapping) else {}),
+        **(ad_metadata if isinstance(ad_metadata, Mapping) else {}),
+    }
+    if merged_ad_metadata:
+        payload["ad_metadata"] = merged_ad_metadata
+    payload["action"] = str(action or "").strip()
+    bucket = _normalize_creative_credit_bucket(budget_bucket)
+    if not bucket:
+        bucket = _creative_credit_bucket_from_metadata(payload, action=action)
+    if bucket:
+        payload["budget_bucket"] = bucket
+    return bucket, payload
+
+
+def _read_creative_credit_channel_allocations(
+    store: "TakyonStore",
+    business: str,
+    *,
+    total_capacity_credits: int = 0,
+) -> dict[str, int]:
+    default_allocations = _creative_credit_default_channel_allocations(total_capacity_credits)
+    config_abs = store._resolve_business_file(business, _creative_credit_budget_relpath())
+    if not config_abs.is_file():
+        return default_allocations
+    try:
+        raw = json.loads(config_abs.read_text(encoding="utf-8"))
+    except Exception:
+        return default_allocations
+    channels = raw.get("channels") if isinstance(raw, Mapping) else None
+    if not isinstance(channels, Mapping):
+        channels = raw if isinstance(raw, Mapping) else {}
+    allocations = dict(default_allocations)
+    for bucket in _creative_credit_bucket_keys():
+        raw_value = channels.get(bucket) if isinstance(channels, Mapping) else None
+        if isinstance(raw_value, Mapping):
+            raw_value = (
+                raw_value.get("credits")
+                or raw_value.get("allocated_credits")
+                or raw_value.get("budget_credits")
+                or raw_value.get("value")
+            )
+        allocations[bucket] = _creative_credit_int(raw_value)
+    return allocations
+
+
+def _creative_credit_channel_usage_from_conn(
+    conn: Any,
+    business: str,
+) -> tuple[dict[str, dict[str, int]], int]:
+    usage = {
+        bucket: {"used_credits": 0, "reserved_credits": 0}
+        for bucket in _creative_credit_bucket_keys()
+    }
+    unbucketed_used_credits = 0
+    try:
+        rows = conn.execute(
+            """
+            SELECT kind, amount_credits, reservation_key, metadata
+            FROM business_creative_credit_entries
+            WHERE business_slug = ?
+            ORDER BY id ASC
+            """,
+            (business,),
+        ).fetchall()
+    except Exception:
+        return usage, 0
+    finalized_keys = {
+        str(_creative_credit_row_get(row, "reservation_key", 2) or "").strip()
+        for row in rows or []
+        if str(_creative_credit_row_get(row, "kind", 0) or "").strip() in {"commit", "release"}
+        and str(_creative_credit_row_get(row, "reservation_key", 2) or "").strip()
+    }
+    for row in rows or []:
+        kind = str(_creative_credit_row_get(row, "kind", 0) or "").strip()
+        amount_credits = _creative_credit_int(_creative_credit_row_get(row, "amount_credits", 1))
+        metadata = _creative_credit_row_get(row, "metadata", 3)
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        bucket = _creative_credit_bucket_from_metadata(metadata, action=(metadata or {}).get("action") if isinstance(metadata, Mapping) else "")
+        if kind == "commit":
+            if bucket in usage:
+                usage[bucket]["used_credits"] += amount_credits
+            else:
+                unbucketed_used_credits += amount_credits
+        elif kind == "reserve":
+            reservation_key = str(_creative_credit_row_get(row, "reservation_key", 2) or "").strip()
+            if reservation_key and reservation_key in finalized_keys:
+                continue
+            if bucket in usage:
+                usage[bucket]["reserved_credits"] += amount_credits
+    return usage, unbucketed_used_credits
+
+
+def _creative_credit_budget_snapshot_from_conn(
+    store: "TakyonStore",
+    conn: sqlite3.Connection,
+    business: str,
+    *,
+    balances: Any | None = None,
+) -> dict[str, Any]:
+    credits_backend = _creative_credit_backend()
+    if balances is None:
+        credits_backend.open_business_credit_account(conn, business)
+        balances = credits_backend.get_business_credit_balances(conn, business)
+    usage, unbucketed_used_credits = _creative_credit_channel_usage_from_conn(conn, business)
+    total_used_credits = sum(item["used_credits"] for item in usage.values())
+    total_capacity_credits = _creative_credit_capacity_credits(
+        balance_credits=int(balances.balance_credits),
+        reserved_credits=int(balances.reserved_credits),
+        used_credits=total_used_credits,
+        unbucketed_used_credits=unbucketed_used_credits,
+    )
+    allocations = _read_creative_credit_channel_allocations(
+        store,
+        business,
+        total_capacity_credits=total_capacity_credits,
+    )
+    channels: dict[str, dict[str, int]] = {}
+    total_allocated_credits = 0
+    for bucket in _creative_credit_bucket_keys():
+        allocated_credits = _creative_credit_int(allocations.get(bucket))
+        used_credits = usage[bucket]["used_credits"]
+        reserved_credits = usage[bucket]["reserved_credits"]
+        total_allocated_credits += allocated_credits
+        channels[bucket] = {
+            "allocated_credits": allocated_credits,
+            "used_credits": used_credits,
+            "reserved_credits": reserved_credits,
+            "remaining_credits": max(0, allocated_credits - used_credits - reserved_credits),
+        }
+    return {
+        "channels": channels,
+        "total_allocated_credits": total_allocated_credits,
+        "total_used_credits": total_used_credits,
+        "budget_capacity_credits": total_capacity_credits,
+        "unallocated_credits": max(0, total_capacity_credits - total_allocated_credits),
+        "unbucketed_used_credits": unbucketed_used_credits,
+    }
+
+
+def _creative_credit_budget_snapshot(business: str) -> dict[str, Any]:
+    store = _store()
+    credits_backend = _creative_credit_backend()
+    with store._connect() as conn:
+        credits_backend.open_business_credit_account(conn, business)
+        balances = credits_backend.get_business_credit_balances(conn, business)
+        return _creative_credit_budget_snapshot_from_conn(
+            store,
+            conn,
+            business,
+            balances=balances,
+        )
+
+
+def _validate_creative_credit_channel_allocations(
+    allocations: Mapping[str, Any],
+    *,
+    snapshot: Mapping[str, Any],
+) -> dict[str, int]:
+    channels = snapshot.get("channels") if isinstance(snapshot.get("channels"), Mapping) else {}
+    total_capacity_credits = _creative_credit_int(snapshot.get("budget_capacity_credits"))
+    normalized: dict[str, int] = {}
+    total_allocated_credits = 0
+    for bucket in _creative_credit_bucket_keys():
+        raw_value = allocations.get(bucket)
+        if isinstance(raw_value, Mapping):
+            raw_value = (
+                raw_value.get("credits")
+                or raw_value.get("allocated_credits")
+                or raw_value.get("budget_credits")
+                or raw_value.get("value")
+            )
+        allocated_credits = _creative_credit_int(raw_value)
+        channel = channels.get(bucket) if isinstance(channels, Mapping) else {}
+        used_credits = _creative_credit_int(
+            channel.get("used_credits") if isinstance(channel, Mapping) else 0
+        )
+        reserved_credits = _creative_credit_int(
+            channel.get("reserved_credits") if isinstance(channel, Mapping) else 0
+        )
+        minimum_credits = used_credits + reserved_credits
+        if allocated_credits < minimum_credits:
+            raise TakyonError(
+                f"{bucket} budget cannot drop below {minimum_credits} credits "
+                f"({used_credits} already used, {reserved_credits} reserved)"
+            )
+        normalized[bucket] = allocated_credits
+        total_allocated_credits += allocated_credits
+    if total_allocated_credits > total_capacity_credits:
+        raise TakyonError(
+            f"channel budgets total {total_allocated_credits} credits but the business has only "
+            f"{total_capacity_credits} credits available to allocate"
+        )
+    return normalized
+
+
+def _creative_credit_budget_payload(allocations: Mapping[str, Any]) -> str:
+    data = {
+        "schema_version": 1,
+        "channels": {
+            bucket: {"credits": _creative_credit_int(allocations.get(bucket))}
+            for bucket in _creative_credit_bucket_keys()
+        },
+        "updated_at": _now(),
+    }
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def handle_business_set_channel_credit_budgets(args: dict, **_: Any) -> str:
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        raw_allocations = args.get("allocations")
+        if not isinstance(raw_allocations, Mapping):
+            raw_allocations = args.get("channels")
+        if not isinstance(raw_allocations, Mapping):
+            raise TakyonError("allocations is required")
+        if isinstance(raw_allocations.get("channels"), Mapping):
+            raw_allocations = raw_allocations.get("channels")
+        snapshot = _creative_credit_budget_snapshot(business)
+        allocations = _validate_creative_credit_channel_allocations(
+            raw_allocations,
+            snapshot=snapshot,
+        )
+        store = _store()
+        store.commit(
+            scope=f"business:{business}/metrics:channel-credit-budgets",
+            operations=[
+                {
+                    "action": "artifact.write",
+                    "business": business,
+                    "path": _creative_credit_budget_relpath(),
+                    "content": _creative_credit_budget_payload(allocations),
+                }
+            ],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "set channel creative credit budgets",
+            actor=args.get("actor") or "agent",
+        )
+        updated = _creative_credit_budget_snapshot(business)
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_set_channel_credit_budgets",
+                "business": business,
+                "path": _creative_credit_budget_relpath(),
+                "value": updated,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def _dashboard_runtime_base_url() -> str:
     raw = str(os.getenv("TAKYON_DASHBOARD_URL") or "http://127.0.0.1:9119").strip()
     return raw.rstrip("/")
@@ -15800,33 +16268,63 @@ def _reserve_creative_credits(
     action: str,
     reservation_key: str,
     units: int = 1,
+    budget_bucket: Any = "",
     metadata: dict[str, Any] | None = None,
+    ad_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     credits_backend = _creative_credit_backend()
     requested = _creative_credit_total_cost(action, units=units)
+    resolved_bucket, resolved_metadata = _creative_credit_budget_metadata(
+        action=action,
+        budget_bucket=budget_bucket,
+        metadata=metadata,
+        ad_metadata=ad_metadata,
+    )
     if requested <= 0:
         return {
             "reservation_key": reservation_key,
             "requested_credits": 0,
             "balance_credits": 0,
             "reserved_credits": 0,
+            "budget_bucket": resolved_bucket,
         }
     store = _store()
     with store._connect() as conn:
         credits_backend.open_business_credit_account(conn, business)
+        if resolved_bucket:
+            snapshot = _creative_credit_budget_snapshot_from_conn(store, conn, business)
+            channel = snapshot["channels"].get(resolved_bucket, {})
+            remaining_credits = _creative_credit_int(channel.get("remaining_credits"))
+            if requested > remaining_credits:
+                raise CreativeCreditBudgetExceeded(
+                    bucket=resolved_bucket,
+                    requested_credits=requested,
+                    remaining_credits=remaining_credits,
+                    allocated_credits=_creative_credit_int(channel.get("allocated_credits")),
+                    used_credits=_creative_credit_int(channel.get("used_credits")),
+                    reserved_credits=_creative_credit_int(channel.get("reserved_credits")),
+                )
         reservation = credits_backend.reserve_credits(
             conn,
             business,
             requested,
             reservation_key,
-            metadata=metadata or {},
+            metadata=resolved_metadata,
         )
         balances = credits_backend.get_business_credit_balances(conn, business)
+        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+            store,
+            conn,
+            business,
+            balances=balances,
+        )
     return {
         "reservation_key": reservation.key,
         "requested_credits": reservation.reserved_credits,
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
+        "budget_bucket": resolved_bucket,
+        "channel_budget": budget_snapshot["channels"].get(resolved_bucket, {}) if resolved_bucket else {},
     }
 
 
@@ -15835,43 +16333,84 @@ def _commit_creative_credits(
     *,
     action: str,
     actual_units: int | None = None,
+    budget_bucket: Any = "",
     metadata: dict[str, Any] | None = None,
+    ad_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     credits_backend = _creative_credit_backend()
     actual_credits = None
     if actual_units is not None:
         actual_credits = _creative_credit_total_cost(action, units=max(0, int(actual_units)))
+    resolved_bucket, resolved_metadata = _creative_credit_budget_metadata(
+        action=action,
+        budget_bucket=budget_bucket,
+        metadata=metadata,
+        ad_metadata=ad_metadata,
+    )
     store = _store()
     with store._connect() as conn:
         balances = credits_backend.commit_credits(
             conn,
             reservation_key,
             actual_credits=actual_credits,
-            metadata=metadata or {},
+            metadata=resolved_metadata,
         )
+        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+            store,
+            conn,
+            str(resolved_metadata.get("business") or ""),
+            balances=balances,
+        ) if str(resolved_metadata.get("business") or "").strip() else None
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
         "actual_credits": actual_credits,
+        "budget_bucket": resolved_bucket,
+        "channel_budget": (
+            budget_snapshot["channels"].get(resolved_bucket, {})
+            if resolved_bucket and isinstance(budget_snapshot, Mapping)
+            else {}
+        ),
     }
 
 
 def _release_creative_credits(
     reservation_key: str,
     *,
+    action: str = "",
+    budget_bucket: Any = "",
     metadata: dict[str, Any] | None = None,
+    ad_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     credits_backend = _creative_credit_backend()
+    resolved_bucket, resolved_metadata = _creative_credit_budget_metadata(
+        action=action,
+        budget_bucket=budget_bucket,
+        metadata=metadata,
+        ad_metadata=ad_metadata,
+    )
     store = _store()
     with store._connect() as conn:
         balances = credits_backend.release_credits(
             conn,
             reservation_key,
-            metadata=metadata or {},
+            metadata=resolved_metadata,
         )
+        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+            store,
+            conn,
+            str(resolved_metadata.get("business") or ""),
+            balances=balances,
+        ) if str(resolved_metadata.get("business") or "").strip() else None
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
+        "budget_bucket": resolved_bucket,
+        "channel_budget": (
+            budget_snapshot["channels"].get(resolved_bucket, {})
+            if resolved_bucket and isinstance(budget_snapshot, Mapping)
+            else {}
+        ),
     }
 
 
@@ -15943,6 +16482,7 @@ def _finalize_operator_task_budget(
     reservation_key: str,
     reserved_cents: int,
     consume_reserved: bool,
+    actual_cents: int | None = None,
 ) -> dict[str, Any]:
     user_id = str(operator_user_id or "").strip()
     reserved = max(0, int(reserved_cents or 0))
@@ -15952,6 +16492,7 @@ def _finalize_operator_task_budget(
             "operator_user_id": user_id,
             "reservation_key": reservation_key,
             "reserved_cents": reserved,
+            "actual_cents": max(0, int(actual_cents or 0)) if actual_cents is not None else None,
             "charged_cents": 0,
             "status": "skipped",
         }
@@ -15965,11 +16506,14 @@ def _finalize_operator_task_budget(
     with store._connect() as conn:
         with store._leaf_conn(conn) as raw:
             if consume_reserved:
-                # The Claude SDK worker returns no exact provider spend today, so once the run actually
-                # happened we settle the full reserved estimate instead of pretending we know the actual.
-                billing.settle(raw, reservation_key, reserved)
-                status = "settled_estimate"
-                charged_cents = reserved
+                if actual_cents is not None:
+                    charged_cents = max(0, min(int(actual_cents or 0), reserved))
+                    billing.settle(raw, reservation_key, charged_cents)
+                    status = "settled_actual"
+                else:
+                    billing.settle(raw, reservation_key, reserved)
+                    status = "settled_estimate"
+                    charged_cents = reserved
             else:
                 billing.refund(raw, reservation_key)
                 status = "released"
@@ -15980,6 +16524,7 @@ def _finalize_operator_task_budget(
         "operator_user_id": user_id,
         "reservation_key": reservation_key,
         "reserved_cents": reserved,
+        "actual_cents": max(0, int(actual_cents or 0)) if actual_cents is not None else None,
         "charged_cents": charged_cents,
         "status": status,
         "allowance_remaining_cents": int(balances.allowance_remaining_cents),
@@ -16074,6 +16619,7 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record ugc video ad",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result(
             {
                 "success": True,
@@ -16144,6 +16690,21 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
 
         business_mode = _business_mode(store, business)
         dry_run = _boolish(args.get("dry_run"), default=False) or business_mode == "test"
+        ad_metadata = (
+            args.get("ad_metadata")
+            if isinstance(args.get("ad_metadata"), Mapping)
+            else {}
+        )
+        budget_bucket = _normalize_creative_credit_bucket(
+            args.get("budget_bucket")
+            or ad_metadata.get("channel")
+            or args.get("channel")
+        )
+        if not dry_run and not budget_bucket:
+            raise TakyonError(
+                "live UGC ad generation requires budget_bucket or ad_metadata.channel "
+                "(x, meta, or reddit)"
+            )
         base_receipt = {
             "idempotency_key": idempotency_key,
             "business": business,
@@ -16152,6 +16713,8 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
             "script_path": script_rel or None,
             "publication_dir": publication_rel,
             "business_mode": business_mode,
+            "budget_bucket": budget_bucket or None,
+            "ad_metadata": dict(ad_metadata) if ad_metadata else {},
             "created_at": _now(),
         }
 
@@ -16237,6 +16800,8 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
                     "jumpcuts": _boolish(args.get("jumpcuts"), default=False),
                     "skip_post": _boolish(args.get("skip_post"), default=False),
                     "workdir": str(args.get("workdir") or ""),
+                    "budget_bucket": budget_bucket,
+                    "ad_metadata": dict(ad_metadata) if ad_metadata else {},
                 },
             )
         except Exception as exc:
@@ -16272,6 +16837,7 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
                 "available_credits": gateway_result.get("available_credits"),
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
+                "channel_budget": gateway_result.get("channel_budget"),
                 "stdout": gateway_result.get("stdout"),
                 "stderr": gateway_result.get("stderr"),
                 "error": gateway_result.get("error") or "ugc render failed",
@@ -16308,6 +16874,7 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
                 "credits_charged": gateway_result.get("credits_charged"),
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
+                "channel_budget": gateway_result.get("channel_budget"),
                 "error": write_result.get("error") or "ugc asset record failed",
             }
             _atomic_write_text(
@@ -16337,6 +16904,7 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
             "credits_charged": gateway_result.get("credits_charged"),
             "balance_credits": gateway_result.get("balance_credits"),
             "reserved_credits": gateway_result.get("reserved_credits"),
+            "channel_budget": gateway_result.get("channel_budget"),
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         store.commit(
@@ -16353,6 +16921,7 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record ugc video ad generation",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result(
             {
                 "success": True,
@@ -16417,6 +16986,21 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
         business_mode = _business_mode(store, business)
         dry_run_requested = _boolish(args.get("dry_run"), default=False)
         suppressed = business_mode == "test" or dry_run_requested
+        ad_metadata = (
+            args.get("ad_metadata")
+            if isinstance(args.get("ad_metadata"), Mapping)
+            else {}
+        )
+        budget_bucket = _normalize_creative_credit_bucket(
+            args.get("budget_bucket")
+            or ad_metadata.get("channel")
+            or args.get("channel")
+        )
+        if not suppressed and not budget_bucket:
+            raise TakyonError(
+                "live static ad generation requires budget_bucket or ad_metadata.channel "
+                "(x, meta, or reddit)"
+            )
         base_receipt = {
             "idempotency_key": idempotency_key,
             "business": business,
@@ -16425,6 +17009,8 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
             "publication_dir": publication_rel,
             "business_mode": business_mode,
             "requested_creatives": requested,
+            "budget_bucket": budget_bucket or None,
+            "ad_metadata": dict(ad_metadata) if ad_metadata else {},
             "created_at": _now(),
         }
 
@@ -16524,6 +17110,8 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
                     "stop_on_error": _boolish(args.get("stop_on_error"), default=False),
                     "aspect_ratio": str(args.get("aspect_ratio") or ""),
                     "max": str(args.get("max") or ""),
+                    "budget_bucket": budget_bucket,
+                    "ad_metadata": dict(ad_metadata) if ad_metadata else {},
                 },
             )
         except Exception as exc:
@@ -16560,6 +17148,7 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
                 "available_credits": gateway_result.get("available_credits"),
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
+                "channel_budget": gateway_result.get("channel_budget"),
                 "succeeded": gateway_result.get("succeeded") or 0,
                 "failed": gateway_result.get("failed") or 0,
                 "stdout": gateway_result.get("stdout"),
@@ -16596,6 +17185,7 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
             "credits_charged": gateway_result.get("credits_charged"),
             "balance_credits": gateway_result.get("balance_credits"),
             "reserved_credits": gateway_result.get("reserved_credits"),
+            "channel_budget": gateway_result.get("channel_budget"),
             "succeeded": gateway_result.get("succeeded") or requested,
             "failed": gateway_result.get("failed") or 0,
         }
@@ -16614,6 +17204,7 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record static ad generation",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result(
             {
                 "success": True,
@@ -16648,14 +17239,21 @@ _META_VALID_CTA = {
 _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
+    "x_publish_outreach": 1,
     "meta_ad_launch": 1,
     "reddit_ad_launch": 1,
 }
 _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
+    "x_publish_outreach": "TAKYON_CREATIVE_CREDITS_X_POST",
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
     "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
+}
+_CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS = {
+    "x_publish_outreach": "x",
+    "meta_ad_launch": "meta",
+    "reddit_ad_launch": "reddit",
 }
 
 
@@ -17256,6 +17854,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "business": business,
             "slug": slug,
             "paused": True,
+            "budget_bucket": "meta",
             "asset_kind": plan["asset_kind"],
             "ad_video_path": plan["ad_video_path"],
             "ad_image_path": plan.get("ad_image_path"),
@@ -17381,6 +17980,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "available_credits": gateway_result.get("available_credits"),
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
+                "channel_budget": gateway_result.get("channel_budget"),
                 "ids": gateway_result.get("ids"),
                 "error": gateway_result.get("error") or "meta launch failed",
             }
@@ -17413,6 +18013,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "ids": gateway_result.get("ids") or {},
             "thumbnail_url": gateway_result.get("thumbnail_url"),
             "credits_charged": gateway_result.get("credits_charged"),
+            "channel_budget": gateway_result.get("channel_budget"),
             "note": "All objects created PAUSED; nothing serves or spends until explicitly activated.",
         }
         receipt["balance_credits"] = gateway_result.get("balance_credits")
@@ -18909,6 +19510,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
             "business": business,
             "slug": slug,
             "paused": True,
+            "budget_bucket": "reddit",
             "asset_kind": plan["asset_kind"],
             "objective": plan["objective"],
             "daily_budget_usd": plan["daily_budget_usd"],
@@ -19013,6 +19615,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
                 "credits_charged": gateway_result.get("credits_charged"),
+                "channel_budget": gateway_result.get("channel_budget"),
             }
             _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
             return tool_result({
@@ -19048,6 +19651,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
             "preview_expiry": gateway_result.get("preview_expiry"),
             "post_url": gateway_result.get("post_url"),
             "credits_charged": gateway_result.get("credits_charged"),
+            "channel_budget": gateway_result.get("channel_budget"),
             "note": "All objects created PAUSED; nothing serves or spends until explicitly activated.",
         }
         receipt["balance_credits"] = gateway_result.get("balance_credits")
@@ -19065,6 +19669,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record reddit ad launch (paused)",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_launch",
@@ -19263,6 +19868,7 @@ def handle_business_reddit_ad_control(args: dict, **_: Any) -> str:
             reason=args.get("reason") or f"record reddit ad {operation}",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_control",
@@ -19325,7 +19931,7 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             "CLICKS",
             "CTR",
             "CPC",
-            "CPM",
+            "ECPM",
         ]
         breakdowns = args.get("breakdowns") if isinstance(args.get("breakdowns"), list) else ["DATE"]
         filter_value = str(args.get("filter") or f"{level}:id=={object_id}").strip()
@@ -19481,6 +20087,7 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record reddit insights sync",
             actor=args.get("actor") or "agent",
         )
+        store._sync_business_workspace_remote(business)
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_insights_sync",
@@ -20103,9 +20710,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or os.getenv("TAKYON_CLAUDE_AGENT_MODEL")
             or default_model
         ).strip()
-        guidance_skills = _normalize_guidance_skills(args.get("guidance_skills"))
+        guidance_skills = _resolve_worker_guidance_skills(args, workspace_rel)
         resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
-        worker_invoked = True
+        worker_invoked = False
+        worker_actual_cents: int | None = None
         install_surface = _boolish(args.get("install"), default=True)
         refresh_timeout_seconds = _clamp_int(
             args.get("refresh_timeout_seconds"),
@@ -20246,12 +20854,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         business=business,
                         workspace_rel=workspace_rel,
                     )
+                worker_invoked = True
                 stdout = proc.stdout.strip()
                 stderr = proc.stderr.strip()
                 try:
                     sdk_result = json.loads(stdout) if stdout else {}
                 except json.JSONDecodeError:
                     sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+                try:
+                    worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
+                except (TypeError, ValueError, AttributeError):
+                    worker_actual_cents = None
                 if proc.returncode != 0:
                     sdk_result.setdefault("success", False)
                     sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
@@ -20409,6 +21022,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             reservation_key=str(operator_budget.get("reservation_key") or ""),
             reserved_cents=int(operator_budget.get("reserved_cents") or 0),
             consume_reserved=worker_invoked,
+            actual_cents=worker_actual_cents,
         )
 
         result_payload = {
@@ -20426,6 +21040,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "worker_attempts": worker_attempts,
             "local_repair_retries": local_repair_retries,
             "summary": sdk_result.get("summary") or "",
+            "actual_cost_cents": worker_actual_cents,
             "error": sdk_result.get("error"),
             "pretend_product_findings": pretend_findings,
         }
@@ -20445,6 +21060,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 reservation_key=str(operator_budget.get("reservation_key") or ""),
                 reserved_cents=int(operator_budget.get("reserved_cents") or 0),
                 consume_reserved=True,
+                actual_cents=worker_actual_cents,
             )
         except Exception:
             operator_budget = {}
@@ -20458,6 +21074,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     reservation_key=str(operator_budget.get("reservation_key") or ""),
                     reserved_cents=int(operator_budget.get("reserved_cents") or 0),
                     consume_reserved=worker_invoked,
+                    actual_cents=worker_actual_cents,
                 )
             except Exception:
                 pass
@@ -20685,11 +21302,11 @@ TAKYON_TOOL_DEFINITIONS = [
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
-                "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now."},
+                "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now, and it should be treated as a paid-only monthly subscription path unless the operator explicitly records another offer shape."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, generate=broken, or usage=live."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
-                "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path instead of free tiers or trials."},
+                "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path and avoid inventing free-tier or trial language unless the operator explicitly changes the contract."},
                 "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},
                 "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
                 "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
@@ -20827,6 +21444,30 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_record_app_usage", "Record product app usage.", {"business": _BUSINESS_PROP, "app_user_id": {"type": "string"}, "app_user_tier": {"type": "string"}, "purpose": {"type": "string"}, "route": {"type": "string"}, "status": {"type": "string"}, "estimated_cost_microusd": {"type": "integer"}, "actual_cost_microusd": {"type": "integer"}, "input_tokens": {"type": "integer"}, "output_tokens": {"type": "integer"}, "provider_request_id": {"type": "string"}, "provider": {"type": "string"}, "model": {"type": "string"}, "metadata": {"type": "object"}, "error": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "purpose", "route", "idempotency_key"]),
     },
     {
+        "name": "business_set_channel_credit_budgets",
+        "description": "Persist the per-business X / Meta / Reddit creative-credit budgets that cap future spend on those channels while sharing one underlying business credit balance.",
+        "handler": handle_business_set_channel_credit_budgets,
+        "schema": _schema(
+            "business_set_channel_credit_budgets",
+            "Set per-channel creative-credit budgets for a business.",
+            {
+                "business": _BUSINESS_PROP,
+                "allocations": {
+                    "type": "object",
+                    "description": "Map of channel -> allocated credits. Supported channels: x, meta, reddit.",
+                },
+                "channels": {
+                    "type": "object",
+                    "description": "Alias for allocations; map of channel -> allocated credits.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "allocations", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_enqueue_job",
         "description": "Record a guarded request for external work such as ad posting, publishing, vendor calls, builds, or deploys.",
         "handler": handle_business_enqueue_job,
@@ -20834,7 +21475,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_publish_outreach",
-        "description": "Publish outreach through the canonical product URL with real provider gates. Missing credentials or provider access hard-fail instead of falling back to local suppressed publication.",
+        "description": "Publish outreach through the canonical product URL with real provider gates. Missing credentials or provider access hard-fail instead of falling back to local suppressed publication. Live X publication charges the fixed X creative-credit price against the business X budget bucket.",
         "handler": handle_business_publish_outreach,
         "schema": _schema(
             "business_publish_outreach",
@@ -20905,7 +21546,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_ugc_ad_generate",
-        "description": "Generate a business-scoped UGC video ad publication under product/ugc-ads/<slug>/ with creative-credit gating. Dry-run remains available, but business test mode is disabled.",
+        "description": "Generate a business-scoped UGC video ad publication under product/ugc-ads/<slug>/ with creative-credit gating. Live runs must carry explicit channel budget context so the spend lands on the right business bucket. Dry-run remains available, but business test mode is disabled.",
         "handler": handle_business_ugc_ad_generate,
         "schema": _schema(
             "business_ugc_ad_generate",
@@ -20921,6 +21562,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "skip_post": {"type": "boolean", "description": "Skip the grain/jump-cut postpass."},
                 "workdir": {"type": "string", "description": "Optional scratch directory for intermediate files."},
                 "env_file": {"type": "string", "description": "Optional local .env filename for the copied script; defaults to .env."},
+                "budget_bucket": {"type": "string", "enum": ["x", "meta", "reddit"], "description": "Required on live runs unless ad_metadata.channel is provided. This chooses which channel budget bucket pays for the creative."},
+                "ad_metadata": {"type": "object", "description": "Optional ad context for where the creative will be used, such as channel, campaign slug, or launch metadata. Live runs should include at least ad_metadata.channel when budget_bucket is omitted."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
@@ -20930,7 +21573,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_static_ad_generate",
-        "description": "Generate business-scoped static ad creative bundles under product/static-ads/<slug>/ with creative-credit gating. Dry-run remains available, but business test mode is disabled.",
+        "description": "Generate business-scoped static ad creative bundles under product/static-ads/<slug>/ with creative-credit gating. Live runs must carry explicit channel budget context so the spend lands on the right business bucket. Dry-run remains available, but business test mode is disabled.",
         "handler": handle_business_static_ad_generate,
         "schema": _schema(
             "business_static_ad_generate",
@@ -20947,6 +21590,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "strict": {"type": "boolean", "description": "Treat lint warnings as errors."},
                 "stop_on_error": {"type": "boolean", "description": "Abort the batch on the first failed creative."},
                 "max": {"type": "integer", "description": "Optional cap on the number of creatives generated from the input."},
+                "budget_bucket": {"type": "string", "enum": ["x", "meta", "reddit"], "description": "Required on live runs unless ad_metadata.channel is provided. This chooses which channel budget bucket pays for the creative."},
+                "ad_metadata": {"type": "object", "description": "Optional ad context for where the creative will be used, such as channel, campaign slug, or launch metadata. Live runs should include at least ad_metadata.channel when budget_bucket is omitted."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
@@ -21291,7 +21936,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "fields": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional Reddit report fields; defaults to spend, impressions, clicks, CTR, CPC, and CPM.",
+                    "description": "Optional Reddit report fields; defaults to spend, impressions, clicks, CTR, CPC, and ECPM.",
                 },
                 "breakdowns": {
                     "type": "array",
@@ -21320,7 +21965,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work"},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work. When omitted for product/site work, defaults to claude-design plus claude-design-openai."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-4-6; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},

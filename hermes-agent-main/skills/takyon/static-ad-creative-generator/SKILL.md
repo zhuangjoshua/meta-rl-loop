@@ -89,6 +89,7 @@ a *static performance-ad creative spec generator*.
 - **Validate:** `python scripts/validate_spec.py <spec|batch|dir>`
 - **Compile prompt:** `python scripts/compile_prompt.py <spec.json>`
 - **Live canonical path:** call `business_static_ad_generate` so creative credits and receipt recording are enforced
+- **Live budget rule:** if the output is meant for Meta, Reddit, or X, call `business_static_ad_generate` with `budget_bucket` or `ad_metadata.channel` so the spend lands on the right business channel budget
 - **Multi-size fan-out:** add `--aspect-ratio 1:1,9:16,1.91:1` to render one creative at every size a placement needs.
 - **Batch helper script:** `python ${HERMES_SKILL_DIR}/scripts/batch_generate.py <batch.json> -o product/static-ads/<slug>/`
 - **Aspect ratios:** free-form `W:H`, any ratio from 1:3 to 3:1 (sized automatically; `--crop` for exact).
@@ -111,6 +112,7 @@ a *static performance-ad creative spec generator*.
 - Start with `business_read_business`, then inspect existing `product/static-ads/`,
   relevant product files, and any prior ad assets with `business_list_files` and
   `business_read_file` before creating new creative bundles.
+- For live spendful runs, do not omit channel budget context. If the downstream channel is known, pass `budget_bucket` directly or include it in `ad_metadata.channel`.
 
 ## References
 

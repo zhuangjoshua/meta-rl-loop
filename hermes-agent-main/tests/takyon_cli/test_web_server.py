@@ -410,18 +410,35 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
         allowance_used_cents=100,
         topup_balance_cents=300,
         reserved_cents=700,
+        allowance_period_start=None,
+        allowance_resets_at=None,
     )
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
     monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
-    monkeypatch.setattr(web_server, "_release_stale_tui_turn_reservations", lambda _conn, _uid: 0)
+    monkeypatch.setattr(web_server, "_release_stale_operator_reservations", lambda _conn, _uid: 0)
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: _Conn())
     monkeypatch.setattr(billing, "get_billing_balances", lambda _conn, _uid: balances)
     monkeypatch.setattr(
         billing,
         "reconcile_billing",
-        lambda _conn, _uid: {"ok": True, "drift": {}, "reserved_cents": 100},
+        lambda _conn, _uid: {
+            "ok": True,
+            "drift": {},
+            "reserved_cents": 100,
+            "reserved_allowance_cents": 100,
+            "reserved_topup_cents": 0,
+        },
+    )
+    monkeypatch.setattr(
+        control_api,
+        "sync_operator_subscription_allowance",
+        lambda _conn, _uid, refresh_live=True: types.SimpleNamespace(
+            allowance_period_start=None,
+            allowance_resets_at=None,
+            subscription_status="active",
+        ),
     )
     monkeypatch.setattr(
         control_api,
@@ -441,7 +458,11 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
 
     assert result["available"] is True
     assert result["reserved_cents"] == 100
+    assert result["reserved_allowance_cents"] == 100
+    assert result["reserved_topup_cents"] == 0
     assert result["allowance_remaining_cents"] == 1900
+    assert result["allowance_percent_remaining"] == 95.0
+    assert result["allowance_percent_used"] == 5.0
     assert result["topup_balance_cents"] == 300
     assert result["spendable_cents"] == 2200
     assert result["owned_business_count"] == 2

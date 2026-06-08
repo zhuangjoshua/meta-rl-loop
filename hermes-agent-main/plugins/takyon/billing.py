@@ -82,6 +82,8 @@ class BillingBalances:
     topup_balance_cents: int
     allowance_remaining_cents: int
     reserved_cents: int
+    allowance_period_start: object | None = None
+    allowance_resets_at: object | None = None
 
 
 def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 0) -> None:
@@ -334,13 +336,16 @@ def get_billing_balances(conn, user_id: str) -> BillingBalances:
     reserved (Σreserve − Σsettle − Σrefund). Allowance figures are metering units —
     callers must not render them as money."""
     acct = conn.execute(
-        "select allowance_included_cents, allowance_used_cents, topup_balance_cents "
+        "select allowance_included_cents, allowance_used_cents, topup_balance_cents, "
+        "allowance_period_start, allowance_resets_at "
         "from billing_accounts where user_id = %s",
         (user_id,),
     ).fetchone()
     if acct is None:
         raise NoBillingAccount(user_id)
-    included, used, topup_bal = int(acct[0]), int(acct[1]), int(acct[2])
+    included, used, topup_bal, period_start, resets_at = (
+        int(acct[0]), int(acct[1]), int(acct[2]), acct[3], acct[4],
+    )
     reserved = conn.execute(
         "select coalesce(sum(amount_cents) filter (where kind = 'reserve'), 0) "
         "- coalesce(sum(amount_cents) filter (where kind = 'settle'), 0) "
@@ -355,6 +360,8 @@ def get_billing_balances(conn, user_id: str) -> BillingBalances:
         topup_balance_cents=topup_bal,
         allowance_remaining_cents=included - used,
         reserved_cents=int(reserved),
+        allowance_period_start=period_start,
+        allowance_resets_at=resets_at,
     )
 
 
@@ -405,6 +412,8 @@ def reconcile_billing(conn, user_id: str) -> dict:
     return {
         "ok": not drift,
         "drift": drift,
+        "reserved_allowance_cents": reserved_allowance,
+        "reserved_topup_cents": reserved_topup,
         "reserved_cents": reserved_allowance + reserved_topup,
     }
 

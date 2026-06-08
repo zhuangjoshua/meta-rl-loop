@@ -7,10 +7,38 @@ from pathlib import Path
 
 import pytest
 
+_BLOCKED_TEST_PG_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
+
+
+def _normalized_host_role() -> str:
+    raw = str(os.environ.get("TAKYON_HOST_ROLE") or "").strip().lower()
+    aliases = {
+        "": "",
+        "all": "combined",
+        "combined": "combined",
+        "default": "combined",
+        "operator": "operator",
+        "dashboard": "operator",
+        "subuser": "subuser",
+        "app": "subuser",
+        "product": "subuser",
+        "safebox": "safebox",
+    }
+    return aliases.get(raw, raw)
+
+
+def _resolve_test_pg_dsn() -> str | None:
+    dsn = str(os.environ.get("TAKYON_TEST_PG_DSN") or "").strip()
+    if dsn and _normalized_host_role() in _BLOCKED_TEST_PG_HOST_ROLES:
+        raise RuntimeError(
+            f"Refusing to run Postgres integration tests on managed TAKYON_HOST_ROLE={_normalized_host_role()}."
+        )
+    return dsn or None
+
 # Shared fixtures for Postgres control-plane integration tests. Importing psycopg
 # is done lazily inside the fixtures (never at conftest import time) so the rest of
 # the tests/plugins suite still collects in environments without psycopg.
-_DSN = os.environ.get("TAKYON_TEST_PG_DSN")
+_DSN = _resolve_test_pg_dsn()
 _DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
 # Manual, gated polsia2 teardown — lives OUTSIDE migrations/ so it is never swept.
 RETIRE_POLSIA2_SQL = _DB_DIR / "retire_polsia2_public.sql"

@@ -145,6 +145,162 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
     assert payload["maxTurns"] == 90
 
 
+def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_compose_worker_guidance_block",
+        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]"),
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-default-guidance",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = str(captured["payload"]["instruction"])
+    assert result["success"] is True
+    assert result["guidance_skills"] == ["claude-design", "claude-design-openai"]
+    assert "[Hermes guidance skill: default-product-site]" in instruction
+
+
+def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    finalize_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "success": True,
+                    "summary": "ok",
+                    "actual_cost_cents": 137,
+                }
+            ),
+            stderr="",
+        )
+
+    def fake_finalize(**kwargs):
+        finalize_calls.append(dict(kwargs))
+        return {
+            "reservation_key": "r1",
+            "reserved_cents": 800,
+            "charged_cents": 137,
+            "status": "settled_actual",
+        }
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(takyon_core, "_finalize_operator_task_budget", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-actual-cost",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["actual_cost_cents"] == 137
+    assert result["operator_budget"]["charged_cents"] == 137
+    assert finalize_calls[-1]["actual_cents"] == 137
+
+
+def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_compose_worker_guidance_block", lambda skills: (list(skills), ""))
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "guidance_skills": [],
+                "idempotency_key": "workspace-explicit-empty-guidance",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["guidance_skills"] == []
+
+
 def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_path, monkeypatch):
     outer_home = tmp_path / "outer-home"
     workspace = outer_home / "businesses" / "latexflow" / "product" / "site"

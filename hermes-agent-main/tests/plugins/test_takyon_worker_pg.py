@@ -574,10 +574,36 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
 def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_path):
     captured: dict[str, Any] = {}
     statuses: list[tuple[str, str, dict[str, Any]]] = []
+    recorded: dict[str, Any] = {}
 
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
     monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: {
+            "actual_credits": 1,
+            "balance_credits": 9,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 1, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
+    )
 
     def _fake_run(command, *, home, timeout):
         captured["command"] = command
@@ -590,7 +616,7 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
     monkeypatch.setattr(
         worker,
         "_record_x_publish_result",
-        lambda slug, **kwargs: {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
+        lambda slug, **kwargs: recorded.update(kwargs) or {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
     )
     monkeypatch.setattr(
         worker,
@@ -628,17 +654,45 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
     assert result.actual_cost_cents == 0
     assert result.result["post_id"] == "tweet-123"
     assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-123"
+    assert result.result["credits_charged"] == 1
+    assert result.result["budget_bucket"] == "x"
     assert statuses[0][1] == "running"
     assert statuses[-1][1] == "completed"
     assert statuses[-1][2]["post_id"] == "tweet-123"
+    assert recorded["credits_charged"] == 1
 
 
 def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_path):
     statuses: list[tuple[str, str, dict[str, Any]]] = []
+    release_calls: list[dict[str, Any]] = []
 
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
     monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("commit should not run when nothing was published")),
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: release_calls.append(dict(kwargs)) or {
+            "balance_credits": 10,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 1},
+        },
+    )
     monkeypatch.setattr(worker, "_run_xurl_json_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")))
     monkeypatch.setattr(
         worker,
@@ -659,6 +713,7 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
 
     assert statuses[0][1] == "running"
     assert statuses[-1][1] == "failed"
+    assert release_calls
 
 
 def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_path):
@@ -668,6 +723,31 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
     monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: {
+            "actual_credits": 1,
+            "balance_credits": 9,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 1, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful thread publish")),
+    )
 
     responses = iter(
         (
@@ -725,6 +805,31 @@ def test_x_publish_outreach_handler_uses_oauth1_without_username(monkeypatch, tm
     monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
     monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("default", ""))
     monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth1")
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: {
+            "actual_credits": 1,
+            "balance_credits": 9,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 1, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
+    )
     def _fake_run(command, *, home, timeout):
         captured["command"] = list(command)
         return {"data": {"id": "tweet-123"}}

@@ -103,6 +103,7 @@ attribution or CAC when the join keys have not been recorded.
   **`business_meta_ad_control`** (activate, pause, set_budget),
   **`business_meta_ad_insights_sync`** (delivery metrics sync, including manual metrics import)
 - Upstream assets: `product/ugc-ads/<slug>/ad.mp4` from `ugc-video-ad` or a local image from `product/static-ads/<slug>/`
+- Upstream creative budget rule: when this skill routes upstream to `ugc-video-ad` or `static-ad-creative-generator`, pass `budget_bucket: "meta"` or `ad_metadata.channel: "meta"` so the creative spend lands on the Meta business budget bucket
 - Safety: launch always creates `PAUSED`; `daily_budget_usd` is capped by
   `TAKYON_META_MAX_DAILY_BUDGET_USD` (default 50); test-mode businesses never call Meta; metrics sync is ad-platform only and does not imply business attribution.
 

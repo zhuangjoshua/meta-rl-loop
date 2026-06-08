@@ -12,6 +12,7 @@ from plugins.takyon.user_api_keys import generate_api_key
 
 
 def test_read_env_backed_value_prefers_process_env(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_process")
     monkeypatch.setattr(
         safebox,
@@ -23,6 +24,7 @@ def test_read_env_backed_value_prefers_process_env(monkeypatch):
 
 
 def test_read_env_backed_value_falls_back_to_takyon_env(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     monkeypatch.setattr(
         safebox,
@@ -34,6 +36,7 @@ def test_read_env_backed_value_falls_back_to_takyon_env(monkeypatch):
 
 
 def test_first_env_backed_value_returns_first_populated_alias(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("POSTGRES_URL", raising=False)
     monkeypatch.setattr(
@@ -49,6 +52,7 @@ def test_first_env_backed_value_returns_first_populated_alias(monkeypatch):
 
 
 def test_read_env_backed_value_allows_sensitive_api_keys(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
         safebox,
@@ -59,13 +63,23 @@ def test_read_env_backed_value_allows_sensitive_api_keys(monkeypatch):
     assert safebox.read_env_backed_value("OPENAI_API_KEY") == "sk-openai-disk"
 
 
-def test_read_env_backed_value_rejects_non_sensitive_keys():
+def test_read_env_backed_value_rejects_non_sensitive_keys(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     with pytest.raises(KeyError, match="non-sensitive env key"):
         safebox.read_env_backed_value("OPENAI_BASE_URL")
 
 
+def test_read_env_backed_value_requires_remote_or_safebox_host(monkeypatch):
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="TAKYON_SAFEBOX_URL"):
+        safebox.read_env_backed_value("OPENAI_API_KEY")
+
+
 def test_save_and_remove_env_backed_value_round_trip(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     safebox.save_env_backed_value("OPENAI_API_KEY", "sk-round-trip")
@@ -84,6 +98,7 @@ def test_save_and_remove_env_backed_value_round_trip(tmp_path, monkeypatch):
 
 def test_user_api_key_round_trip_is_safebox_owned(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
 
     raw = generate_api_key()
     record = safebox.register_user_api_key("user-1", raw, key_id=str(uuid.uuid4()))
@@ -99,6 +114,7 @@ def test_user_api_key_round_trip_is_safebox_owned(tmp_path, monkeypatch):
 
 def test_user_api_key_revoke_blocks_future_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
 
     raw = generate_api_key()
     record = safebox.register_user_api_key("user-1", raw, key_id=str(uuid.uuid4()))
@@ -110,6 +126,7 @@ def test_user_api_key_revoke_blocks_future_resolution(tmp_path, monkeypatch):
 
 def test_user_api_key_registry_blocks_second_active_key_for_one_user(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
 
     safebox.register_user_api_key("user-1", generate_api_key(), key_id=str(uuid.uuid4()))
 
@@ -211,8 +228,17 @@ def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkey
     assert exc.value.available_credits == 3
 
 
+def test_creative_credit_access_requires_remote_or_safebox_host(monkeypatch):
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="TAKYON_SAFEBOX_URL"):
+        safebox.get_business_credit_balances(None, "acme")
+
+
 def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -232,6 +258,7 @@ def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monke
 
 
 def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
     monkeypatch.setattr(
         safebox,

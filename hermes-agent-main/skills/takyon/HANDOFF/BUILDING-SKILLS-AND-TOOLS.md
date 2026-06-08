@@ -107,3 +107,8 @@ Mutating tools should follow these rules:
 - Keep the tool business-scoped and idempotent.
 - Add focused tests for the normal path and any real blocked/test variant.
 - Prefer extending the core reconciliation rails over inventing skill-local freshness rules. If your new tool writes evidence for an existing projection, make the core rail notice that write; only teach future skills new rules when you create a brand-new projection/evidence pair.
+- Business creative/ad spend shares one underlying **per-business** creative-credit balance; do not invent per-tool ledgers or cross-business shared pools.
+- Channel budgets are the business-scoped allocation layer on top of that balance. The canonical buckets are `x`, `meta`, and `reddit`.
+- Fixed channel actions own their bucket directly: live X publish spends the X bucket, Meta launch spends the Meta bucket, and Reddit launch spends the Reddit bucket.
+- Reusable creative generators must not guess the budget bucket. Call `business_ugc_ad_generate` and `business_static_ad_generate` with `budget_bucket` when you know it, or include `ad_metadata.channel` when the creative is being produced for a specific channel.
+- When a creative is being generated specifically for a downstream ad launch, pass the downstream ad metadata along with that budget context so the receipt records where the spend was meant to land.

@@ -17,6 +17,18 @@ function formatUsd(cents: number | null | undefined) {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+function formatPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+function formatResetDate(value: string | null | undefined) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 export function Settings({
   section,
   theme,
@@ -40,6 +52,11 @@ export function Settings({
 }) {
   const { user } = useAuth();
   const [sec, setSec] = useState<SettingsSection>(section);
+  const allowanceIncluded = Number(account?.allowance_included_cents || 0);
+  const reservedUsagePercent = allowanceIncluded > 0
+    ? (Number(account?.reserved_allowance_cents || 0) / allowanceIncluded) * 100
+    : null;
+  const resetLabel = formatResetDate(account?.allowance_resets_at);
 
   return (
     <div className="lb-modal-scrim" onClick={onClose}>
@@ -87,14 +104,19 @@ export function Settings({
                 <div className="lb-set__card-h">Operator wallet</div>
                 <div className="lb-set__planrow">
                   <div>
-                    <div className="lb-set__plan-name">{formatUsd(account?.spendable_cents ?? null)}</div>
-                    <div className="lb-set__muted">Spendful CEO turns and wakes draw from this balance.</div>
+                    <div className="lb-set__plan-name">{formatPercent(account?.allowance_percent_remaining ?? null)}</div>
+                    <div className="lb-set__muted">
+                      Included usage remaining this week{resetLabel ? ` · resets ${resetLabel}` : ""}.
+                    </div>
                   </div>
                 </div>
                 <Divider className="lb-set__rule" />
-                <div className="lb-set__usage"><span>Included remaining</span><span className="lb-set__muted">{formatUsd(account?.allowance_remaining_cents ?? null)}</span></div>
+                <div className="lb-set__usage"><span>Used this week</span><span className="lb-set__muted">{formatPercent(account?.allowance_percent_used ?? null)}</span></div>
+                <div className="lb-set__usage"><span>Reserved usage</span><span className="lb-set__muted">{formatPercent(reservedUsagePercent)}</span></div>
                 <div className="lb-set__usage"><span>Added funds</span><span className="lb-set__muted">{formatUsd(account?.topup_balance_cents ?? null)}</span></div>
-                <div className="lb-set__usage"><span>Reserved</span><span className="lb-set__muted">{formatUsd(account?.reserved_cents ?? null)}</span></div>
+                {(Number(account?.reserved_topup_cents || 0) > 0) && (
+                  <div className="lb-set__usage"><span>Reserved funds</span><span className="lb-set__muted">{formatUsd(account?.reserved_topup_cents ?? null)}</span></div>
+                )}
                 <div className="lb-btnrow lb-set__save">
                   <Button disabled={topupBusy} onClick={() => onTopup(2500)}>Add $25</Button>
                   <Button variant="secondary" disabled={topupBusy} onClick={() => onTopup(10000)}>Add $100</Button>

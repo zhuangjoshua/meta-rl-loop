@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -68,6 +69,21 @@ class OperatorPayoutState:
     payout_currency: str
     owed_balance_cents: int
     paid_out_cents: int
+
+
+@dataclass(frozen=True)
+class OperatorSubscriptionState:
+    user_id: str
+    customer_id: str | None
+    subscription_id: str | None
+    subscription_status: str
+    weekly_allowance_cents: int
+    allowance_period_start: str | None
+    allowance_resets_at: str | None
+    synced: bool
+
+
+_ALLOWANCE_BEARING_SUBSCRIPTION_STATUSES = {"active", "trialing"}
 
 
 def _stripe_connect_country() -> str:
@@ -132,60 +148,369 @@ def create_topup_checkout_session(
     return stripe_util.stripe_request("checkout/sessions", params)
 
 
-def _pick_operator_billing_customer(
-    payload: dict[str, Any] | None,
-    *,
-    user_id: str,
-    email: str,
-) -> dict[str, Any] | None:
+def _read_operator_billing_row(conn, user_id: str, *, for_update: bool = False):
+    sql = (
+        "select email, operator_billing_customer_id, operator_billing_subscription_id, "
+        "operator_billing_subscription_status "
+        "from users where id = %s"
+    )
+    if for_update:
+        sql += " for update"
+    row = conn.execute(sql, (user_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"user_not_found:{user_id}")
+    return row
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
+    raw = metadata.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _operator_billing_customer_search(user_id: str) -> dict[str, Any] | None:
+    payload = stripe_util.stripe_request(
+        "customers/search",
+        {
+            "query": (
+                f"metadata['takyon_user_id']:'{user_id}' "
+                "AND metadata['purpose']:'operator_billing'"
+            ),
+            "limit": 1,
+        },
+        method="GET",
+    )
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return None
-    email_lower = email.strip().lower()
-    exact_match = None
-    email_match = None
     for item in rows:
-        if not isinstance(item, dict) or item.get("deleted"):
+        if isinstance(item, dict) and not item.get("deleted"):
+            return item
+    return None
+
+
+def _persist_operator_billing_identity(
+    conn,
+    user_id: str,
+    *,
+    customer_id: str | None = None,
+    subscription_id: str | None = None,
+    subscription_status: str | None = None,
+) -> None:
+    sets: list[str] = []
+    params: list[Any] = []
+    if customer_id is not None:
+        sets.append("operator_billing_customer_id = %s")
+        params.append(customer_id or None)
+    if subscription_id is not None:
+        sets.append("operator_billing_subscription_id = %s")
+        params.append(subscription_id or None)
+    if subscription_status is not None:
+        sets.append("operator_billing_subscription_status = %s")
+        params.append(subscription_status or "none")
+    if not sets:
+        return
+    params.append(user_id)
+    with conn.transaction():
+        _read_operator_billing_row(conn, user_id, for_update=True)
+        conn.execute(f"update users set {', '.join(sets)} where id = %s", tuple(params))
+
+
+def _stripe_customer_id(payload: Any) -> str | None:
+    if isinstance(payload, str):
+        return payload.strip() or None
+    if isinstance(payload, dict):
+        customer_id = str(payload.get("id") or "").strip()
+        return customer_id or None
+    return None
+
+
+def _subscription_items(subscription: dict[str, Any]) -> list[dict[str, Any]]:
+    items = subscription.get("items") if isinstance(subscription.get("items"), dict) else {}
+    rows = items.get("data") if isinstance(items.get("data"), list) else []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def _weekly_allowance_from_subscription_item(item: dict[str, Any]) -> int:
+    price = item.get("price") if isinstance(item.get("price"), dict) else {}
+    metadata = price.get("metadata") if isinstance(price.get("metadata"), dict) else {}
+    quantity_raw = item.get("quantity")
+    try:
+        quantity = max(1, int(quantity_raw or 1))
+    except (TypeError, ValueError):
+        quantity = 1
+
+    override = _metadata_int(metadata, "takyon_allowance_weekly_cents")
+    if override is not None:
+        return max(0, override * quantity)
+
+    try:
+        amount_cents = max(0, int(price.get("unit_amount") or 0)) * quantity
+    except (TypeError, ValueError):
+        amount_cents = 0
+    if amount_cents <= 0:
+        return 0
+
+    recurring = price.get("recurring") if isinstance(price.get("recurring"), dict) else {}
+    interval = str(recurring.get("interval") or "").strip().lower()
+    try:
+        interval_count = max(1, int(recurring.get("interval_count") or 1))
+    except (TypeError, ValueError):
+        interval_count = 1
+
+    if interval == "week":
+        return max(0, int(round(amount_cents / interval_count)))
+    if interval == "day":
+        return max(0, int(round(amount_cents * 7 / interval_count)))
+    if interval == "month":
+        return max(0, int(round(amount_cents * 12 / (52 * interval_count))))
+    if interval == "year":
+        return max(0, int(round(amount_cents / (52 * interval_count))))
+    return amount_cents
+
+
+def _operator_subscription_weekly_allowance_cents(subscription: dict[str, Any]) -> int:
+    metadata = subscription.get("metadata") if isinstance(subscription.get("metadata"), dict) else {}
+    override = _metadata_int(metadata, "takyon_allowance_weekly_cents")
+    if override is not None:
+        return max(0, override)
+    return sum(_weekly_allowance_from_subscription_item(item) for item in _subscription_items(subscription))
+
+
+def _pick_operator_subscription(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for item in rows:
+        if not isinstance(item, dict):
             continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        candidate_email = str(item.get("email") or "").strip().lower()
-        if metadata.get("takyon_user_id") == user_id:
-            exact_match = item
-            break
-        if not email_match and candidate_email and candidate_email == email_lower:
-            email_match = item
-    return exact_match or email_match
+        status = str(item.get("status") or "").strip().lower()
+        if status == "active":
+            ranked.append((0, item))
+        elif status == "trialing":
+            ranked.append((1, item))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda pair: pair[0])
+    return ranked[0][1]
+
+
+def _subscription_status(subscription: dict[str, Any] | None) -> str:
+    if not isinstance(subscription, dict):
+        return "none"
+    return str(subscription.get("status") or "none").strip().lower() or "none"
+
+
+def _subscription_bears_allowance(subscription: dict[str, Any] | None) -> bool:
+    return _subscription_status(subscription) in _ALLOWANCE_BEARING_SUBSCRIPTION_STATUSES
+
+
+def _weekly_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+    current = now.astimezone(timezone.utc) if isinstance(now, datetime) else datetime.now(timezone.utc)
+    start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def sync_operator_subscription_allowance(
+    conn,
+    user_id: str,
+    *,
+    refresh_live: bool = True,
+    subscription: dict[str, Any] | None = None,
+) -> OperatorSubscriptionState:
+    billing.open_billing_account(conn, user_id)
+    row = _read_operator_billing_row(conn, user_id, for_update=False)
+    customer_id = str(row[1] or "").strip() or None
+    cached_subscription_id = str(row[2] or "").strip() or None
+    cached_status = str(row[3] or "none").strip().lower() or "none"
+
+    incoming_subscription = subscription if isinstance(subscription, dict) else None
+    incoming_subscription_id = str((incoming_subscription or {}).get("id") or "").strip() or None
+    incoming_status = _subscription_status(incoming_subscription)
+    active_subscription = (
+        incoming_subscription
+        if incoming_subscription is not None and _subscription_bears_allowance(incoming_subscription)
+        else None
+    )
+    if active_subscription is None and refresh_live and customer_id:
+        payload = stripe_util.stripe_request(
+            "subscriptions",
+            {"customer": customer_id, "status": "all", "limit": 20},
+            method="GET",
+        )
+        active_subscription = _pick_operator_subscription(payload)
+
+    if active_subscription is None:
+        inactive_customer_id = customer_id or _stripe_customer_id((incoming_subscription or {}).get("customer"))
+        inactive_status = incoming_status if incoming_subscription is not None else "none"
+        inactive_subscription_id = incoming_subscription_id
+        if (
+            inactive_customer_id != customer_id
+            or inactive_subscription_id != cached_subscription_id
+            or inactive_status != cached_status
+        ):
+            _persist_operator_billing_identity(
+                conn,
+                user_id,
+                customer_id=inactive_customer_id or "",
+                subscription_id=inactive_subscription_id or "",
+                subscription_status=inactive_status,
+            )
+        acct = conn.execute(
+            "select allowance_included_cents, allowance_period_start, allowance_resets_at "
+            "from billing_accounts where user_id = %s",
+            (user_id,),
+        ).fetchone()
+        synced = False
+        current_included = int(acct[0] or 0) if acct else 0
+        period_start = acct[1] if acct else None
+        resets_at = acct[2] if acct else None
+        should_clear_allowance = (
+            current_included > 0
+            and (
+                incoming_subscription is not None
+                or cached_subscription_id is not None
+                or cached_status in _ALLOWANCE_BEARING_SUBSCRIPTION_STATUSES
+            )
+        )
+        if should_clear_allowance:
+            reconcile = billing.reconcile_billing(conn, user_id)
+            if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
+                billing.grant_allowance(
+                    conn,
+                    user_id,
+                    0,
+                    f"operator-subscription-clear:{inactive_subscription_id or cached_subscription_id or 'none'}:{inactive_status}",
+                    resets_at=None,
+                )
+                synced = True
+                acct = conn.execute(
+                    "select allowance_period_start, allowance_resets_at from billing_accounts where user_id = %s",
+                    (user_id,),
+                ).fetchone()
+                period_start = acct[0] if acct else None
+                resets_at = acct[1] if acct else None
+        return OperatorSubscriptionState(
+            user_id=user_id,
+            customer_id=inactive_customer_id,
+            subscription_id=inactive_subscription_id,
+            subscription_status=inactive_status,
+            weekly_allowance_cents=0,
+            allowance_period_start=period_start.isoformat() if period_start is not None else None,
+            allowance_resets_at=resets_at.isoformat() if resets_at is not None else None,
+            synced=synced,
+        )
+
+    subscription_id = str(active_subscription.get("id") or "").strip() or None
+    subscription_status = str(active_subscription.get("status") or "none").strip().lower() or "none"
+    if customer_id is None:
+        customer_id = _stripe_customer_id(active_subscription.get("customer"))
+    weekly_allowance_cents = _operator_subscription_weekly_allowance_cents(active_subscription)
+    synced = False
+
+    if (
+        customer_id != (str(row[1] or "").strip() or None)
+        or subscription_id != cached_subscription_id
+        or subscription_status != cached_status
+    ):
+        _persist_operator_billing_identity(
+            conn,
+            user_id,
+            customer_id=customer_id or "",
+            subscription_id=subscription_id or "",
+            subscription_status=subscription_status,
+        )
+
+    acct = conn.execute(
+        "select allowance_included_cents, allowance_period_start, allowance_resets_at "
+        "from billing_accounts where user_id = %s",
+        (user_id,),
+    ).fetchone()
+    current_included = int(acct[0] or 0) if acct else 0
+    period_start = acct[1] if acct else None
+    resets_at = acct[2] if acct else None
+    now = datetime.now(timezone.utc)
+    should_refresh = (
+        weekly_allowance_cents > 0
+        and (
+            current_included != weekly_allowance_cents
+            or not isinstance(resets_at, datetime)
+            or resets_at <= now
+            or subscription_id != cached_subscription_id
+        )
+    )
+    if should_refresh:
+        reconcile = billing.reconcile_billing(conn, user_id)
+        if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
+            period_start, resets_at = _weekly_window(now)
+            week_key = int(period_start.timestamp() // 604800)
+            billing.grant_allowance(
+                conn,
+                user_id,
+                weekly_allowance_cents,
+                f"operator-subscription:{subscription_id or 'none'}:{weekly_allowance_cents}:{week_key}",
+                period_start=period_start,
+                resets_at=resets_at,
+            )
+            synced = True
+
+    return OperatorSubscriptionState(
+        user_id=user_id,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+        subscription_status=subscription_status,
+        weekly_allowance_cents=weekly_allowance_cents,
+        allowance_period_start=period_start.isoformat() if isinstance(period_start, datetime) else None,
+        allowance_resets_at=resets_at.isoformat() if isinstance(resets_at, datetime) else None,
+        synced=synced,
+    )
 
 
 def ensure_operator_billing_customer(
     conn,
     user_id: str,
 ) -> dict[str, Any]:
-    row = _read_operator_payout_row(conn, user_id, for_update=False)
-    email = str(row[3] or "").strip()
+    row = _read_operator_billing_row(conn, user_id, for_update=False)
+    email = str(row[0] or "").strip()
     if not email:
         raise ValueError("operator_email_unavailable")
 
-    search = stripe_util.stripe_request(
-        "customers",
-        {"email": email, "limit": 10},
-        method="GET",
-    )
-    existing = _pick_operator_billing_customer(search, user_id=user_id, email=email)
+    cached_customer_id = str(row[1] or "").strip()
+    existing = None
+    if cached_customer_id:
+        try:
+            candidate = stripe_util.stripe_request(
+                f"customers/{cached_customer_id}",
+                {},
+                method="GET",
+            )
+        except stripe_util.StripeError:
+            candidate = None
+        if isinstance(candidate, dict) and not candidate.get("deleted"):
+            existing = candidate
+    if existing is None:
+        existing = _operator_billing_customer_search(user_id)
     if existing:
         customer_id = str(existing.get("id") or "").strip()
-        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
-        if customer_id and metadata.get("takyon_user_id") != user_id:
+        if customer_id:
+            _persist_operator_billing_identity(conn, user_id, customer_id=customer_id)
             try:
                 stripe_util.stripe_request(
                     f"customers/{customer_id}",
                     {
+                        "email": email,
                         "metadata[takyon_user_id]": user_id,
                         "metadata[purpose]": "operator_billing",
                     },
                 )
             except stripe_util.StripeError:
-                # Portal should still work even if metadata backfill fails.
+                # Portal/topup should still work if metadata backfill fails.
                 pass
         return existing
 
@@ -200,6 +525,7 @@ def ensure_operator_billing_customer(
     customer_id = str(created.get("id") or "").strip()
     if not customer_id:
         raise stripe_util.StripeError("Stripe customer creation returned no customer id")
+    _persist_operator_billing_identity(conn, user_id, customer_id=customer_id)
     return created
 
 
@@ -269,6 +595,19 @@ def get_operator_payout_state(
         owed_balance_cents=int(balances.owed_balance_cents),
         paid_out_cents=int(balances.paid_out_cents),
     )
+
+
+def _resolve_operator_user_id_from_customer(conn, customer_id: str) -> str | None:
+    raw = str(customer_id or "").strip()
+    if not raw:
+        return None
+    row = conn.execute(
+        "select id from users where operator_billing_customer_id = %s",
+        (raw,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0]).strip() or None
 
 
 def create_operator_payout_connect_link(
@@ -774,18 +1113,23 @@ def build_control_router() -> APIRouter:
     def create_topup_checkout(
         body: TopupCheckoutRequest,
         principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
     ) -> dict[str, Any]:
         """Create a Stripe Checkout session that tops up the CALLER's own balance (flow A).
         client_reference_id + metadata.purpose=takyon_topup let the billing webhook credit
         the right user exactly once when payment completes. Requires STRIPE_SECRET_KEY; if
         it is absent the call is blocked (503) with a reason — never a faked URL."""
         try:
+            customer = ensure_operator_billing_customer(conn, principal.user_id)
             session = create_topup_checkout_session(
                 principal.user_id,
                 amount_cents=body.amount_cents,
                 success_url=body.success_url,
                 cancel_url=body.cancel_url,
+                customer_id=str(customer.get("id") or "").strip() or None,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except stripe_util.StripeError as exc:
             msg = str(exc)
             if "STRIPE_SECRET_KEY" in msg:
@@ -820,9 +1164,35 @@ def build_control_router() -> APIRouter:
         event = json.loads(raw)
         event_id = str(event.get("id") or "")
         event_type = str(event.get("type") or "")
+        obj = (event.get("data") or {}).get("object") or {}
+        if event_type in {
+            "customer.subscription.created",
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+        }:
+            customer_id = _stripe_customer_id(obj.get("customer"))
+            user_id = _resolve_operator_user_id_from_customer(conn, customer_id or "")
+            if not user_id:
+                return {"ok": True, "ignored": "unknown_operator_customer"}
+            state = sync_operator_subscription_allowance(
+                conn,
+                user_id,
+                refresh_live=False,
+                subscription=obj if isinstance(obj, dict) else None,
+            )
+            return {
+                "ok": True,
+                "user_id": user_id,
+                "customer_id": customer_id,
+                "subscription_id": state.subscription_id,
+                "subscription_status": state.subscription_status,
+                "weekly_allowance_cents": state.weekly_allowance_cents,
+                "allowance_resets_at": state.allowance_resets_at,
+                "event_id": event_id,
+            }
         if event_type != "checkout.session.completed":
             return {"ok": True, "ignored": event_type or "unknown_event"}
-        session = (event.get("data") or {}).get("object") or {}
+        session = obj if isinstance(obj, dict) else {}
         metadata = session.get("metadata") or {}
         if session.get("payment_status") not in ("paid", "no_payment_required"):
             return {"ok": True, "ignored": "unpaid"}

@@ -82,6 +82,8 @@ _USER_API_KEYS_STATE_VERSION = 1
 _USER_API_KEYS_MUTEX = threading.RLock()
 _SAFEBOX_REMOTE_URL_ENV = "TAKYON_SAFEBOX_URL"
 _SAFEBOX_REMOTE_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
+_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
+_SAFEBOX_HOST_ROLE = "safebox"
 
 
 class RemoteSafeboxError(RuntimeError):
@@ -91,6 +93,10 @@ class RemoteSafeboxError(RuntimeError):
         super().__init__(message)
         self.status_code = int(status_code)
         self.payload = payload
+
+
+class SafeboxAuthorityUnavailable(RuntimeError):
+    """No remote Safebox is configured and this process is not the Safebox host."""
 
 
 def is_sensitive_env_key(key: str) -> bool:
@@ -108,6 +114,31 @@ def _remote_base_url() -> str:
 
 def _remote_enabled() -> bool:
     return bool(_remote_base_url())
+
+
+def _normalized_host_role() -> str:
+    return str(os.environ.get(_HOST_ROLE_ENV) or "").strip().lower()
+
+
+def _local_authority_enabled() -> bool:
+    return _normalized_host_role() == _SAFEBOX_HOST_ROLE
+
+
+def _authority_mode() -> str:
+    if _local_authority_enabled():
+        return "local"
+    if _remote_enabled():
+        return "remote"
+    role = _normalized_host_role() or "<unset>"
+    raise SafeboxAuthorityUnavailable(
+        "Safebox authority is unavailable for "
+        f"{_HOST_ROLE_ENV}={role}; configure {_SAFEBOX_REMOTE_URL_ENV} "
+        f"or run on the dedicated Safebox host with {_HOST_ROLE_ENV}={_SAFEBOX_HOST_ROLE}"
+    )
+
+
+def _use_remote_authority() -> bool:
+    return _authority_mode() == "remote"
 
 
 def _remote_headers(*, with_json: bool = False) -> dict[str, str]:
@@ -398,7 +429,7 @@ def register_user_api_key(
     created_at: str | None = None,
 ) -> dict[str, str | None]:
     """Register a top-level ``tk_...`` API key in Safebox."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/user-api-keys/register",
@@ -445,7 +476,7 @@ def register_user_api_key(
 
 def resolve_user_api_key(raw_key: str) -> dict[str, str | None] | None:
     """Resolve a presented raw ``tk_...`` key against the Safebox registry."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/user-api-keys/resolve",
@@ -468,7 +499,7 @@ def resolve_user_api_key(raw_key: str) -> dict[str, str | None] | None:
 
 def revoke_user_api_key(key_id: str, *, revoked_at: str | None = None) -> bool:
     """Revoke one Safebox-owned top-level API key by id."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/user-api-keys/revoke",
@@ -496,7 +527,7 @@ def revoke_user_api_keys_for_user(
     revoked_at: str | None = None,
 ) -> list[str]:
     """Revoke every active top-level API key owned by one Takyon user."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/user-api-keys/revoke-for-user",
@@ -526,7 +557,7 @@ def revoke_user_api_keys_for_user(
 
 def restore_user_api_keys(key_ids: list[str]) -> None:
     """Undo a staged revoke when an outer transactional caller rolls back."""
-    if _remote_enabled():
+    if _use_remote_authority():
         _remote_json("POST", "/v1/user-api-keys/restore", {"key_ids": list(key_ids or [])})
         return
     wanted = {
@@ -544,7 +575,7 @@ def restore_user_api_keys(key_ids: list[str]) -> None:
 
 def delete_user_api_key(key_id: str) -> bool:
     """Delete one Safebox key record outright for transactional cleanup."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "DELETE",
             f"/v1/user-api-keys/{urllib.parse.quote(str(key_id or '').strip(), safe='')}",
@@ -565,7 +596,7 @@ def open_business_credit_account(conn, business_slug: str) -> None:
     slug = str(business_slug or "").strip()
     if not slug:
         raise ValueError("missing business_slug")
-    if _remote_enabled():
+    if _use_remote_authority():
         _remote_json(
             "POST",
             "/v1/creative-credits/accounts/open",
@@ -580,7 +611,7 @@ def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBala
     slug = str(business_slug or "").strip()
     if not slug:
         raise ValueError("missing business_slug")
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "GET",
             f"/v1/creative-credits/{urllib.parse.quote(slug, safe='')}",
@@ -602,7 +633,7 @@ def grant_credits(
     slug = str(business_slug or "").strip()
     if not slug:
         raise ValueError("missing business_slug")
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/creative-credits/grant",
@@ -638,7 +669,7 @@ def reserve_credits(
     key = str(reservation_key or "").strip()
     if not slug:
         raise ValueError("missing business_slug")
-    if _remote_enabled():
+    if _use_remote_authority():
         try:
             payload = _remote_json(
                 "POST",
@@ -679,7 +710,7 @@ def commit_credits(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    if _remote_enabled():
+    if _use_remote_authority():
         try:
             payload = _remote_json(
                 "POST",
@@ -715,7 +746,7 @@ def release_credits(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    if _remote_enabled():
+    if _use_remote_authority():
         try:
             payload = _remote_json(
                 "POST",
@@ -739,7 +770,7 @@ def release_credits(
 
 def read_env_backed_value(key: str) -> str:
     """Read one sensitive env-backed value from env or TAKYON_HOME/.env."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "GET",
             f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
@@ -754,7 +785,7 @@ def read_env_backed_value(key: str) -> str:
 
 def first_env_backed_value(*keys: str) -> str:
     """Return the first non-empty sensitive value across env-backed aliases."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "POST",
             "/v1/env/first",
@@ -770,7 +801,7 @@ def first_env_backed_value(*keys: str) -> str:
 
 def save_env_backed_value(key: str, value: str) -> None:
     """Persist one sensitive env-backed value through the Safebox authority."""
-    if _remote_enabled():
+    if _use_remote_authority():
         _remote_json(
             "POST",
             f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
@@ -786,7 +817,7 @@ def save_env_backed_value(key: str, value: str) -> None:
 
 def remove_env_backed_value(key: str) -> bool:
     """Remove one sensitive env-backed value through the Safebox authority."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json(
             "DELETE",
             f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
@@ -801,7 +832,7 @@ def remove_env_backed_value(key: str) -> bool:
 
 def sensitive_env_snapshot() -> Dict[str, str]:
     """Return the merged env-backed sensitive-key snapshot."""
-    if _remote_enabled():
+    if _use_remote_authority():
         payload = _remote_json("GET", "/v1/env/snapshot")
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
@@ -824,7 +855,7 @@ def sensitive_env_snapshot() -> Dict[str, str]:
 
 def list_env_backed_keys(*, sensitive_only: bool = True) -> list[str]:
     """List env-backed keys known to Safebox."""
-    if _remote_enabled():
+    if _use_remote_authority():
         flag = "1" if sensitive_only else "0"
         payload = _remote_json("GET", f"/v1/env?{urllib.parse.urlencode({'sensitive_only': flag})}")
         keys = payload.get("keys")

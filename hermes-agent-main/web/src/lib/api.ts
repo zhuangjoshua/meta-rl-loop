@@ -618,9 +618,16 @@ export interface TakyonOperatorAccountResponse {
   allowance_included_cents?: number;
   allowance_used_cents?: number;
   allowance_remaining_cents?: number;
+  allowance_percent_used?: number | null;
+  allowance_percent_remaining?: number | null;
+  allowance_period_start?: string | null;
+  allowance_resets_at?: string | null;
   topup_balance_cents?: number;
   reserved_cents?: number;
+  reserved_allowance_cents?: number;
+  reserved_topup_cents?: number;
   spendable_cents?: number;
+  operator_subscription_status?: string;
   owed_balance_cents?: number;
   paid_out_cents?: number;
   payout_currency?: string;
