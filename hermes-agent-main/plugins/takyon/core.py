@@ -1388,23 +1388,28 @@ def _subuser_app_starter_globals_css() -> str:
         dedent(
             """
             :root {
-              --starter-bg: #f7f1e7;
-              --starter-panel: rgba(255, 252, 247, 0.88);
-              --starter-panel-strong: #fffdf9;
-              --starter-border: rgba(28, 38, 58, 0.12);
-              --starter-border-strong: rgba(18, 34, 59, 0.2);
-              --starter-ink: #132139;
-              --starter-muted: #627089;
-              --starter-accent: #10213b;
-              --starter-accent-ink: #fff9f2;
-              --starter-accent-soft: #d7e7df;
-              --starter-highlight: #2f6f68;
-              --starter-shadow: 0 22px 60px rgba(18, 34, 59, 0.08);
-              --starter-radius-xl: 30px;
-              --starter-radius-lg: 22px;
-              --starter-radius-md: 16px;
-              --starter-max: 1180px;
-              --starter-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+              --starter-bg: #f5f7fb;
+              --starter-bg-accent: rgba(76, 110, 245, 0.08);
+              --starter-panel: rgba(255, 255, 255, 0.92);
+              --starter-panel-soft: rgba(245, 247, 251, 0.96);
+              --starter-border: rgba(15, 23, 42, 0.1);
+              --starter-border-strong: rgba(15, 23, 42, 0.18);
+              --starter-ink: #0f172a;
+              --starter-muted: #475569;
+              --starter-accent: #1d4ed8;
+              --starter-accent-strong: #1e40af;
+              --starter-accent-ink: #ffffff;
+              --starter-success: #166534;
+              --starter-success-bg: #dcfce7;
+              --starter-warn: #92400e;
+              --starter-warn-bg: #fef3c7;
+              --starter-danger: #b91c1c;
+              --starter-danger-bg: #fee2e2;
+              --starter-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+              --starter-radius-lg: 20px;
+              --starter-radius-md: 14px;
+              --starter-radius-sm: 10px;
+              --starter-max: 1120px;
             }
 
             * {
@@ -1416,8 +1421,8 @@ def _subuser_app_starter_globals_css() -> str:
               margin: 0;
               min-height: 100%;
               background:
-                radial-gradient(circle at top left, rgba(215, 231, 223, 0.5), transparent 34%),
-                radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.7), transparent 36%),
+                radial-gradient(circle at top left, var(--starter-bg-accent), transparent 28%),
+                radial-gradient(circle at bottom right, rgba(255, 255, 255, 0.85), transparent 32%),
                 var(--starter-bg);
               color: var(--starter-ink);
               font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -1443,84 +1448,145 @@ def _subuser_app_starter_globals_css() -> str:
               background: none;
             }
 
-            .starter-root {
+            .starter-site-shell,
+            .starter-app-shell {
               min-height: 100vh;
             }
 
+            .starter-site-shell {
+              display: flex;
+              align-items: center;
+              padding: clamp(48px, 9vw, 112px) 0;
+            }
+
             .starter-wrap {
-              width: min(calc(100% - 2rem), var(--starter-max));
+              width: min(calc(100% - clamp(24px, 4vw, 64px)), var(--starter-max));
               margin: 0 auto;
             }
 
-            .starter-page {
-              padding: 1rem 0 4.5rem;
+            .starter-landing-card,
+            .starter-card,
+            .starter-status-banner {
+              border: 1px solid var(--starter-border);
+              background: var(--starter-panel);
+              box-shadow: var(--starter-shadow);
             }
 
-            .starter-nav {
+            .starter-landing-card,
+            .starter-card {
+              border-radius: var(--starter-radius-lg);
+            }
+
+            .starter-landing-card {
+              max-width: 760px;
+              padding: clamp(28px, 4vw, 44px);
+            }
+
+            .starter-stack {
+              display: grid;
+              gap: 1rem;
+            }
+
+            .starter-app-header {
               position: sticky;
               top: 0;
-              z-index: 20;
-              backdrop-filter: blur(18px);
-              background: rgba(247, 241, 231, 0.8);
-              border-bottom: 1px solid rgba(28, 38, 58, 0.08);
+              z-index: 10;
+              backdrop-filter: blur(16px);
+              background: rgba(245, 247, 251, 0.85);
+              border-bottom: 1px solid var(--starter-border);
             }
 
-            .starter-nav-inner,
-            .starter-app-bar {
-              min-height: 78px;
+            .starter-app-header-inner {
+              min-height: 72px;
               display: flex;
               align-items: center;
               justify-content: space-between;
               gap: 1rem;
             }
 
-            .starter-brand,
-            .starter-app-brand {
+            .starter-app-main {
+              padding: 32px 0 56px;
+            }
+
+            .starter-brand {
               display: inline-flex;
               align-items: center;
-              gap: 0.7rem;
-              font-size: 1.05rem;
+              gap: 0.5rem;
+              font-size: 1rem;
               font-weight: 700;
               letter-spacing: -0.02em;
             }
 
-            .starter-brand-mark {
-              width: 12px;
-              height: 12px;
-              border-radius: 999px;
-              background: linear-gradient(135deg, #d9b86b, #f4e8c7);
-              box-shadow: 0 0 0 5px rgba(217, 184, 107, 0.15);
-            }
-
-            .starter-nav-links,
-            .starter-app-links,
-            .starter-actions,
-            .starter-inline-actions,
-            .starter-pill-row,
-            .starter-hero-actions {
+            .starter-app-nav,
+            .starter-actions {
               display: flex;
               flex-wrap: wrap;
               align-items: center;
               gap: 0.8rem;
             }
 
-            .starter-nav-links a,
-            .starter-app-links a {
+            .starter-app-nav a {
               color: var(--starter-muted);
               font-size: 0.98rem;
+              transition: color 140ms ease;
             }
 
-            .starter-button,
-            .starter-link-button {
+            .starter-app-nav a:hover {
+              color: var(--starter-ink);
+            }
+
+            .starter-eyebrow {
+              margin: 0 0 0.8rem;
+              color: var(--starter-accent);
+              font-size: 0.8rem;
+              font-weight: 700;
+              letter-spacing: 0.16em;
+              text-transform: uppercase;
+            }
+
+            .starter-title,
+            .starter-title-sm {
+              margin: 0;
+              letter-spacing: -0.04em;
+              line-height: 1.02;
+            }
+
+            .starter-title {
+              font-size: clamp(2.4rem, 6vw, 4.5rem);
+            }
+
+            .starter-title-sm {
+              font-size: clamp(1.5rem, 3vw, 2rem);
+            }
+
+            .starter-copy,
+            .starter-note,
+            .starter-status-copy span,
+            .starter-field label,
+            .starter-key-value dt {
+              color: var(--starter-muted);
+            }
+
+            .starter-copy {
+              margin: 1rem 0 0;
+              font-size: 1.05rem;
+            }
+
+            .starter-note {
+              margin: 0;
+              font-size: 0.95rem;
+            }
+
+            .starter-button {
               display: inline-flex;
               align-items: center;
               justify-content: center;
-              gap: 0.45rem;
-              min-height: 48px;
-              padding: 0 1.05rem;
+              gap: 0.4rem;
+              min-height: 44px;
+              padding: 0 1rem;
               border-radius: 999px;
               border: 1px solid var(--starter-border-strong);
-              background: rgba(255, 255, 255, 0.7);
+              background: rgba(255, 255, 255, 0.8);
               color: var(--starter-ink);
               cursor: pointer;
               transition:
@@ -1530,453 +1596,163 @@ def _subuser_app_starter_globals_css() -> str:
                 background 140ms ease;
             }
 
-            .starter-button:hover,
-            .starter-link-button:hover {
+            .starter-button:hover {
               transform: translateY(-1px);
-              box-shadow: 0 12px 32px rgba(18, 34, 59, 0.08);
+              box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
             }
 
-            .starter-button-primary,
-            .starter-link-primary {
+            .starter-button-primary {
               background: var(--starter-accent);
               color: var(--starter-accent-ink);
               border-color: var(--starter-accent);
             }
 
-            .starter-button-quiet,
-            .starter-link-quiet {
-              border-color: rgba(28, 38, 58, 0.08);
-              background: rgba(255, 255, 255, 0.42);
+            .starter-button-primary:hover {
+              background: var(--starter-accent-strong);
+              border-color: var(--starter-accent-strong);
+            }
+
+            .starter-button-secondary {
+              background: rgba(255, 255, 255, 0.68);
             }
 
             .starter-button:disabled {
-              opacity: 0.55;
+              opacity: 0.6;
               cursor: not-allowed;
               transform: none;
               box-shadow: none;
             }
 
-            .starter-hero {
-              padding: 3.5rem 0 2.5rem;
+            .starter-actions {
+              margin-top: 1.25rem;
             }
 
-            .starter-hero-grid {
-              display: grid;
-              grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.72fr);
-              gap: 2rem;
-              align-items: flex-start;
+            .starter-actions-compact {
+              margin-top: 1rem;
             }
 
-            .starter-kicker {
-              margin: 0 0 1rem;
-              color: var(--starter-highlight);
-              font-size: 0.92rem;
-              font-weight: 700;
-              letter-spacing: 0.18em;
-              text-transform: uppercase;
+            .starter-card {
+              padding: 1.25rem;
             }
 
-            .starter-headline,
-            .starter-section h2,
-            .starter-price-value,
-            .starter-shell-title {
-              margin: 0;
-              color: var(--starter-ink);
-              font-family: var(--starter-serif);
-              font-weight: 700;
-              letter-spacing: -0.05em;
-            }
-
-            .starter-headline {
-              max-width: 10ch;
-              font-size: clamp(3.4rem, 7vw, 6rem);
-              line-height: 0.95;
-            }
-
-            .starter-lede,
-            .starter-section-copy,
-            .starter-card-copy,
-            .starter-note,
-            .starter-helper,
-            .starter-stat-label {
-              color: var(--starter-muted);
-            }
-
-            .starter-lede {
-              max-width: 32rem;
-              margin: 1.6rem 0 0;
-              font-size: 1.23rem;
-            }
-
-            .starter-hero-meta {
-              margin-top: 1.2rem;
-              color: var(--starter-muted);
-              font-size: 1.02rem;
-            }
-
-            .starter-card,
-            .starter-panel,
-            .starter-shell-card,
-            .starter-price-card,
-            .starter-profile-card {
+            .starter-card-soft {
+              background: var(--starter-panel-soft);
               border: 1px solid var(--starter-border);
-              border-radius: var(--starter-radius-lg);
-              background: var(--starter-panel);
-              box-shadow: var(--starter-shadow);
+              border-radius: var(--starter-radius-md);
+              padding: 1rem;
             }
 
-            .starter-card,
-            .starter-panel,
-            .starter-shell-card,
-            .starter-price-card,
-            .starter-profile-card,
-            .starter-auth-card {
-              padding: 1.4rem;
+            .starter-section-card {
+              padding: clamp(20px, 3vw, 28px);
             }
 
-            .starter-proof-card {
-              padding: 1.7rem;
-            }
-
-            .starter-proof-card h3,
-            .starter-shell-card h3,
-            .starter-price-card h3,
-            .starter-profile-card h3,
-            .starter-auth-card h3 {
-              margin: 0 0 0.9rem;
-              font-size: 1.08rem;
-              letter-spacing: -0.02em;
-            }
-
-            .starter-proof-list,
-            .starter-feature-list,
-            .starter-step-list,
-            .starter-bullet-list,
-            .starter-detail-list {
-              display: grid;
-              gap: 0.95rem;
-              margin: 0;
-              padding: 0;
-              list-style: none;
-            }
-
-            .starter-proof-list li,
-            .starter-step-list li {
-              display: grid;
-              grid-template-columns: 34px 1fr;
-              gap: 0.85rem;
-              align-items: flex-start;
-              color: var(--starter-ink);
-            }
-
-            .starter-proof-index,
-            .starter-step-index {
-              width: 34px;
-              height: 34px;
-              display: inline-flex;
+            .starter-status-banner {
+              border-radius: var(--starter-radius-md);
+              padding: 1rem 1.1rem;
+              display: flex;
               align-items: center;
-              justify-content: center;
-              border-radius: 999px;
-              background: var(--starter-accent-soft);
-              color: var(--starter-highlight);
-              font-weight: 700;
-            }
-
-            .starter-proof-footer {
-              margin-top: 1.2rem;
-              padding-top: 1.1rem;
-              border-top: 1px solid rgba(28, 38, 58, 0.1);
-              color: var(--starter-muted);
-            }
-
-            .starter-section {
-              padding: 1.5rem 0;
-            }
-
-            .starter-section-grid {
-              display: grid;
-              grid-template-columns: minmax(0, 0.86fr) minmax(280px, 0.82fr);
-              gap: 2rem;
-              align-items: flex-start;
-            }
-
-            .starter-section h2 {
-              font-size: clamp(2.6rem, 4.4vw, 4.5rem);
-              line-height: 0.96;
-            }
-
-            .starter-card-grid,
-            .starter-stat-grid {
-              display: grid;
+              justify-content: space-between;
               gap: 1rem;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
-            .starter-feature {
+            .starter-status-copy {
               display: grid;
-              gap: 0.7rem;
+              gap: 0.25rem;
             }
 
-            .starter-feature-tag,
             .starter-pill {
-              width: fit-content;
               display: inline-flex;
               align-items: center;
-              gap: 0.4rem;
-              min-height: 34px;
-              padding: 0 0.8rem;
+              min-height: 32px;
+              padding: 0 0.75rem;
               border-radius: 999px;
-              background: rgba(47, 111, 104, 0.1);
-              color: var(--starter-highlight);
-              font-size: 0.88rem;
-              font-weight: 700;
-            }
-
-            .starter-pill-muted {
-              background: rgba(18, 34, 59, 0.08);
-              color: var(--starter-muted);
-            }
-
-            .starter-pill-warn {
-              background: rgba(182, 119, 0, 0.12);
-              color: #8a5a00;
+              font-size: 0.9rem;
+              font-weight: 600;
+              background: #e2e8f0;
+              color: var(--starter-ink);
             }
 
             .starter-pill-success {
-              background: rgba(47, 111, 104, 0.14);
-              color: var(--starter-highlight);
+              background: var(--starter-success-bg);
+              color: var(--starter-success);
+            }
+
+            .starter-pill-warn {
+              background: var(--starter-warn-bg);
+              color: var(--starter-warn);
             }
 
             .starter-pill-danger {
-              background: rgba(145, 32, 32, 0.12);
-              color: #8d1e1e;
+              background: var(--starter-danger-bg);
+              color: var(--starter-danger);
             }
 
-            .starter-price-card {
-              max-width: 620px;
-              margin: 0 auto;
-              padding: 2rem;
-              text-align: center;
-            }
-
-            .starter-price-value {
-              font-size: clamp(3rem, 5vw, 4.5rem);
-              line-height: 0.95;
-            }
-
-            .starter-price-value small {
-              font-size: 1rem;
-              color: var(--starter-muted);
-              font-family: inherit;
-              font-weight: 500;
-              letter-spacing: 0;
-            }
-
-            .starter-price-copy {
-              max-width: 30rem;
-              margin: 0.95rem auto 0;
-            }
-
-            .starter-final {
-              padding: 2rem 0 0;
-            }
-
-            .starter-final-card {
-              padding: 2rem;
-              background: linear-gradient(180deg, rgba(16, 33, 59, 0.95), rgba(25, 42, 68, 0.95));
-              color: var(--starter-accent-ink);
-              border-radius: var(--starter-radius-xl);
-              box-shadow: 0 26px 70px rgba(18, 34, 59, 0.16);
-            }
-
-            .starter-final-card h2 {
-              color: var(--starter-accent-ink);
-            }
-
-            .starter-final-card .starter-section-copy {
-              color: rgba(255, 249, 242, 0.72);
-            }
-
-            .starter-footer {
-              padding: 1.7rem 0 0;
-              color: var(--starter-muted);
-              font-size: 0.95rem;
-            }
-
-            .starter-shell {
-              padding: 1.2rem 0 3rem;
-            }
-
-            .starter-app-header {
-              margin-bottom: 1.25rem;
-              padding: 1rem 0 0.5rem;
-            }
-
-            .starter-shell-title {
-              font-size: clamp(2.4rem, 4vw, 3.6rem);
-              line-height: 0.98;
-            }
-
-            .starter-shell-copy {
-              max-width: 36rem;
-              margin-top: 0.8rem;
-            }
-
-            .starter-shell-grid {
-              display: grid;
-              gap: 1rem;
-              grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
-            }
-
-            .starter-shell-stack {
-              display: grid;
-              gap: 1rem;
-            }
-
-            .starter-stat-grid {
-              grid-template-columns: repeat(3, minmax(0, 1fr));
-            }
-
-            .starter-stat-card {
-              padding: 1rem 1.1rem;
-            }
-
-            .starter-stat-value {
-              margin: 0;
-              font-size: 1.35rem;
-              font-weight: 700;
-              letter-spacing: -0.03em;
-            }
-
-            .starter-shell-card {
-              display: grid;
-              gap: 1rem;
-            }
-
-            .starter-shell-card-header {
-              display: flex;
-              justify-content: space-between;
-              align-items: flex-start;
-              gap: 1rem;
+            .starter-pill-muted {
+              background: #e2e8f0;
+              color: #334155;
             }
 
             .starter-form,
-            .starter-field,
-            .starter-form-actions,
-            .starter-auth-stack,
-            .starter-profile-grid {
+            .starter-field {
               display: grid;
-              gap: 0.9rem;
+              gap: 0.85rem;
             }
 
             .starter-field label {
-              font-size: 0.88rem;
-              color: var(--starter-muted);
+              font-size: 0.95rem;
+              font-weight: 600;
             }
 
             .starter-input,
             .starter-textarea {
               width: 100%;
-              border: 1px solid rgba(18, 34, 59, 0.14);
-              border-radius: 16px;
-              padding: 0.95rem 1rem;
-              background: rgba(255, 255, 255, 0.88);
+              border: 1px solid var(--starter-border-strong);
+              border-radius: var(--starter-radius-sm);
+              background: #ffffff;
               color: var(--starter-ink);
+              padding: 0.8rem 0.95rem;
+            }
+
+            .starter-input:focus,
+            .starter-textarea:focus {
+              outline: 2px solid rgba(29, 78, 216, 0.16);
+              outline-offset: 1px;
+              border-color: var(--starter-accent);
             }
 
             .starter-textarea {
-              min-height: 150px;
+              min-height: 120px;
               resize: vertical;
             }
 
-            .starter-code,
+            .starter-alert,
             .starter-response {
-              border: 1px solid rgba(18, 34, 59, 0.08);
-              border-radius: 18px;
-              padding: 1rem;
-              background: rgba(255, 255, 255, 0.6);
+              border-radius: var(--starter-radius-sm);
+              padding: 0.85rem 0.95rem;
+              background: rgba(29, 78, 216, 0.08);
               color: var(--starter-ink);
-              white-space: pre-wrap;
-              word-break: break-word;
-              overflow: auto;
-              font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size: 0.9rem;
-              line-height: 1.5;
-            }
-
-            .starter-divider {
-              height: 1px;
-              border: 0;
-              margin: 0;
-              background: rgba(18, 34, 59, 0.08);
-            }
-
-            .starter-status-banner {
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              gap: 1rem;
-              padding: 1rem 1.15rem;
-              border: 1px solid rgba(18, 34, 59, 0.08);
-              border-radius: 18px;
-              background: rgba(255, 255, 255, 0.52);
-            }
-
-            .starter-status-copy {
-              display: grid;
-              gap: 0.2rem;
-            }
-
-            .starter-auth-card {
-              max-width: 680px;
-              margin: 0 auto;
-              border: 1px solid var(--starter-border);
-              border-radius: var(--starter-radius-xl);
-              background: var(--starter-panel-strong);
-              box-shadow: var(--starter-shadow);
-            }
-
-            .starter-auth-title,
-            .starter-profile-title {
-              margin: 0;
-              font-size: 1.45rem;
-              letter-spacing: -0.03em;
-            }
-
-            .starter-auth-copy,
-            .starter-profile-copy {
-              margin: 0;
-              color: var(--starter-muted);
-            }
-
-            .starter-alert {
-              padding: 0.9rem 1rem;
-              border-radius: 16px;
-              background: rgba(47, 111, 104, 0.1);
-              color: var(--starter-highlight);
             }
 
             .starter-alert-error {
-              background: rgba(145, 32, 32, 0.1);
-              color: #8d1e1e;
+              background: var(--starter-danger-bg);
+              color: var(--starter-danger);
             }
 
-            .starter-profile-grid {
-              grid-template-columns: minmax(0, 1fr) minmax(280px, 0.82fr);
-              align-items: flex-start;
+            .starter-account-grid {
+              display: grid;
+              gap: 1rem;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
             .starter-key-value {
+              margin: 1rem 0 0;
               display: grid;
-              gap: 0.6rem;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 0.9rem 1rem;
             }
 
             .starter-key-value div {
-              display: flex;
-              justify-content: space-between;
-              gap: 1rem;
-              padding-bottom: 0.7rem;
-              border-bottom: 1px solid rgba(18, 34, 59, 0.08);
+              min-width: 0;
             }
 
             .starter-key-value dt,
@@ -1984,66 +1760,55 @@ def _subuser_app_starter_globals_css() -> str:
               margin: 0;
             }
 
-            .starter-key-value dt {
-              color: var(--starter-muted);
+            .starter-key-value dd {
+              margin-top: 0.3rem;
+              font-weight: 600;
+              word-break: break-word;
             }
 
-            .starter-profile-card {
-              display: grid;
-              gap: 1rem;
-            }
-
-            @media (max-width: 1080px) {
-              .starter-hero-grid,
-              .starter-section-grid,
-              .starter-shell-grid,
-              .starter-profile-grid {
+            @media (max-width: 900px) {
+              .starter-account-grid {
                 grid-template-columns: 1fr;
               }
             }
 
             @media (max-width: 760px) {
-              .starter-page {
-                padding-top: 0.35rem;
+              .starter-site-shell {
+                padding: 32px 0 48px;
               }
 
-              .starter-nav-inner,
-              .starter-app-bar {
+              .starter-app-header-inner,
+              .starter-status-banner,
+              .starter-actions {
                 flex-direction: column;
                 align-items: stretch;
-                justify-content: center;
-                padding: 0.75rem 0;
               }
 
-              .starter-nav-links,
+              .starter-app-header-inner {
+                padding: 14px 0;
+              }
+
+              .starter-app-nav,
               .starter-actions,
-              .starter-inline-actions,
-              .starter-app-links,
-              .starter-hero-actions {
+              .starter-key-value {
                 width: 100%;
               }
 
-              .starter-nav-links a,
-              .starter-app-links a,
-              .starter-button,
-              .starter-link-button {
-                flex: 1 1 160px;
-                justify-content: center;
+              .starter-app-nav {
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.6rem;
               }
 
-              .starter-stat-grid,
-              .starter-card-grid {
+              .starter-key-value {
                 grid-template-columns: 1fr;
               }
 
-              .starter-headline {
-                max-width: none;
-              }
-
-              .starter-final-card,
-              .starter-proof-card,
-              .starter-price-card {
-                padding: 1.5rem;
+              .starter-app-nav a,
+              .starter-button,
+              .starter-brand {
+                justify-content: center;
               }
             }
             """
@@ -2056,10 +1821,49 @@ def _subuser_app_starter_home_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterLandingPage } from "../components/starter-pages";
+            import Link from "next/link";
+            import { starterBusinessName, starterConfiguredPlans } from "../components/starter-context.js";
+
+            function currentPlan() {
+              return starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || starterConfiguredPlans[0] || null;
+            }
+
+            function formatMoney(cents = 0, currency = "usd") {
+              return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: String(currency || "usd").toUpperCase(),
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 2,
+              }).format((Number(cents || 0) || 0) / 100);
+            }
 
             export default function HomePage() {
-              return <StarterLandingPage />;
+              const plan = currentPlan();
+              const planLabel = plan
+                ? `${formatMoney(plan.priceCents, plan.currency)}${plan.billingInterval ? ` / ${plan.billingInterval}` : ""}`
+                : "Private access opens after sign in and subscription.";
+              return (
+                <main className="starter-site-shell">
+                  <div className="starter-wrap">
+                    <section className="starter-landing-card">
+                      <p className="starter-eyebrow">Early access</p>
+                      <h1 className="starter-title">{starterBusinessName}</h1>
+                      <p className="starter-copy">
+                        One place to request access, start a subscription, and keep your account ready for the private workspace.
+                      </p>
+                      <div className="starter-actions">
+                        <Link className="starter-button starter-button-primary" href="/app?intent=subscribe">
+                          Get access
+                        </Link>
+                        <Link className="starter-button starter-button-secondary" href="/app?intent=signin">
+                          Sign in
+                        </Link>
+                      </div>
+                      <p className="starter-note">{planLabel}</p>
+                    </section>
+                  </div>
+                </main>
+              );
             }
             """
         ).strip()
@@ -2071,10 +1875,28 @@ def _subuser_app_starter_app_layout_js() -> str:
     return (
         dedent(
             """
-            import { StarterAppChrome } from "../../components/starter-pages";
+            import Link from "next/link";
+            import { starterBusinessName } from "../../components/starter-context.js";
 
             export default function AppLayout({ children }) {
-              return <StarterAppChrome>{children}</StarterAppChrome>;
+              return (
+                <div className="starter-app-shell">
+                  <header className="starter-app-header">
+                    <div className="starter-wrap starter-app-header-inner">
+                      <Link className="starter-brand" href="/">
+                        {starterBusinessName}
+                      </Link>
+                      <nav className="starter-app-nav" aria-label="App">
+                        <Link href="/app">Access</Link>
+                        <Link href="/app/profile">Account</Link>
+                      </nav>
+                    </div>
+                  </header>
+                  <main className="starter-app-main">
+                    <div className="starter-wrap">{children}</div>
+                  </main>
+                </div>
+              );
             }
             """
         ).strip()
@@ -2086,14 +1908,14 @@ def _subuser_app_starter_app_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterProductAccessGate } from "../../components/starter-pages";
+            import { StarterAccessPage } from "../../components/starter-access-page";
             import { loadServerAppState } from "../../components/starter-server";
 
             export const dynamic = "force-dynamic";
 
             export default async function AppPage() {
               const initialAppState = await loadServerAppState();
-              return <StarterProductAccessGate initialAppState={initialAppState} />;
+              return <StarterAccessPage initialAppState={initialAppState} />;
             }
             """
         ).strip()
@@ -2140,14 +1962,14 @@ def _subuser_app_starter_profile_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterProfilePage } from "../../../components/starter-pages";
+            import { StarterAccountPage } from "../../../components/starter-account-page";
             import { loadServerAppState } from "../../../components/starter-server";
 
             export const dynamic = "force-dynamic";
 
             export default async function ProfilePage() {
               const initialAppState = await loadServerAppState();
-              return <StarterProfilePage initialAppState={initialAppState} />;
+              return <StarterAccountPage initialAppState={initialAppState} />;
             }
             """
         ).strip()
@@ -2705,6 +2527,707 @@ def _subuser_app_starter_context_js(*, title_literal: str) -> str:
             }
             """
         ).strip().replace("__STARTER_BUSINESS_NAME__", title_literal)
+        + "\n"
+    )
+
+
+def _subuser_app_starter_primitives_js() -> str:
+    return (
+        dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+            import { createContext, useContext, useEffect, useState } from "react";
+
+            import {
+              starterBusinessName,
+              starterConfiguredPlans,
+              starterDefaultMonthlyPlan,
+              starterDefaultPlanKey,
+              starterSurfaceContext,
+              starterLoadAppState,
+              starterRequestAuth,
+              starterCancelSubscription,
+              starterCheckout,
+              starterProfile,
+              starterUpdateProfile,
+            } from "./starter-context.js";
+
+            const StarterAppStateContext = createContext({ appState: null, setAppState: () => {} });
+
+            export {
+              starterBusinessName,
+              starterConfiguredPlans,
+              starterDefaultMonthlyPlan,
+              starterDefaultPlanKey,
+              starterSurfaceContext,
+              starterLoadAppState,
+              starterProfile,
+              starterUpdateProfile,
+              starterCancelSubscription,
+            };
+
+            export function humanize(value) {
+              return String(value || "")
+                .replace(/[_-]+/g, " ")
+                .replace(/\\s+/g, " ")
+                .trim()
+                .replace(/\\b\\w/g, (letter) => letter.toUpperCase());
+            }
+
+            export function formatMoney(cents = 0, currency = "usd") {
+              return new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: String(currency || "usd").toUpperCase(),
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 2,
+              }).format((Number(cents || 0) || 0) / 100);
+            }
+
+            export function formatDate(value) {
+              if (!value) return "—";
+              const date = new Date(value);
+              if (Number.isNaN(date.getTime())) return "—";
+              return new Intl.DateTimeFormat("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              }).format(date);
+            }
+
+            export function currentPlan() {
+              return starterDefaultMonthlyPlan || starterConfiguredPlans[0] || null;
+            }
+
+            export function planSummary(plan = null) {
+              if (!plan) return "No active plan yet";
+              const amount = formatMoney(plan.priceCents, plan.currency);
+              const interval = String(plan.billingInterval || "").trim();
+              return interval ? `${amount} / ${interval}` : amount;
+            }
+
+            function toneClass(state) {
+              if (state === "ready" || state === "active" || state === "trialing") return "starter-pill-success";
+              if (state === "past_due" || state === "subscription_required") return "starter-pill-warn";
+              if (state === "blocked" || state === "canceled") return "starter-pill-danger";
+              return "starter-pill-muted";
+            }
+
+            export function StarterAppStateProvider({ initialAppState, children }) {
+              const [appState, setAppState] = useState(initialAppState || null);
+              useEffect(() => {
+                setAppState(initialAppState || null);
+              }, [initialAppState]);
+              return (
+                <StarterAppStateContext.Provider value={{ appState, setAppState }}>
+                  {children}
+                </StarterAppStateContext.Provider>
+              );
+            }
+
+            export function useStarterAppState() {
+              return useContext(StarterAppStateContext);
+            }
+
+            export function StarterStatePill({ label, state }) {
+              return (
+                <span className={`starter-pill ${toneClass(String(state || "").trim().toLowerCase())}`}>
+                  {label}: {humanize(state || "unknown")}
+                </span>
+              );
+            }
+
+            export function StarterStatusBanner({ title, body, actions = null }) {
+              return (
+                <section className="starter-status-banner">
+                  <div className="starter-status-copy">
+                    <strong>{title}</strong>
+                    <span>{body}</span>
+                  </div>
+                  {actions ? <div className="starter-actions starter-actions-compact">{actions}</div> : null}
+                </section>
+              );
+            }
+
+            export function StarterAuthCard({
+              intent = "signin",
+              onComplete = null,
+              title = "",
+              copy = "",
+              kicker = "",
+              backHref = "/",
+              backLabel = "Back",
+            }) {
+              const [email, setEmail] = useState("");
+              const [message, setMessage] = useState("");
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Send magic link";
+              const resolvedTitle =
+                title || (intent === "subscribe" ? "Sign in to continue to subscription." : "Sign in to continue.");
+              const resolvedCopy =
+                copy || "Use your email to continue. We'll send you a secure sign-in link.";
+              const resolvedKicker = kicker || (intent === "subscribe" ? "Continue" : "Sign in");
+
+              async function handleSubmit(event) {
+                event.preventDefault();
+                setPending(true);
+                setMessage("");
+                setError("");
+                try {
+                  const payload = await starterRequestAuth({
+                    email,
+                    origin: window.location.origin,
+                    product_name: starterBusinessName,
+                    app_slug: starterSurfaceContext.business,
+                  });
+                  setMessage(
+                    payload?.success === false
+                      ? "Could not start sign-in."
+                      : "Check your inbox for the magic link."
+                  );
+                  if (onComplete) onComplete();
+                } catch (requestError) {
+                  setError(String(requestError?.message || requestError || "Unable to send magic link."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              return (
+                <section className="starter-card starter-section-card">
+                  <p className="starter-eyebrow">{resolvedKicker}</p>
+                  <h1 className="starter-title starter-title-sm">{resolvedTitle}</h1>
+                  <p className="starter-copy">{resolvedCopy}</p>
+                  <form className="starter-form" onSubmit={handleSubmit}>
+                    <div className="starter-field">
+                      <label htmlFor="starter-email">Email</label>
+                      <input
+                        id="starter-email"
+                        className="starter-input"
+                        type="email"
+                        autoComplete="email"
+                        required
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                        placeholder="you@example.com"
+                      />
+                    </div>
+                    <div className="starter-actions starter-actions-compact">
+                      <button className="starter-button starter-button-primary" type="submit" disabled={pending || !email}>
+                        {pending ? "Sending..." : actionLabel}
+                      </button>
+                      <Link className="starter-button starter-button-secondary" href={backHref}>
+                        {backLabel}
+                      </Link>
+                    </div>
+                  </form>
+                  {message ? <div className="starter-alert">{message}</div> : null}
+                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                </section>
+              );
+            }
+
+            export function StarterSubscriptionCard({ appState, checkoutState = "" }) {
+              const plan = currentPlan();
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+
+              async function handleCheckout() {
+                setPending(true);
+                setError("");
+                try {
+                  const payload = await starterCheckout({
+                    plan_key: starterDefaultPlanKey,
+                  });
+                  if (payload?.checkout_url) {
+                    window.location.assign(String(payload.checkout_url));
+                    return;
+                  }
+                } catch (checkoutError) {
+                  setError(String(checkoutError?.message || checkoutError || "Unable to start checkout."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              return (
+                <section className="starter-card starter-section-card">
+                  <p className="starter-eyebrow">Subscription</p>
+                  <h1 className="starter-title starter-title-sm">Finish subscription to continue.</h1>
+                  <p className="starter-copy">
+                    {checkoutState === "success"
+                      ? "We received your checkout. Account access updates as soon as the subscription confirms."
+                      : appState.subscription.state === "past_due"
+                        ? "Update billing to restore access."
+                        : "Your private account unlocks as soon as checkout completes."}
+                  </p>
+                  <div className="starter-card starter-card-soft">
+                    <strong>{plan ? humanize(plan.planKey || "plan") : "Plan"}</strong>
+                    <p className="starter-note">{plan ? planSummary(plan) : "Plan setup is still pending."}</p>
+                  </div>
+                  <div className="starter-actions starter-actions-compact">
+                    <button
+                      className="starter-button starter-button-primary"
+                      type="button"
+                      disabled={!appState.canCheckout || pending || !starterDefaultPlanKey}
+                      onClick={handleCheckout}
+                    >
+                      {pending ? "Starting checkout..." : "Subscribe"}
+                    </button>
+                    <Link className="starter-button starter-button-secondary" href="/app/profile">
+                      Account
+                    </Link>
+                  </div>
+                  {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                </section>
+              );
+            }
+
+            export function StarterBlockedCard({ appState }) {
+              return (
+                <section className="starter-card starter-section-card">
+                  <p className="starter-eyebrow">Please try again</p>
+                  <h1 className="starter-title starter-title-sm">We couldn't load your account.</h1>
+                  <p className="starter-copy">Refresh the page or try again in a moment.</p>
+                  <div className="starter-response">
+                    {String(appState?.access?.reason || appState?.errors?.account || "account_unavailable")}
+                  </div>
+                  <div className="starter-actions starter-actions-compact">
+                    <Link className="starter-button starter-button-primary" href="/app/profile">
+                      Open account
+                    </Link>
+                    <Link className="starter-button starter-button-secondary" href="/">
+                      Back to site
+                    </Link>
+                  </div>
+                </section>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_access_page_js() -> str:
+    return (
+        dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+            import { useEffect, useState } from "react";
+
+            import {
+              StarterAppStateProvider,
+              StarterAuthCard,
+              StarterBlockedCard,
+              StarterStatePill,
+              StarterStatusBanner,
+              StarterSubscriptionCard,
+              currentPlan,
+              planSummary,
+              starterBusinessName,
+              useStarterAppState,
+            } from "./starter-primitives.js";
+
+            function StarterReadyCard() {
+              const { appState } = useStarterAppState();
+              const plan = currentPlan();
+              const membershipState = String(appState.subscription?.state || "active").trim().toLowerCase();
+              return (
+                <div className="starter-stack">
+                  <StarterStatusBanner
+                    title="Access ready."
+                    body="You're signed in. Manage your membership and profile in Account."
+                    actions={
+                      <>
+                        <Link className="starter-button starter-button-primary" href="/app/profile">
+                          Open account
+                        </Link>
+                        <Link className="starter-button starter-button-secondary" href="/">
+                          Back to site
+                        </Link>
+                      </>
+                    }
+                  />
+                  <section className="starter-card starter-section-card">
+                    <p className="starter-eyebrow">Private access</p>
+                    <h1 className="starter-title starter-title-sm">{starterBusinessName}</h1>
+                    <p className="starter-copy">
+                      Your membership is active. Use Account to review your plan, billing state, and profile details.
+                    </p>
+                    <div className="starter-actions starter-actions-compact">
+                      <StarterStatePill label="Membership" state={membershipState} />
+                      <StarterStatePill label="Access" state={appState.access?.state || "ready"} />
+                    </div>
+                    <div className="starter-card starter-card-soft">
+                      <strong>{plan ? planSummary(plan) : "Plan details will appear here."}</strong>
+                      <p className="starter-note">
+                        {appState.user?.email ? `Signed in as ${String(appState.user.email)}` : "Account access is active."}
+                      </p>
+                    </div>
+                  </section>
+                </div>
+              );
+            }
+
+            function StarterAccessInner() {
+              const { appState } = useStarterAppState();
+              const [intent, setIntent] = useState("signin");
+              const [checkoutState, setCheckoutState] = useState("");
+
+              useEffect(() => {
+                if (typeof window === "undefined") return;
+                const params = new URLSearchParams(window.location.search);
+                const nextIntent = String(params.get("intent") || "signin").trim().toLowerCase();
+                const nextCheckout = String(params.get("checkout") || "").trim().toLowerCase();
+                setIntent(nextIntent === "subscribe" ? "subscribe" : "signin");
+                setCheckoutState(nextCheckout === "success" ? "success" : "");
+              }, []);
+
+              if (!appState) {
+                return (
+                  <section className="starter-card starter-section-card">
+                    <h1 className="starter-title starter-title-sm">Loading access state...</h1>
+                  </section>
+                );
+              }
+              if (appState.access.state === "ready") {
+                return <StarterReadyCard />;
+              }
+              if (appState.access.state === "blocked") {
+                return <StarterBlockedCard appState={appState} />;
+              }
+              if (appState.access.state === "subscription_required") {
+                return <StarterSubscriptionCard appState={appState} checkoutState={checkoutState} />;
+              }
+              return <StarterAuthCard intent={intent === "subscribe" ? "subscribe" : "signin"} />;
+            }
+
+            export function StarterAccessPage({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterAccessInner />
+                </StarterAppStateProvider>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_account_page_js() -> str:
+    return (
+        dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+            import { useEffect, useState } from "react";
+
+            import {
+              StarterAppStateProvider,
+              StarterAuthCard,
+              StarterStatePill,
+              StarterStatusBanner,
+              currentPlan,
+              formatDate,
+              formatMoney,
+              planSummary,
+              starterCancelSubscription,
+              starterLoadAppState,
+              starterProfile,
+              starterUpdateProfile,
+              useStarterAppState,
+            } from "./starter-primitives.js";
+
+            function StarterAccountInner() {
+              const { appState, setAppState } = useStarterAppState();
+              const [profile, setProfile] = useState(null);
+              const [displayName, setDisplayName] = useState("");
+              const [headline, setHeadline] = useState("");
+              const [bio, setBio] = useState("");
+              const [message, setMessage] = useState("");
+              const [error, setError] = useState("");
+              const [pending, setPending] = useState(false);
+              const [cancelMessage, setCancelMessage] = useState("");
+              const [cancelError, setCancelError] = useState("");
+              const [cancelPending, setCancelPending] = useState(false);
+
+              useEffect(() => {
+                if (!appState?.canManageProfile) return;
+                let active = true;
+                starterProfile()
+                  .then((payload) => {
+                    if (!active) return;
+                    const nextProfile = payload?.profile || null;
+                    setProfile(nextProfile);
+                    setDisplayName(String(nextProfile?.display_name || nextProfile?.displayName || ""));
+                    setHeadline(String(nextProfile?.headline || ""));
+                    setBio(String(nextProfile?.bio || ""));
+                  })
+                  .catch((loadError) => {
+                    if (!active) return;
+                    setError(String(loadError?.message || loadError || "Unable to load profile."));
+                  });
+                return () => {
+                  active = false;
+                };
+              }, [appState?.canManageProfile]);
+
+              if (!appState) {
+                return (
+                  <section className="starter-card starter-section-card">
+                    <h1 className="starter-title starter-title-sm">Loading account...</h1>
+                  </section>
+                );
+              }
+
+              if (!appState.authenticated) {
+                return (
+                  <StarterAuthCard
+                    intent="signin"
+                    kicker="Account"
+                    title="Sign in to open your account."
+                    copy="Use your email to manage your subscription and profile."
+                    backHref="/"
+                    backLabel="Back to site"
+                  />
+                );
+              }
+
+              const plan = currentPlan();
+              const usage = appState.account?.usage_this_period || {};
+              const revenue = appState.account?.revenue || {};
+              const statusState = String(appState.subscription?.state || "none").trim().toLowerCase();
+              const accessState = String(appState.access?.state || "unknown").trim().toLowerCase();
+              const currentPeriodEnd = appState.subscription?.currentPeriodEnd || "";
+              const cancelScheduled = Boolean(appState.subscription?.cancelAtPeriodEnd);
+              const canCancelSubscription = Boolean(
+                (appState.subscription?.source?.stripe_subscription_id || appState.subscription?.source?.stripeSubscriptionId) &&
+                !cancelScheduled
+              );
+              const paidLabel = formatMoney(revenue.amount_paid_cents || 0, "usd");
+              const profileName =
+                String(
+                  profile?.display_name ||
+                  profile?.displayName ||
+                  appState.user?.name ||
+                  ""
+                ).trim() || "Not set yet";
+              const bannerTitle = cancelScheduled
+                ? "Cancellation scheduled."
+                : appState.entitled
+                  ? "Account ready."
+                  : "Subscription required.";
+              const bannerBody = cancelScheduled
+                ? `Your subscription stays active until ${formatDate(currentPeriodEnd)}.`
+                : appState.entitled
+                  ? "Manage your plan, billing state, and profile from one place."
+                  : statusState === "past_due"
+                    ? "Billing needs attention before access is restored."
+                    : "Finish subscription to unlock private access.";
+
+              async function handleSave(event) {
+                event.preventDefault();
+                setPending(true);
+                setMessage("");
+                setError("");
+                try {
+                  const payload = await starterUpdateProfile({
+                    display_name: displayName,
+                    headline,
+                    bio,
+                  });
+                  const nextProfile = payload?.profile || null;
+                  setProfile(nextProfile);
+                  setMessage("Profile saved.");
+                } catch (saveError) {
+                  setError(String(saveError?.message || saveError || "Unable to save profile."));
+                } finally {
+                  setPending(false);
+                }
+              }
+
+              async function handleCancelSubscription() {
+                if (typeof window !== "undefined") {
+                  const confirmed = window.confirm("Cancel this subscription at the end of the current billing period?");
+                  if (!confirmed) return;
+                }
+                setCancelPending(true);
+                setCancelMessage("");
+                setCancelError("");
+                try {
+                  await starterCancelSubscription();
+                  const nextAppState = await starterLoadAppState();
+                  setAppState(nextAppState);
+                  setCancelMessage("Cancellation scheduled. Access stays active until the end of the current period.");
+                } catch (cancelRequestError) {
+                  setCancelError(
+                    String(
+                      cancelRequestError?.message ||
+                      cancelRequestError ||
+                      "Unable to cancel the subscription."
+                    )
+                  );
+                } finally {
+                  setCancelPending(false);
+                }
+              }
+
+              return (
+                <div className="starter-stack">
+                  <StarterStatusBanner
+                    title={bannerTitle}
+                    body={bannerBody}
+                    actions={
+                      <>
+                        <Link className="starter-button starter-button-secondary" href="/app">
+                          Access
+                        </Link>
+                        <Link className="starter-button starter-button-secondary" href="/">
+                          Site
+                        </Link>
+                      </>
+                    }
+                  />
+                  <div className="starter-account-grid">
+                    <section className="starter-card starter-section-card">
+                      <p className="starter-eyebrow">Account</p>
+                      <h1 className="starter-title starter-title-sm">Subscription & access</h1>
+                      <p className="starter-copy">Everything tied to your membership lives here.</p>
+                      <div className="starter-actions starter-actions-compact">
+                        <StarterStatePill label="Membership" state={statusState} />
+                        <StarterStatePill label="Access" state={accessState} />
+                      </div>
+                      <dl className="starter-key-value">
+                        <div>
+                          <dt>Email</dt>
+                          <dd>{String(appState.user?.email || "—")}</dd>
+                        </div>
+                        <div>
+                          <dt>Plan</dt>
+                          <dd>{plan ? planSummary(plan) : "No paid plan yet"}</dd>
+                        </div>
+                        <div>
+                          <dt>Usage this period</dt>
+                          <dd>{Number(usage.events || 0)} events</dd>
+                        </div>
+                        <div>
+                          <dt>Paid so far</dt>
+                          <dd>{paidLabel}</dd>
+                        </div>
+                        <div>
+                          <dt>Billing cadence</dt>
+                          <dd>{plan ? String(plan.billingInterval || "month") : "Monthly"}</dd>
+                        </div>
+                        <div>
+                          <dt>Current period end</dt>
+                          <dd>{formatDate(currentPeriodEnd)}</dd>
+                        </div>
+                      </dl>
+                      <div className="starter-actions starter-actions-compact">
+                        {!appState.entitled ? (
+                          <Link className="starter-button starter-button-primary" href="/app?intent=subscribe">
+                            {statusState === "past_due" ? "Update billing" : "Subscribe"}
+                          </Link>
+                        ) : null}
+                        {canCancelSubscription ? (
+                          <button
+                            className="starter-button starter-button-secondary"
+                            type="button"
+                            onClick={handleCancelSubscription}
+                            disabled={cancelPending}
+                          >
+                            {cancelPending ? "Cancelling..." : "Cancel subscription"}
+                          </button>
+                        ) : null}
+                      </div>
+                      {cancelScheduled ? (
+                        <div className="starter-alert">
+                          Cancellation is already scheduled. Access remains live until {formatDate(currentPeriodEnd)}.
+                        </div>
+                      ) : null}
+                      {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
+                      {cancelError ? <div className="starter-alert starter-alert-error">{cancelError}</div> : null}
+                    </section>
+                    <section className="starter-card starter-section-card">
+                      <p className="starter-eyebrow">Profile</p>
+                      <h1 className="starter-title starter-title-sm">Account profile</h1>
+                      <p className="starter-copy">Update the name and details attached to your account.</p>
+                      <dl className="starter-key-value">
+                        <div>
+                          <dt>Display name</dt>
+                          <dd>{profileName}</dd>
+                        </div>
+                        <div>
+                          <dt>Headline</dt>
+                          <dd>{String(profile?.headline || headline || "Not set yet") || "Not set yet"}</dd>
+                        </div>
+                      </dl>
+                      {appState.canManageProfile ? (
+                        <form className="starter-form" onSubmit={handleSave}>
+                          <div className="starter-field">
+                            <label htmlFor="starter-display-name">Display name</label>
+                            <input
+                              id="starter-display-name"
+                              className="starter-input"
+                              value={displayName}
+                              onChange={(event) => setDisplayName(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-field">
+                            <label htmlFor="starter-headline">Headline</label>
+                            <input
+                              id="starter-headline"
+                              className="starter-input"
+                              value={headline}
+                              onChange={(event) => setHeadline(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-field">
+                            <label htmlFor="starter-bio">Bio</label>
+                            <textarea
+                              id="starter-bio"
+                              className="starter-textarea"
+                              value={bio}
+                              onChange={(event) => setBio(event.target.value)}
+                            />
+                          </div>
+                          <div className="starter-actions starter-actions-compact">
+                            <button className="starter-button starter-button-primary" type="submit" disabled={pending}>
+                              {pending ? "Saving..." : "Save profile"}
+                            </button>
+                          </div>
+                          {message ? <div className="starter-alert">{message}</div> : null}
+                          {error ? <div className="starter-alert starter-alert-error">{error}</div> : null}
+                        </form>
+                      ) : (
+                        <div className="starter-card starter-card-soft">
+                          <p className="starter-note">
+                            Profile editing is not live on this surface yet, but your subscription and account state are.
+                          </p>
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                </div>
+              );
+            }
+
+            export function StarterAccountPage({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterAccountInner />
+                </StarterAppStateProvider>
+              );
+            }
+            """
+        ).strip()
         + "\n"
     )
 
@@ -3815,8 +4338,10 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         "src/app/app/page.js": _subuser_app_starter_app_page_js(),
         "src/app/app/(product)/layout.js": _subuser_app_starter_product_layout_js(),
         "src/app/app/profile/page.js": _subuser_app_starter_profile_page_js(),
+        "src/components/starter-account-page.js": _subuser_app_starter_account_page_js(),
+        "src/components/starter-access-page.js": _subuser_app_starter_access_page_js(),
         "src/components/starter-context.js": _subuser_app_starter_context_js(title_literal=title_literal),
-        "src/components/starter-pages.js": _subuser_app_starter_pages_js(),
+        "src/components/starter-primitives.js": _subuser_app_starter_primitives_js(),
         "src/components/starter-server.js": _subuser_app_starter_server_js(),
     }
 
@@ -3986,13 +4511,13 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        "- Any starter source already present in `src/` is generic wiring only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
+        "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        "- AppKit now seeds canonical starter shells for `/`, `/app`, and `/app/profile`. Reuse those route intentions and access boundaries by default, but redesign their layout, hierarchy, copy, and styling freely when the business calls for it.",
-        "- For a first monthly bootstrap, treat the seeded `/app` route as a polished access shell for sign-in, subscribe, and account management unless the contract explicitly requires more product workflow.",
+        "- AppKit now seeds only a minimal landing stub at `/`, a thin `/app` access gate, and a thin `/app/profile` account page. Reuse those route intentions and access boundaries by default, but replace their layout, hierarchy, copy, and styling freely when the business calls for it.",
+        "- For a first monthly bootstrap, treat the seeded `/app` route as a sign-in and subscribe gate, and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
         "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
-        f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account gating when the seeded shells already cover the route.",
+        f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account rails when the seeded wrappers already cover the route.",
     ]
     return "\n".join(lines).strip()
 

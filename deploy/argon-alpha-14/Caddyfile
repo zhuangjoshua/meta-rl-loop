@@ -9,6 +9,10 @@ app.fourmanifold.com {
 	reverse_proxy 127.0.0.1:9119
 }
 
+skills.fourmanifold.com {
+	reverse_proxy 127.0.0.1:9119
+}
+
 research-composer.fourmanifold.com {
 	reverse_proxy 127.0.0.1:9120
 }
@@ -20,7 +24,7 @@ https:// {
 
 	@product {
 		host *.fourmanifold.com
-		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
@@ -39,6 +43,14 @@ https:// {
 		reverse_proxy 127.0.0.1:9120
 	}
 
+	@skills_lab host skills.fourmanifold.com
+	handle @skills_lab {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host skills.fourmanifold.com
+			header_up X-Forwarded-Proto https
+		}
+	}
+
 	@app host app.fourmanifold.com
 	handle @app {
 		reverse_proxy 127.0.0.1:9119 {
@@ -49,7 +61,7 @@ https:// {
 
 	@product {
 		host *.fourmanifold.com
-		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {

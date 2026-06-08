@@ -459,10 +459,55 @@ def _refresh_business_surface_after_bootstrap(
     (for example via `business_write_file`) after an earlier worker refresh already ran against an
     incomplete scratch workspace. The durable business root is the source of truth for product-host
     publication, so do one final trusted refresh against that durable state before marking bootstrap
-    complete.
+    complete — but only when durable `product/site/*` artifact writes actually happened after the
+    most recent successful publish.
     """
 
     from .core import TakyonStore, handle_business_refresh_product_surface
+
+    def _path_targets_source(candidate: Any, expected_source: str) -> bool:
+        normalized_candidate = str(candidate or "").strip().strip("/")
+        normalized_source = str(expected_source or "").strip().strip("/")
+        if not normalized_candidate or not normalized_source:
+            return False
+        return normalized_candidate == normalized_source or normalized_candidate.startswith(f"{normalized_source}/")
+
+    def _source_changed_after_publish(
+        store: Any,
+        *,
+        business_slug: str,
+        expected_source: str,
+        published_at: str,
+    ) -> bool:
+        timestamp = str(published_at or "").strip()
+        if not timestamp:
+            return True
+        try:
+            with store._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM events
+                    WHERE business_slug = ?
+                      AND created_at > ?
+                      AND event_type IN (?, ?)
+                    ORDER BY created_at ASC
+                    """,
+                    (business_slug, timestamp, "artifact.write", "artifact.patch"),
+                ).fetchall()
+        except Exception:
+            return True
+        for row in rows or []:
+            raw_payload = ""
+            try:
+                raw_payload = str(row["payload_json"] or "")
+            except Exception:
+                raw_payload = ""
+            payload = _parse_jsonish_output(raw_payload)
+            candidate = payload.get("path") or payload.get("source_path") or payload.get("workspace")
+            if _path_targets_source(candidate, expected_source):
+                return True
+        return False
 
     store = TakyonStore(operator_user_id=str(operator_user_id or "").strip() or None)
     summary = store.read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
@@ -472,6 +517,26 @@ def _refresh_business_surface_after_bootstrap(
         return None
     source_path = str(surface.get("source_path") or "").strip()
     if not source_path:
+        return None
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), Mapping) else {}
+    publish_state = metadata.get("takyon_publish") if isinstance(metadata.get("takyon_publish"), Mapping) else {}
+    publish_status = str(
+        publish_state.get("status") or surface.get("publish_status") or ""
+    ).strip().lower()
+    publish_source_path = str(publish_state.get("publish_source_path") or "").strip() or source_path
+    published_at = str(
+        publish_state.get("published_at") or surface.get("published_at") or ""
+    ).strip()
+    if (
+        publish_status == "published"
+        and _path_targets_source(publish_source_path, source_path)
+        and not _source_changed_after_publish(
+            store,
+            business_slug=slug,
+            expected_source=source_path,
+            published_at=published_at,
+        )
+    ):
         return None
 
     raw = handle_business_refresh_product_surface(

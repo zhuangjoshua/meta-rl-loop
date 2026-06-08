@@ -3611,6 +3611,40 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
     server._sessions.pop(sid, None)
 
 
+def test_session_create_skill_lab_preloads_selected_skill(monkeypatch):
+    class _NoopTimer:
+        def __init__(self, _delay, _target):
+            self._target = _target
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(server.threading, "Timer", _NoopTimer)
+
+    response = server.handle_request(
+        {
+            "id": "1",
+            "method": "session.create",
+            "params": {
+                "_takyon_skill_lab_skills": ["takyon-reddit-ads"],
+                "_takyon_request_host": "skills.fourmanifold.com",
+            },
+        }
+    )
+
+    assert response.get("result"), f"got error: {response.get('error')}"
+    result = response["result"]
+    sid = result["session_id"]
+    try:
+        assert result["takyon_skill_lab"]["enabled"] is True
+        assert result["takyon_skill_lab"]["skills"] == ["takyon-reddit-ads"]
+        session = server._sessions[sid]
+        assert session["takyon_skill_lab"]["skills"] == ["takyon-reddit-ads"]
+        assert "Takyon Skill Lab" in session["takyon_skill_lab"]["prompt"]
+    finally:
+        server._sessions.pop(sid, None)
+
+
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_db_error", "locking protocol")
@@ -3997,6 +4031,190 @@ def test_prompt_submit_gateway_agent_uses_isolated_turn_runner(monkeypatch):
         complete = [evt for evt in emitted if evt and evt[0] == "message.complete"]
         assert complete
         assert complete[-1][2]["text"] == "isolated ok"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_skill_lab_uses_raw_prompt_and_preloaded_skill_prompt(monkeypatch):
+    emitted: list[tuple] = []
+    called: dict[str, object] = {}
+
+    class _Agent:
+        _takyon_operator_gateway = True
+        session_id = "session-key"
+        session_estimated_cost_usd = 0.0
+        model = "test-model"
+        provider = "openrouter"
+        api_mode = "chat_completions"
+        base_url = "https://openrouter.ai/api/v1"
+        max_iterations = 90
+        enabled_toolsets = ["takyon", "web", "skills", "todo"]
+        disabled_toolsets = ["terminal", "file"]
+        request_overrides = {}
+        reasoning_config = None
+        service_tier = None
+        pass_session_id = False
+        skip_context_files = False
+        skip_memory = False
+        ephemeral_system_prompt = "base prompt"
+
+        def run_conversation(self, *args, **kwargs):
+            raise AssertionError("inline run_conversation should not be used")
+
+    def _fake_runner(
+        sid,
+        session,
+        agent,
+        run_message,
+        history,
+        *,
+        operator_user_id,
+        business_slug,
+        streamer,
+        system_message_override=None,
+        max_iterations_override=None,
+        agent_config_overrides=None,
+    ):
+        called["run_message"] = run_message
+        called["business_slug"] = business_slug
+        called["agent_config_overrides"] = dict(agent_config_overrides or {})
+        return {
+            "result": {
+                "final_response": "skill lab ok",
+                "messages": [{"role": "assistant", "content": "skill lab ok"}],
+            },
+            "usage": {"total": 12},
+            "usage_snapshot": {"session_total_tokens": 12},
+            "session_id": "session-key",
+            "session_estimated_cost_usd": 0.0,
+        }
+
+    server._sessions["sid"] = _session(
+        agent=_Agent(),
+        takyon_skill_lab={
+            "skills": ["takyon-reddit-ads"],
+            "prompt": "skill lab prompt",
+        },
+    )
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "test the selected skill"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert called["run_message"] == "test the selected skill"
+        assert called["business_slug"] == ""
+        assert called["agent_config_overrides"] == {
+            "ephemeral_system_prompt": "base prompt\n\nskill lab prompt"
+        }
+        assert server._sessions["sid"]["history"] == [
+            {"role": "assistant", "content": "skill lab ok"}
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_skill_lab_contextualizes_once_real_business_exists(monkeypatch):
+    emitted: list[tuple] = []
+    called: dict[str, object] = {}
+
+    class _Agent:
+        _takyon_operator_gateway = True
+        session_id = "session-key"
+        session_estimated_cost_usd = 0.0
+        model = "test-model"
+        provider = "openrouter"
+        api_mode = "chat_completions"
+        base_url = "https://openrouter.ai/api/v1"
+        max_iterations = 90
+        enabled_toolsets = ["takyon", "web", "skills", "todo"]
+        disabled_toolsets = ["terminal", "file"]
+        request_overrides = {}
+        reasoning_config = None
+        service_tier = None
+        pass_session_id = False
+        skip_context_files = False
+        skip_memory = False
+        ephemeral_system_prompt = "base prompt"
+
+        def run_conversation(self, *args, **kwargs):
+            raise AssertionError("inline run_conversation should not be used")
+
+    def _fake_runner(
+        sid,
+        session,
+        agent,
+        run_message,
+        history,
+        *,
+        operator_user_id,
+        business_slug,
+        streamer,
+        system_message_override=None,
+        max_iterations_override=None,
+        agent_config_overrides=None,
+    ):
+        called["run_message"] = run_message
+        called["business_slug"] = business_slug
+        called["agent_config_overrides"] = dict(agent_config_overrides or {})
+        return {
+            "result": {
+                "final_response": "skill lab business ok",
+                "messages": [{"role": "assistant", "content": "skill lab business ok"}],
+            },
+            "usage": {"total": 12},
+            "usage_snapshot": {"session_total_tokens": 12},
+            "session_id": "session-key",
+            "session_estimated_cost_usd": 0.0,
+        }
+
+    server._sessions["sid"] = _session(
+        agent=_Agent(),
+        takyon_current_business="dev-skill-lab",
+        takyon_skill_lab={
+            "skills": ["takyon-reddit-ads"],
+            "prompt": "skill lab prompt",
+        },
+    )
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
+        monkeypatch.setattr(
+            server,
+            "_build_takyon_prompt_text",
+            lambda _session, prompt, create_in_test_mode=False: f"CTX[{_session.get('takyon_current_business')}]: {prompt}",
+        )
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "test the selected skill"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert called["run_message"] == "CTX[dev-skill-lab]: test the selected skill"
+        assert called["business_slug"] == "dev-skill-lab"
+        assert called["agent_config_overrides"] == {
+            "ephemeral_system_prompt": "base prompt\n\nskill lab prompt"
+        }
+        assert server._sessions["sid"]["history"] == [
+            {"role": "assistant", "content": "skill lab business ok"}
+        ]
     finally:
         server._sessions.pop("sid", None)
 

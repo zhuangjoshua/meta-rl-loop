@@ -68,11 +68,15 @@ class WSTransport:
         loop: asyncio.AbstractEventLoop,
         *,
         operator_principal: Any | None = None,
+        request_host: str = "",
+        request_origin: str = "",
     ) -> None:
         self._ws = ws
         self._loop = loop
         self._closed = False
         self.operator_principal = operator_principal
+        self.request_host = str(request_host or "").strip()
+        self.request_origin = str(request_origin or "").strip()
 
     def write(self, obj: dict) -> bool:
         if self._closed:
@@ -136,6 +140,8 @@ async def handle_ws(
         ws,
         asyncio.get_running_loop(),
         operator_principal=principal,
+        request_host=str(ws.headers.get("host", "") or ""),
+        request_origin=str(ws.headers.get("origin", "") or ""),
     )
 
     sid = str(session_id or "").strip()

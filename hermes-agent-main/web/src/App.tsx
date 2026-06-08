@@ -67,6 +67,7 @@ import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
+import SkillLabPage from "@/pages/SkillLabPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -77,8 +78,13 @@ import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 
+function isSkillLabHost() {
+  if (typeof window === "undefined") return false;
+  return /^skills\.fourmanifold\.com$/i.test(window.location.hostname);
+}
+
 function RootRedirect() {
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to={isSkillLabHost() ? "/skill-lab" : "/sessions"} replace />;
 }
 
 function UnknownRouteFallback({
@@ -317,11 +323,15 @@ export default function App() {
   const { manifests, loading: pluginsLoading } = usePlugins();
   const { theme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const skillLabHost = isSkillLabHost();
   const closeMobile = useCallback(() => setMobileOpen(false), []);
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const embeddedChat = isDashboardEmbeddedChatEnabled();
-  const isChatRoute = embeddedChat && (normalizedPath === "/" || normalizedPath === "/chat");
+  const isChatRoute =
+    embeddedChat &&
+    !skillLabHost &&
+    (normalizedPath === "/" || normalizedPath === "/chat");
 
   // `dashboard.show_token_analytics` gates the Analytics nav item.  The
   // page itself remains reachable by URL (it renders an explanation when
@@ -363,17 +373,29 @@ export default function App() {
   const builtinRoutes = useMemo(
     () => ({
       ...BUILTIN_ROUTES_CORE,
-      ...(embeddedChat ? { "/": ChatRouteSink, "/chat": ChatRouteSink } : {}),
+      "/skill-lab": skillLabHost ? SkillLabPage : RootRedirect,
+      ...(embeddedChat
+        ? skillLabHost
+          ? { "/chat": ChatRouteSink }
+          : { "/": ChatRouteSink, "/chat": ChatRouteSink }
+        : {}),
     }),
-    [embeddedChat],
+    [embeddedChat, skillLabHost],
   );
 
   const builtinNav = useMemo(() => {
-    const base = embeddedChat
-      ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
+    const baseRest = skillLabHost
+      ? [
+          ...BUILTIN_NAV_REST.slice(0, 6),
+          { path: "/skill-lab", label: "Skill Lab", icon: Sparkles },
+          ...BUILTIN_NAV_REST.slice(6),
+        ]
       : BUILTIN_NAV_REST;
+    const base = embeddedChat
+      ? [CHAT_NAV_ITEM, ...baseRest]
+      : baseRest;
     return showTokenAnalytics ? base : base.filter((n) => n.path !== "/analytics");
-  }, [embeddedChat, showTokenAnalytics]);
+  }, [embeddedChat, showTokenAnalytics, skillLabHost]);
 
   const sidebarNav = useMemo(
     () => partitionSidebarNav(builtinNav, manifests),

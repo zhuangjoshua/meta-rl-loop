@@ -108,9 +108,12 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
     assert (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").exists()
     assert (workspace_root / "src" / "app" / "app" / "profile" / "page.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-pages.js").exists()
+    assert (workspace_root / "src" / "components" / "starter-primitives.js").exists()
+    assert (workspace_root / "src" / "components" / "starter-access-page.js").exists()
+    assert (workspace_root / "src" / "components" / "starter-account-page.js").exists()
     assert (workspace_root / "src" / "components" / "starter-server.js").exists()
     starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
+    globals_css = (workspace_root / "src" / "app" / "globals.css").read_text()
     next_config = (workspace_root / "next.config.js").read_text()
     assert 'export const starterDefaultPlanKey =' in starter_context
     assert "export const starterConfiguredPlans =" in starter_context
@@ -134,29 +137,24 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "export async function starterLoadViewer" in starter_context
     assert "export async function starterLoadAppState" in starter_context
     assert 'send_email: true' not in starter_context
-    starter_pages = (workspace_root / "src" / "components" / "starter-pages.js").read_text()
-    assert "function StarterLandingPage" in starter_pages
-    assert "function landingState(appState = null)" in starter_pages
-    assert "function StarterProductAccessGate" in starter_pages
-    assert "function StarterProfilePageInner" in starter_pages
-    assert 'new URLSearchParams(window.location.search)' in starter_pages
-    assert 'useSearchParams' not in starter_pages
-    assert "Route-level access lives here." not in starter_pages
-    assert "Use the rails. Redesign everything else." not in starter_pages
-    assert "This shell is already behind the real app gate." not in starter_pages
-    assert "Anonymous visitors can see the landing page" not in starter_pages
-    assert "Open /app" not in starter_pages
-    assert "Open profile" not in starter_pages
-    assert "Start in AppKit" not in starter_pages
-    assert "This action is not available yet." not in starter_pages
-    assert "viewer state" not in starter_pages
-    assert "Connect a real plan before launch." not in starter_pages
-    assert "Subscription details appear here once a real plan is configured." not in starter_pages
-    assert "Land in a real product shell" not in starter_pages
-    assert "We received your checkout." in starter_pages
-    assert "Sign in to view your account." in starter_pages
-    assert "Use your email to manage your subscription and profile." in starter_pages
-    assert "Cancel subscription" in starter_pages
+    starter_primitives = (workspace_root / "src" / "components" / "starter-primitives.js").read_text()
+    starter_access_page = (workspace_root / "src" / "components" / "starter-access-page.js").read_text()
+    starter_account_page = (workspace_root / "src" / "components" / "starter-account-page.js").read_text()
+    assert "export function StarterAuthCard" in starter_primitives
+    assert "export function StarterSubscriptionCard" in starter_primitives
+    assert "export function StarterBlockedCard" in starter_primitives
+    assert 'new URLSearchParams(window.location.search)' in starter_access_page
+    assert 'useSearchParams' not in starter_access_page
+    assert 'title="Access ready."' in starter_access_page
+    assert "Open account" in starter_access_page
+    assert "Use Account to review your plan, billing state, and profile details." in starter_access_page
+    assert "Plan details will appear here." in starter_access_page
+    assert "Sign in to open your account." in starter_account_page
+    assert "Use your email to manage your subscription and profile." in starter_account_page
+    assert "Cancellation scheduled." in starter_account_page
+    assert "Cancel subscription" in starter_account_page
+    assert "--starter-max: 1120px;" in globals_css
+    assert "width: min(calc(100% - clamp(24px, 4vw, 64px)), var(--starter-max));" in globals_css
     starter_server = (workspace_root / "src" / "components" / "starter-server.js").read_text()
     assert "function requestHasSessionCookie()" in starter_server
     assert 'const target = "takyon_app_session="' in starter_server
@@ -165,7 +163,7 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     app_page = (workspace_root / "src" / "app" / "app" / "page.js").read_text()
     product_layout = (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").read_text()
     assert "loadServerAppState" in app_page
-    assert "StarterProductAccessGate initialAppState={initialAppState}" in app_page
+    assert "StarterAccessPage initialAppState={initialAppState}" in app_page
     assert 'if (initialAppState?.access?.state !== "ready")' in product_layout
     assert 'redirect("/app")' in product_layout
     assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
@@ -200,7 +198,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "starterAppState(...)" in block
     assert "starterLoadViewer()" in block
     assert "starterLoadAppState()" in block
-    assert "canonical starter shells for `/`, `/app`, and `/app/profile`" in block
+    assert "minimal landing stub at `/`, a thin `/app` access gate, and a thin `/app/profile` account page" in block
     assert "Keep customer-facing copy free of developer framing." in block
 
 

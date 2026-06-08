@@ -339,6 +339,126 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
     assert server._sessions[sid]["takyon_current_business"] == "latexflow"
 
 
+def test_takyon_dashboard_create_rejects_bootstrap_false_off_skills_host(server):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "",
+        "takyon_operator_user_id": "user-1",
+        "takyon_request_host": "app.fourmanifold.com",
+    }
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-skill-lab-gate-1",
+        {
+            "session_id": sid,
+            "business": "dev-lab",
+            "business_name": "Dev Lab",
+            "goal": "test goal",
+            "mode": "live",
+            "bootstrap": False,
+        },
+    )
+
+    assert response["error"]["code"] == 4048
+    assert "skills.fourmanifold.com" in response["error"]["message"]
+
+
+def test_takyon_dashboard_create_bootstrap_false_creates_ready_dev_business(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "",
+        "takyon_operator_user_id": "user-1",
+        "takyon_request_host": "skills.fourmanifold.com",
+        "agent_ready": threading.Event(),
+    }
+    captured: dict[str, object] = {}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+        assert name == "Dev Lab"
+        assert goal == "test goal"
+        assert slug_hint == "dev-lab"
+        assert operator_user_id == "user-1"
+        return "Dev Lab", "dev-lab"
+
+    def fake_run_takyon_command(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return {
+            "success": True,
+            "business": "dev-lab",
+            "mode": "live",
+        }
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "dev-lab")
+    monkeypatch.setattr(
+        server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "dev-lab", "name": "Dev Lab", "mode": "live"}},
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "dev-lab",
+            "current": {"slug": "dev-lab", "name": "Dev Lab", "mode": "live"},
+            "overview": {"goal": "test goal"},
+            "outputs": [],
+            "background_run": None,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_businesses_for_session",
+        lambda *_args, **_kwargs: [{"slug": "dev-lab", "name": "Dev Lab"}],
+    )
+    monkeypatch.setattr(server, "_takyon_store", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        server,
+        "_start_streaming_session_turn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("bootstrap stream should not start")),
+    )
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-skill-lab-ready-1",
+        {
+            "session_id": sid,
+            "business": "dev-lab",
+            "business_name": "Dev Lab",
+            "goal": "test goal",
+            "mode": "live",
+            "bootstrap": False,
+        },
+    )
+
+    assert captured["argv"] == [
+        "create",
+        "--live",
+        "--no-auto",
+        "--name",
+        "Dev Lab",
+        "dev-lab",
+        "test goal",
+    ]
+    result = response["result"]
+    assert result["business_slug"] == "dev-lab"
+    assert result["lifecycle_state"] == "ready"
+    assert result["job_id"] == ""
+    assert result["job_kind"] == ""
+    assert result["job_status"] == ""
+    assert result["dev_mode"] is True
+    assert result["background_run"] is None
+    assert server._sessions[sid]["takyon_current_business"] == "dev-lab"
+
+
 def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(server, monkeypatch):
     sid = "takyon-session"
     server._sessions[sid] = {"takyon_current_business": "", "takyon_operator_user_id": "user-1"}

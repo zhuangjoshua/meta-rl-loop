@@ -24,6 +24,9 @@ export function resolvePageTitle(
   if (normalized === "/") {
     return t.app.nav.sessions;
   }
+  if (normalized === "/skill-lab") {
+    return "Skill Lab";
+  }
   const plugin = pluginTabs.find((p) => p.path === normalized);
   if (plugin) {
     return plugin.label;

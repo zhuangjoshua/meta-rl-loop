@@ -3695,14 +3695,14 @@ async def get_takyon_business_site_preview(
             if isinstance(surface, dict):
                 publish_status = str(surface.get("publish_status") or "").strip().lower()
                 public_url = str(surface.get("public_url") or "").strip()
-                if publish_status == "published" and re.match(r"^https?://", public_url, re.IGNORECASE):
+                if re.match(r"^https?://", public_url, re.IGNORECASE):
                     return {
                         "business_slug": business,
                         "path": normalized_requested_path,
                         "size": 0,
                         "url": public_url,
                         "mode": "live_url",
-                        "status": "published",
+                        "status": publish_status or "ready",
                     }
         candidate = store._resolve_business_file(business, requested_path, sync=False)
         if candidate.is_dir() or not candidate.suffix:
@@ -7491,10 +7491,14 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
         "params": body.params or {},
     }
 
+    params = dict(req.get("params") or {})
+    params["_takyon_request_host"] = str(request.headers.get("host", "") or "")
+    params["_takyon_request_origin"] = str(request.headers.get("origin", "") or "")
+    req["params"] = params
+
     if req["method"] == "session.create":
         principal = _resolve_dashboard_request_principal(request)
         if principal is not None:
-            params = dict(req.get("params") or {})
             params.setdefault("_takyon_operator_user_id", str(principal.user_id))
             req["params"] = params
 

@@ -195,6 +195,153 @@ def test_handlers_registry_maps_x_publish_outreach():
     assert worker.HANDLERS["x.publish_outreach"] is worker.x_publish_outreach_handler
 
 
+def test_bootstrap_final_surface_refresh_skips_redundant_republish(monkeypatch):
+    called = {"count": 0}
+
+    def _unexpected_refresh(*args, **kwargs):
+        called["count"] += 1
+        return json.dumps({"success": True, "surface_refresh": {"status": "passed", "publish": {"status": "published"}}})
+
+    class _FakeCursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return _FakeCursor(self._rows)
+
+    class _FakeStore:
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:permitkit"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "source_path": "product/site",
+                        "publish_status": "published",
+                        "published_at": "2026-06-08T15:48:31+00:00",
+                        "metadata": {
+                            "takyon_publish": {
+                                "status": "published",
+                                "published_at": "2026-06-08T15:48:31+00:00",
+                                "publish_source_path": "product/site",
+                            }
+                        },
+                    }
+                }
+            }
+
+        def _connect(self):
+            return _FakeConn([])
+
+    monkeypatch.setattr(core, "TakyonStore", lambda operator_user_id=None: _FakeStore())
+    monkeypatch.setattr(core, "handle_business_refresh_product_surface", _unexpected_refresh)
+
+    result = worker._refresh_business_surface_after_bootstrap(
+        "permitkit",
+        job_id="job-1",
+    )
+
+    assert result is None
+    assert called["count"] == 0
+
+
+def test_bootstrap_final_surface_refresh_runs_after_late_product_write(monkeypatch):
+    called: list[dict[str, Any]] = []
+
+    def _refresh(args, **kwargs):
+        called.append(dict(args))
+        return json.dumps(
+            {
+                "success": True,
+                "surface_refresh": {
+                    "status": "passed",
+                    "source_path": "product/site",
+                    "publish": {
+                        "status": "published",
+                        "public_url": "https://permitkit.fourmanifold.com/",
+                    },
+                },
+            }
+        )
+
+    class _FakeCursor:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return _FakeCursor(self._rows)
+
+    class _FakeStore:
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:permitkit"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "source_path": "product/site",
+                        "publish_status": "published",
+                        "published_at": "2026-06-08T15:48:31+00:00",
+                        "metadata": {
+                            "takyon_publish": {
+                                "status": "published",
+                                "published_at": "2026-06-08T15:48:31+00:00",
+                                "publish_source_path": "product/site",
+                            }
+                        },
+                    }
+                }
+            }
+
+        def _connect(self):
+            return _FakeConn(
+                [
+                    {
+                        "payload_json": json.dumps(
+                            {"path": "product/site/src/app/page.js"}
+                        )
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(core, "TakyonStore", lambda operator_user_id=None: _FakeStore())
+    monkeypatch.setattr(core, "handle_business_refresh_product_surface", _refresh)
+
+    result = worker._refresh_business_surface_after_bootstrap(
+        "permitkit",
+        job_id="job-2",
+    )
+
+    assert called and called[0]["source_path"] == "product/site"
+    assert isinstance(result, dict)
+    assert result["publish"]["status"] == "published"
+
+
 def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
     for name in ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
         monkeypatch.delenv(name, raising=False)

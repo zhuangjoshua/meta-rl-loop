@@ -190,12 +190,18 @@ export function useTakyonLitebulb() {
 
   const loadWorkspace = useCallback(async (slug: string) => {
     if (!slug) return;
-    const [workspacePayload, previewPayload] = await Promise.all([
-      api.getTakyonBusinessWorkspace(slug, 60),
-      api.getTakyonBusinessSitePreview(slug).catch(() => ({ url: "" })),
-    ]);
+    const workspacePayload = await api.getTakyonBusinessWorkspace(slug, 60);
     setWorkspace(workspacePayload);
-    setSitePreviewUrl(trimText(previewPayload.url));
+    try {
+      const previewPayload = await api.getTakyonBusinessSitePreview(slug);
+      const nextPreviewUrl = trimText(previewPayload.url);
+      if (nextPreviewUrl) {
+        setSitePreviewUrl(nextPreviewUrl);
+      }
+    } catch {
+      // Keep the last good preview URL instead of blanking the product pane
+      // on transient preview read failures.
+    }
   }, []);
 
   const loadCreativeCredits = useCallback(async (slug: string) => {

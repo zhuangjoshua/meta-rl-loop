@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 from agent.skill_utils import parse_frontmatter
 from takyon_constants import get_takyon_home
@@ -2393,6 +2394,164 @@ def _parse_tui_skills_env() -> list[str]:
     return skills
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = re.split(r"[\n,]", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = []
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        item = str(raw or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        items.append(item)
+    return items
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _normalize_request_hostname(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    except Exception:
+        parsed = None
+    hostname = str(getattr(parsed, "hostname", "") or "").strip().lower()
+    if hostname:
+        return hostname
+    lowered = raw.lower()
+    if lowered.startswith("[") and "]" in lowered:
+        return lowered[1:].split("]", 1)[0].strip()
+    return lowered.split(":", 1)[0].strip()
+
+
+def _takyon_request_hostname(
+    params: dict[str, Any] | None = None,
+    *,
+    session: dict[str, Any] | None = None,
+    transport: Any | None = None,
+) -> str:
+    if isinstance(session, dict):
+        cached = _normalize_request_hostname(session.get("takyon_request_host"))
+        if cached:
+            return cached
+    bound = transport or current_transport() or (session or {}).get("transport")
+    for candidate in (
+        getattr(bound, "request_host", "") if bound is not None else "",
+        getattr(bound, "request_origin", "") if bound is not None else "",
+        (params or {}).get("_takyon_request_host"),
+        (params or {}).get("_takyon_request_origin"),
+    ):
+        normalized = _normalize_request_hostname(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _takyon_is_skill_lab_host(
+    params: dict[str, Any] | None = None,
+    *,
+    session: dict[str, Any] | None = None,
+    transport: Any | None = None,
+) -> bool:
+    return _takyon_request_hostname(
+        params,
+        session=session,
+        transport=transport,
+    ) == "skills.fourmanifold.com"
+
+
+def _takyon_skill_lab_catalog() -> list[dict[str, Any]]:
+    skills_root = Path(__file__).resolve().parents[1] / "skills" / "takyon"
+    catalog: list[dict[str, Any]] = []
+    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+            meta = parse_frontmatter(text)[0]
+        except Exception:
+            meta = {}
+        skill_name = str(meta.get("name") or skill_file.parent.name).strip()
+        if not skill_name:
+            continue
+        hermes_meta = ((meta.get("metadata") or {}).get("hermes") or {})
+        routing_meta = hermes_meta.get("routing") or {}
+        catalog.append(
+            {
+                "name": skill_name,
+                "slug": skill_file.parent.name,
+                "description": str(meta.get("description") or "").strip(),
+                "category": str(hermes_meta.get("category") or "").strip(),
+                "owns": str(routing_meta.get("owns") or "").strip(),
+                "path": str(skill_file),
+            }
+        )
+    return catalog
+
+
+def _build_takyon_skill_lab_prompt(
+    skill_identifiers: list[str],
+    *,
+    session_id: str | None = None,
+) -> tuple[str, list[str], list[str]]:
+    from agent.skill_commands import build_preloaded_skills_prompt
+
+    selected = _normalize_string_list(skill_identifiers)
+    if not selected:
+        return "", [], []
+    catalog = _takyon_skill_lab_catalog()
+    by_identifier: dict[str, str] = {}
+    for item in catalog:
+        name = str(item.get("name") or "").strip()
+        slug = str(item.get("slug") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        if name:
+            by_identifier.setdefault(name, path)
+        if slug:
+            by_identifier.setdefault(slug, path)
+    resolved_identifiers = [by_identifier.get(item, item) for item in selected]
+
+    skills_prompt, loaded_skills, missing_skills = build_preloaded_skills_prompt(
+        resolved_identifiers,
+        task_id=session_id,
+    )
+    session_note = (
+        "You are in Takyon Skill Lab, a development test session for selected Takyon skills.\n"
+        "If a dev business is already in scope, use the normal Takyon business rails for it.\n"
+        "If no business is in scope, do not auto-bootstrap one just because a selected skill is normally business-scoped.\n"
+        "If the active skill needs business state, credentials, receipts, or another authority gate, "
+        "name the exact missing prerequisite and stop rather than inventing it.\n"
+        "Keep the session chat-like and truthful: use real tools when useful, stream normally, and let the "
+        "tool/activity feed reflect what actually happened."
+    )
+    parts = [session_note.strip()]
+    if skills_prompt.strip():
+        parts.append(skills_prompt.strip())
+    return "\n\n".join(parts).strip(), loaded_skills, missing_skills
+
+
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
 
@@ -2748,8 +2907,12 @@ def _(rid, params: dict) -> dict:
     key = _new_session_key()
     cols = int(params.get("cols", 80))
     boot_business = str(params.get("_takyon_boot_business") or "").strip()
+    skill_lab_skills = _normalize_string_list(params.get("_takyon_skill_lab_skills"))
+    skill_lab_prompt = ""
+    loaded_skill_lab_skills: list[str] = []
     _enable_gateway_prompts()
     transport = current_transport() or _stdio_transport
+    request_host = _takyon_request_hostname(params, transport=transport)
     operator_user_id = str(params.get("_takyon_operator_user_id") or "").strip()
     if not operator_user_id:
         principal = getattr(transport, "operator_principal", None)
@@ -2758,6 +2921,24 @@ def _(rid, params: dict) -> dict:
         operator_user_id = str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
     if not operator_user_id:
         logger.warning("takyon session.create without operator_user_id")
+    if skill_lab_skills:
+        if not _takyon_is_skill_lab_host(params, transport=transport):
+            return _err(
+                rid,
+                4047,
+                "Skill Lab is available only on skills.fourmanifold.com",
+            )
+        (
+            skill_lab_prompt,
+            loaded_skill_lab_skills,
+            missing_skill_lab_skills,
+        ) = _build_takyon_skill_lab_prompt(skill_lab_skills, session_id=key)
+        if missing_skill_lab_skills:
+            return _err(
+                rid,
+                4046,
+                f"Unknown skill(s): {', '.join(missing_skill_lab_skills)}",
+            )
 
     ready = threading.Event()
 
@@ -2778,10 +2959,17 @@ def _(rid, params: dict) -> dict:
         "show_reasoning": _load_show_reasoning(),
         "slash_worker": None,
         "takyon_operator_user_id": operator_user_id,
+        "takyon_request_host": request_host,
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
         "transport": transport,
     }
+    if skill_lab_prompt:
+        session["takyon_skill_lab"] = {
+            "requested_skills": skill_lab_skills,
+            "skills": loaded_skill_lab_skills,
+            "prompt": skill_lab_prompt,
+        }
     _sessions[sid] = session
     boot_result = {
         "requested_business": "",
@@ -2849,6 +3037,10 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "takyon_boot": boot_result,
+            "takyon_skill_lab": {
+                "enabled": bool(skill_lab_prompt),
+                "skills": loaded_skill_lab_skills,
+            },
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -3731,6 +3923,22 @@ def _(rid, params: dict) -> dict:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
         session["running"] = True
+    skill_lab = session.get("takyon_skill_lab") if isinstance(session, dict) else None
+    skill_lab_prompt = ""
+    skill_lab_agent_overrides: dict[str, Any] | None = None
+    if isinstance(skill_lab, dict):
+        skill_lab_prompt = str(skill_lab.get("prompt") or "").strip()
+        if skill_lab_prompt:
+            current_ephemeral = str(
+                getattr(session.get("agent"), "ephemeral_system_prompt", "") or ""
+            ).strip()
+            combined_prompt = "\n\n".join(
+                part for part in (current_ephemeral, skill_lab_prompt) if part
+            ).strip()
+            skill_lab_agent_overrides = {
+                "ephemeral_system_prompt": combined_prompt or skill_lab_prompt
+            }
+    current_business = str(session.get("takyon_current_business") or "").strip()
 
     _start_streaming_session_turn(
         rid,
@@ -3738,8 +3946,9 @@ def _(rid, params: dict) -> dict:
         session,
         text,
         display_text=text,
-        contextualize_takyon=True,
+        contextualize_takyon=bool(current_business) or not bool(skill_lab_prompt),
         create_in_test_mode=create_in_test_mode,
+        agent_config_overrides=skill_lab_agent_overrides,
     )
     return _ok(rid, {"status": "streaming"})
 
@@ -8815,10 +9024,17 @@ def _(rid, params: dict) -> dict:
         requested_name = str(params.get("name") or params.get("business_name") or "").strip()
         requested_goal = str(params.get("goal") or "").strip()
         requested_mode = str(params.get("mode") or "live").strip().lower()
+        bootstrap_enabled = _coerce_bool(params.get("bootstrap"), default=True)
         if requested_mode == "test":
             return _err(rid, 4004, "test mode is disabled; all businesses run live")
         if requested_mode != "live":
             return _err(rid, 4004, "mode must be live")
+        if not bootstrap_enabled and not _takyon_is_skill_lab_host(params, session=session):
+            return _err(
+                rid,
+                4048,
+                "bootstrap=false is available only on skills.fourmanifold.com",
+            )
         can_stream_bootstrap = bool(
             session.get("agent") is not None or session.get("agent_ready") is not None
         )
@@ -8847,7 +9063,7 @@ def _(rid, params: dict) -> dict:
         store = TakyonStore(operator_user_id=operator_user_id)
         slug = _takyon_unique_business_slug(store, slug)
         command_argv = ["create", "--live"]
-        if can_stream_bootstrap:
+        if can_stream_bootstrap or not bootstrap_enabled:
             command_argv.append("--no-auto")
         if resolved_name:
             command_argv.extend(["--name", resolved_name])
@@ -8874,8 +9090,6 @@ def _(rid, params: dict) -> dict:
         schedule = str(config.get("default_ceo_schedule") or "every 6h").strip() or "every 6h"
         _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
-        session["takyon_pending_business_create"] = True
-        session["takyon_pending_business_create_at"] = time.time()
         workspace = _takyon_workspace_payload(
             session,
             slug,
@@ -8891,6 +9105,34 @@ def _(rid, params: dict) -> dict:
             current["slug"] = slug
         if active_mode and not str(current.get("mode") or "").strip():
             current["mode"] = active_mode
+
+        if not bootstrap_enabled:
+            session.pop("takyon_pending_business_create", None)
+            session.pop("takyon_pending_business_create_at", None)
+            session.pop("takyon_background_run", None)
+            return _ok(
+                rid,
+                {
+                    "business_slug": slug,
+                    "business_name": resolved_name,
+                    "goal": requested_goal,
+                    "mode": active_mode,
+                    "job_id": "",
+                    "job_kind": "",
+                    "job_status": "",
+                    "lifecycle_state": "ready",
+                    "scope": f"business:{slug}",
+                    "current": current,
+                    "overview": workspace.get("overview") or {},
+                    "outputs": workspace.get("outputs") or [],
+                    "background_run": None,
+                    "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
+                    "dev_mode": True,
+                },
+            )
+
+        session["takyon_pending_business_create"] = True
+        session["takyon_pending_business_create_at"] = time.time()
 
         if not can_stream_bootstrap:
             bootstrap_job = (
@@ -9415,6 +9657,16 @@ def _(rid, params: dict) -> dict:
             rid,
             {"text": prompt_text},
         )
+    except Exception as e:
+        return _err(rid, 5044, str(e))
+
+
+@method("takyon.skill_lab.catalog")
+def _(rid, params: dict) -> dict:
+    if not _takyon_is_skill_lab_host(params):
+        return _err(rid, 4047, "Skill Lab is available only on skills.fourmanifold.com")
+    try:
+        return _ok(rid, {"skills": _takyon_skill_lab_catalog()})
     except Exception as e:
         return _err(rid, 5044, str(e))
 

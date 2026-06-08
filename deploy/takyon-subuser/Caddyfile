@@ -15,7 +15,7 @@ https:// {
 
 	@product {
 		host *.fourmanifold.com
-		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
@@ -31,7 +31,7 @@ https:// {
 :80 {
 	@product {
 		host *.fourmanifold.com
-		not host app.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
+		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
