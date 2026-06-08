@@ -37,7 +37,12 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert 'const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";' in source
     assert 'if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {' in source
     assert "await loadHistory(sessionIdRef.current);" in source
-    assert 'const storedSessionId = readStoredLitebulbSession(businessSlug);' in source
+    assert "const resolveStoredSessionId = async (storedSessionId: string) => {" in source
+    assert "api.getSessionLatestDescendant(candidate)" in source
+    assert 'const readDurableSessionId = async (sessionId: string) => {' in source
+    assert 'gateway.request<SessionTitlePayload>("session.title"' in source
+    assert "const storedSessionId = await resolveStoredSessionId(" in source
+    assert "readStoredLitebulbSession(businessSlug)" in source
     assert 'gateway.request<SessionResumePayload>("session.resume"' in source
     assert 'writeStoredLitebulbSession(' in source
     assert 'clearStoredLitebulbSession(businessSlug);' in source

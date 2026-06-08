@@ -55,6 +55,10 @@ type SessionResumePayload = {
   messages?: Array<{ role?: string; text?: string }>;
 };
 
+type SessionTitlePayload = {
+  session_key?: string;
+};
+
 const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";
 
 function trimText(value: unknown) {
@@ -470,6 +474,18 @@ export function useTakyonLitebulb() {
       }).catch<HistoryPayload>(() => fallback ?? { messages: [], running: false });
       applyHistory(history);
     };
+    const resolveStoredSessionId = async (storedSessionId: string) => {
+      const candidate = trimText(storedSessionId);
+      if (!candidate) return "";
+      const latest = await api.getSessionLatestDescendant(candidate).catch(() => null);
+      return trimText(latest?.session_id) || candidate;
+    };
+    const readDurableSessionId = async (sessionId: string) => {
+      const payload = await gateway.request<SessionTitlePayload>("session.title", {
+        session_id: sessionId,
+      }).catch<SessionTitlePayload | null>(() => null);
+      return trimText(payload?.session_key);
+    };
 
     if (sessionIdRef.current && sessionBusinessRef.current === businessSlug) {
       await loadHistory(sessionIdRef.current);
@@ -477,7 +493,9 @@ export function useTakyonLitebulb() {
     }
 
     if (businessSlug) {
-      const storedSessionId = readStoredLitebulbSession(businessSlug);
+      const storedSessionId = await resolveStoredSessionId(
+        readStoredLitebulbSession(businessSlug),
+      );
       if (storedSessionId) {
         const resumed = await gateway.request<SessionResumePayload>("session.resume", {
           session_id: storedSessionId,
@@ -509,7 +527,12 @@ export function useTakyonLitebulb() {
     sessionBusinessRef.current = businessSlug;
     assistantMessageIdRef.current = "";
     if (businessSlug && sessionIdRef.current) {
-      writeStoredLitebulbSession(businessSlug, sessionIdRef.current);
+      const durableSessionId = await readDurableSessionId(sessionIdRef.current);
+      if (durableSessionId) {
+        writeStoredLitebulbSession(businessSlug, durableSessionId);
+      } else {
+        clearStoredLitebulbSession(businessSlug);
+      }
       await loadHistory(sessionIdRef.current);
     } else {
       setChatMessages([]);
