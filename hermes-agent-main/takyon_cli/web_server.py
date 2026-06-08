@@ -7803,7 +7803,13 @@ def mount_spa(application: FastAPI):
         request_host = _request_host(request.headers)
         skill_lab_host = request_host == _configured_skill_lab_host()
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "" and not skill_lab_host:
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "":
+            target_path = f"{prefix}/chat" if prefix else "/chat"
+            query = str(request.url.query or "").strip()
+            if query:
+                target_path = f"{target_path}?{query}"
+            return RedirectResponse(url=target_path, status_code=307)
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and skill_lab_host and full_path == "index.html":
             target_path = f"{prefix}/chat" if prefix else "/chat"
             query = str(request.url.query or "").strip()
             if query:
@@ -7821,8 +7827,14 @@ def mount_spa(application: FastAPI):
         # Operator landing: in embedded/--tui mode the business workspace IS
         # the Litebulb UI, served directly (no iframe, no React bundle).  Every
         # other route still renders the SPA shell for client-side routing.
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path in ("", "chat") and not skill_lab_host:
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "chat":
             return _serve_litebulb_index(prefix)
+        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and skill_lab_host:
+            target_path = f"{prefix}/chat" if prefix else "/chat"
+            query = str(request.url.query or "").strip()
+            if query:
+                target_path = f"{target_path}?{query}"
+            return RedirectResponse(url=target_path, status_code=307)
         return _serve_index(prefix)
 
 

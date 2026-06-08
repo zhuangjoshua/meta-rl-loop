@@ -2029,7 +2029,7 @@ def test_operator_root_redirects_to_chat(monkeypatch):
     assert response.headers["location"] == "/chat?business=dashboardsly"
 
 
-def test_skill_lab_root_serves_spa_shell_instead_of_chat_redirect(monkeypatch):
+def test_skill_lab_root_redirects_to_chat_like_operator_host(monkeypatch):
     from starlette.testclient import TestClient
 
     import takyon_cli.web_server as web_server
@@ -2039,8 +2039,26 @@ def test_skill_lab_root_serves_spa_shell_instead_of_chat_redirect(monkeypatch):
 
     response = client.get("/", headers={"Host": "skills.fourmanifold.com"}, follow_redirects=False)
 
-    assert response.status_code == 200
-    assert 'window.__TAKYON_SESSION_TOKEN__="' in response.text
+    assert response.status_code == 307
+    assert response.headers["location"] == "/chat"
+
+
+def test_skill_lab_routes_redirect_to_chat_instead_of_serving_legacy_shell(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    client = TestClient(web_server.app)
+
+    response = client.get(
+        "/skill-lab",
+        headers={"Host": "skills.fourmanifold.com"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/chat"
 
 
 def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
@@ -2052,6 +2070,21 @@ def test_operator_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
     client = TestClient(web_server.app)
 
     response = client.get("/chat")
+
+    assert response.status_code == 200
+    assert 'src="/litebulb/assets/' in response.text
+    assert 'href="/litebulb/assets/' in response.text
+
+
+def test_skill_lab_chat_serves_litebulb_assets_from_litebulb_prefix(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    client = TestClient(web_server.app)
+
+    response = client.get("/chat", headers={"Host": "skills.fourmanifold.com"})
 
     assert response.status_code == 200
     assert 'src="/litebulb/assets/' in response.text
