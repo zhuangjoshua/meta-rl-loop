@@ -902,12 +902,28 @@ def _same_origin_path(path: str) -> str:
     return path
 
 
+def _auth0_request_base_url(cfg: Auth0DashboardConfig, request: Request) -> str:
+    """Resolve the callback/logout origin for this login flow.
+
+    Auth0 state/nonce cookies are host-only, so shared dashboard hosts like
+    ``app.<base>`` and ``skills.<base>`` must round-trip through the exact same
+    origin that initiated login. Falling back to the configured public base URL
+    is still useful for non-public/local requests where Auth0 is not normally
+    required.
+    """
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if host:
+        request_base = f"{proto}://{host}".rstrip("/")
+        if cfg.force or _request_host(request.headers) in _configured_public_hosts():
+            return request_base
+    if cfg.base_url:
+        return cfg.base_url.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
 def _auth0_redirect_uri(cfg: Auth0DashboardConfig, request: Request) -> str:
-    base_url = cfg.base_url
-    if not base_url:
-        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-        base_url = f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+    base_url = _auth0_request_base_url(cfg, request)
     return f"{base_url.rstrip('/')}/auth/callback"
 
 
@@ -1863,7 +1879,7 @@ async def auth0_logout(request: Request):
     return_to = _same_origin_path(request.query_params.get("return_to") or "/")
     response: Response
     if cfg:
-        base_url = cfg.base_url or str(request.base_url).rstrip("/")
+        base_url = _auth0_request_base_url(cfg, request)
         logout_params = {
             "client_id": cfg.client_id,
             "returnTo": f"{base_url.rstrip('/')}{return_to}",

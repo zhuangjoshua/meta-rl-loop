@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import types
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1632,6 +1633,74 @@ def test_auth0_required_for_skill_lab_host_when_public_dashboard_auth_is_enabled
     assert web_server._auth0_required_for_host({"host": "app.fourmanifold.com"}) is True
     assert web_server._auth0_required_for_host({"host": "skills.fourmanifold.com"}) is True
     assert web_server._auth0_required_for_host({"host": "mathflow.fourmanifold.com"}) is False
+
+
+def test_auth0_login_uses_request_host_for_skill_lab_callback(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    web_server._clear_auth0_config_cache()
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda key: {
+            "AUTH0_CLIENT_SECRET": "client-secret",
+            "AUTH0_SECRET": "cookie-secret",
+        }.get(str(key), ""),
+    )
+
+    client = TestClient(web_server.app)
+    response = client.get(
+        "/auth/login?return_to=/chat",
+        headers={"Host": "skills.fourmanifold.com", "X-Forwarded-Proto": "https"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    parsed = urllib.parse.urlparse(location)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query["redirect_uri"] == ["https://skills.fourmanifold.com/auth/callback"]
+    web_server._clear_auth0_config_cache()
+
+
+def test_auth0_logout_uses_request_host_for_skill_lab_return_to(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    web_server._clear_auth0_config_cache()
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda key: {
+            "AUTH0_CLIENT_SECRET": "client-secret",
+            "AUTH0_SECRET": "cookie-secret",
+        }.get(str(key), ""),
+    )
+
+    client = TestClient(web_server.app)
+    response = client.get(
+        "/auth/logout?return_to=/chat",
+        headers={"Host": "skills.fourmanifold.com", "X-Forwarded-Proto": "https"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    parsed = urllib.parse.urlparse(location)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query["returnTo"] == ["https://skills.fourmanifold.com/chat"]
+    web_server._clear_auth0_config_cache()
 
 
 def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monkeypatch):
