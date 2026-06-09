@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -129,6 +130,21 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
 
 def _env_truthy(name: str) -> bool:
     return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def operator_identity_mode() -> str:
+    """The plane's missing-principal policy from TAKYON_REQUIRE_OPERATOR_IDENTITY: '' (unset —
+    historical single-operator/worker behavior), 'warn' (allow + record evidence), or 'enforce'
+    (fail closed). A NON-EMPTY mode also declares the plane PER-SESSION: process-global
+    TAKYON_OPERATOR_USER_ID stops being an identity source everywhere on that plane, so identity
+    can only arrive through the authenticated session path (transport principal, server-injected
+    session params, or per-session TAKYON_SESSION_USER_ID env in a per-session child process)."""
+    raw = str(os.getenv("TAKYON_REQUIRE_OPERATOR_IDENTITY") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on", "enforce"}:
+        return "enforce"
+    if raw == "warn":
+        return "warn"
+    return ""
 
 
 def _normalized_host_role() -> str:
@@ -4794,6 +4810,23 @@ def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
 
 
 _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
+_ACTIVE_OPERATOR_TASK_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "takyon_active_operator_task_run_id", default=""
+)
+
+
+@contextmanager
+def _bound_operator_task_run(run_id: str):
+    """Bind the canonical worker-plane run id so live progress events can reference the durable row."""
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        yield
+        return
+    token = _ACTIVE_OPERATOR_TASK_RUN_ID.set(normalized)
+    try:
+        yield
+    finally:
+        _ACTIVE_OPERATOR_TASK_RUN_ID.reset(token)
 
 
 def _record_claude_agent_runtime_event(
@@ -4805,6 +4838,7 @@ def _record_claude_agent_runtime_event(
     detail: str = "",
     line: str = "",
     trace: Mapping[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> None:
     slug = _slugify(business)
     if not slug:
@@ -4820,6 +4854,9 @@ def _record_claude_agent_runtime_event(
         "line": _truncate_text(str(line or detail or "").strip(), 400),
         "command": command,
     }
+    active_run_id = str(run_id or _ACTIVE_OPERATOR_TASK_RUN_ID.get() or "").strip()
+    if active_run_id:
+        payload["run_id"] = active_run_id
     if isinstance(trace, Mapping) and trace:
         trace_payload = {
             str(key): _truncate_text(str(value).strip(), 240)
@@ -9601,7 +9638,15 @@ class TakyonStore:
         *,
         database_url: str | None = None,
         operator_user_id: str | None = None,
+        system_plane: str = "",
     ):
+        # ``system_plane`` is the NARROW, code-only marker for trusted in-process SYSTEM surfaces
+        # whose business reads are runtime serving, not operator actions (e.g. product-host
+        # routing/materialization in web_server). It is set only at explicit construction sites in
+        # server code — it can never arrive via request params or environment — and it exempts only
+        # the missing-principal gate: a store with BOTH a principal and a system_plane still gets
+        # owner-checked. Do not use it for operator-facing tools.
+        self._system_plane = str(system_plane or "").strip()
         base = Path(root).expanduser() if root else Path(os.getenv("TAKYON_HOME") or get_takyon_home() / DEFAULT_TAKYON_DIRNAME)
         self.root = base.resolve()
         # Explicit Postgres DSN for tests/callers that want a throwaway DB instead of the runtime env.
@@ -9621,10 +9666,16 @@ class TakyonStore:
             except Exception:
                 session_user_id = ""
                 session_workspace_root = ""
+        # Process-global TAKYON_OPERATOR_USER_ID is a legacy single-operator convenience ONLY: on a
+        # plane that declares per-session identity (operator_identity_mode() non-empty, i.e. the
+        # dashboard plane), it is ignored so a process-wide env value can never satisfy a
+        # per-session principal. Session identity arrives via TAKYON_SESSION_USER_ID (contextvar,
+        # falling back to per-session child-process env) or an explicit operator_user_id argument.
+        env_operator_user_id = "" if operator_identity_mode() else (os.getenv("TAKYON_OPERATOR_USER_ID") or "")
         self._operator_user_id = str(
             operator_user_id
             or session_user_id
-            or os.getenv("TAKYON_OPERATOR_USER_ID")
+            or env_operator_user_id
             or ""
         ).strip()
         self._workspace_root_override = (
@@ -9712,16 +9763,28 @@ class TakyonStore:
     ) -> None:
         operator_user_id = self._active_operator_user_id()
         if not operator_user_id:
-            # Fail closed on a missing principal where the deployment requires one: set
-            # TAKYON_REQUIRE_OPERATOR_IDENTITY=1 on any plane that serves multi-user operator
-            # sessions, so a session that lost its user binding gets an error, not all-business
-            # access. Single-operator deployments and the trusted worker plane (which resolves
-            # owners per job) leave the flag unset and keep the historical ownerless behavior.
-            if _env_truthy("TAKYON_REQUIRE_OPERATOR_IDENTITY"):
+            if self._system_plane:
+                # Declared in-process system surface (see __init__): runtime serving reads are not
+                # operator actions, so the missing-principal policy does not apply to them.
+                return
+            # Missing-principal policy, staged bind -> observe -> enforce so enforcement can be
+            # turned on with evidence instead of outages:
+            #   * TAKYON_REQUIRE_OPERATOR_IDENTITY=1|enforce — fail closed: a session that lost its
+            #     user binding gets an error, never all-business access. Flip this on a plane only
+            #     after its 'warn' events have gone quiet.
+            #   * TAKYON_REQUIRE_OPERATOR_IDENTITY=warn — record one operator.identity.unbound
+            #     event per business per process (the canonical evidence list of paths that still
+            #     run without a bound principal), then allow as before.
+            #   * unset — historical ownerless behavior (single-operator deployments and the
+            #     trusted worker plane, which resolves owners per job).
+            mode = operator_identity_mode()
+            if mode == "enforce":
                 raise TakyonError(
                     "operator identity required: no operator user is bound to this session "
                     f"(refusing access to business:{business_slug})"
                 )
+            if mode == "warn":
+                self._warn_unbound_operator_access(conn, business_slug)
             return
         row = conn.execute(
             "SELECT owner_user_id FROM businesses WHERE slug = ?",
@@ -9732,6 +9795,34 @@ class TakyonStore:
         owner_user_id = str(row["owner_user_id"] or "").strip()
         if owner_user_id != operator_user_id:
             raise TakyonError(f"access denied for business:{business_slug}")
+
+    def _warn_unbound_operator_access(self, conn: sqlite3.Connection, business_slug: str) -> None:
+        """Observe stage of the identity migration: record ONE operator.identity.unbound event per
+        business per store instance, so the events stream accumulates the exact set of access paths
+        still running without a bound principal. Best-effort — observability must never break the
+        access it is observing."""
+        seen: set[str] = getattr(self, "_unbound_operator_warned", None) or set()
+        if business_slug in seen:
+            return
+        seen.add(business_slug)
+        self._unbound_operator_warned = seen
+        try:
+            self._record_event(
+                conn,
+                scope=f"business:{business_slug}",
+                business_slug=business_slug,
+                event_type="operator.identity.unbound",
+                payload={
+                    "note": (
+                        "business access without a bound operator principal under "
+                        "TAKYON_REQUIRE_OPERATOR_IDENTITY=warn; bind TAKYON_SESSION_USER_ID for "
+                        "this path before flipping the plane to enforce"
+                    ),
+                    "pid": os.getpid(),
+                },
+            )
+        except Exception:
+            pass
 
     def _work_requests_table(self) -> str:
         """Physical table name for the operator's *work-request record* store.
@@ -20791,13 +20882,14 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
 # dispatcher polls it. If the caller dies (dashboard PTY refresh/disconnect), the run continues and
 # the result still lands in the run row, agent_runs, and events. A replay of the SAME tool call
 # (same args + idempotency_key) re-attaches to the SAME run via commit idempotency.
-# Deferral is skipped: inside the worker process itself (TAKYON_WORKER_PROCESS=1 — the surrounding
-# job is already durable, and waiting on a sub-job could starve the drain threads), and for
-# isolated-turn sessions with a workspace-root override (their live local edits are not yet synced
-# to the canonical workspace the worker would mount).
+# Deferral is skipped only inside the worker process itself (TAKYON_WORKER_PROCESS=1 — the
+# surrounding job is already durable, and waiting on a sub-job could starve the drain threads).
+# Operator turns with session-local workspace overrides now fail closed instead of silently falling
+# back inline: durable worker execution requires the canonical business workspace.
 
 _WORK_REQUEST_TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 _WORKER_DEFERRAL_POLL_SECONDS = 3.0
+_WORKER_PICKUP_TIMEOUT_SECONDS = 30.0
 
 
 def _operator_tasks_via_worker_enabled() -> bool:
@@ -20856,21 +20948,42 @@ def _run_operator_task_on_worker(
     if not run_id or not worker_job_id:
         raise TakyonError(f"worker-plane enqueue did not return a run handle for {tool_name}")
     deadline = time.monotonic() + max(30.0, float(wait_seconds))
+    pickup_deadline = time.monotonic() + min(
+        max(5.0, _WORKER_PICKUP_TIMEOUT_SECONDS),
+        max(5.0, float(wait_seconds)),
+    )
+    picked_up = False
     while True:
         status, payload = _read_work_request_run(store, run_id)
-        if status in _WORK_REQUEST_TERMINAL_STATUSES:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "running":
+            picked_up = True
+        if normalized_status in _WORK_REQUEST_TERMINAL_STATUSES:
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             result.setdefault("run_id", run_id)
             result.setdefault("worker_job", worker_job_id)
             if result.get("success"):
                 return tool_result(result)
-            error_text = str(result.get("error") or f"{tool_name} {status} on the worker plane")
+            error_text = str(
+                result.get("error") or f"{tool_name} {normalized_status or status} on the worker plane"
+            )
             return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
-        if time.monotonic() >= deadline:
+        now = time.monotonic()
+        if not picked_up and now >= pickup_deadline:
+            return tool_error(
+                f"{tool_name} did not start on the worker plane before the pickup deadline",
+                success=False,
+                status=normalized_status or "queued",
+                run_id=run_id,
+                worker_job=worker_job_id,
+                business=business,
+                kind=kind,
+            )
+        if now >= deadline:
             return tool_result(
                 {
                     "success": False,
-                    "status": "running",
+                    "status": normalized_status or "running",
                     "detached": True,
                     "run_id": run_id,
                     "worker_job": worker_job_id,
@@ -20893,7 +21006,10 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
         return None
     store = _store()
     if _session_business_slug() and getattr(store, "_workspace_root_override", None) is not None:
-        return None
+        raise TakyonError(
+            "business_claude_agent_task requires the canonical business workspace when "
+            "TAKYON_OPERATOR_TASKS_VIA_WORKER=1; session-local workspace overrides are not supported"
+        )
     business = _resolved_business_slug(args, required=True)
     instruction = str(args.get("instruction") or "").strip()
     if not instruction:
@@ -20950,7 +21066,7 @@ def _defer_product_surface_refresh_to_worker(args: dict) -> str | None:
     if not _operator_tasks_via_worker_enabled():
         return None
     if _session_business_slug():
-        return None  # the inline handler rejects session-bound callers; keep its exact error path
+        raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
     store = _store()
     business = _resolved_business_slug(args, required=True)
     idempotency_key = str(args.get("idempotency_key") or "").strip()

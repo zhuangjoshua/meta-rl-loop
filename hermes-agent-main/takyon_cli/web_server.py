@@ -7241,6 +7241,7 @@ except ImportError as _pty_import_err:  # pragma: no cover - Windows-only path
 
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
+_PTY_REATTACH_GRACE_SECONDS = 20.0
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 # Starlette's TestClient reports the peer as "testclient"; treat it as
 # loopback so tests don't need to rewrite request scope.
@@ -7368,7 +7369,9 @@ def _product_host_has_business_uncached(domain: str) -> tuple[bool, str]:
     try:
         from plugins.takyon.core import TakyonStore
 
-        store = TakyonStore(get_takyon_home())
+        # Product-host ROUTING is a system serving surface, not an operator action — declare it
+        # (see TakyonStore.system_plane) so per-session identity enforcement does not apply.
+        store = TakyonStore(get_takyon_home(), system_plane="product-serving")
         with store._connect() as conn:
             if store._business(conn, slug) is None:
                 return False, "business_not_found"
@@ -7475,7 +7478,9 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
 
         try:
             app = (
-                TakyonStore(get_takyon_home())
+                # System serving surface (product-site materialization), not an operator action —
+                # declared via system_plane so per-session identity enforcement does not apply.
+                TakyonStore(get_takyon_home(), system_plane="product-serving")
                 .read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
                 .get("app")
                 or {}
@@ -7593,7 +7598,110 @@ async def product_site_file(business: str, full_path: str):
 # the chat tab generates on mount; entries auto-evict when the last subscriber
 # drops AND the publisher has disconnected.
 _event_channels: dict[str, set] = {}
+_event_channel_aliases: dict[str, set[str]] = {}
 _event_lock = asyncio.Lock()
+
+
+@dataclass
+class _HeldPtySession:
+    bridge: "PtyBridge"
+    keys: tuple[str, ...]
+    channel: Optional[str]
+    attached: bool = True
+    expiry_handle: Optional[asyncio.TimerHandle] = None
+
+
+_held_pty_sessions: dict[str, _HeldPtySession] = {}
+_held_pty_lock = asyncio.Lock()
+
+
+def _resolved_chat_resume(resume: Optional[str]) -> Optional[str]:
+    value = (resume or "").strip()
+    if not value:
+        return None
+    latest_resume, _latest_path = _session_latest_descendant(value)
+    return latest_resume or value
+
+
+def _pty_reconnect_keys(
+    *,
+    resume: Optional[str] = None,
+    channel: Optional[str] = None,
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    resolved_resume = _resolved_chat_resume(resume)
+    if resolved_resume:
+        keys.append(f"resume:{resolved_resume}")
+    if channel:
+        keys.append(f"channel:{channel}")
+    return tuple(dict.fromkeys(keys))
+
+
+def _drop_held_pty_locked(held: _HeldPtySession) -> None:
+    if held.expiry_handle is not None:
+        held.expiry_handle.cancel()
+        held.expiry_handle = None
+    for key in held.keys:
+        if _held_pty_sessions.get(key) is held:
+            _held_pty_sessions.pop(key, None)
+
+
+async def _expire_held_pty(held: _HeldPtySession) -> None:
+    bridge: Optional["PtyBridge"] = None
+    async with _held_pty_lock:
+        if held.attached:
+            return
+        still_held = any(_held_pty_sessions.get(key) is held for key in held.keys)
+        if not still_held:
+            return
+        _drop_held_pty_locked(held)
+        bridge = held.bridge
+    if bridge is not None:
+        bridge.close()
+
+
+def _schedule_held_pty_expiry(held: _HeldPtySession) -> None:
+    loop = asyncio.get_running_loop()
+    held.expiry_handle = loop.call_later(
+        _PTY_REATTACH_GRACE_SECONDS,
+        lambda: asyncio.create_task(_expire_held_pty(held)),
+    )
+
+
+async def _attach_held_pty(
+    keys: tuple[str, ...],
+    *,
+    requested_channel: Optional[str] = None,
+) -> Optional[_HeldPtySession]:
+    if not keys:
+        return None
+    async with _held_pty_lock:
+        for key in keys:
+            held = _held_pty_sessions.get(key)
+            if held is None:
+                continue
+            if held.attached or not held.bridge.is_alive():
+                _drop_held_pty_locked(held)
+                continue
+            held.attached = True
+            if held.expiry_handle is not None:
+                held.expiry_handle.cancel()
+                held.expiry_handle = None
+            if held.channel and requested_channel and held.channel != requested_channel:
+                _event_channel_aliases.setdefault(held.channel, set()).add(requested_channel)
+            return held
+    return None
+
+
+async def _hold_pty_for_reattach(held: _HeldPtySession) -> bool:
+    if not held.keys or not held.bridge.is_alive():
+        return False
+    async with _held_pty_lock:
+        held.attached = False
+        for key in held.keys:
+            _held_pty_sessions[key] = held
+        _schedule_held_pty_expiry(held)
+    return True
 
 
 def _resolve_chat_argv(
@@ -7630,9 +7738,7 @@ def _resolve_chat_argv(
     env.setdefault("TAKYON_TUI_INLINE", "1")
 
     if resume:
-        latest_resume, _latest_path = _session_latest_descendant(resume)
-        if latest_resume:
-            resume = latest_resume
+        resume = _resolved_chat_resume(resume)
         env["TAKYON_TUI_RESUME"] = resume
 
     if sidecar_url:
@@ -7658,7 +7764,10 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
 async def _broadcast_event(channel: str, payload: str) -> None:
     """Fan out one publisher frame to every subscriber on `channel`."""
     async with _event_lock:
-        subs = list(_event_channels.get(channel, ()))
+        channels = {channel, *(_event_channel_aliases.get(channel, set()))}
+        subs: list[Any] = []
+        for candidate in channels:
+            subs.extend(_event_channels.get(candidate, ()))
 
     for sub in subs:
         try:
@@ -7726,29 +7835,37 @@ async def pty_ws(ws: WebSocket) -> None:
     resume = ws.query_params.get("resume") or None
     channel = _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
+    reconnect_keys = _pty_reconnect_keys(resume=resume, channel=channel)
+    held = await _attach_held_pty(reconnect_keys, requested_channel=channel)
+    if held is None:
+        try:
+            argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
+        except SystemExit as exc:
+            # _make_tui_argv calls sys.exit(1) when node/npm is missing.
+            await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+            await ws.close(code=1011)
+            return
 
-    try:
-        argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
-    except SystemExit as exc:
-        # _make_tui_argv calls sys.exit(1) when node/npm is missing.
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
-        await ws.close(code=1011)
-        return
+        if principal is not None:
+            # Per-session identity for the per-session PTY child: the tui_gateway inside it reads
+            # TAKYON_SESSION_USER_ID through gateway.session_context's env fallback. Never the
+            # process-global TAKYON_OPERATOR_USER_ID — that var is not an identity source on planes
+            # that declare per-session identity (core.operator_identity_mode).
+            env["TAKYON_SESSION_USER_ID"] = str(principal.user_id)
 
-    if principal is not None:
-        env["TAKYON_OPERATOR_USER_ID"] = str(principal.user_id)
-
-
-    try:
-        bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
-    except PtyUnavailableError as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
-        await ws.close(code=1011)
-        return
-    except (FileNotFoundError, OSError) as exc:
-        await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
-        await ws.close(code=1011)
-        return
+        try:
+            bridge = PtyBridge.spawn(argv, cwd=cwd, env=env)
+        except PtyUnavailableError as exc:
+            await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
+            await ws.close(code=1011)
+            return
+        except (FileNotFoundError, OSError) as exc:
+            await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
+            await ws.close(code=1011)
+            return
+        held = _HeldPtySession(bridge=bridge, keys=reconnect_keys, channel=channel)
+    else:
+        bridge = held.bridge
 
     loop = asyncio.get_running_loop()
 
@@ -7801,7 +7918,8 @@ async def pty_ws(ws: WebSocket) -> None:
             await reader_task
         except (asyncio.CancelledError, Exception):
             pass
-        bridge.close()
+        if not await _hold_pty_for_reattach(held):
+            bridge.close()
 
 
 # ---------------------------------------------------------------------------
@@ -7878,13 +7996,16 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
     params = dict(req.get("params") or {})
     params["_takyon_request_host"] = str(request.headers.get("host", "") or "")
     params["_takyon_request_origin"] = str(request.headers.get("origin", "") or "")
-    req["params"] = params
-
+    # Identity is SERVER-ASSIGNED on this ingress: a client-supplied _takyon_operator_user_id is
+    # always discarded (never setdefault — that let the caller pick their principal), and the
+    # authenticated dashboard principal is injected for session.create. No principal ⇒ no identity
+    # param ⇒ the store's identity gate decides (enforce: denied).
+    params.pop("_takyon_operator_user_id", None)
     if req["method"] == "session.create":
         principal = _resolve_dashboard_request_principal(request)
         if principal is not None:
-            params.setdefault("_takyon_operator_user_id", str(principal.user_id))
-            req["params"] = params
+            params["_takyon_operator_user_id"] = str(principal.user_id)
+    req["params"] = params
 
     from tui_gateway import server as tui_server
 

@@ -6682,13 +6682,23 @@ def test_business_x_metrics_sync_defaults_to_latest_x_receipt(tmp_path, monkeypa
 
 
 def test_enforce_operator_business_access_fails_closed_without_principal(monkeypatch):
-    """With TAKYON_REQUIRE_OPERATOR_IDENTITY set (the VPS operator-plane posture), a session with
-    no bound operator user must be refused BEFORE any business read — never widened to
-    all-business access. Without the flag, local single-operator behavior is unchanged."""
+    """The staged identity gate (bind -> observe -> enforce): '1'/'enforce' refuses a principal-less
+    session BEFORE any business read — never widened to all-business access; 'warn' allows but
+    records one operator.identity.unbound event per business; unset keeps local single-operator
+    behavior unchanged."""
 
     class _UnboundStore:
+        _warn_unbound_operator_access = takyon_core.TakyonStore._warn_unbound_operator_access
+        _system_plane = ""
+
+        def __init__(self):
+            self.events = []
+
         def _active_operator_user_id(self) -> str:
             return ""
+
+        def _record_event(self, conn, *, scope, business_slug, event_type, payload):
+            self.events.append((scope, business_slug, event_type))
 
     store = _UnboundStore()
 
@@ -6696,6 +6706,19 @@ def test_enforce_operator_business_access_fails_closed_without_principal(monkeyp
     with pytest.raises(takyon_core.TakyonError, match="operator identity required"):
         # conn=None proves the refusal happens before any DB access.
         takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme")
+    monkeypatch.setenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", "enforce")
+    with pytest.raises(takyon_core.TakyonError, match="operator identity required"):
+        takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme")
+
+    # Observe stage: allowed, evidence recorded once per business per store instance.
+    monkeypatch.setenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", "warn")
+    assert takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme") is None
+    assert takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme") is None
+    assert takyon_core.TakyonStore._enforce_operator_business_access(store, None, "zeta") is None
+    assert store.events == [
+        ("business:acme", "acme", "operator.identity.unbound"),
+        ("business:zeta", "zeta", "operator.identity.unbound"),
+    ]
 
     monkeypatch.delenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", raising=False)
     assert (
@@ -6812,6 +6835,117 @@ def test_defer_claude_agent_task_detaches_when_wait_budget_expires(monkeypatch):
     assert result["detached"] is True
     assert result["run_id"] == "run-1"
     assert "idempotency_key" in result["note"]
+
+
+def test_defer_claude_agent_task_rejects_session_local_workspace_override(monkeypatch):
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+
+    class _SessionStoreStub:
+        _workspace_root_override = "/tmp/takyon-session-workspace"
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _SessionStoreStub())
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "acme")
+
+    with pytest.raises(TakyonError, match="session-local workspace overrides are not supported"):
+        takyon_core._defer_claude_agent_task_to_worker(
+            {
+                "business": "acme",
+                "instruction": "build",
+                "idempotency_key": "task-override",
+                "workspace": "product/site",
+            }
+        )
+
+
+def test_defer_product_surface_refresh_rejects_session_bound_call(monkeypatch):
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "acme")
+
+    with pytest.raises(TakyonError, match="authority tool surface"):
+        takyon_core._defer_product_surface_refresh_to_worker(
+            {
+                "business": "acme",
+                "idempotency_key": "surface-1",
+            }
+        )
+
+
+def test_defer_claude_agent_task_fails_if_worker_never_picks_up(monkeypatch):
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: ("queued", {}))
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(takyon_core, "_WORKER_PICKUP_TIMEOUT_SECONDS", 0.0)
+
+    class _FakeTime:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += max(float(seconds), 1.0) * 100_000.0
+
+    monkeypatch.setattr(takyon_core, "time", _FakeTime())
+
+    raw = takyon_core._defer_claude_agent_task_to_worker(
+        {
+            "business": "acme",
+            "instruction": "build",
+            "idempotency_key": "task-queued",
+            "workspace": "research",
+        }
+    )
+    result = json.loads(raw)
+    assert result["success"] is False
+    assert "pickup deadline" in result["error"]
+    assert result["status"] == "queued"
+    assert result["run_id"] == "run-1"
+    assert result["worker_job"] == "wj-1"
+
+
+def test_record_claude_agent_runtime_event_includes_bound_run_id(monkeypatch):
+    captured: list[dict[str, Any]] = []
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Store:
+        def _connect(self):
+            return _Conn()
+
+        def _record_event(self, conn, *, scope, business_slug, event_type, payload):
+            captured.append(
+                {
+                    "scope": scope,
+                    "business_slug": business_slug,
+                    "event_type": event_type,
+                    "payload": dict(payload),
+                }
+            )
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _Store())
+    with takyon_core._bound_operator_task_run("run-123"):
+        takyon_core._record_claude_agent_runtime_event(
+            business="acme",
+            workspace_rel="product/site",
+            status="running",
+            detail="still working",
+        )
+
+    assert captured
+    assert captured[-1]["event_type"] == "dashboard.run.running"
+    assert captured[-1]["payload"]["run_id"] == "run-123"
 
 
 def test_operator_tool_task_handler_records_run_lifecycle(monkeypatch):

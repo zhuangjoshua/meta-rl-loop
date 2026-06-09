@@ -217,7 +217,7 @@ _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 class _SlashWorker:
     """Persistent TakyonCLI subprocess for slash commands."""
 
-    def __init__(self, session_key: str, model: str):
+    def __init__(self, session_key: str, model: str, operator_user_id: str = ""):
         self._lock = threading.Lock()
         self._seq = 0
         self.stderr_tail: list[str] = []
@@ -233,6 +233,15 @@ class _SlashWorker:
         if model:
             argv += ["--model", model]
 
+        # Per-session identity propagation: the slash worker acts as THIS session's operator, so
+        # it gets the session principal via TAKYON_SESSION_USER_ID (per-session env in a
+        # per-session child process) — never the process-global operator var, which per-session
+        # planes ignore (core.operator_identity_mode).
+        env = os.environ.copy()
+        principal = str(operator_user_id or "").strip()
+        if principal:
+            env["TAKYON_SESSION_USER_ID"] = principal
+
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -241,7 +250,7 @@ class _SlashWorker:
             text=True,
             bufsize=1,
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=env,
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
@@ -612,7 +621,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
         worker = None
         notify_registered = False
         try:
-            tokens = _set_session_context(key)
+            # Bind the session principal during agent construction — set_session_vars with an
+            # empty user_id would otherwise EXPLICITLY clear the contextvar and mask the
+            # per-session identity this session resolved at create time.
+            tokens = _set_session_context(
+                key, operator_user_id=_takyon_operator_user_id(current)
+            )
             try:
                 agent = _make_agent(sid, key)
             finally:
@@ -623,7 +637,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
             current["agent"] = agent
 
             try:
-                worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
+                worker = _SlashWorker(
+                    key,
+                    getattr(agent, "model", _resolve_model()),
+                    operator_user_id=_takyon_operator_user_id(current),
+                )
                 current["slash_worker"] = worker
             except Exception:
                 pass
@@ -1121,6 +1139,7 @@ def _restart_slash_worker(session: dict):
         session["slash_worker"] = _SlashWorker(
             session["session_key"],
             getattr(session.get("agent"), "model", _resolve_model()),
+            operator_user_id=_takyon_operator_user_id(session),
         )
     except Exception:
         session["slash_worker"] = None
@@ -2591,7 +2610,9 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
-    tokens = _set_session_context(session["session_key"])
+    tokens = _set_session_context(
+        session["session_key"], operator_user_id=_takyon_operator_user_id(session)
+    )
     try:
         new_agent = _make_agent(
             sid, session["session_key"], session_id=session["session_key"]
@@ -2667,10 +2688,16 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
     )
 
 
-def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
+def _init_session(
+    sid: str, key: str, agent, history: list, cols: int = 80, operator_user_id: str = ""
+):
     _sessions[sid] = {
         "agent": agent,
         "session_key": key,
+        # The session principal — resumed/branched sessions must carry it exactly like freshly
+        # created ones, never re-derive it from process-global env (per-session identity planes
+        # ignore TAKYON_OPERATOR_USER_ID; see core.operator_identity_mode).
+        "takyon_operator_user_id": str(operator_user_id or "").strip(),
         "history": history,
         "history_lock": threading.Lock(),
         "history_version": 0,
@@ -2689,7 +2716,9 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     }
     try:
         _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
+            key,
+            getattr(agent, "model", _resolve_model()),
+            operator_user_id=str(operator_user_id or "").strip(),
         )
     except Exception:
         # Defer hard-failure to slash.exec; chat still works without slash worker.
@@ -2918,6 +2947,41 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
+def _resolve_session_operator_user_id(params: dict | None, transport) -> str:
+    """Resolve the operator principal for a new TUI session, most-authenticated source first:
+
+    1. the transport's authenticated principal (the /api/ws upgrade resolved it from the dashboard
+       auth session) — a client-supplied param can NEVER override it;
+    2. the ``_takyon_operator_user_id`` param — only reaches here on transports without a principal:
+       the dashboard HTTP-RPC ingress strips any client value and injects the authenticated
+       principal server-side, and a local stdio client is the same-user trusted shell;
+    3. per-session TAKYON_SESSION_USER_ID (contextvar with env fallback — the per-session PTY child
+       carries it from the dashboard's authenticated spawn);
+    4. legacy process-global TAKYON_OPERATOR_USER_ID, ONLY on planes that have not declared
+       per-session identity (core.operator_identity_mode() == "") — a process-wide env value must
+       never satisfy a per-session dashboard principal."""
+    principal = getattr(transport, "operator_principal", None)
+    principal_user = str(getattr(principal, "user_id", "") or "").strip()
+    if principal_user:
+        return principal_user
+    param_user = str((params or {}).get("_takyon_operator_user_id") or "").strip()
+    if param_user:
+        return param_user
+    try:
+        from gateway.session_context import get_session_env
+
+        session_user = str(get_session_env("TAKYON_SESSION_USER_ID", "") or "").strip()
+    except Exception:
+        session_user = ""
+    if session_user:
+        return session_user
+    from plugins.takyon.core import operator_identity_mode
+
+    if operator_identity_mode():
+        return ""
+    return str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
+
+
 @method("session.create")
 def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
@@ -2930,12 +2994,7 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     transport = current_transport() or _stdio_transport
     request_host = _takyon_request_hostname(params, transport=transport)
-    operator_user_id = str(params.get("_takyon_operator_user_id") or "").strip()
-    if not operator_user_id:
-        principal = getattr(transport, "operator_principal", None)
-        operator_user_id = str(getattr(principal, "user_id", "") or "").strip()
-    if not operator_user_id:
-        operator_user_id = str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
+    operator_user_id = _resolve_session_operator_user_id(params, transport)
     if not operator_user_id:
         logger.warning("takyon session.create without operator_user_id")
     if skill_lab_skills:
@@ -3178,6 +3237,12 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4007, "session not found")
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    # Resume resolves the principal exactly like session.create — from the authenticated
+    # transport/server-injected param/session env — so a resumed dashboard session is never an
+    # identity-less session that only worked through a process-global env backdoor.
+    operator_user_id = _resolve_session_operator_user_id(
+        params, current_transport() or _stdio_transport
+    )
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -3185,12 +3250,19 @@ def _(rid, params: dict) -> dict:
             target, include_ancestors=True
         )
         messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target)
+        tokens = _set_session_context(target, operator_user_id=operator_user_id)
         try:
             agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
-        _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        _init_session(
+            sid,
+            target,
+            agent,
+            history,
+            cols=int(params.get("cols", 80)),
+            operator_user_id=operator_user_id,
+        )
         if boot_business:
             try:
                 from plugins.takyon.cli import _slugify
@@ -3637,13 +3709,20 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5008, f"branch failed: {e}")
     new_sid = uuid.uuid4().hex[:8]
     try:
-        tokens = _set_session_context(new_key)
+        # A branch inherits the parent session's principal — same operator, same authority.
+        branch_operator_user_id = _takyon_operator_user_id(session)
+        tokens = _set_session_context(new_key, operator_user_id=branch_operator_user_id)
         try:
             agent = _make_agent(new_sid, new_key, session_id=new_key)
         finally:
             _clear_session_context(tokens)
         _init_session(
-            new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
+            new_sid,
+            new_key,
+            agent,
+            list(history),
+            cols=session.get("cols", 80),
+            operator_user_id=branch_operator_user_id,
         )
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
@@ -4991,7 +5070,11 @@ def _(rid, params: dict) -> dict:
     task_id = f"bg_{uuid.uuid4().hex[:6]}"
 
     def run():
-        session_tokens = _set_session_context(task_id)
+        # The background task acts as the parent session's operator — bind its principal so the
+        # cleared-contextvar state can't mask per-session identity during the detached turn.
+        session_tokens = _set_session_context(
+            task_id, operator_user_id=_takyon_operator_user_id(session)
+        )
         try:
             from run_agent import AIAgent
 
@@ -9939,7 +10022,10 @@ def _(rid, params: dict) -> dict:
                         env={
                             **os.environ.copy(),
                             **(
-                                {"TAKYON_OPERATOR_USER_ID": operator_user_id}
+                                # Per-session identity propagation into the detached child — the
+                                # session var, never the legacy process-global operator var (which
+                                # per-session planes ignore; see core.operator_identity_mode).
+                                {"TAKYON_SESSION_USER_ID": operator_user_id}
                                 if operator_user_id
                                 else {}
                             ),
@@ -11230,6 +11316,7 @@ def _(rid, params: dict) -> dict:
             worker = _SlashWorker(
                 session["session_key"],
                 getattr(session.get("agent"), "model", _resolve_model()),
+                operator_user_id=_takyon_operator_user_id(session),
             )
             session["slash_worker"] = worker
         except Exception as e:

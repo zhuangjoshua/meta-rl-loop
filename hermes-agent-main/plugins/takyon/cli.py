@@ -1062,7 +1062,21 @@ def _idempotency_key(prefix: str, *parts: Any, max_length: int = 180) -> str:
 
 
 def _resolved_operator_user_id(operator_user_id: str | None = None) -> str:
-    return str(operator_user_id or os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
+    """Resolve the acting operator: explicit argument, then the per-session identity a parent
+    process injected (TAKYON_SESSION_USER_ID — e.g. the detached-command subprocess spawned by the
+    TUI gateway), then — ONLY on planes that have not declared per-session identity — the legacy
+    process-global TAKYON_OPERATOR_USER_ID convenience (see core.operator_identity_mode)."""
+    explicit = str(operator_user_id or "").strip()
+    if explicit:
+        return explicit
+    session_user = str(os.getenv("TAKYON_SESSION_USER_ID") or "").strip()
+    if session_user:
+        return session_user
+    from .core import operator_identity_mode
+
+    if operator_identity_mode():
+        return ""
+    return str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
 
 
 def _operator_turn_estimate_cents() -> int:

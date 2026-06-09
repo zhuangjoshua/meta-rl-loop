@@ -1460,7 +1460,10 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
     if work_request_id:
         _update_work_request(slug, work_request_id, status="running", rewrite_distribution=False)
     try:
-        raw = handler_fn(dict(args))
+        from .core import _bound_operator_task_run
+
+        with _bound_operator_task_run(work_request_id):
+            raw = handler_fn(dict(args))
         result = _parse_jsonish_output(str(raw or ""))
         if not isinstance(result, dict) or not result:
             result = {"success": False, "error": f"{tool_name} returned no parseable result"}

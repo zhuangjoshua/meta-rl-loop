@@ -2390,6 +2390,54 @@ class TestWebServerEndpoints:
         assert req["params"]["_takyon_request_host"] == "app.fourmanifold.com"
         assert req["params"]["_takyon_request_origin"] == "https://app.fourmanifold.com"
 
+    def test_tui_rpc_discards_client_supplied_operator_identity(self, monkeypatch):
+        """Identity is SERVER-ASSIGNED on the HTTP RPC ingress: a client-supplied
+        _takyon_operator_user_id never survives — stripped on every method, replaced by the
+        authenticated principal on session.create, and absent entirely when no principal resolves
+        (the store's identity gate then denies under enforce)."""
+        import takyon_cli.web_server as web_server
+
+        captured: dict[str, object] = {}
+
+        def fake_handle_request(req):
+            captured["req"] = req
+            return {"jsonrpc": "2.0", "id": req.get("id"), "result": {"ok": True}}
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+        monkeypatch.setattr("tui_gateway.server.handle_request", fake_handle_request)
+
+        def _post(method):
+            return self.client.post(
+                "/api/tui/rpc",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "rpc-ident-1",
+                    "method": method,
+                    "params": {"_takyon_operator_user_id": "attacker-chosen"},
+                },
+            )
+
+        # Any method: the client-supplied identity param is dropped.
+        assert _post("session.history").status_code == 200
+        assert "_takyon_operator_user_id" not in captured["req"]["params"]
+
+        # session.create with an authenticated principal: server value replaces the client's.
+        class _Principal:
+            user_id = "user-real"
+
+        monkeypatch.setattr(
+            web_server, "_resolve_dashboard_request_principal", lambda request: _Principal()
+        )
+        assert _post("session.create").status_code == 200
+        assert captured["req"]["params"]["_takyon_operator_user_id"] == "user-real"
+
+        # session.create with NO principal: no identity param at all — never the client's.
+        monkeypatch.setattr(
+            web_server, "_resolve_dashboard_request_principal", lambda request: None
+        )
+        assert _post("session.create").status_code == 200
+        assert "_takyon_operator_user_id" not in captured["req"]["params"]
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import takyon_cli.web_server as web_server
@@ -4560,6 +4608,111 @@ class TestPtyWebSocket:
         assert url.startswith("ws://127.0.0.1:9119/api/pub?")
         assert "channel=abc-123" in url
         assert "token=" in url
+
+    def test_disconnect_briefly_holds_resumable_pty_for_reattach(self, monkeypatch):
+        import asyncio
+        import time
+
+        import takyon_cli.web_server as ws_mod
+
+        class FakeBridge:
+            spawn_calls = 0
+            close_calls = 0
+
+            def __init__(self):
+                self.closed = False
+
+            @classmethod
+            def spawn(cls, argv, **kwargs):
+                cls.spawn_calls += 1
+                return cls()
+
+            def read(self, timeout=0.2):
+                time.sleep(min(timeout, 0.01))
+                return b""
+
+            def write(self, data):
+                return None
+
+            def resize(self, cols, rows):
+                return None
+
+            def is_alive(self):
+                return not self.closed
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    type(self).close_calls += 1
+
+        monkeypatch.setattr(
+            self.ws_module,
+            "_resolve_chat_argv",
+            lambda resume=None, sidecar_url=None: (["/bin/cat"], None, None),
+        )
+        monkeypatch.setattr(ws_mod, "_PTY_REATTACH_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(ws_mod, "PtyBridge", FakeBridge)
+
+        url = self._url(resume="sess-42", channel="chat-a")
+
+        with self.client.websocket_connect(url):
+            pass
+        assert FakeBridge.spawn_calls == 1
+        assert FakeBridge.close_calls == 0
+
+        with self.client.websocket_connect(url):
+            pass
+        assert FakeBridge.spawn_calls == 1
+
+        held = next(iter(ws_mod._held_pty_sessions.values()))
+        asyncio.run(ws_mod._expire_held_pty(held))
+        assert FakeBridge.close_calls == 1
+
+    def test_disconnect_without_reattach_key_closes_pty_immediately(self, monkeypatch):
+        import takyon_cli.web_server as ws_mod
+
+        class FakeBridge:
+            spawn_calls = 0
+            close_calls = 0
+
+            def __init__(self):
+                self.closed = False
+
+            @classmethod
+            def spawn(cls, argv, **kwargs):
+                cls.spawn_calls += 1
+                return cls()
+
+            def read(self, timeout=0.2):
+                return b""
+
+            def write(self, data):
+                return None
+
+            def resize(self, cols, rows):
+                return None
+
+            def is_alive(self):
+                return not self.closed
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    type(self).close_calls += 1
+
+        monkeypatch.setattr(
+            self.ws_module,
+            "_resolve_chat_argv",
+            lambda resume=None, sidecar_url=None: (["/bin/cat"], None, None),
+        )
+        monkeypatch.setattr(ws_mod, "_PTY_REATTACH_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(ws_mod, "PtyBridge", FakeBridge)
+
+        with self.client.websocket_connect(self._url()):
+            pass
+
+        assert FakeBridge.spawn_calls == 1
+        assert FakeBridge.close_calls == 1
 
     def test_pub_broadcasts_to_events_subscribers(self, monkeypatch):
         """Frame written to /api/pub is rebroadcast verbatim to every

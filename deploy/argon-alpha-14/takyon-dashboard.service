@@ -33,6 +33,15 @@ Environment=PYTHONUNBUFFERED=1
 # on the canonical work-request run row, and a PTY refresh/disconnect no longer kills the run.
 # Requires the worker service to be active; remove this line to fall back to inline execution.
 Environment=TAKYON_OPERATOR_TASKS_VIA_WORKER=1
+# Per-session operator identity, stage ENFORCE (bind -> observe -> enforce): every dashboard
+# session resolves its principal from the authenticated session path (auth0/local dashboard
+# principal -> PTY child / slash-worker / detached-command TAKYON_SESSION_USER_ID env, ws transport
+# principal, or server-injected RPC param). A missing or wrong principal is DENIED. This mode also
+# disables the legacy process-global TAKYON_OPERATOR_USER_ID as an identity source on this plane
+# (core.operator_identity_mode), so no env or request-param fallback can satisfy per-session
+# identity. Declared system serving surfaces (TakyonStore(system_plane=...)) are exempt by
+# explicit construction-site code only.
+Environment=TAKYON_REQUIRE_OPERATOR_IDENTITY=enforce
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_NODE_NAME=argon-alpha-14
 Environment=TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14
