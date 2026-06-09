@@ -1474,7 +1474,6 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
         ) as workspace_home:
             tokens = set_session_vars(
                 user_id=owner_user_id,
-                workspace_root=str(workspace_home or ""),
                 business_slug=slug,
             )
             with _bound_operator_task_run(work_request_id):

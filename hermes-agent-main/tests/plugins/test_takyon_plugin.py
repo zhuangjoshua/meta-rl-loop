@@ -7073,7 +7073,6 @@ def test_operator_tool_task_handler_binds_owner_session_context(monkeypatch):
     }
     assert observed["set_session_vars"] == {
         "user_id": "user-123",
-        "workspace_root": "/tmp/takyon-worker-test-home",
         "business_slug": "acme",
     }
     assert observed["clear_session_vars"] == ["token"]
