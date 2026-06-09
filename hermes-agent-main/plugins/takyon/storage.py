@@ -213,7 +213,13 @@ def _walk_local_digests(root: Path, *, include_excluded: bool = False) -> dict[s
                 if include_excluded:
                     out[rel] = _EXCLUDED_DIGEST
                 continue
-            out[rel] = digest_bytes(_read_file_bytes(abs_path))
+            try:
+                out[rel] = digest_bytes(_read_file_bytes(abs_path))
+            except OSError:
+                # Local business mirrors are scratch only; an unreadable file should
+                # be treated as stale drift and replaced from the canonical backend,
+                # not wedge the whole sync_down/auth/runtime path.
+                continue
     return out
 
 
