@@ -35,7 +35,7 @@ export function Building({
         <header className="lb-bld__head">
           <span className="lb-bld__mark"><BulbMark size={26} tone="ink" /></span>
           <div className="lb-bld__head-txt">
-            <span className="lb-bld__status"><span className="lb-bld__pulse" />{done ? "Workspace ready" : errored ? "Build blocked" : "Litebulb is building"}</span>
+            <span className="lb-bld__status"><span className="lb-bld__pulse" />{done ? "Workspace ready" : errored ? "Build failed" : "Litebulb is building"}</span>
             {title ? <h1 className="lb-bld__name">{title}</h1> : null}
           </div>
         </header>
@@ -73,7 +73,7 @@ export function Building({
           {done
             ? <button className="b44-btn b44-btn--brand lb-bld__enter" onClick={onDone}>{title ? `Enter ${title} →` : "Enter workspace →"}</button>
             : errored
-              ? <span className="lb-bld__pct">blocked</span>
+              ? <span className="lb-bld__pct">failed</span>
               : <span className="lb-bld__pct">{pct}%</span>}
         </div>
       </div>

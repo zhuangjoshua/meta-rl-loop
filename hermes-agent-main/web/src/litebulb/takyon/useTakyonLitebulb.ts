@@ -385,10 +385,14 @@ export function useTakyonLitebulb() {
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const sessionRunningRef = useRef(false);
 
+  const isVisibleScope = useCallback((slug: string) => {
+    return trimText(slug).toLowerCase() === visibleBusinessRef.current;
+  }, []);
+
   const isVisibleBusiness = useCallback((slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
-    return Boolean(businessSlug) && visibleBusinessRef.current === businessSlug;
-  }, []);
+    return Boolean(businessSlug) && isVisibleScope(businessSlug);
+  }, [isVisibleScope]);
 
   const loadHome = useCallback(async () => {
     if (auth.status !== "in") return;
@@ -675,9 +679,9 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     const gateway = ensureGateway();
     await gateway.connect();
-    if (!isVisibleBusiness(businessSlug)) return "";
+    if (!isVisibleScope(businessSlug)) return "";
     const applyHistory = (history: HistoryPayload) => {
-      if (!isVisibleBusiness(businessSlug)) {
+      if (!isVisibleScope(businessSlug)) {
         return {
           pendingTurn: null,
           pendingTurnMissing: false,
@@ -736,14 +740,14 @@ export function useTakyonLitebulb() {
       const storedSessionId = await resolveStoredSessionId(
         readStoredLitebulbSession(businessSlug),
       );
-      if (!isVisibleBusiness(businessSlug)) return "";
+      if (!isVisibleScope(businessSlug)) return "";
       if (storedSessionId) {
         const resumed = await gateway.request<SessionResumePayload>("session.resume", {
           session_id: storedSessionId,
           cols: 100,
           _takyon_boot_business: businessSlug || undefined,
         }).catch<SessionResumePayload | null>(() => null);
-        if (!isVisibleBusiness(businessSlug)) return "";
+        if (!isVisibleScope(businessSlug)) return "";
         if (resumed?.session_id) {
           sessionIdRef.current = trimText(resumed.session_id);
           sessionBusinessRef.current = businessSlug;
@@ -756,7 +760,7 @@ export function useTakyonLitebulb() {
             messages: resumed.messages || [],
             running: true,
           });
-          if (!isVisibleBusiness(businessSlug)) return "";
+          if (!isVisibleScope(businessSlug)) return "";
           if (loaded?.pendingTurnMissing) {
             void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
           }
@@ -770,20 +774,20 @@ export function useTakyonLitebulb() {
       cols: 100,
       _takyon_boot_business: businessSlug || undefined,
     });
-    if (!isVisibleBusiness(businessSlug)) return "";
+    if (!isVisibleScope(businessSlug)) return "";
     sessionIdRef.current = trimText(result?.session_id);
     sessionBusinessRef.current = businessSlug;
     assistantMessageIdRef.current = "";
     if (businessSlug && sessionIdRef.current) {
       const durableSessionId = await readDurableSessionId(sessionIdRef.current);
-      if (!isVisibleBusiness(businessSlug)) return "";
+      if (!isVisibleScope(businessSlug)) return "";
       if (durableSessionId) {
         writeStoredLitebulbSession(businessSlug, durableSessionId);
       } else {
         clearStoredLitebulbSession(businessSlug);
       }
       const loaded = await loadHistory(sessionIdRef.current);
-      if (!isVisibleBusiness(businessSlug)) return "";
+      if (!isVisibleScope(businessSlug)) return "";
       if (loaded?.pendingTurnMissing) {
         void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
       }
@@ -795,7 +799,7 @@ export function useTakyonLitebulb() {
       setSessionRunning(false);
     }
     return sessionIdRef.current;
-  }, [ensureGateway, isVisibleBusiness, replayPendingTurn]);
+  }, [ensureGateway, isVisibleScope, replayPendingTurn]);
 
   const openBusiness = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
@@ -919,9 +923,11 @@ export function useTakyonLitebulb() {
     });
     setSubmitting(true);
     try {
-      const sessionId = await ensureSession("");
       const gateway = ensureGateway();
-      const result = await gateway.request<{
+      visibleBusinessRef.current = "";
+      assistantMessageIdRef.current = "";
+      let sessionId = await ensureSession("");
+      let result: {
         business_slug?: string;
         business_name?: string;
         businesses?: TakyonOperatorBusinessSummary[];
@@ -930,12 +936,45 @@ export function useTakyonLitebulb() {
         outputs?: unknown[];
         background_run?: Record<string, unknown> | null;
         streaming?: boolean;
-      }>("takyon.dashboard.create", {
-        session_id: sessionId,
-        goal: idea,
-        mode: "live",
-        limit: 60,
-      });
+      } | null = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          result = await gateway.request<{
+            business_slug?: string;
+            business_name?: string;
+            businesses?: TakyonOperatorBusinessSummary[];
+            current?: Record<string, unknown>;
+            overview?: Record<string, unknown>;
+            outputs?: unknown[];
+            background_run?: Record<string, unknown> | null;
+            streaming?: boolean;
+          }>("takyon.dashboard.create", {
+            session_id: sessionId,
+            goal: idea,
+            mode: "live",
+            limit: 60,
+          });
+          break;
+        } catch (error) {
+          if (isMissingSessionError(error)) {
+            sessionIdRef.current = "";
+            sessionBusinessRef.current = "";
+            sessionRunningRef.current = false;
+            setSessionRunning(false);
+            sessionId = await ensureSession("");
+            continue;
+          }
+          if (attempt < 3 && isBusyError(error)) {
+            await wait(350 + attempt * 200);
+            sessionId = await ensureSession("");
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (!result) {
+        throw new Error("Failed to create company.");
+      }
       const businessSlug = trimText(result?.business_slug).toLowerCase();
       const businessName = trimText(result?.business_name) || titleCaseSlug(businessSlug || "business");
       if (Array.isArray(result?.businesses) && result.businesses.length) {

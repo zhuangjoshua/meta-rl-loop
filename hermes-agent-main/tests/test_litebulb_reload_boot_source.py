@@ -38,11 +38,14 @@ def test_business_switch_ignores_stale_workspace_preview_and_session_writes():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'const visibleBusinessRef = useRef("");' in source
+    assert 'const isVisibleScope = useCallback((slug: string) => {' in source
+    assert 'return trimText(slug).toLowerCase() === visibleBusinessRef.current;' in source
     assert "const isVisibleBusiness = useCallback((slug: string) => {" in source
+    assert 'return Boolean(businessSlug) && isVisibleScope(businessSlug);' in source
     assert "if (!isVisibleBusiness(businessSlug)) return;" in source
     assert 'if (workspaceResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
     assert 'if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
-    assert 'if (!isVisibleBusiness(businessSlug)) return "";' in source
+    assert 'if (!isVisibleScope(businessSlug)) return "";' in source
     assert "visibleBusinessRef.current = businessSlug;" in source
     assert 'sessionIdRef.current = "";' in source
     assert 'sessionBusinessRef.current = "";' in source
@@ -87,3 +90,16 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert 'clearStoredPendingTurn(sessionBusinessRef.current);' in source
     assert 'clearStoredLitebulbSession(businessSlug);' in source
     assert 'await gateway.request("session.interrupt", {' in source
+
+
+def test_create_flow_uses_global_scope_session_and_recovers_missing_session():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'visibleBusinessRef.current = "";' in source
+    assert 'let sessionId = await ensureSession("");' in source
+    assert 'for (let attempt = 0; attempt < 4; attempt += 1) {' in source
+    assert 'if (isMissingSessionError(error)) {' in source
+    assert 'sessionIdRef.current = "";' in source
+    assert 'sessionBusinessRef.current = "";' in source
+    assert 'sessionId = await ensureSession("");' in source
+    assert 'if (attempt < 3 && isBusyError(error)) {' in source
