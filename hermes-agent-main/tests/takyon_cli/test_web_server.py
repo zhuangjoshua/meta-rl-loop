@@ -129,24 +129,22 @@ def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
     assert web_server._load_or_create_session_token() == "env-token-that-is-long-enough-1234567890"
 
 
-def test_preview_html_with_base_inserts_base_tag_when_missing():
+def test_live_site_preview_wrapper_html_embeds_public_url():
     import takyon_cli.web_server as web_server
 
-    html_text = "<html><head><title>x</title></head><body>Hello</body></html>"
-    result = web_server._takyon_preview_html_with_base(html_text, "https://coolman.fourmanifold.com/")
+    result = web_server._takyon_live_site_preview_wrapper_html("https://coolman.fourmanifold.com/")
 
-    assert '<base href="https://coolman.fourmanifold.com/" />' in result
-    assert result.index("<base") > result.index("<head")
+    assert "<title>Takyon Product Preview</title>" in result
+    assert '<iframe src="https://coolman.fourmanifold.com/"' in result
+    assert "referrerpolicy=\"strict-origin-when-cross-origin\"" in result
 
 
-def test_preview_html_with_base_replaces_existing_base_tag():
+def test_live_site_preview_wrapper_html_requires_http_url():
     import takyon_cli.web_server as web_server
 
-    html_text = "<html><head><base href=\"https://old.example/\"><title>x</title></head><body>Hello</body></html>"
-    result = web_server._takyon_preview_html_with_base(html_text, "https://coolman.fourmanifold.com/")
-
-    assert result.count("<base") == 1
-    assert 'href="https://coolman.fourmanifold.com/"' in result
+    with pytest.raises(web_server.HTTPException) as excinfo:
+        web_server._takyon_live_site_preview_wrapper_html("/relative/path")
+    assert excinfo.value.status_code == 400
 
 
 def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
@@ -1179,6 +1177,41 @@ def test_business_site_preview_prefers_published_public_url_over_local_html(monk
         "mode": "live_url",
         "status": "published",
     }
+
+
+def test_site_preview_document_wraps_live_public_url(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(
+        web_server,
+        "_read_takyon_business_site_preview",
+        lambda operator_user_id, business, requested_path: {
+            "business_slug": business,
+            "path": requested_path or "product/site",
+            "size": 0,
+            "url": "https://alpha.example.com/",
+            "mode": "live_url",
+            "status": "published",
+        },
+    )
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/site-preview/alpha", params={"path": "product/site"})
+
+    assert resp.status_code == 200, resp.text
+    assert "Takyon Product Preview" in resp.text
+    assert '<iframe src="https://alpha.example.com/"' in resp.text
 
 
 def test_business_site_preview_uses_public_url_even_when_publish_status_is_not_published(monkeypatch, tmp_path):

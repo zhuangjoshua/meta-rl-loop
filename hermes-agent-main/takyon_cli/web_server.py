@@ -3548,48 +3548,25 @@ def _read_takyon_business_site_preview(
     }
 
 
-def _takyon_preview_html_with_base(html_text: str, base_href: str) -> str:
-    href = str(base_href or "").strip()
-    if not href:
-        return html_text
-    base_tag = f'<base href="{html.escape(href, quote=True)}" />'
-    if re.search(r"<base\b", html_text, re.IGNORECASE):
-        return re.sub(
-            r"<base\b[^>]*>",
-            base_tag,
-            html_text,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-    head_match = re.search(r"<head\b[^>]*>", html_text, re.IGNORECASE)
-    if head_match:
-        return f"{html_text[:head_match.end()]}{base_tag}{html_text[head_match.end():]}"
-    return f"{base_tag}{html_text}"
-
-
-def _read_takyon_live_site_preview_html(url: str) -> str:
+def _takyon_live_site_preview_wrapper_html(url: str) -> str:
     preview_url = str(url or "").strip()
     if not re.match(r"^https?://", preview_url, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="preview url required")
-    request = urllib.request.Request(
-        preview_url,
-        headers={
-            "User-Agent": "TakyonPreview/1.0",
-            "Accept": "text/html,application/xhtml+xml",
-        },
+    escaped_url = html.escape(preview_url, quote=True)
+    return (
+        "<!doctype html>"
+        "<html><head>"
+        '<meta charset="utf-8" />'
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+        "<title>Takyon Product Preview</title>"
+        "<style>"
+        "html,body{margin:0;height:100%;background:#fff;overflow:hidden;}"
+        "iframe{display:block;width:100%;height:100%;border:0;background:#fff;}"
+        "</style>"
+        "</head><body>"
+        f'<iframe src="{escaped_url}" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>'
+        "</body></html>"
     )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            content_type = str(response.headers.get("Content-Type") or "text/html")
-            if "html" not in content_type.lower():
-                raise HTTPException(status_code=502, detail=f"preview is not html: {content_type}")
-            charset = response.headers.get_content_charset() or "utf-8"
-            html_text = response.read().decode(charset, errors="replace")
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 - preview should fail honestly
-        raise HTTPException(status_code=502, detail=f"preview fetch failed: {exc}") from exc
-    return _takyon_preview_html_with_base(html_text, preview_url)
 
 
 def _read_takyon_business_workspace(
@@ -4048,10 +4025,7 @@ async def get_takyon_site_preview_document(
         except Exception as exc:  # noqa: BLE001 - preview should fail honestly
             raise HTTPException(status_code=500, detail=f"preview payload decode failed: {exc}") from exc
     elif mode == "live_url":
-        html_text = await asyncio.to_thread(
-            _read_takyon_live_site_preview_html,
-            str(preview.get("url") or ""),
-        )
+        html_text = _takyon_live_site_preview_wrapper_html(str(preview.get("url") or ""))
     else:
         raise HTTPException(status_code=404, detail="site preview not available")
     return HTMLResponse(
