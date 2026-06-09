@@ -2319,6 +2319,7 @@ Playful shared design system.
     assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "[Hermes guidance skill: claude-design-doodle]" in instruction
+    assert "required design contract" in instruction
     assert "Pick one coherent style skill." in instruction
     assert "playful still has to ship" in instruction
 
@@ -2363,6 +2364,10 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
     assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+    receipt_path = tmp_path / "businesses" / "latexflow" / str(result["surface_refresh"]["receipt_path"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["guidance_skills"] == ["claude-design", "claude-design-openai"]
+    assert "claude-design-openai" in str(receipt["guidance_selection_reason"])
 
 
 def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refresh(tmp_path, monkeypatch):

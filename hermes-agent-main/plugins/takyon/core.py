@@ -232,6 +232,79 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
 }
 _DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS: tuple[str, ...] = ("claude-design", "claude-design-openai")
+_DEFAULT_PRODUCT_SITE_STYLE_SKILL = "claude-design-openai"
+_PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "claude-design-doodle": (
+        "pet",
+        "pets",
+        "dog",
+        "dogs",
+        "cat",
+        "cats",
+        "kid",
+        "kids",
+        "family-friendly",
+        "whimsical",
+        "doodle",
+        "silly",
+        "cute",
+        "charming",
+    ),
+    "claude-design-stripe": (
+        "fintech",
+        "finance",
+        "payments",
+        "billing",
+        "checkout",
+        "infrastructure",
+        "infra",
+        "developer platform",
+        "b2b",
+        "enterprise",
+        "api",
+        "commercial",
+    ),
+    "claude-design-superhuman": (
+        "productivity",
+        "inbox",
+        "calendar",
+        "focus",
+        "executive",
+        "speed",
+        "high-performance",
+        "performance",
+        "workflow",
+    ),
+    "claude-design-vibrant": (
+        "consumer",
+        "social",
+        "creator",
+        "community",
+        "gen z",
+        "18-35",
+        "18 to 35",
+        "younger",
+        "fun",
+        "playful",
+        "bold",
+        "anti-generic",
+        "energetic",
+        "lively",
+        "colorful",
+        "cooler",
+        "coolness",
+        "fashion",
+        "dating",
+        "wellness",
+        "lifestyle",
+    ),
+}
+_PRODUCT_SITE_STYLE_PRIORITY: tuple[str, ...] = (
+    "claude-design-doodle",
+    "claude-design-stripe",
+    "claude-design-superhuman",
+    "claude-design-vibrant",
+)
 _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -730,12 +803,72 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-def _resolve_worker_guidance_skills(args: dict[str, Any], workspace_raw: str) -> list[str]:
+def _collect_guidance_signal_text(value: Any, collected: list[str]) -> None:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            collected.append(text)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_guidance_signal_text(item, collected)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_guidance_signal_text(item, collected)
+
+
+def _select_default_product_site_style_skill(
+    *,
+    surface: dict[str, Any] | None = None,
+    instruction: str = "",
+) -> tuple[str, str]:
+    collected: list[str] = []
+    _collect_guidance_signal_text(instruction, collected)
+    if isinstance(surface, dict):
+        _collect_guidance_signal_text(surface, collected)
+    signal_text = " ".join(collected).strip().lower()
+    if not signal_text:
+        return (
+            _DEFAULT_PRODUCT_SITE_STYLE_SKILL,
+            f"defaulted to {_DEFAULT_PRODUCT_SITE_STYLE_SKILL}; no style signal text was available",
+        )
+
+    best_skill = _DEFAULT_PRODUCT_SITE_STYLE_SKILL
+    best_matches: list[str] = []
+    best_score = 0
+    for skill_name in _PRODUCT_SITE_STYLE_PRIORITY:
+        keywords = _PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS.get(skill_name, ())
+        matches = [keyword for keyword in keywords if keyword in signal_text]
+        score = len(matches)
+        if score > best_score:
+            best_skill = skill_name
+            best_matches = matches
+            best_score = score
+    if best_score <= 0:
+        return (
+            _DEFAULT_PRODUCT_SITE_STYLE_SKILL,
+            f"defaulted to {_DEFAULT_PRODUCT_SITE_STYLE_SKILL}; no stronger style signal matched the brief",
+        )
+    return (
+        best_skill,
+        f"selected {best_skill} from style signals: {', '.join(best_matches[:6])}",
+    )
+
+
+def _resolve_worker_guidance_skills(
+    args: dict[str, Any],
+    workspace_raw: str,
+    *,
+    surface: dict[str, Any] | None = None,
+    instruction: str = "",
+) -> tuple[list[str], str]:
     if "guidance_skills" in args:
-        return _normalize_guidance_skills(args.get("guidance_skills"))
+        return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
     if _workspace_needs_runtime_ui_contract(workspace_raw):
-        return list(_DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS)
-    return []
+        style_skill, reason = _select_default_product_site_style_skill(surface=surface, instruction=instruction)
+        return ["claude-design", style_skill], reason
+    return [], ""
 
 
 def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
@@ -4985,10 +5118,20 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         resolved_names.append(skill_name)
         section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
         excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
+        if skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
+            preamble = (
+                "Treat this guidance as the required design contract for this run. "
+                "Follow its visual direction, component posture, and hard rules unless the business brief explicitly conflicts. "
+                "Do not silently substitute a different aesthetic."
+            )
+        else:
+            preamble = (
+                "Follow this guidance when it improves the artifact quality or UX. "
+                "Business state, workspace boundaries, runtime truth, and the Hermes no-pretend contract override this guidance if they conflict."
+            )
         block = (
             f"[Hermes guidance skill: {skill_name}]\n"
-            "Follow this guidance when it improves the artifact quality or UX. "
-            "Business state, workspace boundaries, runtime truth, and the Hermes no-pretend contract override this guidance if they conflict.\n\n"
+            f"{preamble}\n\n"
             f"{excerpt}"
         )
         blocks.append(block.strip())
@@ -20710,8 +20853,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or os.getenv("TAKYON_CLAUDE_AGENT_MODEL")
             or default_model
         ).strip()
-        guidance_skills = _resolve_worker_guidance_skills(args, workspace_rel)
-        resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
+        guidance_skills: list[str] = []
+        guidance_selection_reason = ""
+        resolved_guidance_skills: list[str] = []
+        guidance_block = ""
         worker_invoked = False
         worker_actual_cents: int | None = None
         install_surface = _boolish(args.get("install"), default=True)
@@ -20738,6 +20883,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
             if not isinstance(surface_for_worker, dict):
                 surface_for_worker = {}
+            guidance_skills, guidance_selection_reason = _resolve_worker_guidance_skills(
+                args,
+                workspace_rel,
+                surface=surface_for_worker,
+                instruction=instruction,
+            )
+            resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
             if refresh_surface and workspace_targets_product_surface:
                 _enforce_canonical_product_surface_source_path(
                     business=business,
@@ -20943,6 +21095,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         receipt_path=f"metrics/receipts/product-surface/{receipt_id}.json",
                         refresh_source="business_claude_agent_task",
                     )
+                    surface_refresh = {
+                        **surface_refresh,
+                        "guidance_skills": resolved_guidance_skills,
+                        "guidance_selection_reason": guidance_selection_reason,
+                    }
                     active_store._sync_business_workspace_remote(business)
                 should_retry_local_repair = (
                     sdk_result.get("success")
@@ -20999,6 +21156,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "workspace": workspace_rel,
                         "model": model,
                         "guidance_skills": resolved_guidance_skills,
+                        "guidance_selection_reason": guidance_selection_reason,
                         "summary": sdk_result.get("summary") or "",
                         "error": sdk_result.get("error") or None,
                         "blocked": bool(sdk_result.get("blocked")),
@@ -21032,6 +21190,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "source": "claude-agent-sdk",
             "model": model,
             "guidance_skills": resolved_guidance_skills,
+            "guidance_selection_reason": guidance_selection_reason,
             "blocked": bool(sdk_result.get("blocked")) or status == "blocked",
             "budget": operator_budget,
             "operator_budget": operator_budget,
@@ -21965,7 +22124,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work. When omitted for product/site work, defaults to claude-design plus claude-design-openai."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work. When omitted for product/site work, defaults to claude-design plus a shared style skill inferred from the brief, falling back to claude-design-openai when no stronger signal exists."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-4-6; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},

@@ -18,9 +18,15 @@ class _FakeConn:
 
 
 class _FakeStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, surface_contract: dict[str, object] | None = None):
         self.root = root
         self._workspace_root_override = None
+        self._surface_contract = {
+            "source_path": "product/site",
+            "publish_policy": "publish_after_refresh",
+        }
+        if isinstance(surface_contract, dict):
+            self._surface_contract.update(surface_contract)
 
     def _connect(self):
         return _FakeConn()
@@ -35,10 +41,7 @@ class _FakeStore:
         if query == "summary":
             return {
                 "app": {
-                    "surface_contract": {
-                        "source_path": "product/site",
-                        "publish_policy": "publish_after_refresh",
-                    }
+                    "surface_contract": dict(self._surface_contract)
                 }
             }
         return {}
@@ -195,6 +198,71 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
     assert result["success"] is True
     assert result["guidance_skills"] == ["claude-design", "claude-design-openai"]
     assert "[Hermes guidance skill: default-product-site]" in instruction
+
+
+def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+    store = _FakeStore(
+        tmp_path,
+        surface_contract={
+            "notes": (
+                "ICP: men and women 18-35 who want to be socially cooler. "
+                "Landing page must be bold, specific, anti-generic."
+            ),
+            "customer_experience_shape": {
+                "surface_goal": "Convert young consumer users for a social self-improvement app."
+            },
+        },
+    )
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Coolman</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "coolman")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_compose_worker_guidance_block",
+        lambda skills: (list(skills), "[Hermes guidance skill: inferred-product-site]"),
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "coolman",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-vibrant-guidance",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = str(captured["payload"]["instruction"])
+    assert result["success"] is True
+    assert result["guidance_skills"] == ["claude-design", "claude-design-vibrant"]
+    assert "claude-design-vibrant" in str(result["guidance_selection_reason"])
+    assert "[Hermes guidance skill: inferred-product-site]" in instruction
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
