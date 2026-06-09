@@ -364,6 +364,7 @@ function ChannelBudget({
   workspace,
   creativeCredits,
   onSaveChannelCreditBudgets,
+  onBuyCreativeCredits,
 }: {
   workspace: TakyonBusinessWorkspaceResponse | null;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
@@ -371,6 +372,7 @@ function ChannelBudget({
     slug: string,
     allocations: Record<ChannelBudgetKey, number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
+  onBuyCreativeCredits: (slug: string) => Promise<void>;
 }) {
   const overview = asRecord(workspace?.overview);
   const outreach = asRecord(asRecord(asRecord(overview.artifacts).outreach).channels);
@@ -407,7 +409,9 @@ function ChannelBudget({
   const businessSlug = asText(workspace?.business_slug || creativeCredits?.business_slug);
   const [draftAllocations, setDraftAllocations] = useState<Record<ChannelBudgetKey, number>>(savedAllocations);
   const [saving, setSaving] = useState(false);
+  const [buying, setBuying] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [buyError, setBuyError] = useState("");
   const syncedBusinessRef = useRef(businessSlug);
   const hasChanges = CHANNEL_BUDGET_KEYS.some((key) => draftAllocations[key] !== savedAllocations[key]);
 
@@ -416,6 +420,7 @@ function ChannelBudget({
       syncedBusinessRef.current = businessSlug;
       setDraftAllocations(savedAllocations);
       setSaveError("");
+      setBuyError("");
       return;
     }
     if (!saving && !hasChanges) {
@@ -434,6 +439,9 @@ function ChannelBudget({
   const unallocatedCredits = Math.max(0, budgetCapacity - totalAllocated);
   const sliderMax = Math.max(1, budgetCapacity, totalAllocated);
   const canEdit = Boolean(creativeCredits?.available && businessSlug);
+  const canBuy = Boolean(businessSlug);
+  const needsCredits = canBuy && budgetCapacity <= 0 && spendableCredits <= 0;
+  const feedbackError = buyError || saveError;
   const rows = [
     {
       key: "x",
@@ -477,12 +485,14 @@ function ChannelBudget({
       };
     });
     setSaveError("");
+    setBuyError("");
   }, [budgetCapacity, rowFloors]);
 
   const saveBudgets = useCallback(async () => {
     if (!canEdit || !businessSlug || saving || !hasChanges) return;
     setSaving(true);
     setSaveError("");
+    setBuyError("");
     try {
       await onSaveChannelCreditBudgets(businessSlug, draftAllocations);
     } catch (error) {
@@ -491,6 +501,20 @@ function ChannelBudget({
       setSaving(false);
     }
   }, [businessSlug, canEdit, draftAllocations, hasChanges, onSaveChannelCreditBudgets, saving]);
+
+  const buyCredits = useCallback(async () => {
+    if (!businessSlug || buying) return;
+    setBuying(true);
+    setBuyError("");
+    setSaveError("");
+    try {
+      await onBuyCreativeCredits(businessSlug);
+    } catch (error) {
+      setBuyError(error instanceof Error ? error.message : "Failed to start creative credit checkout.");
+    } finally {
+      setBuying(false);
+    }
+  }, [businessSlug, buying, onBuyCreativeCredits]);
 
   return (
     <section className="lb-card lb-bud">
@@ -543,18 +567,28 @@ function ChannelBudget({
       <div className="lb-bud__foot">
         <div className="lb-bud__note">
           {creativeCredits?.available
-            ? `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope`
+            ? `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope${needsCredits ? " · Buy credits to unlock allocation." : ""}`
             : "Creative credits are unavailable right now, so channel budgets cannot be edited."}
-          {saveError ? <span className="lb-bud__error">{saveError}</span> : null}
+          {feedbackError ? <span className="lb-bud__error">{feedbackError}</span> : null}
         </div>
-        <button
-          type="button"
-          className="lb-bud__save"
-          disabled={!canEdit || saving || !hasChanges}
-          onClick={() => { void saveBudgets(); }}
-        >
-          {saving ? "Saving..." : hasChanges ? "Save budgets" : "Saved"}
-        </button>
+        <div className="lb-bud__actions">
+          <button
+            type="button"
+            className="lb-bud__buy"
+            disabled={!canBuy || buying}
+            onClick={() => { void buyCredits(); }}
+          >
+            {buying ? "Opening Stripe..." : "Buy credits"}
+          </button>
+          <button
+            type="button"
+            className="lb-bud__save"
+            disabled={!canEdit || saving || !hasChanges}
+            onClick={() => { void saveBudgets(); }}
+          >
+            {saving ? "Saving..." : hasChanges ? "Save budgets" : "Saved"}
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -844,6 +878,7 @@ export function CompanyTab({
   traction,
   tractionRange,
   onSaveChannelCreditBudgets,
+  onBuyCreativeCredits,
   onTractionRangeChange,
 }: {
   business: LitebulbBusiness;
@@ -855,6 +890,7 @@ export function CompanyTab({
     slug: string,
     allocations: Record<ChannelBudgetKey, number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
+  onBuyCreativeCredits: (slug: string) => Promise<void>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const liveState = useMemo(() => asRecord(workspace?.live_state), [workspace]);
@@ -871,6 +907,7 @@ export function CompanyTab({
             workspace={workspace}
             creativeCredits={creativeCredits}
             onSaveChannelCreditBudgets={onSaveChannelCreditBudgets}
+            onBuyCreativeCredits={onBuyCreativeCredits}
           />
         </div>
         <Distribution business={business} workspace={workspace} />

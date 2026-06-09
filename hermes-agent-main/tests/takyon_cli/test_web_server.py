@@ -303,6 +303,47 @@ def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
     assert cfg.secret == "cookie-secret"
 
 
+def test_auth0_config_returns_none_when_safebox_unavailable_and_not_forced(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    web_server._clear_auth0_config_cache()
+    monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
+    monkeypatch.setenv("AUTH0_DOMAIN", "fourmanifold.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda _key: (_ for _ in ()).throw(
+            web_server.takyon_safebox.SafeboxAuthorityUnavailable("missing safebox")
+        ),
+    )
+
+    assert web_server._auth0_config() is None
+    web_server._clear_auth0_config_cache()
+
+
+def test_auth0_config_raises_when_safebox_unavailable_and_forced(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    web_server._clear_auth0_config_cache()
+    monkeypatch.setenv("TAKYON_DASHBOARD_AUTH0", "1")
+    monkeypatch.setenv("AUTH0_DOMAIN", "fourmanifold.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "read_env_backed_value",
+        lambda _key: (_ for _ in ()).throw(
+            web_server.takyon_safebox.SafeboxAuthorityUnavailable("missing safebox")
+        ),
+    )
+
+    with pytest.raises(web_server.Auth0ConfigError, match="Safebox authority is unavailable"):
+        web_server._auth0_config()
+    web_server._clear_auth0_config_cache()
+
+
 def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     import plugins.takyon.ai_gateway as ai_gateway
     import plugins.takyon.control_api as control_api
@@ -809,16 +850,17 @@ def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):
                 "cancel_url": cancel_url,
             }
         )
-        return (
-            {"id": "cs_credit_fast", "url": "https://checkout.stripe.com/c/cs_credit_fast"},
-            {
-                "credits": int(credits or 0),
-                "amount_cents": int(credits or 0),
-                "price_cents_per_credit": 1,
-            },
-        )
+        return {
+            "checkout_url": "https://checkout.stripe.com/c/cs_credit_fast",
+            "session_id": "cs_credit_fast",
+            "business_slug": slug,
+            "pack_id": pack_id,
+            "credits": int(credits or 0),
+            "amount_cents": int(credits or 0),
+            "price_cents_per_credit": 1,
+        }
 
-    monkeypatch.setattr(control_api, "create_creative_credit_checkout_session", _fake_checkout)
+    monkeypatch.setattr(control_api.safebox, "create_creative_credit_checkout", _fake_checkout)
 
     client = TestClient(web_server.app)
     client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
@@ -2445,15 +2487,15 @@ class TestWebServerEndpoints:
         """POST /api/env/reveal should return the real unredacted value."""
         from takyon_cli.config import save_env_value
         from takyon_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
-        save_env_value("TEST_REVEAL_KEY", "super-secret-value-12345")
+        save_env_value("TEST_REVEAL_VALUE", "super-secret-value-12345")
         resp = self.client.post(
             "/api/env/reveal",
-            json={"key": "TEST_REVEAL_KEY"},
+            json={"key": "TEST_REVEAL_VALUE"},
             headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["key"] == "TEST_REVEAL_KEY"
+        assert data["key"] == "TEST_REVEAL_VALUE"
         assert data["value"] == "super-secret-value-12345"
 
     def test_reveal_env_var_not_found(self):

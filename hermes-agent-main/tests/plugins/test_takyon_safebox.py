@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -8,6 +9,7 @@ from starlette.testclient import TestClient
 
 from plugins.takyon import safebox
 from plugins.takyon.safebox_app import build_safebox_app
+from plugins.takyon.stripe_util import build_signature_header
 from plugins.takyon.user_api_keys import generate_api_key
 
 
@@ -203,6 +205,48 @@ def test_remote_safebox_creative_credit_balance_delegates_to_service(monkeypatch
     assert calls == [("GET", "/v1/creative-credits/acme", None)]
 
 
+def test_remote_safebox_creative_credit_checkout_delegates_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {
+            "checkout_url": "https://checkout.stripe.test/cs_123",
+            "session_id": "cs_123",
+            "business_slug": "acme",
+            "credits": 125,
+            "amount_cents": 125,
+            "price_cents_per_credit": 1,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    payload = safebox.create_creative_credit_checkout(
+        "user-1",
+        "acme",
+        credits=125,
+        success_url="https://app.example.com/#/app/c/acme",
+        cancel_url="https://app.example.com/#/app/c/acme",
+    )
+
+    assert payload["session_id"] == "cs_123"
+    assert calls == [
+        (
+            "POST",
+            "/v1/creative-credits/checkout",
+            {
+                "user_id": "user-1",
+                "business_slug": "acme",
+                "credits": 125,
+                "pack_id": None,
+                "success_url": "https://app.example.com/#/app/c/acme",
+                "cancel_url": "https://app.example.com/#/app/c/acme",
+            },
+        )
+    ]
+
+
 def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
 
@@ -282,4 +326,88 @@ def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(m
         "business_slug": "acme",
         "balance_credits": 9,
         "reserved_credits": 4,
+    }
+
+
+def test_safebox_app_requires_internal_token_and_creates_creative_credit_checkout(monkeypatch):
+    from plugins.takyon import control_api
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setattr(
+        control_api,
+        "create_creative_credit_checkout_session",
+        lambda user_id, business_slug, **kwargs: (
+            {"id": "cs_credit_1", "url": "https://checkout.stripe.test/cs_credit_1"},
+            {
+                "pack_id": None,
+                "credits": 125,
+                "amount_cents": 125,
+                "price_cents_per_credit": 1,
+            },
+        ),
+    )
+
+    client = TestClient(build_safebox_app())
+
+    unauthorized = client.post(
+        "/v1/creative-credits/checkout",
+        json={
+            "user_id": "user-1",
+            "business_slug": "acme",
+            "credits": 125,
+            "success_url": "https://app.example.com/#/app/c/acme",
+            "cancel_url": "https://app.example.com/#/app/c/acme",
+        },
+    )
+    assert unauthorized.status_code == 401
+
+    headers = {"Authorization": "Bearer shared-token"}
+    response = client.post(
+        "/v1/creative-credits/checkout",
+        headers=headers,
+        json={
+            "user_id": "user-1",
+            "business_slug": "acme",
+            "credits": 125,
+            "success_url": "https://app.example.com/#/app/c/acme",
+            "cancel_url": "https://app.example.com/#/app/c/acme",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "checkout_url": "https://checkout.stripe.test/cs_credit_1",
+        "session_id": "cs_credit_1",
+        "business_slug": "acme",
+        "pack_id": None,
+        "credits": 125,
+        "amount_cents": 125,
+        "price_cents_per_credit": 1,
+    }
+
+
+def test_safebox_app_verifies_billing_webhook_signature(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+
+    client = TestClient(build_safebox_app())
+    body = json.dumps({"id": "evt_123", "type": "checkout.session.completed"})
+    headers = {"Authorization": "Bearer shared-token"}
+
+    unauthorized = client.post(
+        "/v1/stripe/billing-webhook/verify",
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_test_xyz")},
+    )
+    assert unauthorized.status_code == 401
+
+    response = client.post(
+        "/v1/stripe/billing-webhook/verify",
+        headers=headers,
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_test_xyz")},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "event": {"id": "evt_123", "type": "checkout.session.completed"}
     }

@@ -454,6 +454,36 @@ export function useTakyonLitebulb() {
     return payload;
   }, [isVisibleBusiness]);
 
+  const startCreativeCreditCheckout = useCallback(async (slug: string) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
+    const returnPath = window.location.pathname + window.location.search + window.location.hash;
+    let packId = "";
+    try {
+      const catalog = await api.getTakyonBusinessCreativeCreditPacks(businessSlug);
+      const packs = Array.isArray(catalog.packs) ? [...catalog.packs] : [];
+      packs.sort((left, right) => {
+        const leftAmount = Number(left.amount_cents || Number.MAX_SAFE_INTEGER);
+        const rightAmount = Number(right.amount_cents || Number.MAX_SAFE_INTEGER);
+        return leftAmount - rightAmount;
+      });
+      packId = trimText(packs[0]?.id);
+    } catch {
+      packId = "";
+    }
+    const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
+      businessSlug,
+      packId
+        ? { packId, returnPath }
+        : { credits: 100, returnPath },
+    );
+    const checkoutUrl = trimText(checkout.checkout_url);
+    if (!checkoutUrl) {
+      throw new Error("Creative credit checkout unavailable.");
+    }
+    window.location.assign(checkoutUrl);
+  }, []);
+
   const loadTraction = useCallback(async (slug: string, range: "D" | "W" | "M" | "Y") => {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
@@ -1174,6 +1204,7 @@ export function useTakyonLitebulb() {
     sendPrompt,
     createBusiness,
     saveChannelCreditBudgets,
+    startCreativeCreditCheckout,
     openBillingPortal,
     startTopup,
   };

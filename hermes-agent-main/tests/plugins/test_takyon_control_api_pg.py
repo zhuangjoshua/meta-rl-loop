@@ -113,7 +113,8 @@ def _post_webhook(client, event: dict, secret: str):
 
 
 @pytest.fixture
-def client(pg_conn):
+def client(pg_conn, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     app = FastAPI()
     app.include_router(build_control_router())
     app.dependency_overrides[get_control_conn] = lambda: pg_conn

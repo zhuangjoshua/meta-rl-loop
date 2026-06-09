@@ -4985,7 +4985,15 @@ def get_env_value(key: str) -> Optional[str]:
     from plugins.takyon import safebox as takyon_safebox
 
     if takyon_safebox.is_sensitive_env_key(name):
-        value = takyon_safebox.read_env_backed_value(name)
+        try:
+            value = takyon_safebox.read_env_backed_value(name)
+        except takyon_safebox.SafeboxAuthorityUnavailable:
+            # Local CLI/dashboard processes should still be able to inspect
+            # env-backed config even when no remote Safebox is configured.
+            if name in os.environ:
+                return os.environ[name]
+            env_vars = load_env()
+            return env_vars.get(name)
         return value or None
     if name in os.environ:
         return os.environ[name]

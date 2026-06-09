@@ -47,6 +47,7 @@ from takyon_cli.config import (
     DEFAULT_CONFIG,
     OPTIONAL_ENV_VARS,
     get_config_path,
+    get_env_value,
     get_env_path,
     get_takyon_home,
     load_config,
@@ -759,8 +760,18 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
 
     domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
     client_id = _env_value("AUTH0_CLIENT_ID")
-    client_secret = takyon_safebox.read_env_backed_value("AUTH0_CLIENT_SECRET")
-    secret = takyon_safebox.read_env_backed_value("AUTH0_SECRET")
+    try:
+        client_secret = takyon_safebox.read_env_backed_value("AUTH0_CLIENT_SECRET")
+        secret = takyon_safebox.read_env_backed_value("AUTH0_SECRET")
+    except takyon_safebox.SafeboxAuthorityUnavailable as exc:
+        if force is True:
+            raise Auth0ConfigError(
+                "Auth0 dashboard auth is enabled but Safebox authority is unavailable: "
+                f"{exc}"
+            ) from exc
+        _AUTH0_CONFIG_CACHE_KEY = cache_key
+        _AUTH0_CONFIG_CACHE_VALUE = None
+        return None
     base_url = _default_public_base_url()
 
     required = {
@@ -4367,14 +4378,12 @@ async def create_takyon_business_creative_credit_checkout(
     success_path = _same_origin_path(str(body.get("success_path") or "/"))
     cancel_path = _same_origin_path(str(body.get("cancel_path") or success_path))
     try:
-        from plugins.takyon import stripe_util
-        from plugins.takyon.control_api import create_creative_credit_checkout_session
+        from plugins.takyon import safebox, stripe_util
         from plugins.takyon.core import _db_backend
 
         if _db_backend() != "postgres":
             raise HTTPException(status_code=503, detail="postgres_required")
-
-        session, charge = create_creative_credit_checkout_session(
+        return safebox.create_creative_credit_checkout(
             str(principal.user_id),
             slug,
             credits=credits if credits > 0 else None,
@@ -4390,7 +4399,7 @@ async def create_takyon_business_creative_credit_checkout(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except stripe_util.StripeError as exc:
         message = str(exc)
-        if "STRIPE_SECRET_KEY" in message:
+        if "STRIPE_SECRET_KEY" in message or "creative_credit_checkout_unconfigured" in message:
             raise HTTPException(
                 status_code=503, detail="creative_credit_checkout_unconfigured"
             ) from exc
@@ -4398,15 +4407,6 @@ async def create_takyon_business_creative_credit_checkout(
     except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
         _log.warning("dashboard business creative credit checkout failed for %s: %s", slug, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {
-        "checkout_url": session.get("url"),
-        "session_id": session.get("id"),
-        "business_slug": slug,
-        "pack_id": charge.get("pack_id"),
-        "credits": charge["credits"],
-        "amount_cents": charge["amount_cents"],
-        "price_cents_per_credit": charge.get("price_cents_per_credit"),
-    }
 
 
 @app.post("/api/takyon/businesses/{slug}/outreach/start")
@@ -5154,13 +5154,9 @@ async def update_config(body: ConfigUpdate):
 
 @app.get("/api/env")
 async def get_env_vars():
-    env_on_disk = load_env()
     result = {}
     for var_name, info in OPTIONAL_ENV_VARS.items():
-        if takyon_safebox.is_sensitive_env_key(var_name):
-            value = takyon_safebox.read_env_backed_value(var_name)
-        else:
-            value = env_on_disk.get(var_name)
+        value = get_env_value(var_name)
         result[var_name] = {
             "is_set": bool(value),
             "redacted_value": redact_key(value) if value else None,
@@ -5219,11 +5215,7 @@ async def reveal_env_var(body: EnvVarReveal, request: Request):
     _reveal_timestamps.append(now)
 
     # --- Reveal ---
-    if takyon_safebox.is_sensitive_env_key(body.key):
-        value = takyon_safebox.read_env_backed_value(body.key)
-    else:
-        env_on_disk = load_env()
-        value = env_on_disk.get(body.key)
+    value = get_env_value(body.key)
     if value is None:
         raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
 

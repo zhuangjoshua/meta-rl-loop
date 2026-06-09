@@ -97,8 +97,13 @@
 .lb-bud__foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--cds-color-border-divider); }
 .lb-bud__note { flex: 1; min-width: 0; font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); }
 .lb-bud__error { display: inline-block; margin-left: 8px; color: var(--cds-color-error); }
+.lb-bud__actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.lb-bud__buy,
 .lb-bud__save { flex: none; border: 1px solid var(--cds-color-border-default); background: var(--cds-color-surface-card); color: var(--cds-color-text-default); border-radius: var(--cds-radius-md); padding: 7px 12px; font: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-semibold); cursor: pointer; }
+.lb-bud__buy { border-color: var(--cds-color-brand-secondary); background: var(--cds-color-brand-secondary); color: #fff; box-shadow: var(--cds-shadow-xs); }
+.lb-bud__buy:hover:not(:disabled) { filter: brightness(1.04); }
 .lb-bud__save:hover:not(:disabled) { background: var(--cds-color-surface-sunken); }
+.lb-bud__buy:disabled,
 .lb-bud__save:disabled { opacity: 0.55; cursor: default; }
 
 /* ── terminal (always dark) ── */

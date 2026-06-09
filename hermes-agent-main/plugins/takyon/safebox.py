@@ -99,6 +99,14 @@ class SafeboxAuthorityUnavailable(RuntimeError):
     """No remote Safebox is configured and this process is not the Safebox host."""
 
 
+class StripeBillingWebhookUnconfigured(RuntimeError):
+    """Billing webhook verification is unavailable because Safebox lacks the secret."""
+
+
+class StripeBillingWebhookInvalidSignature(RuntimeError):
+    """The presented Stripe billing webhook signature failed verification."""
+
+
 def is_sensitive_env_key(key: str) -> bool:
     name = str(key or "").strip()
     if not name:
@@ -618,6 +626,111 @@ def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBala
         )
         return _balances_from_payload(payload, business_slug=slug)
     return _local_get_business_credit_balances(conn, slug)
+
+
+def create_creative_credit_checkout(
+    user_id: str,
+    business_slug: str,
+    *,
+    credits: int | None = None,
+    pack_id: str | None = None,
+    success_url: str,
+    cancel_url: str,
+) -> dict[str, Any]:
+    """Create a business creative-credit Stripe checkout through Safebox authority."""
+    user_ref = str(user_id or "").strip()
+    slug = str(business_slug or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if not slug:
+        raise ValueError("missing business_slug")
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/creative-credits/checkout",
+                {
+                    "user_id": user_ref,
+                    "business_slug": slug,
+                    "credits": None if credits is None else int(credits),
+                    "pack_id": str(pack_id or "").strip() or None,
+                    "success_url": success_url,
+                    "cancel_url": cancel_url,
+                },
+            )
+        except RemoteSafeboxError as exc:
+            detail = _remote_error_detail(exc)
+            message = str(detail.get("error") or detail.get("detail") or str(exc)).strip() or str(exc)
+            if exc.status_code == 404:
+                raise LookupError(message) from exc
+            if exc.status_code == 400:
+                raise ValueError(message) from exc
+            if exc.status_code in {502, 503}:
+                from . import stripe_util
+
+                if exc.status_code == 503:
+                    raise stripe_util.StripeError("creative_credit_checkout_unconfigured") from exc
+                raise stripe_util.StripeError(message) from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+    from . import stripe_util
+    from .control_api import create_creative_credit_checkout_session
+
+    try:
+        session, charge = create_creative_credit_checkout_session(
+            user_ref,
+            slug,
+            credits=credits,
+            pack_id=pack_id,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except SafeboxAuthorityUnavailable as exc:
+        raise stripe_util.StripeError("creative_credit_checkout_unconfigured") from exc
+    return {
+        "checkout_url": session.get("url"),
+        "session_id": session.get("id"),
+        "business_slug": slug,
+        "pack_id": charge.get("pack_id"),
+        "credits": charge["credits"],
+        "amount_cents": charge["amount_cents"],
+        "price_cents_per_credit": charge.get("price_cents_per_credit"),
+    }
+
+
+def verify_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, Any]:
+    """Verify one Stripe billing webhook through Safebox authority and return the event."""
+    body = str(raw_body or "")
+    presented = str(signature or "").strip()
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/stripe/billing-webhook/verify",
+                {"raw_body": body, "signature": presented},
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 503:
+                raise StripeBillingWebhookUnconfigured("billing_webhook_unconfigured") from exc
+            if exc.status_code == 400:
+                raise StripeBillingWebhookInvalidSignature("invalid_signature") from exc
+            raise
+        event = payload.get("event")
+        return event if isinstance(event, dict) else {}
+    from . import stripe_util
+
+    try:
+        secret = read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
+    except SafeboxAuthorityUnavailable as exc:
+        raise StripeBillingWebhookUnconfigured("billing_webhook_unconfigured") from exc
+    if not secret:
+        raise StripeBillingWebhookUnconfigured("billing_webhook_unconfigured")
+    try:
+        stripe_util.verify_stripe_signature(body, presented, secret)
+    except stripe_util.StripeError as exc:
+        raise StripeBillingWebhookInvalidSignature("invalid_signature") from exc
+    event = json.loads(body)
+    return event if isinstance(event, dict) else {}
 
 
 def grant_credits(

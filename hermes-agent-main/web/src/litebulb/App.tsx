@@ -72,6 +72,7 @@ function Router() {
     sendPrompt,
     createBusiness,
     saveChannelCreditBudgets,
+    startCreativeCreditCheckout,
     openBillingPortal,
     startTopup,
     setTractionRange,
@@ -205,6 +206,7 @@ function Router() {
         onOpenSettings={openSettings}
         onSendPrompt={sendPrompt}
         onSaveChannelCreditBudgets={saveChannelCreditBudgets}
+        onBuyCreativeCredits={startCreativeCreditCheckout}
         onTractionRangeChange={setTractionRange}
       />
     ) : null;

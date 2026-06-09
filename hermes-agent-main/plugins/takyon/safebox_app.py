@@ -8,6 +8,7 @@ Safebox authority module as the single backing implementation.
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from typing import Any
 
@@ -64,6 +65,15 @@ class _GrantCreativeCreditsBody(BaseModel):
     stripe_ref: str | None = None
 
 
+class _CreativeCreditCheckoutBody(BaseModel):
+    user_id: str
+    business_slug: str
+    credits: int | None = None
+    pack_id: str | None = None
+    success_url: str
+    cancel_url: str
+
+
 class _ReserveCreativeCreditsBody(BaseModel):
     business_slug: str
     credits: int
@@ -80,6 +90,11 @@ class _CommitCreativeCreditsBody(BaseModel):
 class _ReleaseCreativeCreditsBody(BaseModel):
     reservation_key: str
     metadata: dict[str, Any] | None = None
+
+
+class _StripeBillingWebhookVerifyBody(BaseModel):
+    raw_body: str
+    signature: str
 
 
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
@@ -213,6 +228,45 @@ def build_safebox_app() -> FastAPI:
             "reserved_credits": balances.reserved_credits,
         }
 
+    @app.post("/v1/creative-credits/checkout")
+    def create_creative_credit_checkout(
+        body: _CreativeCreditCheckoutBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import stripe_util
+        from .control_api import create_creative_credit_checkout_session
+
+        try:
+            session, charge = create_creative_credit_checkout_session(
+                body.user_id,
+                body.business_slug,
+                credits=body.credits,
+                pack_id=body.pack_id,
+                success_url=body.success_url,
+                cancel_url=body.cancel_url,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="unknown_credit_pack") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except stripe_util.StripeError as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message or "creative_credit_checkout_unconfigured" in message:
+                raise HTTPException(
+                    status_code=503, detail="creative_credit_checkout_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {message}") from exc
+        return {
+            "checkout_url": session.get("url"),
+            "session_id": session.get("id"),
+            "business_slug": body.business_slug,
+            "pack_id": charge.get("pack_id"),
+            "credits": charge["credits"],
+            "amount_cents": charge["amount_cents"],
+            "price_cents_per_credit": charge.get("price_cents_per_credit"),
+        }
+
     @app.post("/v1/creative-credits/grant")
     def grant_creative_credits(
         body: _GrantCreativeCreditsBody,
@@ -232,6 +286,24 @@ def build_safebox_app() -> FastAPI:
             "balance_credits": balances.balance_credits,
             "reserved_credits": balances.reserved_credits,
         }
+
+    @app.post("/v1/stripe/billing-webhook/verify")
+    def verify_stripe_billing_webhook(
+        body: _StripeBillingWebhookVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import stripe_util
+
+        secret = safebox.read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
+        if not secret:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
+        try:
+            stripe_util.verify_stripe_signature(body.raw_body, body.signature, secret)
+        except stripe_util.StripeError as exc:
+            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+        event = json.loads(body.raw_body)
+        return {"event": event if isinstance(event, dict) else {}}
 
     @app.post("/v1/creative-credits/reserve")
     def reserve_creative_credits(

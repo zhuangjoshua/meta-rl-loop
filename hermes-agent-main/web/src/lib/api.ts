@@ -194,8 +194,7 @@ export const api = {
     ),
   createTakyonBusinessCreativeCreditCheckout: (
     slug: string,
-    packId: string,
-    returnPath: string,
+    options: { packId?: string | null; credits?: number | null; returnPath: string },
   ) =>
     fetchJSON<{
       checkout_url?: string;
@@ -208,9 +207,10 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        pack_id: packId,
-        success_path: returnPath,
-        cancel_path: returnPath,
+        pack_id: options.packId || undefined,
+        credits: options.credits || undefined,
+        success_path: options.returnPath,
+        cancel_path: options.returnPath,
       }),
     }),
   getTakyonBusinessFile: (slug: string, path: string) =>

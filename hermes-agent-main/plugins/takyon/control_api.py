@@ -1152,7 +1152,7 @@ def build_control_router() -> APIRouter:
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
         try:
-            session, charge = create_creative_credit_checkout_session(
+            return safebox.create_creative_credit_checkout(
                 principal.user_id,
                 slug,
                 credits=body.credits,
@@ -1166,20 +1166,11 @@ def build_control_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except stripe_util.StripeError as exc:
             msg = str(exc)
-            if "STRIPE_SECRET_KEY" in msg:
+            if "STRIPE_SECRET_KEY" in msg or "creative_credit_checkout_unconfigured" in msg:
                 raise HTTPException(
                     status_code=503, detail="creative_credit_checkout_unconfigured"
                 ) from exc
             raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
-        return {
-            "checkout_url": session.get("url"),
-            "session_id": session.get("id"),
-            "business_slug": slug,
-            "credits": charge["credits"],
-            "amount_cents": charge["amount_cents"],
-            "price_cents_per_credit": charge.get("price_cents_per_credit"),
-            "pack_id": charge.get("pack_id"),
-        }
 
     @router.post("/billing/topup/checkout")
     def create_topup_checkout(
@@ -1224,16 +1215,14 @@ def build_control_router() -> APIRouter:
         we return 503 so Stripe retries — crediting is never faked around a missing
         credential. A paid checkout.session.completed bearing metadata.purpose=takyon_topup
         credits the user once, idempotent on the Stripe event id."""
-        secret = safebox.read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
         raw = (await request.body()).decode("utf-8")
         signature = request.headers.get("stripe-signature", "")
         try:
-            stripe_util.verify_stripe_signature(raw, signature, secret)
-        except stripe_util.StripeError:
+            event = safebox.verify_stripe_billing_webhook(raw, signature)
+        except safebox.StripeBillingWebhookUnconfigured:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
+        except safebox.StripeBillingWebhookInvalidSignature:
             raise HTTPException(status_code=400, detail="invalid_signature")
-        event = json.loads(raw)
         event_id = str(event.get("id") or "")
         event_type = str(event.get("type") or "")
         obj = (event.get("data") or {}).get("object") or {}
