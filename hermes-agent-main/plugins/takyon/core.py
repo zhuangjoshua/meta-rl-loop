@@ -2816,10 +2816,21 @@ def _subuser_app_starter_primitives_js() -> str:
               starterDefaultMonthlyPlan,
               starterDefaultPlanKey,
               starterSurfaceContext,
+              starterAppState,
+              starterViewerState,
+              starterIsAuthenticated,
+              starterIsEntitled,
+              starterSubscriptionState,
+              starterCanUseApp,
+              starterCanCheckout,
+              starterCanGenerate,
               starterLoadAppState,
               starterRequestAuth,
+              starterSession,
+              starterAccount,
               starterCancelSubscription,
               starterCheckout,
+              starterGenerate,
               starterProfile,
               starterUpdateProfile,
             } from "./starter-context.js";
@@ -2832,7 +2843,20 @@ def _subuser_app_starter_primitives_js() -> str:
               starterDefaultMonthlyPlan,
               starterDefaultPlanKey,
               starterSurfaceContext,
+              starterAppState,
+              starterViewerState,
+              starterIsAuthenticated,
+              starterIsEntitled,
+              starterSubscriptionState,
+              starterCanUseApp,
+              starterCanCheckout,
+              starterCanGenerate,
               starterLoadAppState,
+              starterRequestAuth,
+              starterSession,
+              starterAccount,
+              starterCheckout,
+              starterGenerate,
               starterProfile,
               starterUpdateProfile,
               starterCancelSubscription,
@@ -2898,6 +2922,23 @@ def _subuser_app_starter_primitives_js() -> str:
 
             export function useStarterAppState() {
               return useContext(StarterAppStateContext);
+            }
+
+            export function useStarterApp() {
+              const { appState, setAppState } = useStarterAppState();
+              return {
+                appState,
+                setAppState,
+                requestAuth: starterRequestAuth,
+                session: starterSession,
+                account: starterAccount,
+                checkout: starterCheckout,
+                cancelSubscription: starterCancelSubscription,
+                profile: starterProfile,
+                updateProfile: starterUpdateProfile,
+                generate: starterGenerate,
+                loadAppState: starterLoadAppState,
+              };
             }
 
             export function StarterStatePill({ label, state }) {
@@ -7410,6 +7451,9 @@ def _normalize_supported_product_build_shape(
             if old in updated:
                 updated = updated.replace(old, new)
                 changed = True
+        if "useStarterApp" in updated and "components/starter-context" in updated:
+            updated = updated.replace("components/starter-context", "components/starter-primitives")
+            changed = True
         return updated, changed
 
     def _merge_normalizations(*results: dict[str, Any]) -> dict[str, Any]:

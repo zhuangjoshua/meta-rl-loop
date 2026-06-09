@@ -162,7 +162,7 @@ def test_refresh_rewrites_legacy_product_root_starter_imports(tmp_path: Path, mo
     canonical_root = site / "src" / "app" / "app" / "(product)" / "root.js"
     normalized_root = canonical_root.read_text(encoding="utf-8")
     assert '../../../../components/starter-context' not in normalized_root
-    assert '../../../components/starter-context' in normalized_root
+    assert '../../../components/starter-primitives' in normalized_root
 
 
 def test_refresh_warns_when_custom_app_page_needs_manual_product_root_render(tmp_path: Path, monkeypatch):
