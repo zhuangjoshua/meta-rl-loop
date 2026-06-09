@@ -820,6 +820,7 @@ export function useTakyonLitebulb() {
     if (openingBusinessRef.current === businessSlug) return;
     const matched = businesses.find((item) => item.slug === businessSlug)
       || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode" };
+    visibleBusinessRef.current = businessSlug;
     if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {
       setActiveBusiness((current) => (
         current?.slug === businessSlug ? { ...current, ...matched } : matched
@@ -997,6 +998,7 @@ export function useTakyonLitebulb() {
       } else {
         void loadHome();
       }
+      visibleBusinessRef.current = businessSlug;
       sessionBusinessRef.current = businessSlug;
       setActiveBusiness({
         slug: businessSlug,

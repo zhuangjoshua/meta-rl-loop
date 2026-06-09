@@ -96,6 +96,7 @@ def test_create_flow_uses_global_scope_session_and_recovers_missing_session():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'visibleBusinessRef.current = "";' in source
+    assert 'visibleBusinessRef.current = businessSlug;' in source
     assert 'let sessionId = await ensureSession("");' in source
     assert 'for (let attempt = 0; attempt < 4; attempt += 1) {' in source
     assert 'if (isMissingSessionError(error)) {' in source
@@ -103,3 +104,9 @@ def test_create_flow_uses_global_scope_session_and_recovers_missing_session():
     assert 'sessionBusinessRef.current = "";' in source
     assert 'sessionId = await ensureSession("");' in source
     assert 'if (attempt < 3 && isBusyError(error)) {' in source
+
+
+def test_same_business_fast_path_still_marks_the_business_visible():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'visibleBusinessRef.current = businessSlug;\n    if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {' in source
