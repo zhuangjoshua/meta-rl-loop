@@ -1638,6 +1638,82 @@ def _tool_file_activity(result: str) -> list[dict[str, str]]:
     return deduped
 
 
+def _append_turn_file_activity(session: dict | None, items: list[dict[str, str]]) -> None:
+    if not isinstance(session, dict) or not items:
+        return
+    bucket = session.setdefault("takyon_turn_file_activity", [])
+    if not isinstance(bucket, list):
+        bucket = []
+        session["takyon_turn_file_activity"] = bucket
+    seen = {
+        (str(item.get("action") or "").strip(), str(item.get("path") or "").strip())
+        for item in bucket
+        if isinstance(item, dict)
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not action or not path:
+            continue
+        key = (action, path)
+        if key in seen:
+            continue
+        seen.add(key)
+        bucket.append({"action": action, "path": path})
+
+
+def _turn_file_activity_targets_product_surface(file_activity: list[dict[str, str]]) -> bool:
+    if not isinstance(file_activity, list) or not file_activity:
+        return False
+    try:
+        from plugins.takyon.core import _workspace_needs_runtime_ui_contract
+    except Exception:
+        return False
+    for item in file_activity:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if path and _workspace_needs_runtime_ui_contract(path):
+            return True
+    return False
+
+
+def _finalize_product_surface_after_turn(
+    session: dict | None,
+    *,
+    sid: str,
+    business_slug: str,
+    operator_user_id: str,
+) -> str:
+    if not isinstance(session, dict):
+        return ""
+    file_activity = list(session.get("takyon_turn_file_activity") or [])
+    if not _turn_file_activity_targets_product_surface(file_activity):
+        return ""
+    from plugins.takyon.worker import _refresh_business_surface_after_bootstrap
+
+    refresh = _refresh_business_surface_after_bootstrap(
+        business_slug,
+        job_id=f"session:{session.get('session_key') or sid}:{session.get('takyon_active_turn_key') or 'turn'}",
+        operator_user_id=operator_user_id or None,
+    )
+    if not isinstance(refresh, dict):
+        return ""
+    publish = refresh.get("publish") if isinstance(refresh.get("publish"), dict) else {}
+    publish_status = str(publish.get("status") or refresh.get("status") or "").strip()
+    publish_blocker = str(
+        publish.get("blocker")
+        or refresh.get("blocker")
+        or refresh.get("error")
+        or ""
+    ).strip()
+    if publish_status and publish_status != "published" and publish_blocker:
+        return f"Product surface: {publish_status} - {publish_blocker}"
+    return ""
+
+
 def _tool_summary(name: str, result: str, duration_s: float | None) -> str | None:
     try:
         data = json.loads(result)
@@ -1800,6 +1876,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         payload["summary"] = summary
     file_activity = _tool_file_activity(result)
     if file_activity:
+        _append_turn_file_activity(session, file_activity)
         payload["file_activity"] = file_activity
         if not payload.get("summary"):
             primary = file_activity[0]
@@ -4310,6 +4387,7 @@ def _run_prompt_submit(
         billing_warning = ""
         resolved_operator_user_id = ""
         try:
+            session["takyon_turn_file_activity"] = []
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
@@ -4654,6 +4732,26 @@ def _run_prompt_submit(
                         status_note = f"{status_note}\n{warning}"
                     else:
                         status_note = warning
+            if status == "complete" and current_business:
+                try:
+                    post_warning = _finalize_product_surface_after_turn(
+                        session,
+                        sid=sid,
+                        business_slug=current_business,
+                        operator_user_id=resolved_operator_user_id,
+                    )
+                    if post_warning:
+                        if status_note:
+                            status_note = f"{status_note}\n{post_warning}"
+                        else:
+                            status_note = post_warning
+                except Exception as exc:
+                    logger.exception("post-turn product surface finalization failed")
+                    warning = f"Post-turn product surface finalization failed: {exc}"
+                    if status_note:
+                        status_note = f"{status_note}\n{warning}"
+                    else:
+                        status_note = warning
 
             usage_payload = worker_usage if isinstance(worker_usage, dict) else _get_usage(agent)
             payload = {"text": raw, "usage": usage_payload, "status": status}
@@ -4865,6 +4963,7 @@ def _run_prompt_submit(
             except Exception:
                 pass
             _clear_session_context(session_tokens)
+            session["takyon_turn_file_activity"] = []
             session.pop("takyon_active_turn_key", None)
             with session["history_lock"]:
                 if not record_user_history:

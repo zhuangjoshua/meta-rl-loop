@@ -885,7 +885,8 @@ def test_session_request_reattaches_current_transport_on_reconnect():
 
 def test_on_tool_complete_extracts_file_activity_from_commit_results(monkeypatch):
     events: list[tuple[str, str, dict]] = []
-    server._sessions["sid"] = _session()
+    session = _session()
+    server._sessions["sid"] = session
     monkeypatch.setattr(server, "_emit", lambda event, sid, payload: events.append((event, sid, payload)))
     monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: True)
 
@@ -915,11 +916,15 @@ def test_on_tool_complete_extracts_file_activity_from_commit_results(monkeypatch
         {"action": "file.write", "path": "research/market.md"}
     ]
     assert payload["summary"] == "file.write -> research/market.md"
+    assert session["takyon_turn_file_activity"] == [
+        {"action": "file.write", "path": "research/market.md"}
+    ]
 
 
 def test_on_tool_complete_extracts_workspace_upsert_activity(monkeypatch):
     events: list[tuple[str, str, dict]] = []
-    server._sessions["sid"] = _session()
+    session = _session()
+    server._sessions["sid"] = session
     monkeypatch.setattr(server, "_emit", lambda event, sid, payload: events.append((event, sid, payload)))
     monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: True)
 
@@ -949,6 +954,9 @@ def test_on_tool_complete_extracts_workspace_upsert_activity(monkeypatch):
         {"action": "workspace.upsert", "path": "product/site"}
     ]
     assert payload["summary"] == "workspace.upsert -> product/site"
+    assert session["takyon_turn_file_activity"] == [
+        {"action": "workspace.upsert", "path": "product/site"}
+    ]
 
 
 def test_prompt_context_wraps_plain_text_in_business_scope(monkeypatch):
@@ -3146,6 +3154,103 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         assert len(complete_calls) == 1
         _, _, payload = complete_calls[0]
         assert "warning" not in payload
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_refreshes_product_surface_after_direct_product_write(monkeypatch):
+    session_ref = {"s": None}
+    refresh_calls: list[tuple[str, str]] = []
+    emitted: list[tuple[str, str, dict]] = []
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            session_ref["s"]["takyon_turn_file_activity"] = [
+                {"action": "file.write", "path": "product/site/src/app/page.js"}
+            ]
+            return {
+                "final_response": "built",
+                "messages": [{"role": "assistant", "content": "built"}],
+            }
+
+    session = _session(agent=_Agent(), takyon_current_business="acme")
+    session_ref["s"] = session
+    server._sessions["sid"] = session
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(
+            server,
+            "_emit",
+            lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+        )
+        monkeypatch.setattr(
+            server,
+            "_finalize_product_surface_after_turn",
+            lambda _session, *, sid, business_slug, operator_user_id: refresh_calls.append(
+                (sid, business_slug)
+            )
+            or "",
+        )
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "ship it"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert refresh_calls == [("sid", "acme")]
+        assert server._sessions["sid"]["takyon_turn_file_activity"] == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_surfaces_product_surface_refresh_warning(monkeypatch):
+    emitted: list[tuple[str, str, dict]] = []
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "built",
+                "messages": [{"role": "assistant", "content": "built"}],
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(
+            server,
+            "_emit",
+            lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+        )
+        monkeypatch.setattr(
+            server,
+            "_finalize_product_surface_after_turn",
+            lambda _session, *, sid, business_slug, operator_user_id: "Product surface: blocked - build failed",
+        )
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "ship it"},
+            }
+        )
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        complete_calls = [a for a in emitted if a[0] == "message.complete"]
+        assert len(complete_calls) == 1
+        assert complete_calls[0][2]["warning"] == "Product surface: blocked - build failed"
     finally:
         server._sessions.pop("sid", None)
 
