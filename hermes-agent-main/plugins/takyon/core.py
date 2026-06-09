@@ -7471,6 +7471,52 @@ def _normalize_supported_product_build_shape(
                 }
         return {"repairs": repairs, "warnings": warnings}
 
+    def _normalize_appkit_starter_primitives(root: Path) -> dict[str, Any]:
+        starter_primitives = root / "src" / "components" / "starter-primitives.js"
+        if not starter_primitives.is_file():
+            return {"repairs": [], "warnings": []}
+        try:
+            existing = _normalize_newlines(starter_primitives.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "repairs": [],
+                "warnings": [],
+                "blocked": True,
+                "error": f"AppKit starter-primitives.js could not be read for normalization: {exc}",
+            }
+        canonical = _normalize_newlines(_subuser_app_starter_primitives_js())
+        if existing == canonical:
+            return {"repairs": [], "warnings": []}
+
+        looks_starter_managed = all(
+            marker in existing
+            for marker in (
+                'from "./starter-context.js"',
+                "StarterAppStateProvider",
+                "StarterAuthCard",
+            )
+        )
+        missing_compat_exports = (
+            "export function useStarterApp()" not in existing
+            or "starterCanGenerate" not in existing
+            or "starterGenerate" not in existing
+        )
+        if not looks_starter_managed or not missing_compat_exports:
+            return {"repairs": [], "warnings": []}
+
+        starter_primitives.write_text(canonical, encoding="utf-8")
+        return {
+            "repairs": [
+                {
+                    "kind": "appkit_starter_primitives_normalize",
+                    "from": "src/components/starter-primitives.js",
+                    "to": "src/components/starter-primitives.js",
+                    "message": "Updated the AppKit-owned starter primitives helper to the canonical runtime helper contract so legacy product roots can keep using the shared starter rails after refresh/publish.",
+                }
+            ],
+            "warnings": [],
+        }
+
     def _normalize_appkit_product_root_route(root: Path) -> dict[str, Any]:
         app_root = root / "src" / "app" / "app"
         legacy_route = app_root / "(product)" / "page.js"
@@ -7582,6 +7628,7 @@ def _normalize_supported_product_build_shape(
     if looks_next:
         return _merge_normalizations(
             _normalize_next_config_typescript(root),
+            _normalize_appkit_starter_primitives(root),
             _normalize_appkit_product_root_route(root),
         )
     return {"repairs": [], "warnings": []}

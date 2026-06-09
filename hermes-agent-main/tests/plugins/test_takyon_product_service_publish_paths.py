@@ -165,6 +165,105 @@ def test_refresh_rewrites_legacy_product_root_starter_imports(tmp_path: Path, mo
     assert '../../../components/starter-primitives' in normalized_root
 
 
+def test_refresh_normalizes_legacy_starter_primitives_contract(tmp_path: Path, monkeypatch):
+    business_root = tmp_path / "businesses" / "scopesync"
+    site = business_root / "product" / "site"
+    starter_primitives = site / "src" / "components" / "starter-primitives.js"
+    app_page = site / "src" / "app" / "app" / "page.js"
+    starter_primitives.parent.mkdir(parents=True, exist_ok=True)
+    app_page.parent.mkdir(parents=True, exist_ok=True)
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "scopesync-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    starter_primitives.write_text(
+        '"use client";\n'
+        '\n'
+        'import Link from "next/link";\n'
+        'import { createContext, useContext, useEffect, useState } from "react";\n'
+        '\n'
+        'import {\n'
+        '  starterBusinessName,\n'
+        '  starterConfiguredPlans,\n'
+        '  starterDefaultMonthlyPlan,\n'
+        '  starterDefaultPlanKey,\n'
+        '  starterSurfaceContext,\n'
+        '  starterLoadAppState,\n'
+        '  starterRequestAuth,\n'
+        '  starterCancelSubscription,\n'
+        '  starterCheckout,\n'
+        '  starterProfile,\n'
+        '  starterUpdateProfile,\n'
+        '} from "./starter-context.js";\n'
+        '\n'
+        'const StarterAppStateContext = createContext({ appState: null, setAppState: () => {} });\n'
+        '\n'
+        'export {\n'
+        '  starterBusinessName,\n'
+        '  starterConfiguredPlans,\n'
+        '  starterDefaultMonthlyPlan,\n'
+        '  starterDefaultPlanKey,\n'
+        '  starterSurfaceContext,\n'
+        '  starterLoadAppState,\n'
+        '  starterProfile,\n'
+        '  starterUpdateProfile,\n'
+        '  starterCancelSubscription,\n'
+        '};\n'
+        '\n'
+        'export function StarterAppStateProvider({ initialAppState, children }) {\n'
+        '  const [appState, setAppState] = useState(initialAppState || null);\n'
+        '  useEffect(() => {\n'
+        '    setAppState(initialAppState || null);\n'
+        '  }, [initialAppState]);\n'
+        '  return (\n'
+        '    <StarterAppStateContext.Provider value={{ appState, setAppState }}>\n'
+        '      {children}\n'
+        '    </StarterAppStateContext.Provider>\n'
+        '  );\n'
+        '}\n'
+        '\n'
+        'export function useStarterAppState() {\n'
+        '  return useContext(StarterAppStateContext);\n'
+        '}\n'
+        '\n'
+        'export function StarterAuthCard() {\n'
+        '  return <Link href=\"/\">Back</Link>;\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    app_page.write_text(
+        takyon_core._subuser_app_starter_app_page_js(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_run_surface_command",
+        lambda command, **kwargs: {"command": command, "status": "passed"},
+    )
+
+    verification = takyon_core._refresh_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    repair_kinds = [item.get("kind") for item in verification["repairs"]]
+    assert "appkit_starter_primitives_normalize" in repair_kinds
+    normalized = starter_primitives.read_text(encoding="utf-8")
+    assert "export function useStarterApp()" in normalized
+    assert "starterCanGenerate" in normalized
+
+
 def test_refresh_warns_when_custom_app_page_needs_manual_product_root_render(tmp_path: Path, monkeypatch):
     business_root = tmp_path / "businesses" / "scopesync"
     site = business_root / "product" / "site"
