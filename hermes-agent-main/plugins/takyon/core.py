@@ -8007,6 +8007,44 @@ def _replace_directory_tree_atomic(
         shutil.rmtree(stage_root, ignore_errors=True)
 
 
+def _rewrite_product_service_build_paths(*, source_root: Path, target_root: Path) -> None:
+    original_root = str(source_root.resolve())
+    published_root = str(target_root.resolve())
+    if not original_root or original_root == published_root:
+        return
+
+    next_root = target_root / ".next"
+    if not next_root.exists():
+        return
+
+    rewrite_files: list[Path] = []
+    for candidate in (next_root / "required-server-files.json", next_root / "trace"):
+        if candidate.is_file():
+            rewrite_files.append(candidate)
+    for candidate_root in (next_root / "server", next_root / "types"):
+        if not candidate_root.exists():
+            continue
+        rewrite_files.extend(
+            path
+            for path in candidate_root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        )
+
+    seen: set[Path] = set()
+    for path in rewrite_files:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if original_root not in content:
+            continue
+        path.write_text(content.replace(original_root, published_root), encoding="utf-8")
+
+
 def _probe_public_asset_url(url: str) -> tuple[bool, str]:
     headers = {"User-Agent": "Takyon public asset verifier"}
     head = urllib.request.Request(url, headers=headers, method="HEAD")
@@ -8653,6 +8691,7 @@ def _copy_product_service_tree(*, source_root: Path, target_root: Path) -> Path:
         }
 
     _replace_directory_tree_atomic(source_root, target_root, ignore=ignore)
+    _rewrite_product_service_build_paths(source_root=source_root, target_root=target_root)
     _make_static_publish_tree_readable(target_root)
     _make_product_publish_path_traversable(target_root)
     return target_root
