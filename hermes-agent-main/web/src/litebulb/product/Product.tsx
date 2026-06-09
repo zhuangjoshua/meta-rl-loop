@@ -39,7 +39,7 @@ function siteHost(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "") + ".app";
 }
 
-function backgroundRunProgress(
+function liveStateProgress(
   workspace: TakyonBusinessWorkspaceResponse | null,
 ): ChatProgress | null {
   const liveProgress = (statusValue: unknown, ...parts: unknown[]): ChatProgress | null => {
@@ -56,6 +56,12 @@ function backgroundRunProgress(
     };
   };
 
+  const state = workspace?.live_state;
+  if (state && typeof state === "object") {
+    const payload = state as Record<string, unknown>;
+    const progress = liveProgress(payload.status, payload.detail);
+    if (progress) return progress;
+  }
   const run = workspace?.background_run;
   if (run && typeof run === "object") {
     const payload = run as Record<string, unknown>;
@@ -412,7 +418,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  const effectiveProgress = chatProgress ?? backgroundRunProgress(workspace);
+  const effectiveProgress = liveStateProgress(workspace) ?? (!workspace ? chatProgress : null);
 
   useEffect(() => {
     setTab("company");

@@ -132,6 +132,58 @@ function isDocumentDeliverable(output: Record<string, unknown>) {
   return DOCUMENT_OUTPUT_KINDS.has(kind) || DOCUMENT_OUTPUT_SUFFIXES.has(suffix);
 }
 
+function asDocumentOutput(output: Record<string, unknown>) {
+  const path = asText(output.path);
+  const title = asText(output.title) || path.split("/").pop() || "Output";
+  const kind = asText(output.kind) || "file";
+  const source = asText(output.source);
+  const detail = asText(output.detail)
+    || (source === "brain" ? "Business brain artifact" : source === "research" ? "Research artifact" : "Business artifact");
+  return {
+    id: asText(output.id) || `doc:${path || title}`,
+    title,
+    detail,
+    path,
+    kind,
+    at: Number(output.at || output.updated_at || 0),
+    preview_content: output.preview_content,
+    preview_truncated: output.preview_truncated,
+    preview_size: output.preview_size,
+  };
+}
+
+function mergeDocumentOutputs(
+  outputs: Array<Record<string, unknown>>,
+  researchOutputs: Array<Record<string, unknown>>,
+) {
+  const byPath = new Map<string, Record<string, unknown>>();
+  const push = (output: Record<string, unknown>) => {
+    const normalized = asDocumentOutput(output);
+    const path = asText(normalized.path);
+    const key = path || asText(normalized.id);
+    if (!key) return;
+    const current = byPath.get(key);
+    if (!current) {
+      byPath.set(key, normalized);
+      return;
+    }
+    const currentHasPreview = typeof current.preview_content === "string";
+    const nextHasPreview = typeof normalized.preview_content === "string";
+    if (!currentHasPreview && nextHasPreview) {
+      byPath.set(key, { ...current, ...normalized });
+      return;
+    }
+    const currentAt = Number(current.at || 0);
+    const nextAt = Number(normalized.at || 0);
+    if (nextAt >= currentAt) {
+      byPath.set(key, { ...current, ...normalized });
+    }
+  };
+  outputs.forEach(push);
+  researchOutputs.forEach(push);
+  return Array.from(byPath.values()).sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
+}
+
 function inlinePreviewFile(
   businessSlug: string,
   output: Record<string, unknown>,
@@ -333,6 +385,7 @@ function Traction({
 
 function normalizeTaskStatus(value: string) {
   const status = value.toLowerCase();
+  if (status.includes("fail") || status.includes("error") || status.includes("block")) return "failed";
   if (status.includes("running") || status.includes("working")) return "live";
   if (status.includes("done") || status.includes("complete") || status.includes("success")) return "done";
   return "queued";
@@ -345,9 +398,10 @@ function Activity({ tasks }: { tasks: Array<Record<string, unknown>> }) {
   ];
   const running = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "live").length;
   const queued = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
+  const issues = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "failed").length;
   return (
     <section className="lb-card lb-act">
-      <div className="lb-h"><span className="lb-act__pulse" />Activity<span className="lb-h__c">{running} running · {queued} queued</span></div>
+      <div className="lb-h"><span className="lb-act__pulse" />Activity<span className="lb-h__c">{running} running · {queued} queued{issues ? ` · ${issues} issue${issues === 1 ? "" : "s"}` : ""}</span></div>
       <div className="lb-act__list">
         {visible.map((task, index) => {
           const state = normalizeTaskStatus(asText(task.status));
@@ -866,8 +920,17 @@ export function CompanyTab({
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const overview = useMemo(() => asRecord(workspace?.overview), [workspace]);
-  const tasks = asList(overview.tasks);
-  const outputs = asList(workspace?.outputs);
+  const liveState = useMemo(() => asRecord(workspace?.live_state), [workspace]);
+  const tasks = useMemo(() => asList(liveState.tasks), [liveState]);
+  const outputs = useMemo(
+    () => mergeDocumentOutputs(
+      asList(workspace?.outputs),
+      asList(asRecord(overview.research).outputs).length
+        ? asList(asRecord(overview.research).outputs)
+        : asList(overview.research_outputs),
+    ),
+    [overview, workspace],
+  );
 
   return (
     <div className="lb-comp">

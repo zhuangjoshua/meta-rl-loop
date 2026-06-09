@@ -6166,6 +6166,31 @@ def _takyon_business_home_snapshot(
         inventory=receipt_inventory,
     )
     product_blocker = as_text(product_facts.get("blocker") or surface.get("publish_blocker"))
+    local_research_outputs: list[dict[str, Any]] = []
+    try:
+        by_path: dict[str, dict[str, Any]] = {}
+        for rel_root in ("research", "brain"):
+            root = business_root / rel_root
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.name.startswith("."):
+                    continue
+                rel = str(path.relative_to(business_root))
+                if rel in {"research/index.md", "metrics/summary.md", "metrics/wake-history.md"}:
+                    continue
+                stat = path.stat()
+                by_path[rel] = {
+                    "path": rel,
+                    "updated_at": int(stat.st_mtime * 1000),
+                    "size": int(stat.st_size),
+                    "source": rel_root,
+                }
+        local_research_outputs = list(by_path.values())
+        local_research_outputs.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+        local_research_outputs = local_research_outputs[:80]
+    except Exception:
+        local_research_outputs = []
     latest_job_label = job_label(as_text(latest_job.get("kind")))
     latest_job_status = trace_status(as_text(latest_job.get("status")))
     latest_job_payload = latest_job.get("payload") if isinstance(latest_job.get("payload"), dict) else {}
@@ -6485,8 +6510,13 @@ def _takyon_business_home_snapshot(
                 "next_action": current_action["detail"] or current_action["label"],
             },
             "wake_health": {},
-            "research": {"status": "needed", "latest_path": "", "count": 0, "outputs": []},
-            "research_outputs": [],
+            "research": {
+                "status": "visible" if local_research_outputs else "needed",
+                "latest_path": as_text((local_research_outputs[0] if local_research_outputs else {}).get("path")),
+                "count": len(local_research_outputs),
+                "outputs": local_research_outputs[:24],
+            },
+            "research_outputs": local_research_outputs,
             "artifacts": {
                 "website": {
                     "status": website_status,
@@ -7968,6 +7998,8 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
     recursive_roots = [
         "outputs",
         "reports",
+        "research",
+        "brain",
         "campaigns",
         "distribution",
         "outreach/local-published",
@@ -8305,6 +8337,191 @@ def _takyon_reconcile_background_run(
     return reconciled
 
 
+def _takyon_live_state_payload(
+    overview: dict[str, Any] | None,
+    background_run: dict[str, Any] | None,
+) -> dict[str, Any]:
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    def as_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def run_label(kind: str) -> str:
+        key = as_text(kind).lower()
+        if key == "create":
+            return "CEO bootstrap"
+        if key == "wake":
+            return "CEO wake"
+        if key == "turn":
+            return "CEO turn"
+        if key:
+            words = re.sub(r"[._-]+", " ", key)
+            return " ".join(part.capitalize() for part in words.split())
+        return "Background run"
+
+    def canonical_task_status(value: Any) -> str:
+        status = as_text(value).lower()
+        if not status:
+            return "idle"
+        if any(token in status for token in ("failed", "error", "blocked", "recovering", "needs_attention", "overdue", "stale")):
+            return "failed"
+        if any(token in status for token in ("queued", "scheduled", "pending", "waiting")):
+            return "queued"
+        if any(token in status for token in ("done", "complete", "completed", "success", "succeeded", "published", "visible", "previewable")):
+            return "completed"
+        if any(token in status for token in ("running", "active", "live")):
+            return "running"
+        if status in {"working", "watching", "research_first", "idle", "quiet", "missing"}:
+            return "idle"
+        return "idle"
+
+    def canonical_hint_status(value: Any) -> str:
+        status = as_text(value).lower()
+        if not status:
+            return "idle"
+        if any(token in status for token in ("failed", "error", "blocked", "recovering", "needs_attention", "overdue", "stale")):
+            return "failed"
+        if any(token in status for token in ("queued", "scheduled", "pending", "waiting")):
+            return "queued"
+        if any(token in status for token in ("running", "active", "live")):
+            return "running"
+        return "idle"
+
+    def canonical_task(task: dict[str, Any]) -> dict[str, Any]:
+        label = as_text(task.get("label")) or "Recorded work"
+        status = canonical_task_status(task.get("status"))
+        detail = as_text(task.get("detail")) or "Tracked in the workspace overview."
+        updated_at = as_text(task.get("updated_at") or task.get("created_at"))
+        return {
+            "id": as_text(task.get("id")) or f"task:{label}:{status}",
+            "source": as_text(task.get("source")) or "overview",
+            "label": label,
+            "status": status,
+            "detail": detail,
+            "updated_at": updated_at,
+        }
+
+    overview_dict = as_dict(overview)
+    current_action = as_dict(overview_dict.get("current_action"))
+    ceo_loop = as_dict(overview_dict.get("ceo_loop"))
+    raw_tasks = [canonical_task(task) for task in as_list(overview_dict.get("tasks")) if isinstance(task, dict)]
+
+    run = as_dict(background_run)
+    run_status = canonical_task_status(run.get("status"))
+    run_label_text = run_label(as_text(run.get("kind")))
+    run_detail = as_text(run.get("detail")) or (
+        "CEO bootstrap is queued." if run_status == "queued"
+        else "CEO bootstrap is running." if run_status == "running" and run_label_text == "CEO bootstrap"
+        else "Background work is queued." if run_status == "queued"
+        else "Background work is running." if run_status == "running"
+        else ""
+    )
+    run_updated_at = as_text(run.get("updated_at") or run.get("finished_at") or run.get("started_at"))
+    run_task = {
+        "id": as_text(run.get("job_id")) or f"background:{run_label_text.lower().replace(' ', '-')}",
+        "source": "background",
+        "label": run_label_text,
+        "status": run_status,
+        "detail": run_detail,
+        "updated_at": run_updated_at,
+    } if run_status in {"running", "queued", "failed"} else None
+
+    live_tasks = list(raw_tasks)
+    if run_task and not any(
+        task.get("label") == run_task["label"]
+        and task.get("status") == run_task["status"]
+        and task.get("detail") == run_task["detail"]
+        for task in live_tasks
+    ):
+        live_tasks.insert(0, run_task)
+
+    hint_candidates = [
+        canonical_hint_status(current_action.get("status")),
+        canonical_hint_status(ceo_loop.get("status")),
+    ]
+    if "failed" in hint_candidates:
+        hint_status = "failed"
+    elif "running" in hint_candidates:
+        hint_status = "running"
+    elif "queued" in hint_candidates:
+        hint_status = "queued"
+    else:
+        hint_status = "idle"
+    has_active_run = bool(run_task and run_status in {"running", "queued"})
+    if hint_status == "failed" and not has_active_run:
+        live_tasks = [task for task in live_tasks if task.get("status") != "running"]
+
+    def first_task(status: str) -> dict[str, Any] | None:
+        return next((task for task in live_tasks if task.get("status") == status), None)
+
+    active_task = first_task("running")
+    queued_task = first_task("queued")
+    failed_task = first_task("failed")
+    completed_task = first_task("completed")
+
+    if active_task:
+        return {
+            "status": "running",
+            "label": as_text(active_task.get("label")) or "Working…",
+            "detail": as_text(active_task.get("detail")) or "Working…",
+            "updated_at": as_text(active_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+        }
+    if queued_task:
+        return {
+            "status": "queued",
+            "label": as_text(queued_task.get("label")) or "Queued",
+            "detail": as_text(queued_task.get("detail")) or "Queued work is waiting to run.",
+            "updated_at": as_text(queued_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+        }
+    if failed_task:
+        return {
+            "status": "failed",
+            "label": as_text(failed_task.get("label")) or "Needs attention",
+            "detail": as_text(failed_task.get("detail")) or "Recorded work needs attention.",
+            "updated_at": as_text(failed_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+        }
+    if hint_status == "failed":
+        label = as_text(current_action.get("label")) or as_text(ceo_loop.get("headline")) or "Needs attention"
+        detail = as_text(current_action.get("detail")) or as_text(ceo_loop.get("detail")) or "Recorded work needs attention."
+        synthetic_task = {
+            "id": "live-state:failed",
+            "source": as_text(current_action.get("source")) or "overview",
+            "label": label,
+            "status": "failed",
+            "detail": detail,
+            "updated_at": "",
+        }
+        return {
+            "status": "failed",
+            "label": label,
+            "detail": detail,
+            "updated_at": "",
+            "tasks": [synthetic_task, *live_tasks][:16],
+        }
+    if completed_task:
+        return {
+            "status": "completed",
+            "label": as_text(completed_task.get("label")) or "Completed",
+            "detail": as_text(completed_task.get("detail")) or "Recent work completed.",
+            "updated_at": as_text(completed_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+        }
+    return {
+        "status": "idle",
+        "label": "Idle",
+        "detail": "",
+        "updated_at": "",
+        "tasks": live_tasks[:16],
+    }
+
+
 def _takyon_operator_user_id(session: dict | None) -> str:
     return str((session or {}).get("takyon_operator_user_id") or "").strip()
 
@@ -8452,6 +8669,13 @@ def _takyon_workspace_boot_payload(
             "overview": {},
             "outputs": [],
             "background_run": None,
+            "live_state": {
+                "status": "idle",
+                "label": "Idle",
+                "detail": "",
+                "updated_at": "",
+                "tasks": [],
+            },
         }
     store = _takyon_store(session)
     try:
@@ -8465,12 +8689,17 @@ def _takyon_workspace_boot_payload(
         _takyon_get_background_run(slug),
         overview if isinstance(overview, dict) else {},
     )
+    live_state = _takyon_live_state_payload(
+        overview if isinstance(overview, dict) else {},
+        background_run,
+    )
     return {
         "business_slug": slug,
         "current": current if isinstance(current, dict) else {},
         "overview": overview if isinstance(overview, dict) else {},
         "outputs": [],
         "background_run": background_run,
+        "live_state": live_state,
     }
 
 
@@ -8489,6 +8718,13 @@ def _takyon_workspace_payload(
             "overview": {},
             "outputs": [],
             "background_run": None,
+            "live_state": {
+                "status": "idle",
+                "label": "Idle",
+                "detail": "",
+                "updated_at": "",
+                "tasks": [],
+            },
         }
     if str(view or "").strip().lower() == "boot":
         return _takyon_workspace_boot_payload(session, slug)
@@ -8509,12 +8745,17 @@ def _takyon_workspace_payload(
         _takyon_get_background_run(slug),
         overview if isinstance(overview, dict) else {},
     )
+    live_state = _takyon_live_state_payload(
+        overview if isinstance(overview, dict) else {},
+        background_run,
+    )
     return {
         "business_slug": slug,
         "current": current,
         "overview": overview if isinstance(overview, dict) else {},
         "outputs": outputs if isinstance(outputs, list) else [],
         "background_run": background_run,
+        "live_state": live_state,
     }
 
 
@@ -8563,6 +8804,7 @@ def _takyon_dashboard_state_payload(
         "overview": workspace.get("overview") or {},
         "outputs": workspace.get("outputs") or [],
         "background_run": workspace.get("background_run"),
+        "live_state": workspace.get("live_state") or {},
         "auto_switched_business": auto_slug or "",
         "auto_scope_warning": auto_warning or "",
     }
@@ -9228,6 +9470,7 @@ def _(rid, params: dict) -> dict:
                     "overview": workspace.get("overview") or {},
                     "outputs": workspace.get("outputs") or [],
                     "background_run": None,
+                    "live_state": workspace.get("live_state") or {},
                     "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
                     "dev_mode": True,
                 },
@@ -9268,6 +9511,7 @@ def _(rid, params: dict) -> dict:
                     "overview": workspace.get("overview") or {},
                     "outputs": workspace.get("outputs") or [],
                     "background_run": workspace.get("background_run") or session.get("takyon_background_run"),
+                    "live_state": workspace.get("live_state") or {},
                     "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
                 },
             )
@@ -9399,6 +9643,7 @@ def _(rid, params: dict) -> dict:
                 "overview": workspace.get("overview") or {},
                 "outputs": workspace.get("outputs") or [],
                 "background_run": workspace.get("background_run"),
+                "live_state": workspace.get("live_state") or {},
                 "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
             },
         )

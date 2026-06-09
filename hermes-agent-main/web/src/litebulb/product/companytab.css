@@ -215,10 +215,12 @@
 .lb-act__task:hover { background: var(--cds-color-surface-sunken); }
 .lb-act__dot { flex: none; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--cds-color-text-faint); }
 .lb-act__task.is-live .lb-act__dot { border-color: var(--cds-color-success-bold); background: var(--cds-color-success-bold); box-shadow: 0 0 0 3px var(--cds-color-success-bg); }
+.lb-act__task.is-failed .lb-act__dot { border-color: var(--cds-color-danger-bold); background: var(--cds-color-danger-bold); box-shadow: 0 0 0 3px var(--cds-color-danger-bg); }
 .lb-act__task.is-done .lb-act__dot { border-color: var(--cds-color-text-faint); background: var(--cds-color-text-faint); }
 .lb-act__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .lb-act__row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .lb-act__name { font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); color: var(--cds-color-text-default); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-act__task.is-failed .lb-act__name { color: var(--cds-color-danger-bold); }
 .lb-act__task.is-done .lb-act__name { color: var(--cds-color-text-soft); text-decoration: line-through; }
 .lb-act__meta { flex: none; font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); font-variant-numeric: tabular-nums; }
 .lb-act__ev { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: var(--cds-text-xs); color: var(--cds-color-text-soft); animation: lb-evflash 1.5s ease-out; }

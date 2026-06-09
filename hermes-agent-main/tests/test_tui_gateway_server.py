@@ -6023,6 +6023,17 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
     monkeypatch.setattr(server, "_takyon_store", lambda session: _FakeStore())
     monkeypatch.setattr(server, "_takyon_get_background_run", lambda slug: None)
     monkeypatch.setattr(server, "_takyon_reconcile_background_run", lambda slug, run, overview: None)
+    monkeypatch.setattr(
+        server,
+        "_takyon_live_state_payload",
+        lambda overview, background_run: {
+            "status": "idle",
+            "label": "Idle",
+            "detail": "",
+            "updated_at": "",
+            "tasks": [],
+        },
+    )
 
     payload = server._takyon_workspace_payload(
         {"takyon_operator_user_id": "demo"},
@@ -6036,8 +6047,68 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
         "overview": {"metrics": {"users": 3}, "product": {"public_url": "https://demo.test"}},
         "outputs": [],
         "background_run": None,
+        "live_state": {
+            "status": "idle",
+            "label": "Idle",
+            "detail": "",
+            "updated_at": "",
+            "tasks": [],
+        },
     }
     assert captured["sync_files"] is False
+
+
+def test_live_state_payload_marks_failed_when_only_stale_running_tasks_remain():
+    payload = server._takyon_live_state_payload(
+        {
+            "ceo_loop": {
+                "status": "recovering",
+                "headline": "1 blocker needs CEO recovery.",
+                "detail": "Blocked work is preserved as tasks instead of disappearing into logs.",
+            },
+            "tasks": [
+                {
+                    "id": "runtime-1",
+                    "label": "CEO live trace",
+                    "status": "running",
+                    "detail": "Streaming an older trace entry.",
+                    "updated_at": "2026-06-08T12:00:00Z",
+                },
+                {
+                    "id": "job-1",
+                    "label": "CEO turn",
+                    "status": "failed",
+                    "detail": "isolated turn exited with code -15",
+                    "updated_at": "2026-06-08T12:01:00Z",
+                },
+            ],
+        },
+        None,
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["label"] == "CEO turn"
+    assert payload["detail"] == "isolated turn exited with code -15"
+    assert all(task["status"] != "running" for task in payload["tasks"])
+
+
+def test_historical_outputs_payload_includes_research_files(tmp_path):
+    business_root = tmp_path / "demo"
+    (business_root / "research").mkdir(parents=True)
+    (business_root / "brain").mkdir(parents=True)
+    (business_root / "research" / "market.md").write_text("# Research\n", encoding="utf-8")
+    (business_root / "brain" / "notes.txt").write_text("memo\n", encoding="utf-8")
+
+    class _Store:
+        def _business_root(self, slug):
+            assert slug == "demo"
+            return business_root
+
+    outputs = server._takyon_historical_outputs_payload(_Store(), "demo", limit=20)
+    paths = {item["path"] for item in outputs}
+
+    assert "research/market.md" in paths
+    assert "brain/notes.txt" in paths
 
 
 def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tmp_path):
@@ -6045,6 +6116,8 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     site_root = business_root / "product" / "site"
     site_root.mkdir(parents=True)
     (site_root / "index.html").write_text("<html><body>demo</body></html>\n", encoding="utf-8")
+    (business_root / "research").mkdir(parents=True)
+    (business_root / "research" / "market.md").write_text("# Research\n", encoding="utf-8")
     receipt_rel = "product/site/publish-receipt.json"
     (business_root / receipt_rel).write_text(
         json.dumps(
@@ -6265,6 +6338,8 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     assert snapshot["overview"]["product"]["latest_check_command"] == "npm run build"
     assert snapshot["overview"]["product"]["latest_check_error"] == "Missing CSS asset manifest"
     assert snapshot["overview"]["product"]["detected_frameworks"] == ["vite"]
+    assert snapshot["overview"]["research"]["status"] == "visible"
+    assert snapshot["overview"]["research"]["latest_path"] == "research/market.md"
     assert snapshot["overview"]["posts"][0]["url"] == "https://x.com/vaalapp/status/2063725765531701534"
     assert snapshot["overview"]["artifacts"]["outreach"]["channels"]["x"]["published_count"] == 1
     assert snapshot["overview"]["artifacts"]["outreach"]["channels"]["x"]["latest_job"]["kind"] == "x.publish_outreach"

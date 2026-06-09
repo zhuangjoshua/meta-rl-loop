@@ -620,6 +620,8 @@ export interface TakyonOperatorAccountResponse {
   allowance_remaining_cents?: number;
   allowance_percent_used?: number | null;
   allowance_percent_remaining?: number | null;
+  operator_plan_name?: string | null;
+  operator_plan_weekly_allowance_cents?: number | null;
   allowance_period_start?: string | null;
   allowance_resets_at?: string | null;
   topup_balance_cents?: number;
@@ -750,6 +752,7 @@ export interface TakyonBusinessWorkspaceResponse {
   overview?: Record<string, unknown>;
   outputs?: unknown[];
   background_run?: Record<string, unknown> | null;
+  live_state?: Record<string, unknown> | null;
 }
 
 export interface TakyonBusinessTractionPoint {

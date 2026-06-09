@@ -380,6 +380,7 @@ export function useTakyonLitebulb() {
   const sessionBusinessRef = useRef("");
   const assistantMessageIdRef = useRef("");
   const workspacePollRef = useRef<number | null>(null);
+  const homeShellPollRef = useRef<number | null>(null);
   const openingBusinessRef = useRef("");
   const visibleBusinessRef = useRef("");
   const chatMessagesRef = useRef<ChatMessage[]>([]);
@@ -414,7 +415,19 @@ export function useTakyonLitebulb() {
     if (!businessSlug) return;
     const workspacePayload = await api.getTakyonBusinessHome(businessSlug);
     if (!isVisibleBusiness(businessSlug)) return;
-    setWorkspace(workspacePayload);
+    setWorkspace((current) => {
+      if (current?.business_slug !== businessSlug) {
+        return workspacePayload;
+      }
+      const nextOutputs = Array.isArray(workspacePayload.outputs) && workspacePayload.outputs.length
+        ? workspacePayload.outputs
+        : current.outputs || [];
+      return {
+        ...current,
+        ...workspacePayload,
+        outputs: nextOutputs,
+      };
+    });
   }, [isVisibleBusiness]);
 
   const loadWorkspace = useCallback(async (slug: string) => {
@@ -935,6 +948,7 @@ export function useTakyonLitebulb() {
         overview?: Record<string, unknown>;
         outputs?: unknown[];
         background_run?: Record<string, unknown> | null;
+        live_state?: Record<string, unknown> | null;
         streaming?: boolean;
       } | null = null;
       for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -947,6 +961,7 @@ export function useTakyonLitebulb() {
             overview?: Record<string, unknown>;
             outputs?: unknown[];
             background_run?: Record<string, unknown> | null;
+            live_state?: Record<string, unknown> | null;
             streaming?: boolean;
           }>("takyon.dashboard.create", {
             session_id: sessionId,
@@ -999,6 +1014,7 @@ export function useTakyonLitebulb() {
         overview: result?.overview || {},
         outputs: result?.outputs || [],
         background_run: result?.background_run || null,
+        live_state: result?.live_state || null,
       });
       setBuildState((state) => ({
         ...state,
@@ -1130,23 +1146,34 @@ export function useTakyonLitebulb() {
   }, [ensureGateway, sessionRunning, submitting]);
 
   useEffect(() => {
+    if (homeShellPollRef.current !== null) {
+      window.clearInterval(homeShellPollRef.current);
+      homeShellPollRef.current = null;
+    }
     if (workspacePollRef.current !== null) {
       window.clearInterval(workspacePollRef.current);
       workspacePollRef.current = null;
     }
     if (!activeBusiness?.slug || auth.status !== "in") return;
+    homeShellPollRef.current = window.setInterval(() => {
+      void loadBusinessHomeShell(activeBusiness.slug);
+    }, 2500);
     workspacePollRef.current = window.setInterval(() => {
       void loadWorkspace(activeBusiness.slug);
       void loadCreativeCredits(activeBusiness.slug);
       void loadTraction(activeBusiness.slug, tractionRange);
     }, 8000);
     return () => {
+      if (homeShellPollRef.current !== null) {
+        window.clearInterval(homeShellPollRef.current);
+        homeShellPollRef.current = null;
+      }
       if (workspacePollRef.current !== null) {
         window.clearInterval(workspacePollRef.current);
         workspacePollRef.current = null;
       }
     };
-  }, [activeBusiness?.slug, auth.status, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
+  }, [activeBusiness?.slug, auth.status, loadBusinessHomeShell, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
 
   const walletBalance = useMemo(() => {
     if (!account?.available) return null;
