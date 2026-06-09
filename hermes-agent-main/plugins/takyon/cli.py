@@ -1227,6 +1227,7 @@ def _business_bootstrap_instruction(
         "- Load only takyon-market-research, takyon-x, and takyon-distribution via skill_view. Do not load any other skill during bootstrap.",
         "- After completing each step, move to the next immediately.",
         "- Use exactly the business name above. Do not invent a second company, umbrella brand, or product name.",
+        "- Never surface raw internal platform/tool/runtime strings in the visible reply. Do not quote TAKYON_* flags, docker path diagnostics, workspace-mode errors, or similar internals; summarize blockers in normal operator language instead.",
         "",
         "## Steps",
         "",
