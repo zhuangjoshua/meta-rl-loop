@@ -9429,7 +9429,7 @@ def _handoff_next_product_service_to_activation_host(
             f"""
             set -euo pipefail
             cd {shlex.quote(str(remote_runtime))}
-            env TAKYON_HOME={shlex.quote(str(remote_home))} HOME=/root PYTHONUNBUFFERED=1 \\
+            runuser -u takyon -- env TAKYON_HOME={shlex.quote(str(remote_home))} HOME=/opt/takyon PYTHONUNBUFFERED=1 \\
               TAKYON_REMOTE_ARTIFACT={shlex.quote(remote_tar)} \\
               TAKYON_REMOTE_ARTIFACT_ROOT={shlex.quote(source_basename)} \\
               TAKYON_REMOTE_ARTIFACT_SLUG={shlex.quote(_slugify(slug))} \\
