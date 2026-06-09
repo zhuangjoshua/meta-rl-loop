@@ -310,7 +310,7 @@ function ProductPreview({
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  const frameUrl = publicUrl || previewUrl || "";
+  const frameUrl = previewUrl || publicUrl || "";
   const hasLocalSource = Boolean(
     sourcePath
     || outputs.some((item) => {

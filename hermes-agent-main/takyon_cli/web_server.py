@@ -3548,6 +3548,50 @@ def _read_takyon_business_site_preview(
     }
 
 
+def _takyon_preview_html_with_base(html_text: str, base_href: str) -> str:
+    href = str(base_href or "").strip()
+    if not href:
+        return html_text
+    base_tag = f'<base href="{html.escape(href, quote=True)}" />'
+    if re.search(r"<base\b", html_text, re.IGNORECASE):
+        return re.sub(
+            r"<base\b[^>]*>",
+            base_tag,
+            html_text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    head_match = re.search(r"<head\b[^>]*>", html_text, re.IGNORECASE)
+    if head_match:
+        return f"{html_text[:head_match.end()]}{base_tag}{html_text[head_match.end():]}"
+    return f"{base_tag}{html_text}"
+
+
+def _read_takyon_live_site_preview_html(url: str) -> str:
+    preview_url = str(url or "").strip()
+    if not re.match(r"^https?://", preview_url, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="preview url required")
+    request = urllib.request.Request(
+        preview_url,
+        headers={
+            "User-Agent": "TakyonPreview/1.0",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            content_type = str(response.headers.get("Content-Type") or "text/html")
+            if "html" not in content_type.lower():
+                raise HTTPException(status_code=502, detail=f"preview is not html: {content_type}")
+            charset = response.headers.get_content_charset() or "utf-8"
+            html_text = response.read().decode(charset, errors="replace")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - preview should fail honestly
+        raise HTTPException(status_code=502, detail=f"preview fetch failed: {exc}") from exc
+    return _takyon_preview_html_with_base(html_text, preview_url)
+
+
 def _read_takyon_business_workspace(
     operator_user_id: str,
     business: str,
@@ -3960,6 +4004,52 @@ async def get_takyon_business_site_preview(
     except Exception as exc:  # noqa: BLE001 - preview should fail honestly
         _log.warning("dashboard business site preview failed for %s:%s: %s", business, requested_path, exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/takyon/site-preview/{slug}")
+async def get_takyon_site_preview_document(
+    request: Request,
+    slug: str,
+    path: str = "",
+) -> HTMLResponse:
+    _require_token(request)
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    requested_path = str(path or "").strip() or "product/site"
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+        raise HTTPException(status_code=404, detail="business not found")
+
+    preview = await asyncio.to_thread(
+        _read_takyon_business_site_preview,
+        str(principal.user_id),
+        business,
+        requested_path,
+    )
+    mode = str(preview.get("mode") or "").strip().lower()
+    if mode == "inline_html":
+        payload = str(preview.get("url") or "")
+        prefix = "data:text/html;charset=utf-8;base64,"
+        if not payload.startswith(prefix):
+            raise HTTPException(status_code=500, detail="preview payload malformed")
+        try:
+            html_text = base64.b64decode(payload[len(prefix):]).decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001 - preview should fail honestly
+            raise HTTPException(status_code=500, detail=f"preview payload decode failed: {exc}") from exc
+    elif mode == "live_url":
+        html_text = await asyncio.to_thread(
+            _read_takyon_live_site_preview_html,
+            str(preview.get("url") or ""),
+        )
+    else:
+        raise HTTPException(status_code=404, detail="site preview not available")
+    return HTMLResponse(
+        html_text,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/api/takyon/businesses/{slug}/workspace")

@@ -30,6 +30,11 @@ declare global {
 let _sessionToken: string | null = null;
 const SESSION_HEADER = "X-Takyon-Session-Token";
 
+function readSessionToken(): string {
+  if (typeof window === "undefined") return "";
+  return String(window.__TAKYON_SESSION_TOKEN__ || "").trim();
+}
+
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
     headers.set(SESSION_HEADER, token);
@@ -76,12 +81,22 @@ export async function fetchJSONWithTimeout<T>(
 
 async function getSessionToken(): Promise<string> {
   if (_sessionToken) return _sessionToken;
-  const injected = window.__TAKYON_SESSION_TOKEN__;
+  const injected = readSessionToken();
   if (injected) {
     _sessionToken = injected;
     return _sessionToken;
   }
   throw new Error("Session token not available — page must be served by the Takyon dashboard server");
+}
+
+export function buildTakyonBusinessSitePreviewFrameUrl(slug: string, path = "product/site"): string {
+  const businessSlug = String(slug || "").trim();
+  if (!businessSlug) return "";
+  const normalizedPath = String(path || "").trim() || "product/site";
+  const token = readSessionToken();
+  const query = new URLSearchParams({ path: normalizedPath });
+  if (token) query.set("token", token);
+  return `${BASE}/api/takyon/site-preview/${encodeURIComponent(businessSlug)}?${query.toString()}`;
 }
 
 export const api = {

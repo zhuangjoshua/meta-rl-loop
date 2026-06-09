@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  buildTakyonBusinessSitePreviewFrameUrl,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonBusinessTractionResponse,
   type TakyonBusinessWorkspaceResponse,
@@ -442,7 +443,10 @@ export function useTakyonLitebulb() {
       setWorkspace(workspaceResult.value);
     }
     if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {
-      const nextPreviewUrl = trimText(previewResult.value.url);
+      const previewPath = trimText(previewResult.value.path) || "product/site";
+      const nextPreviewUrl = trimText(previewResult.value.mode).toLowerCase() === "live_url"
+        ? buildTakyonBusinessSitePreviewFrameUrl(businessSlug, previewPath)
+        : trimText(previewResult.value.url);
       if (nextPreviewUrl) {
         setSitePreviewUrl(nextPreviewUrl);
       }

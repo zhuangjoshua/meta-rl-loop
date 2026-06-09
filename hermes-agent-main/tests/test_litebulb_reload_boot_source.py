@@ -32,6 +32,13 @@ def test_full_workspace_load_parallelizes_preview_fetch():
     assert "const [workspaceResult, previewResult] = await Promise.allSettled([" in source
     assert 'api.getTakyonBusinessWorkspace(businessSlug, 60, "full")' in source
     assert "api.getTakyonBusinessSitePreview(businessSlug)" in source
+    assert 'buildTakyonBusinessSitePreviewFrameUrl(businessSlug, previewPath)' in source
+
+
+def test_published_product_preview_uses_preview_proxy_before_public_url():
+    source = (REPO_ROOT / "web" / "src" / "litebulb" / "product" / "Product.tsx").read_text(encoding="utf-8")
+
+    assert 'const frameUrl = previewUrl || publicUrl || "";' in source
 
 
 def test_business_switch_ignores_stale_workspace_preview_and_session_writes():

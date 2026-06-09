@@ -129,6 +129,26 @@ def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
     assert web_server._load_or_create_session_token() == "env-token-that-is-long-enough-1234567890"
 
 
+def test_preview_html_with_base_inserts_base_tag_when_missing():
+    import takyon_cli.web_server as web_server
+
+    html_text = "<html><head><title>x</title></head><body>Hello</body></html>"
+    result = web_server._takyon_preview_html_with_base(html_text, "https://coolman.fourmanifold.com/")
+
+    assert '<base href="https://coolman.fourmanifold.com/" />' in result
+    assert result.index("<base") > result.index("<head")
+
+
+def test_preview_html_with_base_replaces_existing_base_tag():
+    import takyon_cli.web_server as web_server
+
+    html_text = "<html><head><base href=\"https://old.example/\"><title>x</title></head><body>Hello</body></html>"
+    result = web_server._takyon_preview_html_with_base(html_text, "https://coolman.fourmanifold.com/")
+
+    assert result.count("<base") == 1
+    assert 'href="https://coolman.fourmanifold.com/"' in result
+
+
 def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
     import plugins.takyon.runtime_app as runtime_app
     import takyon_cli.web_server as web_server
