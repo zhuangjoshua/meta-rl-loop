@@ -7,6 +7,7 @@ import os
 import stat
 import tempfile
 import types
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -7006,6 +7007,78 @@ def test_operator_tool_task_handler_records_run_lifecycle(monkeypatch):
     )
     assert [c[2] for c in calls] == ["running", "failed"]
     assert outcome.result["status"] == "failed"
+
+
+def test_operator_tool_task_handler_binds_owner_session_context(monkeypatch):
+    from plugins.takyon import worker as takyon_worker
+
+    observed = {}
+
+    @contextmanager
+    def _workspace(slug, *, operator_user_id=None, sync_on_exception=False):
+        observed["workspace"] = {
+            "slug": slug,
+            "operator_user_id": operator_user_id,
+            "sync_on_exception": sync_on_exception,
+        }
+        yield "/tmp/takyon-worker-test-home"
+
+    def _set_session_vars(**kwargs):
+        observed["set_session_vars"] = dict(kwargs)
+        return ["token"]
+
+    def _clear_session_vars(tokens):
+        observed["clear_session_vars"] = list(tokens)
+
+    @contextmanager
+    def _bound_run(run_id):
+        observed["run_id"] = run_id
+        yield
+
+    monkeypatch.setattr(takyon_worker, "_business_owner_user_id", lambda slug: "user-123")
+    monkeypatch.setattr(takyon_worker, "_update_work_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr("plugins.takyon.cli._business_workspace_execution_context", _workspace)
+    monkeypatch.setattr("gateway.session_context.set_session_vars", _set_session_vars)
+    monkeypatch.setattr("gateway.session_context.clear_session_vars", _clear_session_vars)
+    monkeypatch.setattr(takyon_core, "_bound_operator_task_run", _bound_run)
+    monkeypatch.setattr(
+        takyon_core,
+        "handle_business_claude_agent_task",
+        lambda args, **kw: json.dumps({"success": True, "summary": "ok"}),
+    )
+
+    job = takyon_worker.Job(
+        id="job-ctx",
+        business_slug="acme",
+        kind="claude.agent_task",
+        status="running",
+        idempotency_key="ik-ctx",
+        payload={"args": {"business": "acme"}, "work_request_id": "wr-ctx"},
+        result=None,
+        error=None,
+        reserved_billing_entry_id=None,
+        attempts=1,
+        max_attempts=1,
+        locked_by="w1",
+        locked_at=None,
+        created_at=None,
+        updated_at=None,
+    )
+    outcome = takyon_worker.claude_agent_task_handler(job)
+
+    assert observed["workspace"] == {
+        "slug": "acme",
+        "operator_user_id": "user-123",
+        "sync_on_exception": True,
+    }
+    assert observed["set_session_vars"] == {
+        "user_id": "user-123",
+        "workspace_root": "/tmp/takyon-worker-test-home",
+        "business_slug": "acme",
+    }
+    assert observed["clear_session_vars"] == ["token"]
+    assert observed["run_id"] == "wr-ctx"
+    assert outcome.result == {"status": "completed", "work_request_id": "wr-ctx"}
 
     # An unrecorded crash writes the failed run row, then re-raises so the JOB fails loudly.
     calls.clear()

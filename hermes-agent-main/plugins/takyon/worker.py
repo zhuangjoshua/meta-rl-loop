@@ -1459,11 +1459,26 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
     slug = job.business_slug
     if work_request_id:
         _update_work_request(slug, work_request_id, status="running", rewrite_distribution=False)
+    owner_user_id = _business_owner_user_id(slug)
+    tokens: list[object] = []
     try:
+        from gateway.session_context import clear_session_vars, set_session_vars
+
+        from .cli import _business_workspace_execution_context
         from .core import _bound_operator_task_run
 
-        with _bound_operator_task_run(work_request_id):
-            raw = handler_fn(dict(args))
+        with _business_workspace_execution_context(
+            slug,
+            operator_user_id=owner_user_id,
+            sync_on_exception=True,
+        ) as workspace_home:
+            tokens = set_session_vars(
+                user_id=owner_user_id,
+                workspace_root=str(workspace_home or ""),
+                business_slug=slug,
+            )
+            with _bound_operator_task_run(work_request_id):
+                raw = handler_fn(dict(args))
         result = _parse_jsonish_output(str(raw or ""))
         if not isinstance(result, dict) or not result:
             result = {"success": False, "error": f"{tool_name} returned no parseable result"}
@@ -1477,6 +1492,9 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
                 rewrite_distribution=False,
             )
         raise
+    finally:
+        if tokens:
+            clear_session_vars(tokens)
     status = "completed" if result.get("success") else ("blocked" if result.get("blocked") else "failed")
     if work_request_id:
         _update_work_request(
