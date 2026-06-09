@@ -2172,12 +2172,16 @@ def _subuser_app_starter_app_page_js() -> str:
         dedent(
             """
             import { StarterAccessPage } from "../../components/starter-access-page";
+            import ProductRoot from "./(product)/root";
             import { loadServerAppState } from "../../components/starter-server";
 
             export const dynamic = "force-dynamic";
 
-            export default async function AppPage() {
+            export default async function AppPage({ searchParams }) {
               const initialAppState = await loadServerAppState();
+              if (initialAppState?.access?.state === "ready") {
+                return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;
+              }
               return <StarterAccessPage initialAppState={initialAppState} />;
             }
             """
@@ -2208,12 +2212,14 @@ def _subuser_app_starter_product_layout_js() -> str:
     )
 
 
-def _subuser_app_starter_product_page_js() -> str:
+def _subuser_app_starter_product_root_js() -> str:
     return (
         dedent(
             """
-            export default function ProductRoutePlaceholder() {
-              return null;
+            import { StarterProductHome } from "../../../components/starter-product-home";
+
+            export default function ProductRoot({ initialAppState }) {
+              return <StarterProductHome initialAppState={initialAppState} />;
             }
             """
         ).strip()
@@ -3174,6 +3180,78 @@ def _subuser_app_starter_access_page_js() -> str:
               return (
                 <StarterAppStateProvider initialAppState={initialAppState}>
                   <StarterAccessInner />
+                </StarterAppStateProvider>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_product_home_js() -> str:
+    return (
+        dedent(
+            """
+            "use client";
+
+            import Link from "next/link";
+
+            import {
+              StarterAppStateProvider,
+              StarterStatePill,
+              StarterStatusBanner,
+              currentPlan,
+              planSummary,
+              starterBusinessName,
+              useStarterAppState,
+            } from "./starter-primitives.js";
+
+            function StarterProductHomeInner() {
+              const { appState } = useStarterAppState();
+              const plan = currentPlan();
+              const membershipState = String(appState?.subscription?.state || "active").trim().toLowerCase();
+              return (
+                <div className="starter-stack">
+                  <StarterStatusBanner
+                    title="Access ready."
+                    body="Your private account area is active. Use Account to review your membership and profile."
+                    actions={
+                      <>
+                        <Link className="starter-button starter-button-primary" href="/app/profile">
+                          Open account
+                        </Link>
+                        <Link className="starter-button starter-button-secondary" href="/">
+                          Back to site
+                        </Link>
+                      </>
+                    }
+                  />
+                  <section className="starter-card starter-section-card">
+                    <p className="starter-eyebrow">Private access</p>
+                    <h1 className="starter-title starter-title-sm">{starterBusinessName}</h1>
+                    <p className="starter-copy">
+                      Your membership is active. Keep the main product flow here, and use Account for subscription and profile details.
+                    </p>
+                    <div className="starter-actions starter-actions-compact">
+                      <StarterStatePill label="Membership" state={membershipState} />
+                      <StarterStatePill label="Access" state={appState?.access?.state || "ready"} />
+                    </div>
+                    <div className="starter-card starter-card-soft">
+                      <strong>{plan ? planSummary(plan) : "Plan details will appear here."}</strong>
+                      <p className="starter-note">
+                        {appState?.user?.email ? `Signed in as ${String(appState.user.email)}` : "Account access is active."}
+                      </p>
+                    </div>
+                  </section>
+                </div>
+              );
+            }
+
+            export function StarterProductHome({ initialAppState }) {
+              return (
+                <StarterAppStateProvider initialAppState={initialAppState}>
+                  <StarterProductHomeInner />
                 </StarterAppStateProvider>
               );
             }
@@ -4600,10 +4678,12 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         "src/app/app/layout.js": _subuser_app_starter_app_layout_js(),
         "src/app/app/page.js": _subuser_app_starter_app_page_js(),
         "src/app/app/(product)/layout.js": _subuser_app_starter_product_layout_js(),
+        "src/app/app/(product)/root.js": _subuser_app_starter_product_root_js(),
         "src/app/app/profile/page.js": _subuser_app_starter_profile_page_js(),
         "src/components/starter-account-page.js": _subuser_app_starter_account_page_js(),
         "src/components/starter-access-page.js": _subuser_app_starter_access_page_js(),
         "src/components/starter-context.js": _subuser_app_starter_context_js(title_literal=title_literal),
+        "src/components/starter-product-home.js": _subuser_app_starter_product_home_js(),
         "src/components/starter-primitives.js": _subuser_app_starter_primitives_js(),
         "src/components/starter-server.js": _subuser_app_starter_server_js(),
     }
@@ -4757,7 +4837,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
         lines.append("- Treat the product as paid-only by default. Do not invent a free plan, free tier, trial, waitlist tier, or limited starter offer in customer-facing pricing copy unless the operator explicitly records that change first.")
         lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
-        lines.append("- Keep product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
+        lines.append("- Treat `/app` as the single routed entrypoint. Keep the main entitled product surface in `src/app/app/(product)/root.js`, and keep nested product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -4782,8 +4862,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        "- AppKit now seeds only a minimal landing stub at `/`, a thin `/app` access gate, and a thin `/app/profile` account page. Reuse those route intentions and access boundaries by default, but replace their layout, hierarchy, copy, and styling freely when the business calls for it.",
-        "- For a first monthly bootstrap, treat the seeded `/app` route as a sign-in and subscribe gate, and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
+        "- AppKit now seeds only a minimal landing stub at `/`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page. Reuse those route intentions and access boundaries by default, but replace their layout, hierarchy, copy, and styling freely when the business calls for it.",
+        "- For a first monthly bootstrap, treat the seeded `/app` route as the truthful membership entrypoint and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
         "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
         f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account rails when the seeded wrappers already cover the route.",
     ]
@@ -7297,6 +7377,118 @@ def _normalize_supported_product_build_shape(
     scripts: dict[str, Any],
     deps: dict[str, Any],
 ) -> dict[str, Any]:
+    def _merge_normalizations(*results: dict[str, Any]) -> dict[str, Any]:
+        repairs: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for item in results:
+            repairs.extend(list(item.get("repairs") or []))
+            warnings.extend(str(entry).strip() for entry in (item.get("warnings") or []) if str(entry).strip())
+            if item.get("blocked"):
+                return {
+                    "repairs": repairs,
+                    "warnings": warnings,
+                    "blocked": True,
+                    "error": str(item.get("error") or "unsupported build shape requires manual repair"),
+                }
+        return {"repairs": repairs, "warnings": warnings}
+
+    def _normalize_appkit_product_root_route(root: Path) -> dict[str, Any]:
+        app_root = root / "src" / "app" / "app"
+        legacy_route = app_root / "(product)" / "page.js"
+        canonical_root = app_root / "(product)" / "root.js"
+        app_page = app_root / "page.js"
+        if not legacy_route.is_file():
+            return {"repairs": [], "warnings": []}
+
+        try:
+            legacy_text = legacy_route.read_text(encoding="utf-8")
+        except Exception as exc:
+            return {
+                "repairs": [],
+                "warnings": [],
+                "blocked": True,
+                "error": f"legacy AppKit product root route could not be read for normalization: {exc}",
+            }
+
+        repairs: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        if canonical_root.exists():
+            try:
+                canonical_text = canonical_root.read_text(encoding="utf-8")
+            except Exception as exc:
+                return {
+                    "repairs": repairs,
+                    "warnings": warnings,
+                    "blocked": True,
+                    "error": f"canonical AppKit product root could not be read for normalization: {exc}",
+                }
+            if canonical_text.replace("\r\n", "\n") != legacy_text.replace("\r\n", "\n"):
+                return {
+                    "repairs": repairs,
+                    "warnings": warnings,
+                    "blocked": True,
+                    "error": (
+                        "both src/app/app/(product)/page.js and src/app/app/(product)/root.js exist with "
+                        "different contents; remove the legacy route page or merge it into root.js before refreshing"
+                    ),
+                }
+            legacy_route.unlink()
+            repairs.append(
+                {
+                    "kind": "appkit_product_root_route_normalize",
+                    "from": "src/app/app/(product)/page.js",
+                    "to": "src/app/app/(product)/root.js",
+                    "message": "Removed the legacy /app product route file after confirming root.js already carries the same product root.",
+                }
+            )
+        else:
+            canonical_root.parent.mkdir(parents=True, exist_ok=True)
+            legacy_route.replace(canonical_root)
+            repairs.append(
+                {
+                    "kind": "appkit_product_root_route_normalize",
+                    "from": "src/app/app/(product)/page.js",
+                    "to": "src/app/app/(product)/root.js",
+                    "message": "Moved the legacy /app product route into the shared AppKit product-root module so /app stays the single routed entrypoint.",
+                }
+            )
+
+        if app_page.exists():
+            try:
+                app_page_text = app_page.read_text(encoding="utf-8").replace("\r\n", "\n")
+            except Exception as exc:
+                return {
+                    "repairs": repairs,
+                    "warnings": warnings,
+                    "blocked": True,
+                    "error": f"AppKit /app entry page could not be read for normalization: {exc}",
+                }
+            old_template = _subuser_app_starter_app_page_js().replace(
+                'import ProductRoot from "./(product)/root";\n', ""
+            ).replace(
+                '  if (initialAppState?.access?.state === "ready") {\n'
+                '    return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;\n'
+                '  }\n',
+                "",
+            ).replace("export default async function AppPage({ searchParams }) {", "export default async function AppPage() {")
+            new_template = _subuser_app_starter_app_page_js().replace("\r\n", "\n")
+            if app_page_text == old_template.replace("\r\n", "\n"):
+                app_page.write_text(new_template, encoding="utf-8")
+                repairs.append(
+                    {
+                        "kind": "appkit_app_entry_normalize",
+                        "from": "src/app/app/page.js",
+                        "to": "src/app/app/page.js",
+                        "message": "Updated the seeded /app entry page so it renders the shared product-root module whenever access is ready.",
+                    }
+                )
+            elif app_page_text != new_template:
+                warnings.append(
+                    "Legacy AppKit product root route was moved to src/app/app/(product)/root.js. "
+                    "If /app is a custom page, make sure it renders that product-root module when access is ready."
+                )
+        return {"repairs": repairs, "warnings": warnings}
+
     looks_next = (
         "next" in deps
         or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
@@ -7305,7 +7497,10 @@ def _normalize_supported_product_build_shape(
         or "next start" in str(scripts.get("start") or "")
     )
     if looks_next:
-        return _normalize_next_config_typescript(root)
+        return _merge_normalizations(
+            _normalize_next_config_typescript(root),
+            _normalize_appkit_product_root_route(root),
+        )
     return {"repairs": [], "warnings": []}
 
 
