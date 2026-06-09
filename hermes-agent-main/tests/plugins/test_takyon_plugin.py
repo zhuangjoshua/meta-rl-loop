@@ -2241,6 +2241,7 @@ def test_claude_agent_task_distills_method_and_style_guidance_skills(tmp_path, m
     skills_dir = tmp_path / "skills"
     method_file = skills_dir / "creative" / "claude-design" / "SKILL.md"
     style_file = skills_dir / "creative" / "claude-design-doodle" / "SKILL.md"
+    style_design_file = skills_dir / "creative" / "claude-design-doodle" / "DESIGN.md"
     method_file.parent.mkdir(parents=True, exist_ok=True)
     style_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2284,6 +2285,23 @@ Playful shared design system.
 """,
         encoding="utf-8",
     )
+    style_design_file.write_text(
+        """# Design System Inspired by Doodle
+
+## 4. Spacing & Grid
+
+- use a broad desktop grid instead of a narrow centered island
+
+## 5. Layout & Composition
+
+- the right rail should feel visually substantial
+
+## 9. Anti-patterns
+
+- do not turn the page into long paragraph blocks
+""",
+        encoding="utf-8",
+    )
 
     captured: dict[str, object] = {}
 
@@ -2319,9 +2337,11 @@ Playful shared design system.
     assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "[Hermes guidance skill: claude-design-doodle]" in instruction
+    assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" in instruction
     assert "required design contract" in instruction
     assert "Pick one coherent style skill." in instruction
     assert "playful still has to ship" in instruction
+    assert "right rail should feel visually substantial" in instruction
 
 
 def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypatch):
@@ -6659,3 +6679,25 @@ def test_business_x_metrics_sync_defaults_to_latest_x_receipt(tmp_path, monkeypa
     assert result["success"] is True
     assert seen["post_id"] == "222"
     assert result["post_id"] == "222"
+
+
+def test_enforce_operator_business_access_fails_closed_without_principal(monkeypatch):
+    """With TAKYON_REQUIRE_OPERATOR_IDENTITY set (the VPS operator-plane posture), a session with
+    no bound operator user must be refused BEFORE any business read — never widened to
+    all-business access. Without the flag, local single-operator behavior is unchanged."""
+
+    class _UnboundStore:
+        def _active_operator_user_id(self) -> str:
+            return ""
+
+    store = _UnboundStore()
+
+    monkeypatch.setenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", "1")
+    with pytest.raises(takyon_core.TakyonError, match="operator identity required"):
+        # conn=None proves the refusal happens before any DB access.
+        takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme")
+
+    monkeypatch.delenv("TAKYON_REQUIRE_OPERATOR_IDENTITY", raising=False)
+    assert (
+        takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme") is None
+    )

@@ -38,10 +38,21 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi
   if ! command -v xurl >/dev/null 2>&1 && [ -x /root/.local/bin/xurl ]; then
-    ln -sf /root/.local/bin/xurl /usr/local/bin/xurl
+    # A real copy, not a symlink: the services run with ProtectHome=true, so a link into
+    # /root/.local would be unreachable for them.
+    install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
   fi
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
+  # The tracked units run as the dedicated non-root 'takyon' user (docker group for the
+  # Docker-isolated agent/terminal work) — provision it and hand the state tree over. The runtime
+  # tree stays root-owned (read-only to the services via the units' ReadOnlyPaths).
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir '$REMOTE_ROOT' --shell /usr/sbin/nologin takyon
+  fi
+  id -nG takyon | grep -qw docker || usermod -aG docker takyon
+  chown takyon:takyon '$REMOTE_ROOT'
+  chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
   systemctl enable docker >/dev/null
   systemctl start docker
   systemctl is-active --quiet docker

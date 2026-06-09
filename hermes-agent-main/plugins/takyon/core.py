@@ -176,6 +176,22 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 - Never mix vendors accidentally. Do not describe Claude-backed behavior with GPT names or stale model labels like GPT-4o-mini.
 - Prefer customer-visible claims like analyze feedback, cluster themes, rank opportunities, explain why, and export insights.
 """
+PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition contract:
+- For the public `/` route on desktop, make the first screen occupy most of the viewport instead of reading like a small centered island.
+- If you use a split hero, both sides must carry real visual weight. Aim for a balanced `50/50` to `55/45` feel, not a tiny proof card floating beside a text column.
+- Let the hero actually use the container width. On desktop, prefer a broad container roughly in the `1320px` to `1440px` range unless the brief explicitly calls for a tighter editorial column.
+- On large desktop viewports, widen further when the page still leaves obvious dead margins. A good default is roughly `90vw` capped around `1600px` to `1720px`, not a fixed narrow frame.
+- A strong large-screen default is something like `width: min(92vw, 1680px)` with side padding in the rough `24px` to `40px` range, not a boxed `1400px` shell with oversized gutters.
+- Avoid inner max-widths or timid card sizes that leave the page feeling half-empty on laptop screens.
+- The proof rail in a split hero should usually read around `520px` to `680px` wide on desktop and feel like a real half of the first screen, not an accessory.
+- Let the hero headline scale decisively on desktop before wrapping; conservative caps that make the entire composition feel miniature are the wrong tradeoff here.
+- Do not cap both hero columns to similar mid-`500px` widths inside a wide container. At least one side of the hero should expand beyond that so the first screen reads broad rather than bottled up.
+- Keep the headline block and proof rail snapped toward the outer edges of the hero grid. Avoid a layout where both columns are centered little islands with extra dead space between them.
+- When using a split hero on a very wide screen, prefer a slightly asymmetric grid such as `58/42` or `60/40` if that helps the composition fill the page more convincingly.
+- If the browser viewport is very wide, the first screen should not leave huge blank gutters on both outer sides. Reduce side padding or increase the max width until the hero reads page-scale.
+- Keep hero support copy to 1 or 2 short sentences. Cut prose before shrinking the layout.
+- Do not place a long explanatory paragraph directly under the hero. Follow with concise proof, features, pricing, or another clearly structured section instead.
+"""
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
@@ -220,20 +236,67 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
         "When To Use",
         "Shared Style Selection",
         "Workflow",
+        "Layout and Width",
         "Marketing Surfaces",
         "Product Surfaces",
         "Self Review Loop",
         "Hard Rules",
     ),
-    "claude-design-openai": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "claude-design-openai": ("When To Use", "Visual Direction", "Typography", "Layout and Width", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-stripe": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
 }
+_WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
+    "claude-design-openai": (
+        "Visual Theme & Atmosphere",
+        "Typography Rules",
+        "Spacing & Layout",
+        "Do's and Don'ts",
+    ),
+    "claude-design-stripe": (
+        "Visual Theme & Atmosphere",
+        "Typography Rules",
+        "Spacing & Layout",
+        "Do's and Don'ts",
+    ),
+    "claude-design-superhuman": (
+        "Visual Theme & Atmosphere",
+        "Typography Rules",
+        "Layout Principles",
+        "Do's and Don'ts",
+    ),
+    "claude-design-vibrant": (
+        "Visual Theme & Atmosphere",
+        "Typography",
+        "Spacing & Grid",
+        "Layout & Composition",
+        "Anti-patterns",
+    ),
+    "claude-design-doodle": (
+        "Visual Theme & Atmosphere",
+        "Typography",
+        "Spacing & Grid",
+        "Layout & Composition",
+        "Anti-patterns",
+    ),
+}
 _DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS: tuple[str, ...] = ("claude-design", "claude-design-openai")
 _DEFAULT_PRODUCT_SITE_STYLE_SKILL = "claude-design-openai"
 _PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "claude-design-openai": (
+        "ai",
+        "calm",
+        "editorial",
+        "trustworthy",
+        "gentle",
+        "serious",
+        "prosumer",
+        "research",
+        "analysis",
+        "quiet confidence",
+    ),
     "claude-design-doodle": (
         "pet",
         "pets",
@@ -300,6 +363,7 @@ _PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 _PRODUCT_SITE_STYLE_PRIORITY: tuple[str, ...] = (
+    "claude-design-openai",
     "claude-design-doodle",
     "claude-design-stripe",
     "claude-design-superhuman",
@@ -2039,47 +2103,10 @@ def _subuser_app_starter_home_page_js() -> str:
     return (
         dedent(
             """
-            import Link from "next/link";
-            import { starterBusinessName, starterConfiguredPlans } from "../components/starter-context.js";
-
-            function currentPlan() {
-              return starterConfiguredPlans.find((plan) => String(plan.planKey || "").trim() === "monthly") || starterConfiguredPlans[0] || null;
-            }
-
-            function formatMoney(cents = 0, currency = "usd") {
-              return new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency: String(currency || "usd").toUpperCase(),
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2,
-              }).format((Number(cents || 0) || 0) / 100);
-            }
-
             export default function HomePage() {
-              const plan = currentPlan();
-              const planLabel = plan
-                ? `${formatMoney(plan.priceCents, plan.currency)}${plan.billingInterval ? ` / ${plan.billingInterval}` : ""}`
-                : "Private access opens after sign in and subscription.";
               return (
                 <main className="starter-site-shell">
-                  <div className="starter-wrap">
-                    <section className="starter-landing-card">
-                      <p className="starter-eyebrow">Early access</p>
-                      <h1 className="starter-title">{starterBusinessName}</h1>
-                      <p className="starter-copy">
-                        One place to request access, start a subscription, and keep your account ready for the private workspace.
-                      </p>
-                      <div className="starter-actions">
-                        <Link className="starter-button starter-button-primary" href="/app?intent=subscribe">
-                          Get access
-                        </Link>
-                        <Link className="starter-button starter-button-secondary" href="/app?intent=signin">
-                          Sign in
-                        </Link>
-                      </div>
-                      <p className="starter-note">{planLabel}</p>
-                    </section>
-                  </div>
+                  <div className="starter-wrap" />
                 </main>
               );
             }
@@ -5044,7 +5071,9 @@ def _find_guidance_skill_file(identifier: str) -> Path | None:
 
 
 def _normalize_heading_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.replace("`", "").strip()).lower()
+    text = value.replace("`", "").strip()
+    text = re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", text)
+    return re.sub(r"\s+", " ", text).lower()
 
 
 def _excerpt_guidance_skill(content: str, *, section_titles: tuple[str, ...], max_chars: int = 12_000) -> str:
@@ -5103,6 +5132,25 @@ def _excerpt_guidance_skill(content: str, *, section_titles: tuple[str, ...], ma
     return excerpt
 
 
+def _excerpt_guidance_design_reference(skill_file: Path, skill_name: str) -> str:
+    design_file = skill_file.parent / "DESIGN.md"
+    if not design_file.exists():
+        return ""
+    section_titles = _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS.get(skill_name.lower(), ())
+    if not section_titles:
+        return ""
+    body = design_file.read_text(encoding="utf-8")
+    excerpt = _excerpt_guidance_skill(body, section_titles=section_titles, max_chars=6_000)
+    if not excerpt:
+        return ""
+    return (
+        f"[Hermes design reference: {skill_name} / DESIGN.md]\n"
+        "Treat these as concrete visual implementation details for the chosen design system. "
+        "Favor them over generic landing-page instincts.\n\n"
+        f"{excerpt}"
+    ).strip()
+
+
 def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[str], str]:
     resolved_names: list[str] = []
     blocks: list[str] = []
@@ -5135,6 +5183,9 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
             f"{excerpt}"
         )
         blocks.append(block.strip())
+        design_reference = _excerpt_guidance_design_reference(skill_file, skill_name)
+        if design_reference:
+            blocks.append(design_reference)
     return resolved_names, "\n\n".join(blocks).strip()
 
 
@@ -9651,6 +9702,16 @@ class TakyonStore:
     ) -> None:
         operator_user_id = self._active_operator_user_id()
         if not operator_user_id:
+            # Fail closed on a missing principal where the deployment requires one: set
+            # TAKYON_REQUIRE_OPERATOR_IDENTITY=1 on any plane that serves multi-user operator
+            # sessions, so a session that lost its user binding gets an error, not all-business
+            # access. Single-operator deployments and the trusted worker plane (which resolves
+            # owners per job) leave the flag unset and keep the historical ownerless behavior.
+            if _env_truthy("TAKYON_REQUIRE_OPERATOR_IDENTITY"):
+                raise TakyonError(
+                    "operator identity required: no operator user is bound to this session "
+                    f"(refusing access to business:{business_slug})"
+                )
             return
         row = conn.execute(
             "SELECT owner_user_id FROM businesses WHERE slug = ?",
@@ -20938,6 +20999,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             if _workspace_needs_customer_ai_copy_contract(workspace_rel):
                 worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
             if _workspace_needs_runtime_ui_contract(workspace_rel):
+                worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
                 runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
                 if runtime_ui_contract:
                     worker_instruction_parts.append(runtime_ui_contract)

@@ -64,6 +64,13 @@ class BusinessOwnerMissing(JobError):
 
 _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 
+# Lanes: the per-business concurrency gate in claim_one is PER LANE, not per business-total. CEO
+# turns (ceo_bootstrap/ceo_wake) share one 'ceo' lane so a business never runs two CEO turns at
+# once; every other kind is its own lane so a long-running job cannot starve wakes — and a CEO turn
+# that enqueues another kind and waits on it cannot deadlock behind its own business gate. The lane
+# is derived from kind in SQL (no schema change, dispatch_due_wakes untouched).
+_LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' else {a}.kind end)"
+
 # The columns of a jobs row, in one place so every SELECT projects the same Job.
 _COLS = (
     "id, business_slug, kind, status, idempotency_key, payload, result, error, "
@@ -195,20 +202,25 @@ def list_jobs(conn, business_slug: str, *, limit: int = 50) -> list[Job]:
 def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None = None) -> Job | None:
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
-    Lock one row with ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to
-    'running', stamp locked_by/locked_at, and increment attempts. Returns the claimed job, or None
-    if the queue is empty. The whole claim is one transaction; the row is committed 'running'
-    before this returns."""
+    A business runs at most ONE job per lane at a time (see ``_LANE_SQL``): CEO turns serialize
+    against each other, while other kinds run in their own lane alongside them. Lock one row with
+    ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to 'running', stamp
+    locked_by/locked_at, and increment attempts. Returns the claimed job, or None if the queue is
+    empty. The whole claim is one transaction; the row is committed 'running' before this returns."""
+    lane_gate = (
+        "and not exists ("
+        "  select 1 from jobs r "
+        "  where r.business_slug = j.business_slug and r.status = 'running' "
+        f"  and {_LANE_SQL.format(a='r')} = {_LANE_SQL.format(a='j')}"
+        ") "
+    )
     with conn.transaction():
         if kinds:
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' and j.kind = any(%s) "
-                "and not exists ("
-                "  select 1 from jobs r "
-                "  where r.business_slug = j.business_slug and r.status = 'running'"
-                ") "
-                "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                + lane_gate
+                + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
                 (list(kinds),),
             ).fetchone()
@@ -216,11 +228,8 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' "
-                "and not exists ("
-                "  select 1 from jobs r "
-                "  where r.business_slug = j.business_slug and r.status = 'running'"
-                ") "
-                "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                + lane_gate
+                + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1"
             ).fetchone()
         if picked is None:

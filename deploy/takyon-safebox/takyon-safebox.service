@@ -5,12 +5,29 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Least privilege: dedicated `takyon` user (created by bootstrap-host.sh), filesystem read-only
+# except /opt/takyon state, runtime tree pinned read-only.
+User=takyon
+Group=takyon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
+# The app reads TAKYON_SAFEBOX_TOKEN from process env and FAILS CLOSED (401-everything) when it is
+# missing — safebox_app never falls back to load_takyon_env(), so the unit must load the shared env
+# file. Provision TAKYON_SAFEBOX_TOKEN there before deploying this unit.
+EnvironmentFile=-/opt/takyon/.takyon/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
-Environment=HOME=/root
+Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=safebox
-ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 0.0.0.0 --port 8000
+# Bind the VPC interface only (10.116.0.2 is this host's private address — the same address the
+# operator/subuser planes are pointed at via TAKYON_SAFEBOX_URL). Never bind 0.0.0.0: the public
+# interface must not expose the secret authority even with token auth in front of it.
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 10.116.0.2 --port 8000
 Restart=always
 RestartSec=5
 

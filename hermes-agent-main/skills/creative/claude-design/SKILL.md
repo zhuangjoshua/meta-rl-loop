@@ -49,12 +49,32 @@ If no style is strongly implied, default to `claude-design-openai`.
 4. Keep the interface honest: real controls, real labels, real states, no poster-only hero fakery.
 5. Use one visual thesis and carry it through typography, spacing, chrome, and motion.
 
+## Layout and Width
+
+- On desktop, customer-facing landing pages should occupy most of the canvas, not sit as a tiny island in empty space.
+- Prefer a broad container in the rough `1320px` to `1440px` range with generous side gutters, or a deliberate split/full-bleed composition.
+- On very large desktop viewports, treat that as a floor rather than a ceiling; if the page still looks boxed in, widen toward about `1600px` to `1720px` or roughly `90vw`.
+- A reliable large-screen pattern is roughly `min(92vw, 1680px)` with restrained side padding rather than a centered `1400px` frame with big gutters.
+- Do not leave 40% to 60% of the hero visually empty unless that space is doing clear work with a real image, product visual, proof block, or strong atmospheric gesture.
+- If the headline sits in a narrow column, pair it with an equally intentional second column or widen the composition; avoid accidental center-column layouts that feel unfinished.
+- Make the first screen feel composed at laptop width, not just technically responsive.
+- If you choose a side-by-side hero, the proof rail should feel like a real half of the composition, not a small decorative card parked off to the side.
+- As a starting point, a split hero should usually bias toward about `55/45` rather than a timid perfectly-equal split when that helps the proof rail feel substantial.
+- Let desktop display headlines get big enough to carry the page; if the whole first screen feels miniature, scale the composition up before adding more copy.
+- Do not let a widened container get neutralized by capping both hero columns around the same mid-`500px` width. One side should push wider so the composition actually spans the page.
+- On wide monitors, outer gutters should not dominate the composition. If they do, widen the layout or reduce side padding before touching the copy.
+- For very wide screens, slightly asymmetrical hero splits such as `58/42` or `60/40` often feel better than a perfect `50/50` when the proof rail is otherwise reading too polite.
+
 ## Marketing Surfaces
 
 - Lead with one clear hero idea, then features/proof/pricing/CTA in a deliberate rhythm.
 - Use concrete product language instead of generic startup filler.
 - Do not invent metrics or customer logos.
 - Avoid default AI-startup tropes unless the brief explicitly wants them.
+- Hero support copy should usually stay within 2 sentences.
+- Do not follow the hero with another long editorial paragraph unless the brief truly needs it; prefer one sharp supporting sentence or concise proof instead.
+- If a split hero uses a product mock, screenshot, or proof card, that visual should feel weighty enough to balance the headline on desktop.
+- When the page starts feeling wordy, cut copy and strengthen composition before adding more sections or shrinking the hero.
 
 ## Product Surfaces
 
@@ -81,6 +101,7 @@ Before finishing, check:
 - Do not use filler copy, fake numbers, or fake backend behavior.
 - Do not expose stale model/vendor names in customer-facing copy.
 - Prefer a strong restrained system over five disconnected flourishes.
+- Do not let customer-facing landing pages turn into essay blocks; cut copy before shrinking the layout.
 
 ## Local Sources
 

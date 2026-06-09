@@ -132,9 +132,31 @@ The shape system is uniformly soft: 8px–12px radii, 9999px pills for tags and 
 - **Container**: max-width 1200px, 24px gutter on mobile, 48px on desktop.
 - **Section rhythm**: 96–128px vertical between major sections; 64px on mobile.
 - **Grid**: 12-column desktop, 4-column mobile, 24px gap.
+- **Hero occupancy**: above the fold should use most of the desktop canvas. Do not center a narrow text block in a large field of empty white.
+- **Split balance**: when using a text-plus-proof hero, the proof rail should usually occupy roughly 40% to 50% of the composition and feel visually equal to the headline block.
+- **Copy budget**: the hero lede should typically stay within 1 to 2 short sentences; use layout and proof, not an extra paragraph, to create confidence.
+- **Wide default**: for public landing pages, a wider `1320px` to `1440px` container is usually the better default than a restrained `1200px` frame.
+- **Large-screen default**: on big desktop monitors, go wider still when needed — roughly `90vw` capped around `1600px` to `1720px` is often a better target than stopping at `1400px`.
+- **Concrete wide target**: a pattern like `width: min(92vw, 1680px)` with controlled side padding is often a better large-monitor default than a centered `1400px` frame.
+- **Proof scale**: the right rail in a split hero should often land in the rough `520px` to `680px` range on desktop so it reads as concrete product proof rather than a small ornament.
+- **Headline scale**: editorial restraint does not mean undersized. Let the hero display feel large enough to anchor the whole canvas.
+- **No fake width**: widening the outer container is not enough if both inner hero columns are still capped around the mid-`500px` range. Let at least one side stretch meaningfully wider.
+- **Hero balance on large screens**: a slight asymmetry such as `58/42` or `60/40` often creates a more convincing first screen than a perfectly equal split.
 
 ## 6. Motion
 
 - **Duration**: 150–220ms for hover; 280–360ms for layout transitions.
 - **Easing**: `cubic-bezier(0.16, 1, 0.3, 1)` (smooth out) for entrances.
 - **Restraint**: no parallax, no scroll-jacking. Subtle fade and translate only.
+
+## 7. Do's and Don'ts
+
+### Do
+- Let the hero breathe across the full container and feel decisive at laptop width.
+- Use one strong proof artifact on the right side of a split hero: a product mock, conversation pane, workflow panel, or other concrete evidence.
+- Keep the first screen crisp enough that the value proposition reads before the user has to parse a paragraph.
+
+### Don't
+- Don't ship a polite text island surrounded by empty canvas.
+- Don't let the right rail shrink into a decorative card that feels optional.
+- Don't follow a restrained hero with another large explanatory paragraph just to compensate for a weak composition.

@@ -33,6 +33,20 @@ Pair this with `claude-design` when the product should feel calm, serious, restr
 - modest weights
 - hierarchy from spacing and scale, not loud decoration
 
+## Layout and Width
+
+- broad desktop compositions rather than narrow centered islands
+- default container around `1320px` to `1440px` with real lateral presence
+- on very wide desktop viewports, push beyond that toward roughly `1600px` to `1720px` or about `90vw` when needed so the composition still feels page-scale
+- a dependable large-screen target is roughly `min(92vw, 1680px)` with modest side padding, not a `1400px` shell marooned in the middle of a huge monitor
+- let the first screen breathe, but keep the composition intentional across the full viewport
+- if one side of the hero is mostly empty, it should hold a deliberate visual or proof element, not just blank canvas
+- split heroes should feel genuinely side-by-side on desktop, with the right rail visually substantial rather than decorative
+- a tasteful layout can still fail if it reads too small; scale the headline block and proof block until the first screen feels dominant at laptop width
+- when in doubt, give the proof rail a stronger share such as roughly `45%` of the hero instead of letting it shrink into a polite card
+- when a hero still feels boxed in, move toward something like `58/42` or `60/40` rather than keeping a perfect equal split out of politeness
+- do not widen the outer container and then cancel the effect by capping both inner hero columns around `560px`; the composition should visually reach across the page
+
 ## Color and Tokens
 
 - white or mist backgrounds
@@ -53,6 +67,9 @@ Pair this with `claude-design` when the product should feel calm, serious, restr
 - no multi-accent palette
 - no noisy marketing chrome
 - no fake futurism
+- keep hero support copy short; cut to 1 to 2 sentences before adding more sections
+- do not place a long centered paragraph block immediately under the hero unless the brief explicitly demands a more essay-like read
+- do not let the hero collapse into a polite text column plus a timid proof card; if the proof rail feels secondary, enlarge it or rebalance the grid
 
 ## Local Sources
 

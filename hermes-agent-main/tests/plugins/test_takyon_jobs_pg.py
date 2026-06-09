@@ -135,6 +135,27 @@ def test_claim_one_serializes_jobs_per_business(pg_conn):
     assert next_job is not None and next_job.id == first.id
 
 
+def test_claim_one_serializes_per_lane_not_per_business(pg_conn):
+    """The per-business gate is PER LANE: a running CEO turn must not starve a different-kind job
+    for the same business (and a CEO turn that enqueues-and-waits on another kind must not deadlock
+    behind its own business gate), while two jobs in the SAME lane still serialize."""
+    slug, _uid = _provision_business(pg_conn)
+    wake = jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="lane-wake")
+    publish = jobs.enqueue(pg_conn, slug, "x.publish_outreach", idempotency_key="lane-pub-1")
+    second_publish = jobs.enqueue(pg_conn, slug, "x.publish_outreach", idempotency_key="lane-pub-2")
+
+    first = jobs.claim_one(pg_conn, worker_id="w1")
+    assert first is not None and first.id == wake.id
+    # Different lane (x.publish_outreach vs the running ceo wake): claimable concurrently.
+    cross_lane = jobs.claim_one(pg_conn, worker_id="w2")
+    assert cross_lane is not None and cross_lane.id == publish.id
+    # Same lane as the running publish job: must wait.
+    assert jobs.claim_one(pg_conn, worker_id="w3") is None
+    jobs.complete(pg_conn, cross_lane.id, result={"ok": True})
+    drained = jobs.claim_one(pg_conn, worker_id="w3")
+    assert drained is not None and drained.id == second_publish.id
+
+
 def test_claim_one_skips_rows_locked_by_another_worker(pg_conn):
     # The real FOR UPDATE SKIP LOCKED guarantee: a row another transaction already holds is skipped,
     # not blocked on, so two workers never contend for one job. A second live connection holds the

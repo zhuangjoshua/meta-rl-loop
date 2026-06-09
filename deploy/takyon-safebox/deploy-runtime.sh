@@ -54,14 +54,23 @@ scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
+  # The tracked unit runs as the dedicated non-root 'takyon' user — provision idempotently here,
+  # before daemon-reload/restart, since this script is the rail that ships the unit.
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
+  fi
+  chown takyon:takyon /opt/takyon
+  chown -R takyon:takyon /opt/takyon/.takyon
+  if [ -d /opt/takyon/secrets ]; then chown -R takyon:takyon /opt/takyon/secrets; fi
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
+  # The service binds the VPC interface only (see the unit), so the health probe targets it too.
   for _ in \$(seq 1 30); do
-    if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then
+    if curl -fsS http://10.116.0.2:8000/healthz >/dev/null; then
       exit 0
     fi
     sleep 1
   done
-  curl -fsS http://127.0.0.1:8000/healthz >/dev/null"
+  curl -fsS http://10.116.0.2:8000/healthz >/dev/null"

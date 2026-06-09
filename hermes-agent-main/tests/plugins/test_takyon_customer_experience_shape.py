@@ -160,8 +160,12 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert 'const target = "takyon_app_session="' in starter_server
     assert 'if (!requestHasSessionCookie()) {' in starter_server
     assert "return starterAppState({}, null, { errors });" in starter_server
+    home_page = (workspace_root / "src" / "app" / "page.js").read_text()
     app_page = (workspace_root / "src" / "app" / "app" / "page.js").read_text()
     product_layout = (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").read_text()
+    assert 'import Link from "next/link";' not in home_page
+    assert "starter-landing-card" not in home_page
+    assert '<div className="starter-wrap" />' in home_page
     assert "loadServerAppState" in app_page
     assert "StarterAccessPage initialAppState={initialAppState}" in app_page
     assert 'if (initialAppState?.access?.state !== "ready")' in product_layout

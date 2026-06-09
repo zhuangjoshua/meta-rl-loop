@@ -7,9 +7,24 @@ Wants=docker.service
 
 [Service]
 Type=simple
+# Least privilege: run as the dedicated `takyon` system user (created by bootstrap-host.sh) with
+# the filesystem read-only except /opt/takyon state — and the runtime tree itself pinned read-only
+# inside that, so a compromised runtime cannot rewrite its own code. The docker supplementary
+# group + writable docker socket are required for the Docker-isolated agent/terminal work this
+# plane spawns.
+User=takyon
+Group=takyon
+SupplementaryGroups=docker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadWritePaths=-/run/docker.sock
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
 Environment=TAKYON_HOME=/opt/takyon/.takyon
-Environment=HOME=/root
+Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_NODE_NAME=argon-alpha-14

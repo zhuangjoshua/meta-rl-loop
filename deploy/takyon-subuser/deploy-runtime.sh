@@ -81,6 +81,23 @@ TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
   install -d '$TAKYON_REMOTE_PRODUCT_SITES'
+  # The tracked unit runs as the dedicated non-root 'takyon' user — provision idempotently here,
+  # before daemon-reload/restart, since this script is the rail that ships the unit. No docker
+  # group: this plane spawns no containers.
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
+  fi
+  chown takyon:takyon /opt/takyon
+  chown -R takyon:takyon '$TAKYON_REMOTE_HOME'
+  if [ -d /opt/takyon/secrets ]; then chown -R takyon:takyon /opt/takyon/secrets; fi
+  # Service HOME moved /root -> /opt/takyon (ProtectHome=true hides /root): migrate xurl auth state
+  # once and keep it owned by the service user; replace a /usr/local/bin/xurl symlink into /root
+  # with a real copy (the symlink target is unreachable for the service).
+  if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
+  if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
+  if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then
+    install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
+  fi
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \

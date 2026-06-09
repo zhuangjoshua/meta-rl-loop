@@ -19,10 +19,23 @@ Wants=docker.service
 
 [Service]
 Type=simple
+# Least privilege: same posture as takyon-dashboard.service — dedicated `takyon` user, filesystem
+# read-only except /opt/takyon state, runtime tree pinned read-only, docker socket writable for
+# the Docker-isolated work the CEO turns spawn.
+User=takyon
+Group=takyon
+SupplementaryGroups=docker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadWritePaths=-/run/docker.sock
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
-Environment=HOME=/root
+Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_NODE_NAME=argon-alpha-14

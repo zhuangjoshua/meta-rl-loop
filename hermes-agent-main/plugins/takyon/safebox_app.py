@@ -100,7 +100,10 @@ class _StripeBillingWebhookVerifyBody(BaseModel):
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
     expected = str(os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
     if not expected:
-        return
+        # Fail closed: an unconfigured token must never mean "auth disabled" — Safebox safety must
+        # not silently degrade to firewall/VPC correctness. Provision TAKYON_SAFEBOX_TOKEN (the
+        # service unit loads $TAKYON_HOME/.env) on both the Safebox host and every client plane.
+        raise HTTPException(status_code=401, detail="safebox token not configured")
     presented = str(authorization or "").strip()
     want = f"Bearer {expected}"
     if not hmac.compare_digest(presented.encode(), want.encode()):

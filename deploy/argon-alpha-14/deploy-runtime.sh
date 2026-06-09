@@ -124,6 +124,25 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl is-active --quiet docker
   docker version >/dev/null
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
+  # The tracked units run as the dedicated non-root 'takyon' user (docker group for the
+  # Docker-isolated agent/terminal work). Provision idempotently HERE — this script is the rail
+  # that ships and restarts the units, so the user must exist before daemon-reload/restart.
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
+  fi
+  id -nG takyon | grep -qw docker || usermod -aG docker takyon
+  chown takyon:takyon /opt/takyon
+  chown -R takyon:takyon '$TAKYON_REMOTE_HOME'
+  if [ -d /opt/takyon/secrets ]; then chown -R takyon:takyon /opt/takyon/secrets; fi
+  # Service HOME moved /root -> /opt/takyon (ProtectHome=true hides /root): migrate existing xurl
+  # auth state once, then keep it owned by the service user.
+  if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
+  if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
+  # A /usr/local/bin/xurl SYMLINK into /root/.local is unreachable for the service under
+  # ProtectHome=true — replace it with a real copy once.
+  if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then
+    install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
+  fi
   if ! docker image inspect '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE' >/dev/null 2>&1; then
     docker pull '$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE'
   fi

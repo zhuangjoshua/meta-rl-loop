@@ -48,7 +48,9 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi
   if ! command -v xurl >/dev/null 2>&1 && [ -x /root/.local/bin/xurl ]; then
-    ln -sf /root/.local/bin/xurl /usr/local/bin/xurl
+    # A real copy, not a symlink: the service runs with ProtectHome=true, so a link into
+    # /root/.local would be unreachable for it.
+    install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
   fi
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_HOME/product-sites' '$REMOTE_SECRETS'
@@ -84,6 +86,17 @@ TAKYON_REMOTE_SAFEBOX_URL="$REMOTE_SAFEBOX_URL" \
   "$SEED_XURL_AUTH_SCRIPT"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
+  # The tracked unit runs as the dedicated non-root 'takyon' user — provision it and hand the
+  # state tree over before the first start. The runtime tree stays root-owned (read-only to the
+  # service via the unit's ReadOnlyPaths). xurl auth state lives at /opt/takyon/.xurl (service
+  # HOME), not /root/.xurl.
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir '$REMOTE_ROOT' --shell /usr/sbin/nologin takyon
+  fi
+  chown takyon:takyon '$REMOTE_ROOT'
+  chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
+  if [ -e /root/.xurl ] && [ ! -e '$REMOTE_ROOT/.xurl' ]; then cp -a /root/.xurl '$REMOTE_ROOT/.xurl'; fi
+  if [ -e '$REMOTE_ROOT/.xurl' ]; then chown -R takyon:takyon '$REMOTE_ROOT/.xurl'; fi
   python3 -m compileall -q '$REMOTE_RUNTIME/plugins/takyon' '$REMOTE_RUNTIME/takyon_cli' '$REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl enable '$REMOTE_SERVICE_NAME' >/dev/null

@@ -6,7 +6,9 @@ TARGET_KEY="${TARGET_KEY:?TARGET_KEY is required}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:?TAKYON_REMOTE_RUNTIME is required}"
 TAKYON_REMOTE_HOME="${TAKYON_REMOTE_HOME:-/opt/takyon/.takyon}"
 TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
-TAKYON_REMOTE_XURL_PATH="${TAKYON_REMOTE_XURL_PATH:-/root/.xurl}"
+# The runtime services run as the 'takyon' user with HOME=/opt/takyon (ProtectHome=true hides
+# /root), so the seeded auth must land in the service HOME, not /root.
+TAKYON_REMOTE_XURL_PATH="${TAKYON_REMOTE_XURL_PATH:-/opt/takyon/.xurl}"
 
 if [[ ! -f "$TARGET_KEY" ]]; then
   echo "target key not found: $TARGET_KEY" >&2
@@ -42,7 +44,7 @@ from plugins.takyon.core import (
 
 load_takyon_env()
 
-auth_path = Path(os.environ.get("TAKYON_REMOTE_XURL_PATH") or "/root/.xurl").expanduser()
+auth_path = Path(os.environ.get("TAKYON_REMOTE_XURL_PATH") or "/opt/takyon/.xurl").expanduser()
 auth_path.parent.mkdir(parents=True, exist_ok=True)
 
 raw_secret = ""
@@ -87,4 +89,9 @@ if not _xurl_auth_status_ok(home=str(auth_path.parent)):
     print(f"xurl auth status failed for {auth_path}", file=sys.stderr)
     raise SystemExit(1)
 PY
+
+# Seeding runs as root; the service user must own the result (no-op before the user exists).
+if id -u takyon >/dev/null 2>&1 && [ -e '$TAKYON_REMOTE_XURL_PATH' ]; then
+  chown -R takyon:takyon '$TAKYON_REMOTE_XURL_PATH'
+fi
 EOF

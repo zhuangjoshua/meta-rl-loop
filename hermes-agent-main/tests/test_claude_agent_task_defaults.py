@@ -200,6 +200,66 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
     assert "[Hermes guidance skill: default-product-site]" in instruction
 
 
+def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>PupCoach</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "pupcoach")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_compose_worker_guidance_block",
+        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]"),
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "pupcoach",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-public-landing-composition",
+                "install": False,
+            }
+        )
+    )
+
+    instruction = str(captured["payload"]["instruction"])
+    assert result["success"] is True
+    assert "Public landing composition contract:" in instruction
+    assert "small centered island" in instruction
+    assert "1320px" in instruction
+    assert "520px" in instruction
+    assert "mid-`500px` widths" in instruction
+    assert "1600px" in instruction
+    assert "90vw" in instruction
+    assert "92vw" in instruction
+    assert "1680px" in instruction
+    assert "58/42" in instruction
+
+
 def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
@@ -263,6 +323,24 @@ def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_
     assert result["guidance_skills"] == ["claude-design", "claude-design-vibrant"]
     assert "claude-design-vibrant" in str(result["guidance_selection_reason"])
     assert "[Hermes guidance skill: inferred-product-site]" in instruction
+
+
+def test_style_selector_prefers_openai_for_calm_editorial_ai_pet_brief():
+    skill, reason = takyon_core._select_default_product_site_style_skill(
+        surface={
+            "notes": "AI coach for anxious first-time dog owners. Calm, trustworthy, editorial tone.",
+            "customer_experience_shape": {
+                "surface_goal": "Give serious, gentle guidance to worried new pet parents."
+            },
+        },
+        instruction=(
+            "Create a warm, calm, editorial landing page for an AI dog-parent coach. "
+            "Avoid playful gimmicks and keep it trustworthy."
+        ),
+    )
+
+    assert skill == "claude-design-openai"
+    assert "claude-design-openai" in reason
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):

@@ -280,6 +280,24 @@ def test_creative_credit_access_requires_remote_or_safebox_host(monkeypatch):
         safebox.get_business_credit_balances(None, "acme")
 
 
+def test_safebox_app_fails_closed_when_token_is_unconfigured(tmp_path, monkeypatch):
+    """A missing TAKYON_SAFEBOX_TOKEN must mean 401-everything, never auth-disabled — Safebox
+    safety must not silently degrade to firewall/VPC correctness."""
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.delenv("TAKYON_SAFEBOX_TOKEN", raising=False)
+
+    client = TestClient(build_safebox_app())
+
+    assert client.get("/healthz").status_code == 200
+    no_token = client.get("/v1/env/OPENAI_API_KEY")
+    assert no_token.status_code == 401
+    any_bearer = client.get(
+        "/v1/env/OPENAI_API_KEY", headers={"Authorization": "Bearer anything"}
+    )
+    assert any_bearer.status_code == 401
+
+
 def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")

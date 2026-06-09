@@ -63,18 +63,27 @@ EOF
 scp "${target_ssh[@]}" "$SERVICE_FILE" "$TARGET_HOST:$REMOTE_SERVICE_FILE"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
+  # The tracked unit runs as the dedicated non-root 'takyon' user — provision it and hand the
+  # state tree over before the first start. The runtime tree stays root-owned (read-only to the
+  # service via the unit's ReadOnlyPaths).
+  if ! id -u takyon >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir '$REMOTE_ROOT' --shell /usr/sbin/nologin takyon
+  fi
+  chown takyon:takyon '$REMOTE_ROOT'
+  chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
   python3 -m compileall -q '$REMOTE_RUNTIME/plugins/takyon' '$REMOTE_RUNTIME/takyon_cli' '$REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl enable '$REMOTE_SERVICE_NAME' >/dev/null
   systemctl restart '$REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$REMOTE_SERVICE_NAME'
+  # The service binds the VPC interface only (see the unit), so the health probe targets it too.
   for _ in \$(seq 1 30); do
-    if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then
+    if curl -fsS http://10.116.0.2:8000/healthz >/dev/null; then
       break
     fi
     sleep 1
   done
-  curl -fsS http://127.0.0.1:8000/healthz >/dev/null
+  curl -fsS http://10.116.0.2:8000/healthz >/dev/null
 "
 
 echo "Safebox host bootstrap complete: $TARGET_HOST"
