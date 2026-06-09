@@ -77,6 +77,7 @@ class OperatorSubscriptionState:
     customer_id: str | None
     subscription_id: str | None
     subscription_status: str
+    plan_name: str | None
     weekly_allowance_cents: int
     allowance_period_start: str | None
     allowance_resets_at: str | None
@@ -170,6 +171,16 @@ def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _env_nonnegative_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
 
 
 def _operator_billing_customer_search(user_id: str) -> dict[str, Any] | None:
@@ -281,6 +292,31 @@ def _operator_subscription_weekly_allowance_cents(subscription: dict[str, Any]) 
     return sum(_weekly_allowance_from_subscription_item(item) for item in _subscription_items(subscription))
 
 
+def _operator_subscription_plan_name(subscription: dict[str, Any] | None) -> str | None:
+    if not isinstance(subscription, dict):
+        return None
+    metadata = subscription.get("metadata") if isinstance(subscription.get("metadata"), dict) else {}
+    raw = str(metadata.get("takyon_plan_name") or "").strip()
+    if raw:
+        return raw
+    for item in _subscription_items(subscription):
+        price = item.get("price") if isinstance(item.get("price"), dict) else {}
+        price_metadata = price.get("metadata") if isinstance(price.get("metadata"), dict) else {}
+        candidate = str(price_metadata.get("takyon_plan_name") or price.get("nickname") or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
+def _fallback_operator_plan_name() -> str:
+    raw = str(os.getenv("TAKYON_OPERATOR_DEFAULT_PLAN_NAME") or "").strip()
+    return raw or "DEV"
+
+
+def _fallback_operator_weekly_allowance_cents() -> int:
+    return _env_nonnegative_int("TAKYON_OPERATOR_DEFAULT_WEEKLY_ALLOWANCE_CENTS", 10_000)
+
+
 def _pick_operator_subscription(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
@@ -371,6 +407,40 @@ def sync_operator_subscription_allowance(
         current_included = int(acct[0] or 0) if acct else 0
         period_start = acct[1] if acct else None
         resets_at = acct[2] if acct else None
+        fallback_allowance_cents = _fallback_operator_weekly_allowance_cents()
+        fallback_plan_name = _fallback_operator_plan_name() if fallback_allowance_cents > 0 else None
+        if fallback_allowance_cents > 0:
+            now = datetime.now(timezone.utc)
+            should_refresh = (
+                current_included != fallback_allowance_cents
+                or not isinstance(resets_at, datetime)
+                or resets_at <= now
+            )
+            if should_refresh:
+                reconcile = billing.reconcile_billing(conn, user_id)
+                if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
+                    period_start, resets_at = _weekly_window(now)
+                    week_key = int(period_start.timestamp() // 604800)
+                    billing.grant_allowance(
+                        conn,
+                        user_id,
+                        fallback_allowance_cents,
+                        f"operator-plan:{fallback_plan_name or 'default'}:{fallback_allowance_cents}:{week_key}",
+                        period_start=period_start,
+                        resets_at=resets_at,
+                    )
+                    synced = True
+            return OperatorSubscriptionState(
+                user_id=user_id,
+                customer_id=inactive_customer_id,
+                subscription_id=None,
+                subscription_status="none",
+                plan_name=fallback_plan_name,
+                weekly_allowance_cents=fallback_allowance_cents,
+                allowance_period_start=period_start.isoformat() if period_start is not None else None,
+                allowance_resets_at=resets_at.isoformat() if resets_at is not None else None,
+                synced=synced,
+            )
         should_clear_allowance = (
             current_included > 0
             and (
@@ -401,6 +471,7 @@ def sync_operator_subscription_allowance(
             customer_id=inactive_customer_id,
             subscription_id=inactive_subscription_id,
             subscription_status=inactive_status,
+            plan_name=None,
             weekly_allowance_cents=0,
             allowance_period_start=period_start.isoformat() if period_start is not None else None,
             allowance_resets_at=resets_at.isoformat() if resets_at is not None else None,
@@ -465,6 +536,7 @@ def sync_operator_subscription_allowance(
         customer_id=customer_id,
         subscription_id=subscription_id,
         subscription_status=subscription_status,
+        plan_name=_operator_subscription_plan_name(active_subscription),
         weekly_allowance_cents=weekly_allowance_cents,
         allowance_period_start=period_start.isoformat() if isinstance(period_start, datetime) else None,
         allowance_resets_at=resets_at.isoformat() if isinstance(resets_at, datetime) else None,

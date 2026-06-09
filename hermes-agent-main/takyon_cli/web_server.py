@@ -3010,6 +3010,8 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "allowance_used_cents": allowance_used,
             "allowance_percent_remaining": allowance_percent_remaining,
             "allowance_percent_used": allowance_percent_used,
+            "operator_plan_name": subscription_state.plan_name,
+            "operator_plan_weekly_allowance_cents": int(subscription_state.weekly_allowance_cents or 0),
             "allowance_period_start": (
                 balances.allowance_period_start.isoformat()
                 if getattr(balances, "allowance_period_start", None) is not None

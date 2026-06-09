@@ -29,17 +29,12 @@ function formatResetDate(value: string | null | undefined) {
   return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function Settings({
-  section,
-  theme,
-  account,
-  portalBusy,
-  topupBusy,
-  onTheme,
-  onOpenPortal,
-  onTopup,
-  onClose,
-}: {
+function planLabel(account: { operator_plan_name?: string | null } | null | undefined) {
+  const raw = String(account?.operator_plan_name || "").trim();
+  return raw || "Plan";
+}
+
+export function Settings(props: {
   section: SettingsSection;
   theme: Theme;
   account: TakyonOperatorAccountResponse | null;
@@ -50,9 +45,19 @@ export function Settings({
   onTopup: (amountCents: number) => void;
   onClose: () => void;
 }) {
+  const {
+    section,
+    theme,
+    account,
+    portalBusy,
+    onTheme,
+    onOpenPortal,
+    onClose,
+  } = props;
   const { user } = useAuth();
   const [sec, setSec] = useState<SettingsSection>(section);
   const allowanceIncluded = Number(account?.allowance_included_cents || 0);
+  const weeklyIncluded = Number(account?.operator_plan_weekly_allowance_cents || allowanceIncluded || 0);
   const reservedUsagePercent = allowanceIncluded > 0
     ? (Number(account?.reserved_allowance_cents || 0) / allowanceIncluded) * 100
     : null;
@@ -104,23 +109,22 @@ export function Settings({
                 <div className="lb-set__card-h">Operator wallet</div>
                 <div className="lb-set__planrow">
                   <div>
-                    <div className="lb-set__plan-name">{formatPercent(account?.allowance_percent_remaining ?? null)}</div>
+                    <div className="lb-set__plan-name">{planLabel(account)}</div>
                     <div className="lb-set__muted">
-                      Included usage remaining this week{resetLabel ? ` · resets ${resetLabel}` : ""}.
+                      {formatPercent(account?.allowance_percent_remaining ?? null)} remaining of {formatUsd(weeklyIncluded)} included this week{resetLabel ? ` · resets ${resetLabel}` : ""}.
                     </div>
                   </div>
                 </div>
                 <Divider className="lb-set__rule" />
+                <div className="lb-set__usage"><span>Weekly included</span><span className="lb-set__muted">{formatUsd(weeklyIncluded)}</span></div>
                 <div className="lb-set__usage"><span>Used this week</span><span className="lb-set__muted">{formatPercent(account?.allowance_percent_used ?? null)}</span></div>
                 <div className="lb-set__usage"><span>Reserved usage</span><span className="lb-set__muted">{formatPercent(reservedUsagePercent)}</span></div>
-                <div className="lb-set__usage"><span>Added funds</span><span className="lb-set__muted">{formatUsd(account?.topup_balance_cents ?? null)}</span></div>
+                {(Number(account?.topup_balance_cents || 0) > 0) && (
+                  <div className="lb-set__usage"><span>Extra funds</span><span className="lb-set__muted">{formatUsd(account?.topup_balance_cents ?? null)}</span></div>
+                )}
                 {(Number(account?.reserved_topup_cents || 0) > 0) && (
                   <div className="lb-set__usage"><span>Reserved funds</span><span className="lb-set__muted">{formatUsd(account?.reserved_topup_cents ?? null)}</span></div>
                 )}
-                <div className="lb-btnrow lb-set__save">
-                  <Button disabled={topupBusy} onClick={() => onTopup(2500)}>Add $25</Button>
-                  <Button variant="secondary" disabled={topupBusy} onClick={() => onTopup(10000)}>Add $100</Button>
-                </div>
               </Card>
               <Card variant="outline" className="lb-set__card">
                 <div className="lb-set__card-h">Stripe</div>

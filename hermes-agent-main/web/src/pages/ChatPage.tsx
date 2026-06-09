@@ -3337,12 +3337,16 @@ function GlobalLaunchpad({
   const topupBalanceCents = operatorAccount?.available
     ? Math.max(0, Number(operatorAccount.topup_balance_cents || 0))
     : null;
+  const operatorPlanName = String(operatorAccount?.operator_plan_name || "").trim();
+  const operatorPlanWeeklyCents = operatorAccount?.available
+    ? Math.max(0, Number(operatorAccount.operator_plan_weekly_allowance_cents || operatorAccount.allowance_included_cents || 0))
+    : null;
   const operatorBudgetNote =
     usageRemainingPercent === null
       ? "Auto wake follows Takyon's default cadence. Operator budget state is unavailable in this dashboard mode."
       : usageRemainingPercent === 0
         ? "Auto wake follows Takyon's default cadence. Business creation still works, but CEO turns and wakes will block until budget is added."
-        : `Auto wake follows Takyon's default cadence. Operator usage: ${formatPercent(usageRemainingPercent)} remaining this week${topupBalanceCents && topupBalanceCents > 0 ? ` with ${formatBudgetCents(topupBalanceCents)} in top-ups` : ""}.`;
+        : `Auto wake follows Takyon's default cadence. Operator usage: ${formatPercent(usageRemainingPercent)} remaining this week${operatorPlanName ? ` on ${operatorPlanName}` : ""}${operatorPlanWeeklyCents && operatorPlanWeeklyCents > 0 ? ` (${formatBudgetCents(operatorPlanWeeklyCents)} included)` : ""}${topupBalanceCents && topupBalanceCents > 0 ? ` with ${formatBudgetCents(topupBalanceCents)} in extra funds` : ""}.`;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();

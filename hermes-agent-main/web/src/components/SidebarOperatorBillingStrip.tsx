@@ -53,8 +53,7 @@ function operatorActionErrorMessage(error: unknown, fallback: string): string {
 
 export function SidebarOperatorBillingStrip() {
   const [account, setAccount] = useState<TakyonOperatorAccountResponse | null>(null);
-  const [amount, setAmount] = useState("25");
-  const [busy, setBusy] = useState<"topup" | "withdraw" | null>(null);
+  const [busy, setBusy] = useState<"withdraw" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refreshAccount = useCallback(async () => {
@@ -72,30 +71,6 @@ export function SidebarOperatorBillingStrip() {
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [refreshAccount]);
-
-  const submitTopup = useCallback(async () => {
-    const dollars = Number.parseFloat(amount);
-    const amountCents = Number.isFinite(dollars) ? Math.round(dollars * 100) : 0;
-    if (amountCents <= 0) {
-      setError("Enter a valid top-up amount.");
-      return;
-    }
-    setBusy("topup");
-    setError(null);
-    try {
-      const res = await api.createTakyonOperatorTopupCheckout(
-        amountCents,
-        currentDashboardReturnPath(),
-      );
-      if (!res.checkout_url) {
-        throw new Error("Top-up checkout URL unavailable.");
-      }
-      window.location.assign(res.checkout_url);
-    } catch (err) {
-      setError(operatorActionErrorMessage(err, "Top-up failed."));
-      setBusy(null);
-    }
-  }, [amount]);
 
   const openWithdraw = useCallback(async () => {
     setBusy("withdraw");
@@ -116,6 +91,7 @@ export function SidebarOperatorBillingStrip() {
   }, [refreshAccount]);
 
   const usageRemainingPercent = operatorUsageRemainingPercent(account);
+  const planName = String(account?.operator_plan_name || "").trim();
   const payoutStatus = account?.available
     ? String(account.stripe_connect_status || "none")
     : "none";
@@ -134,19 +110,27 @@ export function SidebarOperatorBillingStrip() {
 
       <div className="space-y-1">
         <p className="break-words">
+          <span className="text-muted-foreground/45">plan</span>{" "}
+          <span className="font-medium text-midground">
+            {planName || "—"}
+          </span>
+        </p>
+        <p className="break-words">
           <span className="text-muted-foreground/45">weekly usage</span>{" "}
           <span className="font-medium text-midground">
             {formatPercent(usageRemainingPercent)}
           </span>
         </p>
-        <p className="break-words">
+        {(Number(account?.topup_balance_cents || 0) > 0) && (
+          <p className="break-words">
           <span className="text-muted-foreground/45">top-ups</span>{" "}
           <span className="font-medium text-midground">
             {account?.available
               ? formatBudgetCents(account.topup_balance_cents)
               : "—"}
           </span>
-        </p>
+          </p>
+        )}
         <p className="break-words">
           <span className="text-muted-foreground/45">customer payouts</span>{" "}
           <span className="font-medium text-midground">
@@ -155,34 +139,6 @@ export function SidebarOperatorBillingStrip() {
               : "—"}
           </span>
         </p>
-      </div>
-
-      <div className="mt-2 flex gap-1.5">
-        <input
-          value={amount}
-          onChange={(event) => setAmount(event.target.value)}
-          inputMode="decimal"
-          placeholder="25"
-          disabled={!account?.available || busy !== null}
-          className={cn(
-            "min-w-0 flex-1 border border-current/20 bg-transparent px-2 py-1",
-            "text-[0.62rem] text-midground placeholder:text-muted-foreground/35",
-            "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground/40",
-            "disabled:opacity-40",
-          )}
-          aria-label="Operator top-up amount"
-        />
-        <button
-          type="button"
-          onClick={() => void submitTopup()}
-          disabled={!account?.available || busy !== null}
-          className={cn(
-            "border border-current/20 px-2 py-1 text-midground transition-opacity",
-            "hover:bg-midground/5 disabled:opacity-40",
-          )}
-        >
-          {busy === "topup" ? "Opening…" : "Top up"}
-        </button>
       </div>
 
       <button

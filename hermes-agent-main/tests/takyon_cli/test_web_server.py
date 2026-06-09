@@ -456,6 +456,8 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
             allowance_period_start=None,
             allowance_resets_at=None,
             subscription_status="active",
+            plan_name="DEV",
+            weekly_allowance_cents=2000,
         ),
     )
     monkeypatch.setattr(
@@ -481,6 +483,8 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["allowance_remaining_cents"] == 1900
     assert result["allowance_percent_remaining"] == 95.0
     assert result["allowance_percent_used"] == 5.0
+    assert result["operator_plan_name"] == "DEV"
+    assert result["operator_plan_weekly_allowance_cents"] == 2000
     assert result["topup_balance_cents"] == 300
     assert result["spendable_cents"] == 2200
     assert result["owned_business_count"] == 2

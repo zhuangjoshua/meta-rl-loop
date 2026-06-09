@@ -22,7 +22,11 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from plugins.takyon import billing, business_credits, custody, safebox, stripe_util  # noqa: E402
-from plugins.takyon.control_api import build_control_router, get_control_conn  # noqa: E402
+from plugins.takyon.control_api import (  # noqa: E402
+    build_control_router,
+    get_control_conn,
+    sync_operator_subscription_allowance,
+)
 from plugins.takyon.control_plane import (  # noqa: E402
     provision_user_on_first_login,
     resolve_api_key,
@@ -156,6 +160,19 @@ def test_me_returns_resolved_identity(client, pg_conn):
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"user_id": uid, "status": "active"}
+
+
+def test_sync_operator_subscription_allowance_falls_back_to_dev_plan(pg_conn):
+    uid, _created, _raw = provision_user_on_first_login(pg_conn, _sub(), "owner@example.com")
+
+    state = sync_operator_subscription_allowance(pg_conn, uid, refresh_live=False)
+    balances = billing.get_billing_balances(pg_conn, uid)
+
+    assert state.plan_name == "DEV"
+    assert state.subscription_status == "none"
+    assert state.weekly_allowance_cents == 10_000
+    assert balances.allowance_included_cents == 10_000
+    assert balances.allowance_resets_at is not None
 
 
 def test_me_payouts_returns_custody_and_connect_state(client, pg_conn, monkeypatch):
