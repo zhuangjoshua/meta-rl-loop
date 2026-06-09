@@ -16,8 +16,10 @@ def test_litebulb_chat_renders_finished_agent_messages_as_markdown():
     assert "function AgentMessageMarkdown({ text }: { text: string }) {" in source
     assert '<div className="lb-msg__md">' in source
     assert 'remarkPlugins={[remarkGfm, remarkBreaks]}' in source
-    assert 'message.who === "agent" && !message.working' in source
+    assert 'message.who === "agent"' in source
     assert '<AgentMessageMarkdown text={message.text} />' in source
+    assert '{message.working && (' in source
+    assert '<span className="lb-msg__work">' in source
 
 
 def test_litebulb_chat_styles_markdown_spacing_for_agent_messages():

@@ -236,8 +236,17 @@ function AgentChat({
         {messages.map((message) => (
           <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
             <div className="lb-msg__bubble">
-              {message.who === "agent" && !message.working
-                ? <AgentMessageMarkdown text={message.text} />
+              {message.who === "agent"
+                ? (
+                    <>
+                      <AgentMessageMarkdown text={message.text} />
+                      {message.working && (
+                        <span className="lb-msg__work">
+                          <span className="lb-typing"><i /><i /><i /></span>
+                        </span>
+                      )}
+                    </>
+                  )
                 : message.text}
             </div>
           </div>
