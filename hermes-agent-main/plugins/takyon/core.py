@@ -109,6 +109,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_create_app_checkout",
         "business_record_stripe_webhook",
         "business_record_app_usage",
+        "business_read_channel_credit_budgets",
         "business_set_channel_credit_budgets",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
@@ -7377,6 +7378,40 @@ def _normalize_supported_product_build_shape(
     scripts: dict[str, Any],
     deps: dict[str, Any],
 ) -> dict[str, Any]:
+    def _normalize_newlines(value: str) -> str:
+        return str(value or "").replace("\r\n", "\n")
+
+    def _subuser_app_starter_legacy_app_page_variants() -> set[str]:
+        current = _normalize_newlines(_subuser_app_starter_app_page_js())
+        legacy_with_search = current.replace(
+            'import ProductRoot from "./(product)/root";\n', ""
+        ).replace(
+            '  if (initialAppState?.access?.state === "ready") {\n'
+            '    return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;\n'
+            '  }\n',
+            "",
+        )
+        legacy_without_search = legacy_with_search.replace(
+            "export default async function AppPage({ searchParams }) {",
+            "export default async function AppPage() {",
+        )
+        return {legacy_with_search, legacy_without_search}
+
+    def _rewrite_legacy_appkit_helper_imports(source_text: str) -> tuple[str, bool]:
+        updated = _normalize_newlines(source_text)
+        rewrites = (
+            ('"../../../../components/', '"../../../components/'),
+            ("'../../../../components/", "'../../../components/"),
+            ('"../../../../_takyon/', '"../../../_takyon/'),
+            ("'../../../../_takyon/", "'../../../_takyon/"),
+        )
+        changed = False
+        for old, new in rewrites:
+            if old in updated:
+                updated = updated.replace(old, new)
+                changed = True
+        return updated, changed
+
     def _merge_normalizations(*results: dict[str, Any]) -> dict[str, Any]:
         repairs: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -7412,6 +7447,7 @@ def _normalize_supported_product_build_shape(
 
         repairs: list[dict[str, Any]] = []
         warnings: list[str] = []
+        normalized_legacy_text, legacy_imports_rewritten = _rewrite_legacy_appkit_helper_imports(legacy_text)
         if canonical_root.exists():
             try:
                 canonical_text = canonical_root.read_text(encoding="utf-8")
@@ -7422,7 +7458,7 @@ def _normalize_supported_product_build_shape(
                     "blocked": True,
                     "error": f"canonical AppKit product root could not be read for normalization: {exc}",
                 }
-            if canonical_text.replace("\r\n", "\n") != legacy_text.replace("\r\n", "\n"):
+            if _normalize_newlines(canonical_text) != normalized_legacy_text:
                 return {
                     "repairs": repairs,
                     "warnings": warnings,
@@ -7443,7 +7479,8 @@ def _normalize_supported_product_build_shape(
             )
         else:
             canonical_root.parent.mkdir(parents=True, exist_ok=True)
-            legacy_route.replace(canonical_root)
+            canonical_root.write_text(normalized_legacy_text, encoding="utf-8")
+            legacy_route.unlink()
             repairs.append(
                 {
                     "kind": "appkit_product_root_route_normalize",
@@ -7452,10 +7489,19 @@ def _normalize_supported_product_build_shape(
                     "message": "Moved the legacy /app product route into the shared AppKit product-root module so /app stays the single routed entrypoint.",
                 }
             )
+        if legacy_imports_rewritten:
+            repairs.append(
+                {
+                    "kind": "appkit_product_root_imports_normalize",
+                    "from": "src/app/app/(product)/page.js",
+                    "to": "src/app/app/(product)/root.js",
+                    "message": "Rewrote legacy AppKit starter-helper imports so the migrated product-root module resolves the shared starter rails from src/components and src/_takyon correctly.",
+                }
+            )
 
         if app_page.exists():
             try:
-                app_page_text = app_page.read_text(encoding="utf-8").replace("\r\n", "\n")
+                app_page_text = _normalize_newlines(app_page.read_text(encoding="utf-8"))
             except Exception as exc:
                 return {
                     "repairs": repairs,
@@ -7463,16 +7509,9 @@ def _normalize_supported_product_build_shape(
                     "blocked": True,
                     "error": f"AppKit /app entry page could not be read for normalization: {exc}",
                 }
-            old_template = _subuser_app_starter_app_page_js().replace(
-                'import ProductRoot from "./(product)/root";\n', ""
-            ).replace(
-                '  if (initialAppState?.access?.state === "ready") {\n'
-                '    return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;\n'
-                '  }\n',
-                "",
-            ).replace("export default async function AppPage({ searchParams }) {", "export default async function AppPage() {")
-            new_template = _subuser_app_starter_app_page_js().replace("\r\n", "\n")
-            if app_page_text == old_template.replace("\r\n", "\n"):
+            legacy_variants = _subuser_app_starter_legacy_app_page_variants()
+            new_template = _normalize_newlines(_subuser_app_starter_app_page_js())
+            if app_page_text in legacy_variants:
                 app_page.write_text(new_template, encoding="utf-8")
                 repairs.append(
                     {
@@ -8878,6 +8917,7 @@ def _write_product_service_file(*, slug: str, source_root: Path, port: int, meta
 
 def _copy_product_service_tree(*, source_root: Path, target_root: Path) -> Path:
     target_root.parent.mkdir(parents=True, exist_ok=True)
+
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {
             name
@@ -16119,6 +16159,36 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             "requested_external_side_effect": "publish_outreach",
         }
         is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
+        if is_x_outreach:
+            credit_gate = _creative_credit_preflight_gate(
+                business,
+                action="x_publish_outreach",
+                budget_bucket="x",
+                metadata=metadata,
+            )
+            if not credit_gate.get("success"):
+                return tool_result(
+                    {
+                        "success": False,
+                        "blocked": True,
+                        "action": "business_publish_outreach",
+                        "business": business,
+                        "channel": channel,
+                        "provider": provider,
+                        "status": credit_gate.get("status"),
+                        "requested_credits": credit_gate.get("requested_credits"),
+                        "available_credits": credit_gate.get("available_credits"),
+                        "balance_credits": credit_gate.get("balance_credits"),
+                        "reserved_credits": credit_gate.get("reserved_credits"),
+                        "budget_bucket": credit_gate.get("budget_bucket"),
+                        "channel_budget": credit_gate.get("channel_budget"),
+                        "error": credit_gate.get("error") or "x publish blocked on creative credits",
+                        "note": (
+                            "Live X publication was not enqueued because the business creative-credit "
+                            "gate cannot cover the fixed X post cost yet."
+                        ),
+                    }
+                )
         operation = {
             "action": "job.enqueue",
             "business": business,
@@ -16614,6 +16684,8 @@ def _creative_credit_budget_snapshot_from_conn(
             "remaining_credits": max(0, allocated_credits - used_credits - reserved_credits),
         }
     return {
+        "balance_credits": int(balances.balance_credits),
+        "reserved_credits": int(balances.reserved_credits),
         "channels": channels,
         "total_allocated_credits": total_allocated_credits,
         "total_used_credits": total_used_credits,
@@ -16635,6 +16707,100 @@ def _creative_credit_budget_snapshot(business: str) -> dict[str, Any]:
             business,
             balances=balances,
         )
+
+
+def _creative_credit_action_costs() -> dict[str, dict[str, Any]]:
+    actions = (
+        "x_publish_outreach",
+        "meta_ad_launch",
+        "reddit_ad_launch",
+        "ugc_ad_generate",
+        "static_ad_generate",
+    )
+    return {
+        action: {
+            "credits": _creative_credit_unit_cost(action),
+            "default_bucket": _creative_credit_default_bucket_for_action(action) or None,
+        }
+        for action in actions
+    }
+
+
+def _creative_credit_preflight_gate(
+    business: str,
+    *,
+    action: str,
+    units: int = 1,
+    budget_bucket: Any = "",
+    metadata: Mapping[str, Any] | None = None,
+    ad_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    requested = _creative_credit_total_cost(action, units=units)
+    resolved_bucket, _resolved_metadata = _creative_credit_budget_metadata(
+        action=action,
+        budget_bucket=budget_bucket,
+        metadata=metadata,
+        ad_metadata=ad_metadata,
+    )
+    snapshot = _creative_credit_budget_snapshot(business)
+    balance_credits = _creative_credit_int(snapshot.get("balance_credits"))
+    reserved_credits = _creative_credit_int(snapshot.get("reserved_credits"))
+    channel = (
+        snapshot.get("channels", {}).get(resolved_bucket, {})
+        if resolved_bucket and isinstance(snapshot.get("channels"), Mapping)
+        else {}
+    )
+    channel_budget = (
+        {
+            "allocated_credits": _creative_credit_int(channel.get("allocated_credits")),
+            "used_credits": _creative_credit_int(channel.get("used_credits")),
+            "reserved_credits": _creative_credit_int(channel.get("reserved_credits")),
+            "remaining_credits": _creative_credit_int(channel.get("remaining_credits")),
+        }
+        if resolved_bucket
+        else {}
+    )
+    result = {
+        "success": True,
+        "requested_credits": requested,
+        "available_credits": balance_credits,
+        "balance_credits": balance_credits,
+        "reserved_credits": reserved_credits,
+        "budget_bucket": resolved_bucket,
+        "channel_budget": channel_budget,
+    }
+    if requested <= 0:
+        return result
+    if requested > balance_credits:
+        credits_backend = _creative_credit_backend()
+        error = credits_backend.InsufficientCreativeCredits(
+            requested_credits=requested,
+            available_credits=balance_credits,
+        )
+        return {
+            **result,
+            "success": False,
+            "blocked": True,
+            "status": "blocked_insufficient_creative_credits",
+            "error": str(error),
+        }
+    if resolved_bucket and requested > _creative_credit_int(channel_budget.get("remaining_credits")):
+        error = CreativeCreditBudgetExceeded(
+            bucket=resolved_bucket,
+            requested_credits=requested,
+            remaining_credits=_creative_credit_int(channel_budget.get("remaining_credits")),
+            allocated_credits=_creative_credit_int(channel_budget.get("allocated_credits")),
+            used_credits=_creative_credit_int(channel_budget.get("used_credits")),
+            reserved_credits=_creative_credit_int(channel_budget.get("reserved_credits")),
+        )
+        return {
+            **result,
+            "success": False,
+            "blocked": True,
+            "status": "blocked_channel_budget_exhausted",
+            "error": str(error),
+        }
+    return result
 
 
 def _validate_creative_credit_channel_allocations(
@@ -16738,6 +16904,24 @@ def handle_business_set_channel_credit_budgets(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_read_channel_credit_budgets(args: dict, **_: Any) -> str:
+    try:
+        business = _resolved_business_slug(args, required=True)
+        snapshot = _creative_credit_budget_snapshot(business)
+        snapshot["action_costs"] = _creative_credit_action_costs()
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_read_channel_credit_budgets",
+                "business": business,
+                "path": _creative_credit_budget_relpath(),
+                "value": snapshot,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def _dashboard_runtime_base_url() -> str:
     raw = str(os.getenv("TAKYON_DASHBOARD_URL") or "http://127.0.0.1:9119").strip()
     return raw.rstrip("/")
@@ -16833,8 +17017,19 @@ def _reserve_creative_credits(
     store = _store()
     with store._connect() as conn:
         credits_backend.open_business_credit_account(conn, business)
+        balances = credits_backend.get_business_credit_balances(conn, business)
+        if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
+            raise credits_backend.InsufficientCreativeCredits(
+                requested_credits=requested,
+                available_credits=_creative_credit_int(getattr(balances, "balance_credits", 0)),
+            )
         if resolved_bucket:
-            snapshot = _creative_credit_budget_snapshot_from_conn(store, conn, business)
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            )
             channel = snapshot["channels"].get(resolved_bucket, {})
             remaining_credits = _creative_credit_int(channel.get("remaining_credits"))
             if requested > remaining_credits:
@@ -17328,24 +17523,32 @@ def handle_business_ugc_ad_generate(args: dict, **_: Any) -> str:
                 }
             )
 
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="ugc_ad_generate",
+            budget_bucket=budget_bucket,
+            metadata=base_receipt,
+            ad_metadata=ad_metadata,
+        )
         try:
-            gateway_result = _call_creative_runtime_gateway(
-                "ugc-render",
-                {
-                    "business": business,
-                    "idempotency_key": idempotency_key,
-                    "brief_path": brief_rel,
-                    "script_path": script_rel or None,
-                    "slug": slug,
-                    "transition_mode": str(args.get("transition_mode") or "continuity"),
-                    "env_file": str(args.get("env_file") or ".env"),
-                    "jumpcuts": _boolish(args.get("jumpcuts"), default=False),
-                    "skip_post": _boolish(args.get("skip_post"), default=False),
-                    "workdir": str(args.get("workdir") or ""),
-                    "budget_bucket": budget_bucket,
-                    "ad_metadata": dict(ad_metadata) if ad_metadata else {},
-                },
-            )
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "ugc-render",
+                    {
+                        "business": business,
+                        "idempotency_key": idempotency_key,
+                        "brief_path": brief_rel,
+                        "script_path": script_rel or None,
+                        "slug": slug,
+                        "transition_mode": str(args.get("transition_mode") or "continuity"),
+                        "env_file": str(args.get("env_file") or ".env"),
+                        "jumpcuts": _boolish(args.get("jumpcuts"), default=False),
+                        "skip_post": _boolish(args.get("skip_post"), default=False),
+                        "workdir": str(args.get("workdir") or ""),
+                        "budget_bucket": budget_bucket,
+                        "ad_metadata": dict(ad_metadata) if ad_metadata else {},
+                    },
+                )
         except Exception as exc:
             receipt = {
                 **base_receipt,
@@ -17637,25 +17840,34 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
                 }
             )
 
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="static_ad_generate",
+            units=requested,
+            budget_bucket=budget_bucket,
+            metadata=base_receipt,
+            ad_metadata=ad_metadata,
+        )
         try:
-            gateway_result = _call_creative_runtime_gateway(
-                "static-render",
-                {
-                    "business": business,
-                    "idempotency_key": idempotency_key,
-                    "input_path": input_rel,
-                    "slug": slug,
-                    "backend": str(args.get("backend") or "openai"),
-                    "quality": str(args.get("quality") or "high"),
-                    "crop": _boolish(args.get("crop"), default=False),
-                    "strict": _boolish(args.get("strict"), default=False),
-                    "stop_on_error": _boolish(args.get("stop_on_error"), default=False),
-                    "aspect_ratio": str(args.get("aspect_ratio") or ""),
-                    "max": str(args.get("max") or ""),
-                    "budget_bucket": budget_bucket,
-                    "ad_metadata": dict(ad_metadata) if ad_metadata else {},
-                },
-            )
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "static-render",
+                    {
+                        "business": business,
+                        "idempotency_key": idempotency_key,
+                        "input_path": input_rel,
+                        "slug": slug,
+                        "backend": str(args.get("backend") or "openai"),
+                        "quality": str(args.get("quality") or "high"),
+                        "crop": _boolish(args.get("crop"), default=False),
+                        "strict": _boolish(args.get("strict"), default=False),
+                        "stop_on_error": _boolish(args.get("stop_on_error"), default=False),
+                        "aspect_ratio": str(args.get("aspect_ratio") or ""),
+                        "max": str(args.get("max") or ""),
+                        "budget_bucket": budget_bucket,
+                        "ad_metadata": dict(ad_metadata) if ad_metadata else {},
+                    },
+                )
         except Exception as exc:
             receipt = {
                 **base_receipt,
@@ -18484,11 +18696,18 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             })
 
         # ── live mode: create everything PAUSED (no spend) ──
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="meta_ad_launch",
+            budget_bucket="meta",
+            metadata=base_receipt,
+        )
         try:
-            gateway_result = _call_creative_runtime_gateway(
-                "meta-launch",
-                {**args, "business": business, "idempotency_key": idempotency_key},
-            )
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "meta-launch",
+                    {**args, "business": business, "idempotency_key": idempotency_key},
+                )
         except Exception as exc:
             receipt = {
                 **base_receipt,
@@ -20113,16 +20332,23 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
                 "value": receipt,
             })
 
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="reddit_ad_launch",
+            budget_bucket="reddit",
+            metadata=base_receipt,
+        )
         try:
-            gateway_result = _call_creative_runtime_gateway(
-                "reddit-launch",
-                {
-                    "business": business,
-                    "idempotency_key": idempotency_key,
-                    "slug": slug,
-                    "plan": plan,
-                },
-            )
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "reddit-launch",
+                    {
+                        "business": business,
+                        "idempotency_key": idempotency_key,
+                        "slug": slug,
+                        "plan": plan,
+                    },
+                )
         except Exception as exc:
             receipt = {
                 **base_receipt,
@@ -20154,6 +20380,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
                 "status": gateway_result.get("status") or "failed",
                 "ids": gateway_result.get("ids") or None,
                 "error": gateway_result.get("error") or "reddit launch failed",
+                "available_credits": gateway_result.get("available_credits"),
                 "balance_credits": gateway_result.get("balance_credits"),
                 "reserved_credits": gateway_result.get("reserved_credits"),
                 "credits_charged": gateway_result.get("credits_charged"),
@@ -22214,6 +22441,19 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Record product app usage under the business app budget cap.",
         "handler": handle_business_record_app_usage,
         "schema": _schema("business_record_app_usage", "Record product app usage.", {"business": _BUSINESS_PROP, "app_user_id": {"type": "string"}, "app_user_tier": {"type": "string"}, "purpose": {"type": "string"}, "route": {"type": "string"}, "status": {"type": "string"}, "estimated_cost_microusd": {"type": "integer"}, "actual_cost_microusd": {"type": "integer"}, "input_tokens": {"type": "integer"}, "output_tokens": {"type": "integer"}, "provider_request_id": {"type": "string"}, "provider": {"type": "string"}, "model": {"type": "string"}, "metadata": {"type": "object"}, "error": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "purpose", "route", "idempotency_key"]),
+    },
+    {
+        "name": "business_read_channel_credit_budgets",
+        "description": "Read the current business creative-credit balance plus the X / Meta / Reddit channel allocations before attempting spendful creative or paid-channel work.",
+        "handler": handle_business_read_channel_credit_budgets,
+        "schema": _schema(
+            "business_read_channel_credit_budgets",
+            "Read the creative-credit snapshot for one business.",
+            {
+                "business": _BUSINESS_PROP,
+            },
+            ["business"],
+        ),
     },
     {
         "name": "business_set_channel_credit_budgets",

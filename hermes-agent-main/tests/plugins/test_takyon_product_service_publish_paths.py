@@ -104,6 +104,67 @@ def test_refresh_normalizes_legacy_appkit_product_root_route(tmp_path: Path, mon
     assert "return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;" in normalized_app_page
 
 
+def test_refresh_rewrites_legacy_product_root_starter_imports(tmp_path: Path, monkeypatch):
+    business_root = tmp_path / "businesses" / "scopesync"
+    site = business_root / "product" / "site"
+    legacy_route = site / "src" / "app" / "app" / "(product)" / "page.js"
+    app_page = site / "src" / "app" / "app" / "page.js"
+    legacy_route.parent.mkdir(parents=True, exist_ok=True)
+    app_page.parent.mkdir(parents=True, exist_ok=True)
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "scopesync-site",
+                "private": True,
+                "scripts": {"build": "next build", "start": "next start"},
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_app_template = takyon_core._subuser_app_starter_app_page_js().replace(
+        'import ProductRoot from "./(product)/root";\n', ""
+    ).replace(
+        '  if (initialAppState?.access?.state === "ready") {\n'
+        '    return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;\n'
+        '  }\n',
+        "",
+    ).replace("export default async function AppPage({ searchParams }) {", "export default async function AppPage() {")
+    app_page.write_text(legacy_app_template, encoding="utf-8")
+    legacy_route.write_text(
+        '"use client";\n'
+        '\n'
+        'import { useStarterApp } from "../../../../components/starter-context";\n'
+        '\n'
+        'export default function ScopeSyncRoot() {\n'
+        '  const { appState } = useStarterApp();\n'
+        '  return <main>{appState ? "ready" : "missing"}</main>;\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_run_surface_command",
+        lambda command, **kwargs: {"command": command, "status": "passed"},
+    )
+
+    verification = takyon_core._refresh_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    repair_kinds = [item.get("kind") for item in verification["repairs"]]
+    assert "appkit_product_root_imports_normalize" in repair_kinds
+    canonical_root = site / "src" / "app" / "app" / "(product)" / "root.js"
+    normalized_root = canonical_root.read_text(encoding="utf-8")
+    assert '../../../../components/starter-context' not in normalized_root
+    assert '../../../components/starter-context' in normalized_root
+
+
 def test_refresh_warns_when_custom_app_page_needs_manual_product_root_render(tmp_path: Path, monkeypatch):
     business_root = tmp_path / "businesses" / "scopesync"
     site = business_root / "product" / "site"
