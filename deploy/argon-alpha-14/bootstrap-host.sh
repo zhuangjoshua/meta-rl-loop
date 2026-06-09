@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
+DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TARGET_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -22,6 +23,11 @@ fi
 
 if [[ ! -f "$WORKER_SERVICE_FILE" ]]; then
   echo "worker service file not found: $WORKER_SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DOCKER_BROKER_SERVICE_FILE" ]]; then
+  echo "docker broker service file not found: $DOCKER_BROKER_SERVICE_FILE" >&2
   exit 1
 fi
 
@@ -44,13 +50,15 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   fi
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
-  # The tracked units run as the dedicated non-root 'takyon' user (docker group for the
-  # Docker-isolated agent/terminal work) — provision it and hand the state tree over. The runtime
-  # tree stays root-owned (read-only to the services via the units' ReadOnlyPaths).
+  # The tracked units run as the dedicated non-root 'takyon' user. Docker authority lives in the
+  # dedicated broker unit only, so the user itself must not remain in the docker group. The
+  # runtime tree stays root-owned (read-only to the services via the units' ReadOnlyPaths).
   if ! id -u takyon >/dev/null 2>&1; then
     useradd --system --user-group --home-dir '$REMOTE_ROOT' --shell /usr/sbin/nologin takyon
   fi
-  id -nG takyon | grep -qw docker || usermod -aG docker takyon
+  if id -nG takyon | grep -qw docker; then
+    gpasswd -d takyon docker >/dev/null 2>&1 || deluser takyon docker >/dev/null 2>&1 || true
+  fi
   chown takyon:takyon '$REMOTE_ROOT'
   chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
   systemctl enable docker >/dev/null

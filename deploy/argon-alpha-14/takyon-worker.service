@@ -16,21 +16,22 @@ After=network-online.target
 Wants=network-online.target
 After=docker.service
 Wants=docker.service
+After=takyon-docker-broker.service
+Wants=takyon-docker-broker.service
 
 [Service]
 Type=simple
 # Least privilege: same posture as takyon-dashboard.service — dedicated `takyon` user, filesystem
-# read-only except /opt/takyon state, runtime tree pinned read-only, docker socket writable for
-# the Docker-isolated work the CEO turns spawn.
+# read-only except /opt/takyon state, runtime tree pinned read-only. Docker authority now lives in
+# the dedicated takyon-docker-broker.service; this worker talks to it through the tracked
+# TAKYON_DOCKER_BINARY shim instead of holding the daemon socket directly.
 User=takyon
 Group=takyon
-SupplementaryGroups=docker
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/opt/takyon
-ReadWritePaths=-/run/docker.sock
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
@@ -43,6 +44,8 @@ Environment=TAKYON_NODE_NAME=argon-alpha-14
 Environment=TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14
 Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
+Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
+Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
 Environment=TERMINAL_CONTAINER_PERSISTENT=false

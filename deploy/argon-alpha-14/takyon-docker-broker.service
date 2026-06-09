@@ -1,0 +1,35 @@
+[Unit]
+Description=Takyon Docker Broker
+After=network-online.target
+Wants=network-online.target
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# Dedicated authority holder for the host Docker daemon. Dashboard and worker no
+# longer get docker-group/socket access directly; they talk to this local broker
+# through the tracked TAKYON_DOCKER_BINARY shim instead.
+User=takyon
+Group=takyon
+SupplementaryGroups=docker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadWritePaths=-/run/docker.sock
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
+WorkingDirectory=/opt/takyon/hermes-agent-main
+EnvironmentFile=-/opt/takyon/.takyon/.env
+EnvironmentFile=-/opt/takyon/secrets/.env
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/opt/takyon
+Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_HOST_ROLE=operator
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.docker_broker_app:app --host 127.0.0.1 --port 8011
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -4,23 +4,23 @@ After=network-online.target
 Wants=network-online.target
 After=docker.service
 Wants=docker.service
+After=takyon-docker-broker.service
+Wants=takyon-docker-broker.service
 
 [Service]
 Type=simple
 # Least privilege: run as the dedicated `takyon` system user (created by bootstrap-host.sh) with
 # the filesystem read-only except /opt/takyon state — and the runtime tree itself pinned read-only
-# inside that, so a compromised runtime cannot rewrite its own code. The docker supplementary
-# group + writable docker socket are required for the Docker-isolated agent/terminal work this
-# plane spawns.
+# inside that, so a compromised runtime cannot rewrite its own code. Docker authority now lives in
+# the dedicated takyon-docker-broker.service; this plane talks to it through the tracked
+# TAKYON_DOCKER_BINARY shim instead of holding the daemon socket directly.
 User=takyon
 Group=takyon
-SupplementaryGroups=docker
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/opt/takyon
-ReadWritePaths=-/run/docker.sock
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
@@ -48,6 +48,8 @@ Environment=TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14
 Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
+Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
+Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
 Environment=TERMINAL_CONTAINER_PERSISTENT=false
