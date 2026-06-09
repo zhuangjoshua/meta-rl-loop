@@ -620,7 +620,7 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
     )
     monkeypatch.setattr(
         worker,
-        "_update_outreach_work_request",
+        "_update_work_request",
         lambda slug, work_request_id, *, status, payload_updates=None: statuses.append(
             (work_request_id, status, dict(payload_updates or {}))
         ),
@@ -696,7 +696,7 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
     monkeypatch.setattr(worker, "_run_xurl_json_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")))
     monkeypatch.setattr(
         worker,
-        "_update_outreach_work_request",
+        "_update_work_request",
         lambda slug, work_request_id, *, status, payload_updates=None: statuses.append(
             (work_request_id, status, dict(payload_updates or {}))
         ),
@@ -775,7 +775,7 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
         "_record_x_publish_result",
         _fake_record,
     )
-    monkeypatch.setattr(worker, "_update_outreach_work_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
 
     body = "A" * 200 + "\n\n" + "B" * 160
@@ -841,7 +841,7 @@ def test_x_publish_outreach_handler_uses_oauth1_without_username(monkeypatch, tm
         "_record_x_publish_result",
         lambda slug, **kwargs: {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
     )
-    monkeypatch.setattr(worker, "_update_outreach_work_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
     monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
 
     result = worker.x_publish_outreach_handler(

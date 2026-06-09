@@ -87,9 +87,13 @@ def test_enqueue_is_idempotent(pg_conn):
 
 
 def test_claim_one_is_fifo_and_never_double_claims(pg_conn):
-    slug, _uid = _provision_business(pg_conn)
-    a = jobs.enqueue(pg_conn, slug, "k", idempotency_key="a")
-    b = jobs.enqueue(pg_conn, slug, "k", idempotency_key="b")
+    # Two businesses so the per-business-per-lane gate stays out of the way: this test pins FIFO
+    # ordering across the queue and that a claimed ('running') row is never re-served. Same-business
+    # serialization has its own tests below.
+    first_slug, _uid = _provision_business(pg_conn)
+    second_slug, _uid2 = _provision_business(pg_conn)
+    a = jobs.enqueue(pg_conn, first_slug, "k", idempotency_key="a")
+    b = jobs.enqueue(pg_conn, second_slug, "k", idempotency_key="b")
     first = jobs.claim_one(pg_conn, worker_id="w1")
     second = jobs.claim_one(pg_conn, worker_id="w2")
     # Both queued jobs were claimed, as distinct rows, oldest first; a 'running' job is never re-served.

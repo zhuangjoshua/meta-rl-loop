@@ -6300,11 +6300,19 @@ def _allow_missing_credentials_in_test_mode(op: dict[str, Any]) -> bool:
     return str(op.get("action") or "") == "job.enqueue"
 
 
+# Job kinds whose EXECUTION lives on the Postgres worker plane (worker.py HANDLERS). The
+# work-request row enqueued alongside them is the canonical run object the tool-side dispatcher
+# (_run_operator_task_on_worker) waits on and re-attaches to.
+_WORKER_EXECUTED_JOB_KINDS = frozenset({"claude.agent_task", "product.surface_refresh"})
+
+
 def _should_mirror_job_to_worker_queue(op: Mapping[str, Any]) -> bool:
     if not _boolish(op.get("worker_queue"), default=False):
         return False
     payload = op.get("payload") if isinstance(op.get("payload"), Mapping) else {}
     kind = str(op.get("kind") or "").strip().lower()
+    if kind in _WORKER_EXECUTED_JOB_KINDS:
+        return True
     provider = str(payload.get("provider") or op.get("provider") or "").strip()
     channel = str(payload.get("channel") or "").strip()
     return kind == "x.publish_outreach" or _is_x_provider_name(provider) or _is_x_provider_name(channel)
@@ -14681,6 +14689,9 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     try:
         if _session_business_slug():
             raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
+        deferred = _defer_product_surface_refresh_to_worker(args)
+        if deferred is not None:
+            return deferred
         business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -20770,6 +20781,195 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+# ── worker-plane execution for long operator tasks ────────────────────────────────────────────────
+# One execution path with an explicit deployment guardrail (CLAUDE.md > Operating Model): when the
+# deployment declares a live worker service (TAKYON_OPERATOR_TASKS_VIA_WORKER=1 in the dashboard
+# unit), long operator tool runs are enqueued onto the Postgres worker plane and the tool ATTACHES
+# to the run instead of owning it. The work-request row (business_work_requests) is the canonical
+# run object: the enqueue commit creates it, the worker handler (worker.py) flips it
+# running -> completed/blocked/failed and stores the full tool result in its payload, and this
+# dispatcher polls it. If the caller dies (dashboard PTY refresh/disconnect), the run continues and
+# the result still lands in the run row, agent_runs, and events. A replay of the SAME tool call
+# (same args + idempotency_key) re-attaches to the SAME run via commit idempotency.
+# Deferral is skipped: inside the worker process itself (TAKYON_WORKER_PROCESS=1 — the surrounding
+# job is already durable, and waiting on a sub-job could starve the drain threads), and for
+# isolated-turn sessions with a workspace-root override (their live local edits are not yet synced
+# to the canonical workspace the worker would mount).
+
+_WORK_REQUEST_TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
+_WORKER_DEFERRAL_POLL_SECONDS = 3.0
+
+
+def _operator_tasks_via_worker_enabled() -> bool:
+    return _env_truthy("TAKYON_OPERATOR_TASKS_VIA_WORKER") and not _env_truthy("TAKYON_WORKER_PROCESS")
+
+
+def _read_work_request_run(store: "TakyonStore", run_id: str) -> tuple[str, dict[str, Any]]:
+    """Read the canonical run row (status + payload) for one work-request id."""
+    with store._connect() as conn:
+        row = conn.execute(
+            f"SELECT status, payload_json FROM {store._work_requests_table()} WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return "", {}
+    try:
+        payload = json.loads(str(row["payload_json"] or "") or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    return str(row["status"] or ""), payload if isinstance(payload, dict) else {}
+
+
+def _run_operator_task_on_worker(
+    *,
+    store: "TakyonStore",
+    business: str,
+    kind: str,
+    tool_name: str,
+    deferred_args: dict[str, Any],
+    commit_idempotency_key: str,
+    wait_seconds: float,
+    reason: str,
+    actor: str,
+) -> str:
+    """Enqueue one worker-executed tool run and attach to it: poll the run row until terminal (return
+    the recorded tool result verbatim) or until this caller's wait budget expires (return a detached
+    'running' handle; the run keeps executing on the worker)."""
+    commit = store.commit(
+        scope=f"business:{business}",
+        operations=[
+            {
+                "action": "job.enqueue",
+                "business": business,
+                "kind": kind,
+                "worker_queue": True,
+                "payload": {"tool": tool_name, "args": deferred_args},
+            }
+        ],
+        idempotency_key=commit_idempotency_key,
+        reason=reason,
+        actor=actor,
+    )
+    op_result = (commit.get("results") or [{}])[0] if isinstance(commit, dict) else {}
+    run_id = str(op_result.get("job") or "").strip()
+    worker_job_id = str(op_result.get("worker_job") or "").strip()
+    if not run_id or not worker_job_id:
+        raise TakyonError(f"worker-plane enqueue did not return a run handle for {tool_name}")
+    deadline = time.monotonic() + max(30.0, float(wait_seconds))
+    while True:
+        status, payload = _read_work_request_run(store, run_id)
+        if status in _WORK_REQUEST_TERMINAL_STATUSES:
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            result.setdefault("run_id", run_id)
+            result.setdefault("worker_job", worker_job_id)
+            if result.get("success"):
+                return tool_result(result)
+            error_text = str(result.get("error") or f"{tool_name} {status} on the worker plane")
+            return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+        if time.monotonic() >= deadline:
+            return tool_result(
+                {
+                    "success": False,
+                    "status": "running",
+                    "detached": True,
+                    "run_id": run_id,
+                    "worker_job": worker_job_id,
+                    "business": business,
+                    "kind": kind,
+                    "note": (
+                        f"{tool_name} is still executing on the worker plane and survives this "
+                        "session. Re-call the tool with the SAME arguments and idempotency_key to "
+                        "re-attach and collect the result, or inspect the business jobs/events for "
+                        f"run {run_id}."
+                    ),
+                }
+            )
+        time.sleep(_WORKER_DEFERRAL_POLL_SECONDS)
+
+
+def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
+    """Route business_claude_agent_task through the worker plane when enabled; None ⇒ run inline."""
+    if not _operator_tasks_via_worker_enabled():
+        return None
+    store = _store()
+    if _session_business_slug() and getattr(store, "_workspace_root_override", None) is not None:
+        return None
+    business = _resolved_business_slug(args, required=True)
+    instruction = str(args.get("instruction") or "").strip()
+    if not instruction:
+        raise TakyonError("instruction is required")
+    idempotency_key = str(args.get("idempotency_key") or "").strip()
+    if not idempotency_key:
+        raise TakyonError("idempotency_key is required")
+    workspace_raw = str(args.get("workspace") or ".").strip() or "."
+    workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
+    load_takyon_env()
+    _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
+    # Freeze session-dependent semantics NOW: the worker process has no session binding, so the
+    # refresh_surface default must be resolved with THIS caller's context and passed explicitly.
+    normalized_workspace = workspace_rel.strip("/").lower()
+    workspace_targets_product_surface = (
+        normalized_workspace == "product"
+        or normalized_workspace.startswith("product/")
+        or normalized_workspace in {"site", "website"}
+    )
+    refresh_surface = _boolish(args.get("refresh_surface"), default=False)
+    if not _session_business_slug() and not refresh_surface:
+        refresh_surface = workspace_targets_product_surface
+    customer_facing = _workspace_needs_customer_ai_copy_contract(workspace_rel)
+    timeout_ms = _clamp_int(
+        args.get("timeout_ms"),
+        default=1_200_000 if customer_facing else 300_000,
+        minimum=30_000,
+        maximum=1_800_000,
+    )
+    refresh_timeout_seconds = _clamp_int(
+        args.get("refresh_timeout_seconds"),
+        default=600 if customer_facing else 300,
+        minimum=15,
+        maximum=900,
+    )
+    deferred_args = {**args, "business": business, "workspace": workspace_rel, "refresh_surface": refresh_surface}
+    # Worst case: one local-repair retry doubles the SDK run + surface refresh, plus claim slack.
+    wait_seconds = 2.0 * (timeout_ms / 1000.0 + float(refresh_timeout_seconds)) + 120.0
+    return _run_operator_task_on_worker(
+        store=store,
+        business=business,
+        kind="claude.agent_task",
+        tool_name="business_claude_agent_task",
+        deferred_args=deferred_args,
+        commit_idempotency_key=f"{idempotency_key}:claude-sdk-worker-job",
+        wait_seconds=wait_seconds,
+        reason=str(args.get("reason") or "Claude Agent SDK task (worker plane)"),
+        actor=str(args.get("actor") or "agent"),
+    )
+
+
+def _defer_product_surface_refresh_to_worker(args: dict) -> str | None:
+    """Route business_refresh_product_surface through the worker plane when enabled; None ⇒ inline."""
+    if not _operator_tasks_via_worker_enabled():
+        return None
+    if _session_business_slug():
+        return None  # the inline handler rejects session-bound callers; keep its exact error path
+    store = _store()
+    business = _resolved_business_slug(args, required=True)
+    idempotency_key = str(args.get("idempotency_key") or "").strip()
+    if not idempotency_key:
+        raise TakyonError("idempotency_key is required")
+    timeout_seconds = _clamp_int(args.get("timeout_seconds"), default=300, minimum=15, maximum=900)
+    return _run_operator_task_on_worker(
+        store=store,
+        business=business,
+        kind="product.surface_refresh",
+        tool_name="business_refresh_product_surface",
+        deferred_args={**args, "business": business},
+        commit_idempotency_key=f"{idempotency_key}:surface-refresh-worker-job",
+        wait_seconds=float(timeout_seconds) + 180.0,
+        reason=str(args.get("reason") or "product surface publication (worker plane)"),
+        actor=str(args.get("actor") or "agent"),
+    )
+
+
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
@@ -20816,6 +21016,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             return None
 
     try:
+        deferred = _defer_claude_agent_task_to_worker(args)
+        if deferred is not None:
+            return deferred
         business = _resolved_business_slug(args, required=True)
         worker_session_bound = bool(_session_business_slug())
         instruction = str(args.get("instruction") or "").strip()

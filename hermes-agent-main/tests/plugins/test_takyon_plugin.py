@@ -6701,3 +6701,187 @@ def test_enforce_operator_business_access_fails_closed_without_principal(monkeyp
     assert (
         takyon_core.TakyonStore._enforce_operator_business_access(store, None, "acme") is None
     )
+
+
+def test_operator_task_worker_deferral_is_opt_in(monkeypatch):
+    """Worker-plane execution of long operator tools is an explicit deployment declaration
+    (TAKYON_OPERATOR_TASKS_VIA_WORKER=1) and never triggers inside the worker process itself
+    (the surrounding job is already durable; re-deferring could starve the drain threads)."""
+    monkeypatch.delenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", raising=False)
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    assert takyon_core._defer_claude_agent_task_to_worker({"business": "acme"}) is None
+    assert takyon_core._defer_product_surface_refresh_to_worker({"business": "acme"}) is None
+
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.setenv("TAKYON_WORKER_PROCESS", "1")
+    assert takyon_core._defer_claude_agent_task_to_worker({"business": "acme"}) is None
+    assert takyon_core._defer_product_surface_refresh_to_worker({"business": "acme"}) is None
+
+
+class _DeferralStoreStub:
+    _workspace_root_override = None
+
+    def __init__(self):
+        self.commits = []
+
+    def commit(self, **kwargs):
+        self.commits.append(kwargs)
+        return {
+            "success": True,
+            "results": [{"action": "job.enqueue", "job": "run-1", "worker_job": "wj-1"}],
+        }
+
+
+def test_defer_claude_agent_task_attaches_to_worker_run(monkeypatch):
+    """The tool enqueues ONE canonical run (work request mirrored to a worker job), waits on the
+    run row, and returns the recorded tool result verbatim — caller-context defaults (like
+    refresh_surface for product workspaces) are frozen into the deferred args."""
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
+    statuses = iter(
+        [
+            ("queued", {}),
+            ("running", {}),
+            ("completed", {"result": {"success": True, "summary": "done"}}),
+        ]
+    )
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: next(statuses))
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
+
+    raw = takyon_core._defer_claude_agent_task_to_worker(
+        {
+            "business": "acme",
+            "instruction": "build the site",
+            "idempotency_key": "task-1",
+            "workspace": "product/site",
+        }
+    )
+    result = json.loads(raw)
+    assert result["success"] is True
+    assert result["summary"] == "done"
+    assert result["run_id"] == "run-1"
+    assert result["worker_job"] == "wj-1"
+
+    assert len(store.commits) == 1
+    op = store.commits[0]["operations"][0]
+    assert op["action"] == "job.enqueue"
+    assert op["kind"] == "claude.agent_task"
+    assert op["worker_queue"] is True
+    assert op["payload"]["tool"] == "business_claude_agent_task"
+    # No session binding here, product workspace: refresh default frozen at the caller.
+    assert op["payload"]["args"]["refresh_surface"] is True
+    assert store.commits[0]["idempotency_key"] == "task-1:claude-sdk-worker-job"
+
+
+def test_defer_claude_agent_task_detaches_when_wait_budget_expires(monkeypatch):
+    """If the caller's wait budget runs out, the tool returns a detached 'running' handle instead
+    of killing the run — re-calling with the same args + idempotency_key re-attaches."""
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: ("running", {}))
+
+    class _FakeTime:
+        def __init__(self):
+            self.now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += max(float(seconds), 1.0) * 100_000.0
+
+    monkeypatch.setattr(takyon_core, "time", _FakeTime())
+
+    raw = takyon_core._defer_claude_agent_task_to_worker(
+        {
+            "business": "acme",
+            "instruction": "build",
+            "idempotency_key": "task-2",
+            "workspace": "research",
+        }
+    )
+    result = json.loads(raw)
+    assert result["success"] is False
+    assert result["status"] == "running"
+    assert result["detached"] is True
+    assert result["run_id"] == "run-1"
+    assert "idempotency_key" in result["note"]
+
+
+def test_operator_tool_task_handler_records_run_lifecycle(monkeypatch):
+    """The worker handler calls the EXISTING tool function and owns the canonical run row:
+    running -> terminal status mapped from the tool result, full result stored on the row, and
+    actual_cost_cents=0 so run_one never double-settles the tool's internal budget rail."""
+    from plugins.takyon import worker as takyon_worker
+
+    calls = []
+
+    def _record(slug, work_request_id, *, status, payload_updates=None, rewrite_distribution=True):
+        calls.append((slug, work_request_id, status, payload_updates, rewrite_distribution))
+
+    monkeypatch.setattr(takyon_worker, "_update_work_request", _record)
+    monkeypatch.setattr(
+        takyon_core,
+        "handle_business_claude_agent_task",
+        lambda args, **kw: json.dumps({"success": True, "summary": "ok", "actual_cost_cents": 42}),
+    )
+
+    def _job(payload):
+        return takyon_worker.Job(
+            id="job-1",
+            business_slug="acme",
+            kind="claude.agent_task",
+            status="running",
+            idempotency_key="ik-1",
+            payload=payload,
+            result=None,
+            error=None,
+            reserved_billing_entry_id=None,
+            attempts=1,
+            max_attempts=1,
+            locked_by="w1",
+            locked_at=None,
+            created_at=None,
+            updated_at=None,
+        )
+
+    outcome = takyon_worker.claude_agent_task_handler(
+        _job({"args": {"business": "acme"}, "work_request_id": "wr-1"})
+    )
+    assert [(c[2], c[4]) for c in calls] == [("running", False), ("completed", False)]
+    assert calls[-1][3]["result"]["summary"] == "ok"
+    assert outcome.actual_cost_cents == 0
+    assert outcome.result == {"status": "completed", "work_request_id": "wr-1"}
+
+    # A recorded tool failure maps to a failed RUN but still a clean handler return (the run row
+    # and agent_runs carry the truth; the job must not retry an expensive task).
+    calls.clear()
+    monkeypatch.setattr(
+        takyon_core,
+        "handle_business_claude_agent_task",
+        lambda args, **kw: json.dumps({"success": False, "error": "boom"}),
+    )
+    outcome = takyon_worker.claude_agent_task_handler(
+        _job({"args": {"business": "acme"}, "work_request_id": "wr-2"})
+    )
+    assert [c[2] for c in calls] == ["running", "failed"]
+    assert outcome.result["status"] == "failed"
+
+    # An unrecorded crash writes the failed run row, then re-raises so the JOB fails loudly.
+    calls.clear()
+
+    def _crash(args, **kw):
+        raise RuntimeError("worker exploded")
+
+    monkeypatch.setattr(takyon_core, "handle_business_claude_agent_task", _crash)
+    with pytest.raises(RuntimeError, match="worker exploded"):
+        takyon_worker.claude_agent_task_handler(
+            _job({"args": {"business": "acme"}, "work_request_id": "wr-3"})
+        )
+    assert [c[2] for c in calls] == ["running", "failed"]

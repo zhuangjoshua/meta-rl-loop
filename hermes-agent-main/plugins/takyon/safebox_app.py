@@ -97,9 +97,18 @@ class _StripeBillingWebhookVerifyBody(BaseModel):
     signature: str
 
 
+def _allow_tokenless() -> bool:
+    """Explicit insecure override for LOCAL TEST RIGS ONLY (the hermetic pytest env scrubs *_TOKEN
+    vars, so a local rig's safebox must run tokenless). Same opt-out idiom as
+    TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS; never set this on a deployed Safebox host."""
+    return str(os.environ.get("TAKYON_SAFEBOX_ALLOW_TOKENLESS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
     expected = str(os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
     if not expected:
+        if _allow_tokenless():
+            return
         # Fail closed: an unconfigured token must never mean "auth disabled" — Safebox safety must
         # not silently degrade to firewall/VPC correctness. Provision TAKYON_SAFEBOX_TOKEN (the
         # service unit loads $TAKYON_HOME/.env) on both the Safebox host and every client plane.

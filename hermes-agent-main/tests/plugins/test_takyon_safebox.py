@@ -297,6 +297,12 @@ def test_safebox_app_fails_closed_when_token_is_unconfigured(tmp_path, monkeypat
     )
     assert any_bearer.status_code == 401
 
+    # Local test rigs may opt out EXPLICITLY (hermetic pytest envs scrub *_TOKEN vars).
+    monkeypatch.setenv("TAKYON_SAFEBOX_ALLOW_TOKENLESS", "1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    allowed = client.get("/v1/env/OPENAI_API_KEY")
+    assert allowed.status_code == 200
+
 
 def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))

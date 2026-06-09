@@ -270,13 +270,18 @@ def _xurl_auth_mode(*, home: Path) -> str:
     return str(auth_mode or "").strip()
 
 
-def _update_outreach_work_request(
+def _update_work_request(
     slug: str,
     work_request_id: str,
     *,
     status: str,
     payload_updates: Mapping[str, Any] | None = None,
+    rewrite_distribution: bool = True,
 ) -> None:
+    """Flip the canonical run row (business_work_requests) for one worker-executed job and emit the
+    status event. ``rewrite_distribution`` stays on for outreach kinds (their run state feeds the
+    distribution files); worker-executed tool runs (claude.agent_task, product.surface_refresh)
+    pass False."""
     if not work_request_id:
         return
     from .core import TakyonStore
@@ -302,7 +307,8 @@ def _update_outreach_work_request(
             f"UPDATE {store._work_requests_table()} SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?",
             (status, json.dumps(payload), _utc_now_iso(), work_request_id),
         )
-        store._rewrite_distribution_files(conn, slug)
+        if rewrite_distribution:
+            store._rewrite_distribution_files(conn, slug)
         store._record_event(
             conn,
             scope=str(row["scope"] or f"business:{slug}"),
@@ -1175,7 +1181,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     credit_result: dict[str, Any] | None = None
     finalized = False
     if work_request_id:
-        _update_outreach_work_request(
+        _update_work_request(
             slug,
             work_request_id,
             status="running",
@@ -1200,7 +1206,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         )
     except takyon_business_credits.InsufficientCreativeCredits as exc:
         if work_request_id:
-            _update_outreach_work_request(
+            _update_work_request(
                 slug,
                 work_request_id,
                 status="failed",
@@ -1209,7 +1215,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         raise RuntimeError(str(exc)) from exc
     except takyon_core.CreativeCreditBudgetExceeded as exc:
         if work_request_id:
-            _update_outreach_work_request(
+            _update_work_request(
                 slug,
                 work_request_id,
                 status="failed",
@@ -1313,7 +1319,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             channel_budget=(credit_result or {}).get("channel_budget"),
         )
         if work_request_id:
-            _update_outreach_work_request(
+            _update_work_request(
                 slug,
                 work_request_id,
                 status="completed",
@@ -1405,7 +1411,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             except Exception as release_exc:
                 finalization_error = release_exc
         if work_request_id:
-            _update_outreach_work_request(
+            _update_work_request(
                 slug,
                 work_request_id,
                 status="failed",
@@ -1433,11 +1439,76 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         raise
 
 
+def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobRunResult:
+    """Execute one worker-deferred operator tool run (core._run_operator_task_on_worker enqueued it)
+    by calling the EXISTING tool function — no copied logic, the inline path and the worker path are
+    one implementation. The work-request row is the canonical run object: flip it running →
+    completed/blocked/failed and store the full tool result in its payload (the waiting tool-side
+    dispatcher polls that row; the dashboard events stream gets the status event from
+    ``_update_work_request``).
+
+    The JOB lifecycle reports on the wrapper execution, not the task outcome: a tool that ran to a
+    recorded failed/blocked result still COMPLETES the job (the run row + agent_runs carry the
+    truth); only an unrecorded crash raises (job 'failed', max_attempts=1 ⇒ terminal, never an
+    expensive double-run). Budget is reserved/settled INSIDE the tool on the operator-budget rail —
+    the job payload carries no estimate_cents, so returning actual_cost_cents=0 keeps run_one from
+    double-settling."""
+    payload = dict(job.payload or {})
+    args = payload.get("args") if isinstance(payload.get("args"), Mapping) else {}
+    work_request_id = str(payload.get("work_request_id") or "").strip()
+    slug = job.business_slug
+    if work_request_id:
+        _update_work_request(slug, work_request_id, status="running", rewrite_distribution=False)
+    try:
+        raw = handler_fn(dict(args))
+        result = _parse_jsonish_output(str(raw or ""))
+        if not isinstance(result, dict) or not result:
+            result = {"success": False, "error": f"{tool_name} returned no parseable result"}
+    except Exception as exc:
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={"result": {"success": False, "error": str(exc)}},
+                rewrite_distribution=False,
+            )
+        raise
+    status = "completed" if result.get("success") else ("blocked" if result.get("blocked") else "failed")
+    if work_request_id:
+        _update_work_request(
+            slug,
+            work_request_id,
+            status=status,
+            payload_updates={"result": result},
+            rewrite_distribution=False,
+        )
+    return JobRunResult(result={"status": status, "work_request_id": work_request_id or None}, actual_cost_cents=0)
+
+
+def claude_agent_task_handler(job: Job) -> JobRunResult:
+    from .core import handle_business_claude_agent_task
+
+    return _operator_tool_task_handler(
+        job, tool_name="business_claude_agent_task", handler_fn=handle_business_claude_agent_task
+    )
+
+
+def product_surface_refresh_handler(job: Job) -> JobRunResult:
+    from .core import handle_business_refresh_product_surface
+
+    return _operator_tool_task_handler(
+        job, tool_name="business_refresh_product_surface", handler_fn=handle_business_refresh_product_surface
+    )
+
+
 # The kind→handler registry the drain consults. New job kinds register here.
 HANDLERS: dict[str, jobs.Handler] = {
     "ceo_bootstrap": ceo_bootstrap_handler,
     "ceo_wake": ceo_wake_handler,
     "x.publish_outreach": x_publish_outreach_handler,
+    "claude.agent_task": claude_agent_task_handler,
+    "product.surface_refresh": product_surface_refresh_handler,
 }
 
 
@@ -1517,6 +1588,10 @@ def run_worker_loop(
     from .runtime_app import resolve_database_url
 
     load_takyon_env()
+    # Mark this process as the worker plane: core's worker-deferral dispatcher must run tools INLINE
+    # here (the surrounding job is already durable; deferring again would starve the drain threads
+    # waiting on their own sub-jobs).
+    os.environ["TAKYON_WORKER_PROCESS"] = "1"
     resolved_url = resolve_database_url(database_url)  # invariant #8: raises if unconfigured
     worker_id = worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
     interval = poll_interval if poll_interval is not None else _env_float(
