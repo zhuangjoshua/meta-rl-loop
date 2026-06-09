@@ -55,6 +55,8 @@ If no style is strongly implied, default to `claude-design-openai`.
 - Prefer a broad container in the rough `1320px` to `1440px` range with generous side gutters, or a deliberate split/full-bleed composition.
 - On very large desktop viewports, treat that as a floor rather than a ceiling; if the page still looks boxed in, widen toward about `1600px` to `1720px` or roughly `90vw`.
 - A reliable large-screen pattern is roughly `min(92vw, 1680px)` with restrained side padding rather than a centered `1400px` frame with big gutters.
+- The masthead or top navigation lane can be a touch wider than the main content lane when that helps the logo, links, and primary CTA breathe.
+- A dependable pattern is a header shell around `min(94vw, 1760px)` while the main hero/body shell sits around `min(92vw, 1680px)`. Keep the difference small and intentional.
 - Do not leave 40% to 60% of the hero visually empty unless that space is doing clear work with a real image, product visual, proof block, or strong atmospheric gesture.
 - If the headline sits in a narrow column, pair it with an equally intentional second column or widen the composition; avoid accidental center-column layouts that feel unfinished.
 - Make the first screen feel composed at laptop width, not just technically responsive.

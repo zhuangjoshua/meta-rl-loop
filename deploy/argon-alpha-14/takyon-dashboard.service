@@ -24,6 +24,7 @@ ReadWritePaths=-/run/docker.sock
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
 WorkingDirectory=/opt/takyon/hermes-agent-main
 EnvironmentFile=-/opt/takyon/.takyon/.env
+EnvironmentFile=-/opt/takyon/secrets/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1

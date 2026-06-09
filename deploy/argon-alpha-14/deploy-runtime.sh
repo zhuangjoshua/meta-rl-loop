@@ -138,6 +138,11 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   # auth state once, then keep it owned by the service user.
   if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
   if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
+  if ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
+    && ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
+    echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
+    exit 1
+  fi
   # A /usr/local/bin/xurl SYMLINK into /root/.local is unreachable for the service under
   # ProtectHome=true — replace it with a real copy once.
   if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then

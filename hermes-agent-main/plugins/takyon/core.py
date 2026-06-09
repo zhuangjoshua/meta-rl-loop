@@ -182,6 +182,8 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition contract:
 - Let the hero actually use the container width. On desktop, prefer a broad container roughly in the `1320px` to `1440px` range unless the brief explicitly calls for a tighter editorial column.
 - On large desktop viewports, widen further when the page still leaves obvious dead margins. A good default is roughly `90vw` capped around `1600px` to `1720px`, not a fixed narrow frame.
 - A strong large-screen default is something like `width: min(92vw, 1680px)` with side padding in the rough `24px` to `40px` range, not a boxed `1400px` shell with oversized gutters.
+- The top masthead/navigation lane may run slightly wider than the main content lane when that keeps the logo, nav, and primary CTA from feeling cramped.
+- A good pattern is a header shell around `min(94vw, 1760px)` while the main hero/body shell sits around `min(92vw, 1680px)`. Keep the difference modest and intentional, not dramatic.
 - Avoid inner max-widths or timid card sizes that leave the page feeling half-empty on laptop screens.
 - The proof rail in a split hero should usually read around `520px` to `680px` wide on desktop and feel like a real half of the first screen, not an accessory.
 - Let the hero headline scale decisively on desktop before wrapping; conservative caps that make the entire composition feel miniature are the wrong tradeoff here.

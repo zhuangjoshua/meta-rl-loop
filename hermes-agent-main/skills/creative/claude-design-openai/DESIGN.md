@@ -138,6 +138,7 @@ The shape system is uniformly soft: 8px–12px radii, 9999px pills for tags and 
 - **Wide default**: for public landing pages, a wider `1320px` to `1440px` container is usually the better default than a restrained `1200px` frame.
 - **Large-screen default**: on big desktop monitors, go wider still when needed — roughly `90vw` capped around `1600px` to `1720px` is often a better target than stopping at `1400px`.
 - **Concrete wide target**: a pattern like `width: min(92vw, 1680px)` with controlled side padding is often a better large-monitor default than a centered `1400px` frame.
+- **Header breathing room**: the masthead can be slightly wider than the main content shell when that keeps the logo, nav, and primary CTA from reading cramped. A useful pattern is roughly `min(94vw, 1760px)` for the header lane over `min(92vw, 1680px)` for the body.
 - **Proof scale**: the right rail in a split hero should often land in the rough `520px` to `680px` range on desktop so it reads as concrete product proof rather than a small ornament.
 - **Headline scale**: editorial restraint does not mean undersized. Let the hero display feel large enough to anchor the whole canvas.
 - **No fake width**: widening the outer container is not enough if both inner hero columns are still capped around the mid-`500px` range. Let at least one side stretch meaningfully wider.

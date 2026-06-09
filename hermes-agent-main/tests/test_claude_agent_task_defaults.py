@@ -257,6 +257,9 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
     assert "90vw" in instruction
     assert "92vw" in instruction
     assert "1680px" in instruction
+    assert "94vw" in instruction
+    assert "1760px" in instruction
+    assert "masthead/navigation lane" in instruction
     assert "58/42" in instruction
 
 

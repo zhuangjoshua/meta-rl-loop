@@ -20,6 +20,7 @@ WorkingDirectory=/opt/takyon/hermes-agent-main
 # missing — safebox_app never falls back to load_takyon_env(), so the unit must load the shared env
 # file. Provision TAKYON_SAFEBOX_TOKEN there before deploying this unit.
 EnvironmentFile=-/opt/takyon/.takyon/.env
+EnvironmentFile=-/opt/takyon/secrets/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1

@@ -39,6 +39,7 @@ Pair this with `claude-design` when the product should feel calm, serious, restr
 - default container around `1320px` to `1440px` with real lateral presence
 - on very wide desktop viewports, push beyond that toward roughly `1600px` to `1720px` or about `90vw` when needed so the composition still feels page-scale
 - a dependable large-screen target is roughly `min(92vw, 1680px)` with modest side padding, not a `1400px` shell marooned in the middle of a huge monitor
+- let the masthead/nav lane run slightly wider than the main content lane when that avoids a pinched top bar; a subtle split like `min(94vw, 1760px)` for header over `min(92vw, 1680px)` for body is healthy
 - let the first screen breathe, but keep the composition intentional across the full viewport
 - if one side of the hero is mostly empty, it should hold a deliberate visual or proof element, not just blank canvas
 - split heroes should feel genuinely side-by-side on desktop, with the right rail visually substantial rather than decorative
