@@ -60,12 +60,10 @@ function Router() {
     activeBusiness,
     workspace,
     creativeCredits,
-    sitePreviewUrl,
     traction,
     tractionRange,
     buildState,
     chatMessages,
-    chatProgress,
     submitting,
     billingBusy,
     topupBusy,
@@ -196,12 +194,10 @@ function Router() {
         business={activeBusiness}
         workspace={workspace}
         creativeCredits={creativeCredits}
-        previewUrl={sitePreviewUrl}
         traction={traction}
         tractionRange={tractionRange}
         theme={theme}
         chatMessages={chatMessages}
-        chatProgress={chatProgress}
         sending={submitting}
         onTheme={setTheme}
         onNav={nav}

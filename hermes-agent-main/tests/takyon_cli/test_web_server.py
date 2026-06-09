@@ -953,11 +953,16 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert body["current"]["name"] == "Alpha"
     assert isinstance(body["overview"], dict)
     assert isinstance(body["outputs"], list)
+    assert isinstance(body["deliverables"], list)
     surface_output = next(
         item for item in body["outputs"] if item.get("path") == "product/surface.md"
     )
+    deliverable = next(
+        item for item in body["deliverables"] if item.get("path") == "product/surface.md"
+    )
     assert surface_output["preview_content"] == "# Alpha\n"
     assert surface_output["preview_truncated"] is False
+    assert deliverable["preview_content"] == "# Alpha\n"
 
 
 def test_business_traction_endpoint_reads_owned_business_directly(monkeypatch):
@@ -1029,9 +1034,11 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
         return {
             "business_slug": business,
             "current": {"slug": business, "name": "Alpha"},
-            "overview": {"product": {"public_url": "https://alpha.example.com"}},
+            "overview": {"product": {"public_url": "https://alpha.example.com", "preview_available": True}},
             "outputs": [],
+            "deliverables": [],
             "background_run": None,
+            "live_state": {"status": "idle", "tasks": []},
         }
 
     async def _fake_to_thread(fn, *args, **kwargs):
@@ -1051,6 +1058,8 @@ def test_business_home_endpoint_reads_owned_shell_directly(monkeypatch):
     assert body["business_slug"] == "alpha"
     assert body["current"]["name"] == "Alpha"
     assert body["overview"]["product"]["public_url"] == "https://alpha.example.com"
+    assert body["overview"]["product"]["preview_available"] is True
+    assert body["deliverables"] == []
     assert captured == {"operator_user_id": "user-123", "business": "alpha"}
 
 

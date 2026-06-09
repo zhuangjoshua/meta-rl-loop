@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
-  buildTakyonBusinessSitePreviewFrameUrl,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonBusinessTractionResponse,
   type TakyonBusinessWorkspaceResponse,
@@ -365,7 +364,6 @@ export function useTakyonLitebulb() {
   const [activeBusiness, setActiveBusiness] = useState<LitebulbBusiness | null>(null);
   const [workspace, setWorkspace] = useState<TakyonBusinessWorkspaceResponse | null>(null);
   const [creativeCredits, setCreativeCredits] = useState<TakyonBusinessCreativeCreditsResponse | null>(null);
-  const [sitePreviewUrl, setSitePreviewUrl] = useState("");
   const [tractionRange, setTractionRange] = useState<"D" | "W" | "M" | "Y">("M");
   const [traction, setTraction] = useState<TakyonBusinessTractionResponse | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -381,7 +379,6 @@ export function useTakyonLitebulb() {
   const sessionBusinessRef = useRef("");
   const assistantMessageIdRef = useRef("");
   const workspacePollRef = useRef<number | null>(null);
-  const homeShellPollRef = useRef<number | null>(null);
   const openingBusinessRef = useRef("");
   const visibleBusinessRef = useRef("");
   const chatMessagesRef = useRef<ChatMessage[]>([]);
@@ -417,46 +414,19 @@ export function useTakyonLitebulb() {
     const workspacePayload = await api.getTakyonBusinessHome(businessSlug);
     if (!isVisibleBusiness(businessSlug)) return;
     setWorkspace((current) => {
-      if (current?.business_slug !== businessSlug) {
+      if (!current || current.business_slug !== businessSlug) {
         return workspacePayload;
       }
-      const nextOutputs = Array.isArray(workspacePayload.outputs) && workspacePayload.outputs.length
-        ? workspacePayload.outputs
-        : current.outputs || [];
-      return {
-        ...current,
-        ...workspacePayload,
-        outputs: nextOutputs,
-      };
+      return current;
     });
   }, [isVisibleBusiness]);
 
   const loadWorkspace = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
-    const [workspaceResult, previewResult] = await Promise.allSettled([
-      api.getTakyonBusinessWorkspace(businessSlug, 60, "full"),
-      api.getTakyonBusinessSitePreview(businessSlug),
-    ]);
-
-    if (workspaceResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {
-      setWorkspace(workspaceResult.value);
-    }
-    if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {
-      const previewPath = trimText(previewResult.value.path) || "product/site";
-      const nextPreviewUrl = trimText(previewResult.value.mode).toLowerCase() === "live_url"
-        ? buildTakyonBusinessSitePreviewFrameUrl(businessSlug, previewPath)
-        : trimText(previewResult.value.url);
-      if (nextPreviewUrl) {
-        setSitePreviewUrl(nextPreviewUrl);
-      }
-    }
-
-    if (workspaceResult.status === "rejected") {
-      throw workspaceResult.reason;
-    }
-    // Keep the last good preview URL instead of blanking the product pane
-    // on transient preview read failures.
+    const workspacePayload = await api.getTakyonBusinessWorkspace(businessSlug, 60, "full");
+    if (!isVisibleBusiness(businessSlug)) return;
+    setWorkspace(workspacePayload);
   }, [isVisibleBusiness]);
 
   const loadCreativeCredits = useCallback(async (slug: string) => {
@@ -611,6 +581,9 @@ export function useTakyonLitebulb() {
       sessionRunningRef.current = true;
       setSessionRunning(true);
       startChatProgress();
+      if (sessionBusinessRef.current) {
+        void loadWorkspace(sessionBusinessRef.current).catch(() => undefined);
+      }
     });
     const offDelta = gateway.on("message.delta", (event) => {
       const text = rawText((event.payload as { text?: string } | undefined)?.text);
@@ -840,7 +813,6 @@ export function useTakyonLitebulb() {
       setWorkspace(null);
       setCreativeCredits(null);
       setTraction(null);
-      setSitePreviewUrl("");
       chatMessagesRef.current = [];
       sessionRunningRef.current = false;
       setChatMessages([]);
@@ -894,6 +866,7 @@ export function useTakyonLitebulb() {
             session_id: sessionId,
             text: value,
           });
+          void loadWorkspace(activeBusiness.slug).catch(() => undefined);
           return;
         } catch (error) {
           if (isMissingSessionError(error)) {
@@ -925,7 +898,7 @@ export function useTakyonLitebulb() {
       clearChatProgress();
       setSubmitting(false);
     }
-  }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, startChatProgress]);
+  }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, loadWorkspace, startChatProgress]);
 
   const createBusiness = useCallback(async (goal: string) => {
     const idea = trimText(goal);
@@ -952,6 +925,7 @@ export function useTakyonLitebulb() {
         current?: Record<string, unknown>;
         overview?: Record<string, unknown>;
         outputs?: unknown[];
+        deliverables?: unknown[];
         background_run?: Record<string, unknown> | null;
         live_state?: Record<string, unknown> | null;
         streaming?: boolean;
@@ -965,6 +939,7 @@ export function useTakyonLitebulb() {
             current?: Record<string, unknown>;
             overview?: Record<string, unknown>;
             outputs?: unknown[];
+            deliverables?: unknown[];
             background_run?: Record<string, unknown> | null;
             live_state?: Record<string, unknown> | null;
             streaming?: boolean;
@@ -1013,12 +988,12 @@ export function useTakyonLitebulb() {
         tagline: idea,
         meta: "Live mode",
       });
-      setSitePreviewUrl("");
       setWorkspace({
         business_slug: businessSlug,
         current: result?.current || {},
         overview: result?.overview || {},
         outputs: result?.outputs || [],
+        deliverables: result?.deliverables || [],
         background_run: result?.background_run || null,
         live_state: result?.live_state || null,
       });
@@ -1093,7 +1068,6 @@ export function useTakyonLitebulb() {
     setActiveBusiness(null);
     setWorkspace(null);
     setCreativeCredits(null);
-    setSitePreviewUrl("");
     setTraction(null);
     chatMessagesRef.current = [];
     setChatMessages([]);
@@ -1152,34 +1126,23 @@ export function useTakyonLitebulb() {
   }, [ensureGateway, sessionRunning, submitting]);
 
   useEffect(() => {
-    if (homeShellPollRef.current !== null) {
-      window.clearInterval(homeShellPollRef.current);
-      homeShellPollRef.current = null;
-    }
     if (workspacePollRef.current !== null) {
       window.clearInterval(workspacePollRef.current);
       workspacePollRef.current = null;
     }
     if (!activeBusiness?.slug || auth.status !== "in") return;
-    homeShellPollRef.current = window.setInterval(() => {
-      void loadBusinessHomeShell(activeBusiness.slug);
-    }, 2500);
     workspacePollRef.current = window.setInterval(() => {
       void loadWorkspace(activeBusiness.slug);
       void loadCreativeCredits(activeBusiness.slug);
       void loadTraction(activeBusiness.slug, tractionRange);
     }, 8000);
     return () => {
-      if (homeShellPollRef.current !== null) {
-        window.clearInterval(homeShellPollRef.current);
-        homeShellPollRef.current = null;
-      }
       if (workspacePollRef.current !== null) {
         window.clearInterval(workspacePollRef.current);
         workspacePollRef.current = null;
       }
     };
-  }, [activeBusiness?.slug, auth.status, loadBusinessHomeShell, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
+  }, [activeBusiness?.slug, auth.status, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
 
   const walletBalance = useMemo(() => {
     if (!account?.available) return null;
@@ -1196,7 +1159,6 @@ export function useTakyonLitebulb() {
     activeBusiness,
     workspace,
     creativeCredits,
-    sitePreviewUrl,
     traction,
     tractionRange,
     setTractionRange,

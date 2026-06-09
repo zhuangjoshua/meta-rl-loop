@@ -7,10 +7,11 @@ import type {
   TakyonBusinessTractionResponse,
   TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
+import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
-import type { ChatMessage, ChatProgress, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import type { ChatMessage, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { CompanyTab } from "./CompanyTab";
 import { BulbMark } from "../shared/icons";
 import "./product.css";
@@ -41,8 +42,8 @@ function siteHost(name: string) {
 
 function liveStateProgress(
   workspace: TakyonBusinessWorkspaceResponse | null,
-): ChatProgress | null {
-  const liveProgress = (statusValue: unknown, ...parts: unknown[]): ChatProgress | null => {
+): { text: string; live: boolean } | null {
+  const liveProgress = (statusValue: unknown, ...parts: unknown[]) => {
     const status = String(statusValue || "").trim().toLowerCase();
     if (!status || ["done", "completed", "success", "failed", "error", "blocked", "cancelled", "idle"].includes(status)) {
       return null;
@@ -59,12 +60,6 @@ function liveStateProgress(
   const state = workspace?.live_state;
   if (state && typeof state === "object") {
     const payload = state as Record<string, unknown>;
-    const progress = liveProgress(payload.status, payload.detail);
-    if (progress) return progress;
-  }
-  const run = workspace?.background_run;
-  if (run && typeof run === "object") {
-    const payload = run as Record<string, unknown>;
     const progress = liveProgress(payload.status, payload.detail);
     if (progress) return progress;
   }
@@ -201,7 +196,7 @@ function AgentChat({
 }: {
   business: LitebulbBusiness;
   messages: ChatMessage[];
-  progress: ChatProgress | null;
+  progress: { text: string; live: boolean } | null;
   tab: TabKey;
   sending: boolean;
   onTab: (tab: TabKey) => void;
@@ -294,23 +289,26 @@ function AgentChat({
 function ProductPreview({
   business,
   workspace,
-  previewUrl,
   publicUrl,
 }: {
   business: LitebulbBusiness;
   workspace: TakyonBusinessWorkspaceResponse | null;
-  previewUrl: string;
   publicUrl?: string;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
   const site = publicUrl || siteHost(business.name);
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
+  const previewAvailable = Boolean(product.preview_available);
+  const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";
+  const previewStatus = typeof product.preview_status === "string" ? product.preview_status : "";
   const outputs = Array.isArray(workspace?.outputs) ? workspace.outputs : [];
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  const frameUrl = previewUrl || publicUrl || "";
+  const frameUrl = previewAvailable
+    ? buildTakyonBusinessSitePreviewFrameUrl(business.slug, previewPath)
+    : "";
   const hasLocalSource = Boolean(
     sourcePath
     || outputs.some((item) => {
@@ -319,8 +317,12 @@ function ProductPreview({
       return path.startsWith("product/site/");
     }),
   );
+  const stateLabel = String(previewStatus || publishStatus || productStatus || "").trim().toLowerCase();
   const isLoading = !workspace;
-  const isBuilding = !frameUrl && !isLoading && hasLocalSource && publishStatus !== "published";
+  const isBuilding = !frameUrl && !isLoading && (
+    hasLocalSource
+    || ["queued", "scheduled", "pending", "running", "ready", "local_source"].includes(stateLabel)
+  );
   const detail = isLoading
     ? "Loading the product workspace and preview surface."
     : isBuilding
@@ -377,12 +379,10 @@ export function Product({
   business,
   workspace,
   creativeCredits,
-  previewUrl,
   traction,
   tractionRange,
   theme,
   chatMessages,
-  chatProgress,
   sending,
   onTheme,
   onNav,
@@ -395,12 +395,10 @@ export function Product({
   business: LitebulbBusiness;
   workspace: TakyonBusinessWorkspaceResponse | null;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
-  previewUrl: string;
   traction: TakyonBusinessTractionResponse | null;
   tractionRange: "D" | "W" | "M" | "Y";
   theme: Theme;
   chatMessages: ChatMessage[];
-  chatProgress: ChatProgress | null;
   sending: boolean;
   onTheme: (theme: Theme) => void;
   onNav: (hash: string) => void;
@@ -418,7 +416,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  const effectiveProgress = liveStateProgress(workspace) ?? (!workspace ? chatProgress : null);
+  const effectiveProgress = liveStateProgress(workspace);
 
   useEffect(() => {
     setTab("company");
@@ -451,7 +449,7 @@ export function Product({
 
         <div className={`lb-main${tab === "product" ? " lb-main--preview" : ""}`}>
           {tab === "product" ? (
-            <ProductPreview business={business} workspace={workspace} previewUrl={previewUrl} publicUrl={publicUrl} />
+            <ProductPreview business={business} workspace={workspace} publicUrl={publicUrl} />
           ) : (
             <CompanyTab
               business={business}

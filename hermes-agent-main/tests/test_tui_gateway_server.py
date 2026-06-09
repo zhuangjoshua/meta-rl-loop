@@ -6001,6 +6001,10 @@ def test_workspace_payload_reuses_summary_for_current_and_overview(monkeypatch):
     payload = server._takyon_workspace_payload({"takyon_operator_user_id": "demo"}, "demo")
 
     assert payload["current"] == {"slug": "demo", "name": "Demo"}
+    assert payload["deliverables"] == []
+    assert payload["overview"]["product"]["preview_available"] is False
+    assert payload["overview"]["product"]["preview_path"] == "product/site"
+    assert payload["overview"]["product"]["preview_status"] == "draft"
     assert captured["slug"] == "demo"
     assert captured["summary_data"] == summary_payload
     assert calls == [("business:demo", "summary")]
@@ -6044,8 +6048,17 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
     assert payload == {
         "business_slug": "demo",
         "current": {"name": "Demo", "goal": "Fast workspace", "mode": "test"},
-        "overview": {"metrics": {"users": 3}, "product": {"public_url": "https://demo.test"}},
+        "overview": {
+            "metrics": {"users": 3},
+            "product": {
+                "public_url": "https://demo.test",
+                "preview_available": True,
+                "preview_path": "product/site",
+                "preview_status": "published",
+            },
+        },
         "outputs": [],
+        "deliverables": [],
         "background_run": None,
         "live_state": {
             "status": "idle",
@@ -6056,6 +6069,70 @@ def test_workspace_boot_payload_uses_home_snapshot(monkeypatch):
         },
     }
     assert captured["sync_files"] is False
+
+
+def test_workspace_payload_promotes_deliverables_and_preview_metadata(monkeypatch):
+    class _FakeStore:
+        def read(self, scope, query, **kwargs):
+            if query == "summary":
+                return {"business": {"slug": "demo", "name": "Demo"}}
+            return {}
+
+    monkeypatch.setattr(server, "_takyon_store", lambda session: _FakeStore())
+    monkeypatch.setattr(
+        server,
+        "_takyon_business_overview_payload",
+        lambda store, slug, *, summary_data=None: {
+            "product": {
+                "publish_status": "draft",
+                "public_url": "",
+            },
+            "artifacts": {
+                "website": {
+                    "status": "local_source",
+                    "path": "product/site/index.html",
+                },
+            },
+            "research": {
+                "outputs": [
+                    {
+                        "path": "research/strategy.md",
+                        "updated_at": 20,
+                        "source": "research",
+                    },
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_historical_outputs_payload",
+        lambda store, slug, limit=50: [
+            {
+                "id": "out:site",
+                "title": "index.html",
+                "detail": "Website surface",
+                "path": "product/site/index.html",
+                "kind": "file",
+                "at": 10,
+                "preview_content": "<html />",
+                "preview_truncated": False,
+                "preview_size": 8,
+            },
+        ],
+    )
+    monkeypatch.setattr(server, "_takyon_get_background_run", lambda slug: None)
+    monkeypatch.setattr(server, "_takyon_reconcile_background_run", lambda slug, run, overview: None)
+
+    payload = server._takyon_workspace_payload({"takyon_operator_user_id": "demo"}, "demo")
+
+    assert [item["path"] for item in payload["deliverables"]] == [
+        "research/strategy.md",
+        "product/site/index.html",
+    ]
+    assert payload["overview"]["product"]["preview_available"] is True
+    assert payload["overview"]["product"]["preview_path"] == "product/site"
+    assert payload["overview"]["product"]["preview_status"] == "ready"
 
 
 def test_live_state_payload_marks_failed_when_only_stale_running_tasks_remain():

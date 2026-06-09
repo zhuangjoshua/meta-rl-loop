@@ -53,8 +53,6 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
 
 const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
 const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
-const DOCUMENT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ...MEDIA_OUTPUT_SUFFIXES]);
-const DOCUMENT_OUTPUT_KINDS = new Set(["image", "video", "receipt", "report"]);
 const CHANNEL_BUDGET_KEYS: ChannelBudgetKey[] = ["x", "meta", "reddit"];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -123,65 +121,6 @@ function outputSuffix(path: string) {
   const clean = asText(path).toLowerCase();
   const index = clean.lastIndexOf(".");
   return index >= 0 ? clean.slice(index) : "";
-}
-
-function isDocumentDeliverable(output: Record<string, unknown>) {
-  const path = asText(output.path);
-  const suffix = outputSuffix(path);
-  const kind = asText(output.kind).toLowerCase();
-  return DOCUMENT_OUTPUT_KINDS.has(kind) || DOCUMENT_OUTPUT_SUFFIXES.has(suffix);
-}
-
-function asDocumentOutput(output: Record<string, unknown>) {
-  const path = asText(output.path);
-  const title = asText(output.title) || path.split("/").pop() || "Output";
-  const kind = asText(output.kind) || "file";
-  const source = asText(output.source);
-  const detail = asText(output.detail)
-    || (source === "brain" ? "Business brain artifact" : source === "research" ? "Research artifact" : "Business artifact");
-  return {
-    id: asText(output.id) || `doc:${path || title}`,
-    title,
-    detail,
-    path,
-    kind,
-    at: Number(output.at || output.updated_at || 0),
-    preview_content: output.preview_content,
-    preview_truncated: output.preview_truncated,
-    preview_size: output.preview_size,
-  };
-}
-
-function mergeDocumentOutputs(
-  outputs: Array<Record<string, unknown>>,
-  researchOutputs: Array<Record<string, unknown>>,
-) {
-  const byPath = new Map<string, Record<string, unknown>>();
-  const push = (output: Record<string, unknown>) => {
-    const normalized = asDocumentOutput(output);
-    const path = asText(normalized.path);
-    const key = path || asText(normalized.id);
-    if (!key) return;
-    const current = byPath.get(key);
-    if (!current) {
-      byPath.set(key, normalized);
-      return;
-    }
-    const currentHasPreview = typeof current.preview_content === "string";
-    const nextHasPreview = typeof normalized.preview_content === "string";
-    if (!currentHasPreview && nextHasPreview) {
-      byPath.set(key, { ...current, ...normalized });
-      return;
-    }
-    const currentAt = Number(current.at || 0);
-    const nextAt = Number(normalized.at || 0);
-    if (nextAt >= currentAt) {
-      byPath.set(key, { ...current, ...normalized });
-    }
-  };
-  outputs.forEach(push);
-  researchOutputs.forEach(push);
-  return Array.from(byPath.values()).sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
 }
 
 function inlinePreviewFile(
@@ -623,16 +562,15 @@ function ChannelBudget({
 
 function Documents({
   business,
-  outputs,
+  deliverables,
 }: {
   business: LitebulbBusiness;
-  outputs: Array<Record<string, unknown>>;
+  deliverables: Array<Record<string, unknown>>;
 }) {
   const [preview, setPreview] = useState<DocumentPreviewState | null>(null);
   const fileCacheRef = useRef<Map<string, TakyonBusinessFileReadResponse>>(new Map());
   const pendingReadsRef = useRef<Map<string, Promise<TakyonBusinessFileReadResponse>>>(new Map());
-  const documentOutputs = outputs.filter(isDocumentDeliverable);
-  const visible = documentOutputs.slice(0, 6);
+  const visible = deliverables.slice(0, 6);
 
   const loadDocument = useCallback((path: string) => {
     const cached = fileCacheRef.current.get(path);
@@ -719,7 +657,7 @@ function Documents({
   return (
     <>
       <section className="lb-card lb-docs">
-        <div className="lb-h">Documents<span className="lb-h__c">{documentOutputs.length} generated</span></div>
+        <div className="lb-h">Documents<span className="lb-h__c">{deliverables.length} generated</span></div>
         <div className="lb-docs__grid">
           {visible.map((output, index) => (
             <button
@@ -919,18 +857,9 @@ export function CompanyTab({
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
-  const overview = useMemo(() => asRecord(workspace?.overview), [workspace]);
   const liveState = useMemo(() => asRecord(workspace?.live_state), [workspace]);
   const tasks = useMemo(() => asList(liveState.tasks), [liveState]);
-  const outputs = useMemo(
-    () => mergeDocumentOutputs(
-      asList(workspace?.outputs),
-      asList(asRecord(overview.research).outputs).length
-        ? asList(asRecord(overview.research).outputs)
-        : asList(overview.research_outputs),
-    ),
-    [overview, workspace],
-  );
+  const deliverables = useMemo(() => asList(workspace?.deliverables), [workspace]);
 
   return (
     <div className="lb-comp">
@@ -945,7 +874,7 @@ export function CompanyTab({
           />
         </div>
         <Distribution business={business} workspace={workspace} />
-        <Documents business={business} outputs={outputs} />
+        <Documents business={business} deliverables={deliverables} />
       </div>
     </div>
   );

@@ -766,6 +766,7 @@ export interface TakyonBusinessWorkspaceResponse {
   current?: Record<string, unknown>;
   overview?: Record<string, unknown>;
   outputs?: unknown[];
+  deliverables?: unknown[];
   background_run?: Record<string, unknown> | null;
   live_state?: Record<string, unknown> | null;
 }

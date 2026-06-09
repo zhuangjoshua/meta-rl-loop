@@ -8060,6 +8060,149 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
     return outputs[: max(1, min(int(limit or 40), 100))]
 
 
+def _takyon_preview_path(path: Any) -> str:
+    text = str(path or "").strip().strip("/")
+    if not text:
+        return "product/site"
+    if text == "product/site/index.html":
+        return "product/site"
+    if text.startswith("product/site/"):
+        return "product/site"
+    return text
+
+
+def _takyon_workspace_deliverables_payload(
+    overview: dict[str, Any] | None,
+    outputs: list[dict[str, Any]] | None,
+    *,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    def as_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def read_at(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def normalize(output: dict[str, Any]) -> dict[str, Any] | None:
+        path = as_text(output.get("path"))
+        title = as_text(output.get("title")) or (Path(path).name if path else "Output")
+        source = as_text(output.get("source")).lower()
+        detail = as_text(output.get("detail"))
+        if not detail:
+            if source == "research":
+                detail = "Research artifact"
+            elif source == "brain":
+                detail = "Business brain artifact"
+            else:
+                detail = "Business artifact"
+        item = {
+            "id": as_text(output.get("id")) or f"deliverable:{path or title}",
+            "title": title,
+            "detail": detail,
+            "path": path,
+            "kind": as_text(output.get("kind")) or "file",
+            "source": source or "workspace",
+            "at": read_at(output.get("at") or output.get("updated_at") or output.get("created_at")),
+        }
+        for key in ("preview_content", "preview_truncated", "preview_size", "size", "updated_at", "created_at"):
+            if key in output and output.get(key) not in (None, ""):
+                item[key] = output.get(key)
+        return item
+
+    def merge_item(by_key: dict[str, dict[str, Any]], output: dict[str, Any]) -> None:
+        item = normalize(output)
+        if not item:
+            return
+        key = as_text(item.get("path")) or as_text(item.get("id"))
+        if not key:
+            return
+        current = by_key.get(key)
+        if current is None:
+            by_key[key] = item
+            return
+        current_has_preview = isinstance(current.get("preview_content"), str)
+        next_has_preview = isinstance(item.get("preview_content"), str)
+        if not current_has_preview and next_has_preview:
+            by_key[key] = {**current, **item}
+            return
+        if read_at(item.get("at")) >= read_at(current.get("at")):
+            by_key[key] = {**current, **item}
+
+    merged: dict[str, dict[str, Any]] = {}
+    for output in outputs or []:
+        if isinstance(output, dict):
+            merge_item(merged, output)
+
+    overview_dict = as_dict(overview)
+    research = as_dict(overview_dict.get("research"))
+    research_outputs = research.get("outputs")
+    if not isinstance(research_outputs, list) or not research_outputs:
+        research_outputs = overview_dict.get("research_outputs")
+    for output in as_list(research_outputs):
+        if isinstance(output, dict):
+            merge_item(merged, output)
+
+    deliverables = list(merged.values())
+    deliverables.sort(key=lambda item: read_at(item.get("at")), reverse=True)
+    return deliverables[: max(1, min(int(limit or 60), 120))]
+
+
+def _takyon_workspace_preview_payload(
+    overview: dict[str, Any] | None,
+    outputs: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    overview_dict = as_dict(overview)
+    product = as_dict(overview_dict.get("product"))
+    artifacts = as_dict(overview_dict.get("artifacts"))
+    website = as_dict(artifacts.get("website"))
+    public_url = as_text(product.get("public_url") or website.get("public_url"))
+    local_paths = [
+        as_text(website.get("path")),
+        *[
+            as_text(item.get("path"))
+            for item in (outputs or [])
+            if isinstance(item, dict)
+        ],
+    ]
+    local_preview_path = next(
+        (
+            _takyon_preview_path(path)
+            for path in local_paths
+            if path.startswith("product/site")
+        ),
+        "product/site",
+    )
+    has_local_preview = any(path.startswith("product/site") for path in local_paths)
+    preview_status = (
+        "published"
+        if public_url
+        else "ready"
+        if has_local_preview
+        else as_text(product.get("publish_status") or website.get("publish_status") or product.get("status") or website.get("status"))
+        or "missing"
+    )
+    return {
+        "preview_path": local_preview_path,
+        "preview_available": bool(public_url or has_local_preview),
+        "preview_status": preview_status,
+    }
+
+
 def _takyon_session(params: dict) -> dict | None:
     return _sessions.get(str(params.get("session_id") or ""))
 
@@ -8668,6 +8811,7 @@ def _takyon_workspace_boot_payload(
             "current": {},
             "overview": {},
             "outputs": [],
+            "deliverables": [],
             "background_run": None,
             "live_state": {
                 "status": "idle",
@@ -8689,15 +8833,29 @@ def _takyon_workspace_boot_payload(
         _takyon_get_background_run(slug),
         overview if isinstance(overview, dict) else {},
     )
+    deliverables = _takyon_workspace_deliverables_payload(
+        overview if isinstance(overview, dict) else {},
+        [],
+    )
     live_state = _takyon_live_state_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
     )
+    overview_payload = dict(overview) if isinstance(overview, dict) else {}
+    product_payload = dict(overview_payload.get("product") or {})
+    product_payload.update(
+        _takyon_workspace_preview_payload(
+            overview_payload,
+            [],
+        )
+    )
+    overview_payload["product"] = product_payload
     return {
         "business_slug": slug,
         "current": current if isinstance(current, dict) else {},
-        "overview": overview if isinstance(overview, dict) else {},
+        "overview": overview_payload,
         "outputs": [],
+        "deliverables": deliverables,
         "background_run": background_run,
         "live_state": live_state,
     }
@@ -8717,6 +8875,7 @@ def _takyon_workspace_payload(
             "current": {},
             "overview": {},
             "outputs": [],
+            "deliverables": [],
             "background_run": None,
             "live_state": {
                 "status": "idle",
@@ -8740,6 +8899,10 @@ def _takyon_workspace_payload(
         slug,
         limit=max(1, min(int(output_limit or 50), 100)),
     )
+    deliverables = _takyon_workspace_deliverables_payload(
+        overview if isinstance(overview, dict) else {},
+        outputs if isinstance(outputs, list) else [],
+    )
     background_run = _takyon_reconcile_background_run(
         slug,
         _takyon_get_background_run(slug),
@@ -8749,11 +8912,21 @@ def _takyon_workspace_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
     )
+    overview_payload = dict(overview) if isinstance(overview, dict) else {}
+    product_payload = dict(overview_payload.get("product") or {})
+    product_payload.update(
+        _takyon_workspace_preview_payload(
+            overview_payload,
+            outputs if isinstance(outputs, list) else [],
+        )
+    )
+    overview_payload["product"] = product_payload
     return {
         "business_slug": slug,
         "current": current,
-        "overview": overview if isinstance(overview, dict) else {},
+        "overview": overview_payload,
         "outputs": outputs if isinstance(outputs, list) else [],
+        "deliverables": deliverables,
         "background_run": background_run,
         "live_state": live_state,
     }
@@ -8803,6 +8976,7 @@ def _takyon_dashboard_state_payload(
         "current": workspace.get("current") or {},
         "overview": workspace.get("overview") or {},
         "outputs": workspace.get("outputs") or [],
+        "deliverables": workspace.get("deliverables") or [],
         "background_run": workspace.get("background_run"),
         "live_state": workspace.get("live_state") or {},
         "auto_switched_business": auto_slug or "",
@@ -9469,6 +9643,7 @@ def _(rid, params: dict) -> dict:
                     "current": current,
                     "overview": workspace.get("overview") or {},
                     "outputs": workspace.get("outputs") or [],
+                    "deliverables": workspace.get("deliverables") or [],
                     "background_run": None,
                     "live_state": workspace.get("live_state") or {},
                     "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
@@ -9510,6 +9685,7 @@ def _(rid, params: dict) -> dict:
                     "current": current,
                     "overview": workspace.get("overview") or {},
                     "outputs": workspace.get("outputs") or [],
+                    "deliverables": workspace.get("deliverables") or [],
                     "background_run": workspace.get("background_run") or session.get("takyon_background_run"),
                     "live_state": workspace.get("live_state") or {},
                     "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
@@ -9642,6 +9818,7 @@ def _(rid, params: dict) -> dict:
                 "current": current,
                 "overview": workspace.get("overview") or {},
                 "outputs": workspace.get("outputs") or [],
+                "deliverables": workspace.get("deliverables") or [],
                 "background_run": workspace.get("background_run"),
                 "live_state": workspace.get("live_state") or {},
                 "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),

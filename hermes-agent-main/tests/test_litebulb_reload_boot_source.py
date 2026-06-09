@@ -20,28 +20,34 @@ def test_open_business_boots_shell_before_full_workspace_refresh():
 
     assert 'const loadBusinessHomeShell = useCallback(async (slug: string) => {' in source
     assert 'api.getTakyonBusinessHome(businessSlug)' in source
+    assert 'if (!current || current.business_slug !== businessSlug) {' in source
+    assert 'return current;' in source
     assert 'if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {' in source
     assert 'setChatMessages([]);' in source
     assert 'loadBusinessHomeShell(businessSlug).catch(() => undefined),' in source
     assert 'void loadWorkspace(businessSlug).catch(() => undefined);' in source
 
 
-def test_full_workspace_load_parallelizes_preview_fetch():
+def test_full_workspace_load_uses_only_the_workspace_snapshot():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
-    assert "const [workspaceResult, previewResult] = await Promise.allSettled([" in source
+    assert "const workspacePayload = await api.getTakyonBusinessWorkspace(businessSlug, 60, \"full\");" in source
+    assert "setWorkspace(workspacePayload);" in source
     assert 'api.getTakyonBusinessWorkspace(businessSlug, 60, "full")' in source
-    assert "api.getTakyonBusinessSitePreview(businessSlug)" in source
-    assert 'buildTakyonBusinessSitePreviewFrameUrl(businessSlug, previewPath)' in source
+    assert "api.getTakyonBusinessSitePreview(businessSlug)" not in source
+    assert "Promise.allSettled" not in source
 
 
-def test_published_product_preview_uses_preview_proxy_before_public_url():
+def test_published_product_preview_uses_workspace_preview_metadata():
     source = (REPO_ROOT / "web" / "src" / "litebulb" / "product" / "Product.tsx").read_text(encoding="utf-8")
 
-    assert 'const frameUrl = previewUrl || publicUrl || "";' in source
+    assert 'const previewAvailable = Boolean(product.preview_available);' in source
+    assert 'const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";' in source
+    assert 'buildTakyonBusinessSitePreviewFrameUrl(business.slug, previewPath)' in source
+    assert "previewUrl" not in source
 
 
-def test_business_switch_ignores_stale_workspace_preview_and_session_writes():
+def test_business_switch_ignores_stale_workspace_and_session_writes():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 
     assert 'const visibleBusinessRef = useRef("");' in source
@@ -50,12 +56,20 @@ def test_business_switch_ignores_stale_workspace_preview_and_session_writes():
     assert "const isVisibleBusiness = useCallback((slug: string) => {" in source
     assert 'return Boolean(businessSlug) && isVisibleScope(businessSlug);' in source
     assert "if (!isVisibleBusiness(businessSlug)) return;" in source
-    assert 'if (workspaceResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
-    assert 'if (previewResult.status === "fulfilled" && isVisibleBusiness(businessSlug)) {' in source
+    assert 'setWorkspace(workspacePayload);' in source
+    assert "sitePreviewUrl" not in source
     assert 'if (!isVisibleScope(businessSlug)) return "";' in source
     assert "visibleBusinessRef.current = businessSlug;" in source
     assert 'sessionIdRef.current = "";' in source
     assert 'sessionBusinessRef.current = "";' in source
+
+
+def test_litebulb_polls_only_the_workspace_snapshot_after_boot():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert "homeShellPollRef" not in source
+    assert "window.setInterval(() => {\n      void loadWorkspace(activeBusiness.slug);" in source
+    assert "loadBusinessHomeShell(activeBusiness.slug);" not in source
 
 
 def test_litebulb_reuses_stored_session_before_creating_a_new_one():

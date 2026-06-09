@@ -3612,7 +3612,15 @@ def _read_takyon_business_workspace(
         "current": {},
         "overview": {},
         "outputs": [],
+        "deliverables": [],
         "background_run": None,
+        "live_state": {
+            "status": "idle",
+            "label": "Idle",
+            "detail": "",
+            "updated_at": "",
+            "tasks": [],
+        },
     }
 
 
