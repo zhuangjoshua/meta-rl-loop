@@ -20884,8 +20884,9 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
 # (same args + idempotency_key) re-attaches to the SAME run via commit idempotency.
 # Deferral is skipped only inside the worker process itself (TAKYON_WORKER_PROCESS=1 — the
 # surrounding job is already durable, and waiting on a sub-job could starve the drain threads).
-# Operator turns with session-local workspace overrides now fail closed instead of silently falling
-# back inline: durable worker execution requires the canonical business workspace.
+# Business-scoped dashboard sessions still carry a session workspace root, but that workspace is
+# the canonical business mirror for the current slug; worker deferral must preserve that path
+# instead of misclassifying it as an unsafe local override and surfacing a fake platform blocker.
 
 _WORK_REQUEST_TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 _WORKER_DEFERRAL_POLL_SECONDS = 3.0
@@ -21005,11 +21006,6 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
     if not _operator_tasks_via_worker_enabled():
         return None
     store = _store()
-    if _session_business_slug() and getattr(store, "_workspace_root_override", None) is not None:
-        raise TakyonError(
-            "business_claude_agent_task requires the canonical business workspace when "
-            "TAKYON_OPERATOR_TASKS_VIA_WORKER=1; session-local workspace overrides are not supported"
-        )
     business = _resolved_business_slug(args, required=True)
     instruction = str(args.get("instruction") or "").strip()
     if not instruction:

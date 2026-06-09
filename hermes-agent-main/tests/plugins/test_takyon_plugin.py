@@ -6838,25 +6838,36 @@ def test_defer_claude_agent_task_detaches_when_wait_budget_expires(monkeypatch):
     assert "idempotency_key" in result["note"]
 
 
-def test_defer_claude_agent_task_rejects_session_local_workspace_override(monkeypatch):
+def test_defer_claude_agent_task_allows_business_session_canonical_workspace(monkeypatch):
     monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
     monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
 
-    class _SessionStoreStub:
+    class _SessionStoreStub(_DeferralStoreStub):
         _workspace_root_override = "/tmp/takyon-session-workspace"
 
-    monkeypatch.setattr(takyon_core, "_store", lambda: _SessionStoreStub())
+    store = _SessionStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "acme")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
+    monkeypatch.setattr(
+        takyon_core,
+        "_read_work_request_run",
+        lambda _store, _run_id: ("completed", {"result": {"success": True, "summary": "done"}}),
+    )
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
 
-    with pytest.raises(TakyonError, match="session-local workspace overrides are not supported"):
-        takyon_core._defer_claude_agent_task_to_worker(
-            {
-                "business": "acme",
-                "instruction": "build",
-                "idempotency_key": "task-override",
-                "workspace": "product/site",
-            }
-        )
+    raw = takyon_core._defer_claude_agent_task_to_worker(
+        {
+            "business": "acme",
+            "instruction": "build",
+            "idempotency_key": "task-override",
+            "workspace": "product/site",
+        }
+    )
+    result = json.loads(raw)
+    assert result["success"] is True
+    assert result["summary"] == "done"
+    assert store.commits[0]["operations"][0]["payload"]["args"]["workspace"] == "product/site"
 
 
 def test_defer_product_surface_refresh_rejects_session_bound_call(monkeypatch):
