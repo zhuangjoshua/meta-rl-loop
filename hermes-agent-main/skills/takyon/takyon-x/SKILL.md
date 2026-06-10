@@ -15,7 +15,7 @@ metadata:
       [
         business_read_business,
         business_calculate_pulse,
-        business_publish_outreach,
+        business_x_publish_outreach,
         business_record_conversation_message,
         business_update_conversation_message_status,
       ]
@@ -70,7 +70,7 @@ If `distribution/voice/x.md` is missing, stale, or weak and X is a repeated lane
 - Primary root: `distribution/`
 - Publication paths: `distribution/voice/x.md`, `distribution/campaign/`, `distribution/local-published/`, `metrics/conversations/`
 - Best call points: X posting, X replies, X thread handling, X voice maintenance
-- Tools: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_list_conversation_messages`, `business_read_conversation_thread`, `business_write_file`, `business_patch_file`, `business_publish_outreach`, `business_publish_test_outreach`, `business_record_conversation_message`, `business_update_conversation_message_status`, `business_enqueue_job`
+- Tools: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_list_conversation_messages`, `business_read_conversation_thread`, `business_write_file`, `business_patch_file`, `business_x_publish_outreach`, `business_publish_test_outreach`, `business_record_conversation_message`, `business_update_conversation_message_status`, `business_enqueue_job`
 - Live budget rule: live X publication spends the fixed X creative-credit price from the business X bucket; a business with at least 1 total creative credit starts with 1 credit allocated to X by default
 
 **Copy engine (how to write):**
@@ -133,8 +133,8 @@ None. Copy is crafted from the references and published through the Takyon busin
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only legacy X drafts live under `distribution/phase-1-outreach/`, move or merge that visible state forward before drafting new work.
 - Keep in-progress X drafts visible under `distribution/campaign/` when the turn is not publishing immediately.
 - Draft with the copy engine (hooks → build → refine → de-Claude/humanize → set edge dial), then ship one send-ready piece.
-- Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
-- In live mode, treat `business_publish_outreach` as a spendful path: the actual worker-backed X publish charges the X bucket, so leave enough X channel budget before asking it to send.
+- Prefer `business_x_publish_outreach` as the main live publish path. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
+- In live mode, treat `business_x_publish_outreach` as a spendful path: the actual worker-backed X publish charges the X bucket, so leave enough X channel budget before asking it to send.
 - Use `business_record_conversation_message` and `business_update_conversation_message_status` so the thread state stays truthful after a draft, suppressed publication, or real publish outcome.
 
 ## Procedure
@@ -144,8 +144,8 @@ None. Copy is crafted from the references and published through the Takyon busin
 3. **If this is a reply:** read the target thread first. Draft exactly one send-ready reply by default — one move, usually 1–2 sentences — using `references/x-playbook.md` (Replies) and the edge dial in `references/voice-and-edge.md`. Answer the real thing (the false tradeoff, the smug premise, the outdated assumption), not always the literal claim. No variants unless the operator asks.
 4. **If this is a top-level post or thread:** read current `research/` state first, then draft one send-ready piece with one concrete payload. Use that research state to choose the audience, promise, objection, and hook. Generate hooks (`references/hook-library.md`), build with `references/x-playbook.md`, then run the refinement and de-Claude passes (`references/refinement-protocol.md`, `references/ai-tells.md`). Prefer a real number, product contrast, tradeoff, or direct observation over generic positioning.
 5. If the turn is still in draft mode, keep the draft visible under `distribution/campaign/` rather than pretending it was published.
-6. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a conversation mirror or receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
-7. If the business is in live mode and the publish path is provider-backed, call `business_publish_outreach` and inspect the resulting receipt, job, or blocker. If the channel requires deferred action rather than immediate publication, record that next step with `business_enqueue_job`.
+6. If the business is in test mode or the publish path should remain local, call `business_x_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a conversation mirror or receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
+7. If the business is in live mode and the publish path is provider-backed, call `business_x_publish_outreach` and inspect the resulting receipt, job, or blocker. If the channel requires deferred action rather than immediate publication, record that next step with `business_enqueue_job`.
 8. After the draft or publish step, keep `metrics/conversations/` truthful with the conversation tools. Do not mark a thread resolved just because a draft exists.
 
 ## Output Format

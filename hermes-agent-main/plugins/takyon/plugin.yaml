@@ -33,7 +33,7 @@ provides_tools:
   - business_record_stripe_webhook
   - business_record_app_usage
   - business_enqueue_job
-  - business_publish_outreach
+  - business_x_publish_outreach
   - business_publish_test_outreach
   - business_ugc_ad_write
   - business_ugc_ad_generate

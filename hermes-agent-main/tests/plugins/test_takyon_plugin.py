@@ -47,7 +47,8 @@ from plugins.takyon.core import (
     handle_business_reddit_ad_control,
     handle_business_reddit_ad_insights_sync,
     handle_business_reddit_ad_launch,
-    handle_business_publish_outreach,
+    handle_business_publish_test_outreach,
+    handle_business_x_publish_outreach,
     handle_business_x_metrics_sync,
     handle_business_read_app_account,
     handle_business_request_app_magic_link,
@@ -135,7 +136,8 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     toolsets = {item["name"]: item["toolset"] for item in ctx.tool_defs}
 
     assert toolsets["business_write_file"] == "takyon"
-    assert toolsets["business_publish_outreach"] == "takyon"
+    assert toolsets["business_x_publish_outreach"] == "takyon"
+    assert toolsets["business_publish_test_outreach"] == "takyon"
     assert toolsets["business_read_channel_credit_budgets"] == "takyon-authority"
     assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
     assert toolsets["business_static_ad_generate"] == "takyon-authority"
@@ -186,13 +188,12 @@ def test_bootstrap_prompt_expands_strategy_then_builds_then_posts_on_x():
     assert "Draft or publish one top-level X post." in prompt
 
 
-def test_bootstrap_prompt_uses_business_publish_outreach_for_the_x_move_in_test_mode():
+def test_bootstrap_prompt_routes_the_x_move_to_takyon_x():
     from plugins.takyon.cli import _business_bootstrap_instruction
 
     prompt = _business_bootstrap_instruction("demo", "find users", "test")
 
-    assert "For the X move, call business_publish_outreach." in prompt
-    assert "distribution/local-published/" in prompt
+    assert "Load takyon-x (skill_view) and execute its procedure to draft and publish one X post about this business." in prompt
     assert "3 evidence-backed lanes" not in prompt
     assert "6 total" not in prompt
 
@@ -6395,7 +6396,7 @@ def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeyp
     assert payload["receipt"].startswith("metrics/reddit-ads/demo-reddit/syncs/")
 
 
-def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkeypatch):
+def test_business_publish_test_outreach_uses_local_receipt(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -6413,7 +6414,7 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     )
 
     result = json.loads(
-        handle_business_publish_outreach(
+        handle_business_publish_test_outreach(
             {
                 "business": "jobtailor",
                 "channel": "meta",
@@ -6447,7 +6448,42 @@ def test_business_publish_outreach_uses_test_mode_local_receipt(tmp_path, monkey
     assert receipt_payload["artifact_path"] == publish["artifact"]
 
 
-def test_business_publish_outreach_canonicalizes_product_url(tmp_path, monkeypatch):
+def test_business_x_publish_outreach_sets_x_defaults_in_test_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "test",
+            }
+        ],
+        "init-jobtailor-x",
+    )
+
+    result = json.loads(
+        handle_business_x_publish_outreach(
+            {
+                "business": "jobtailor",
+                "body": "Scope creep keeps eating freelancer margins.",
+                "idempotency_key": "jobtailor-x-local-publish",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["channel"] == "x"
+    assert receipt_payload["provider"] == "x"
+
+
+def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -6487,7 +6523,7 @@ def test_business_publish_outreach_canonicalizes_product_url(tmp_path, monkeypat
     assert replacements == [{"from": "https://latexflow.io", "to": "https://latexflow.fourmanifold.com/"}]
 
     result = json.loads(
-        handle_business_publish_outreach(
+        handle_business_publish_test_outreach(
             {
                 "business": "latexflow",
                 "channel": "reddit",
@@ -6510,7 +6546,7 @@ def test_business_publish_outreach_canonicalizes_product_url(tmp_path, monkeypat
     assert receipt_payload["metadata"]["canonicalized_product_links"]
 
 
-def test_business_publish_outreach_records_intended_destination(tmp_path, monkeypatch):
+def test_business_publish_test_outreach_records_intended_destination(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -6528,7 +6564,7 @@ def test_business_publish_outreach_records_intended_destination(tmp_path, monkey
     )
 
     result = json.loads(
-        handle_business_publish_outreach(
+        handle_business_publish_test_outreach(
             {
                 "business": "domainpulse",
                 "channel": "show_hn",
@@ -6555,43 +6591,7 @@ def test_business_publish_outreach_records_intended_destination(tmp_path, monkey
     assert receipt_payload["sent"] is False
 
 
-def test_business_publish_outreach_live_requires_provider_gate(tmp_path, monkeypatch):
-    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    monkeypatch.delenv("META_ACCESS_TOKEN", raising=False)
-    monkeypatch.delenv("FACEBOOK_ACCESS_TOKEN", raising=False)
-    store = TakyonStore(tmp_path)
-    _commit(
-        store,
-        "business:jobtailor",
-        [
-            {
-                "action": "business.upsert",
-                "business": "jobtailor",
-                "name": "JobTailor",
-                "mode": "live",
-            }
-        ],
-        "init-jobtailor-live",
-    )
-
-    result = json.loads(
-        handle_business_publish_outreach(
-                {
-                    "business": "jobtailor",
-                    "channel": "meta",
-                    "provider": "MISSING_OUTREACH_PROVIDER",
-                    "subject": "Try JobTailor",
-                    "body": "Paste a job description and see what your resume is missing.",
-                    "idempotency_key": "jobtailor-meta-live-publish",
-                }
-        )
-    )
-
-    assert result["success"] is False
-    assert "requires missing API/env credential" in result["error"]
-
-
-def test_business_publish_outreach_live_x_blocks_before_enqueue_when_credits_are_missing(tmp_path, monkeypatch):
+def test_business_x_publish_outreach_live_x_blocks_before_enqueue_when_credits_are_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -6609,7 +6609,7 @@ def test_business_publish_outreach_live_x_blocks_before_enqueue_when_credits_are
     )
 
     result = json.loads(
-        handle_business_publish_outreach(
+        handle_business_x_publish_outreach(
             {
                 "business": "jobtailor",
                 "channel": "x",

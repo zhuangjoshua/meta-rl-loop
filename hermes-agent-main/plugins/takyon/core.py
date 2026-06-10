@@ -13984,7 +13984,8 @@ class TakyonStore:
 
         if action == "outreach.local_publish":
             raise TakyonError(
-                "test mode is disabled; use business_publish_outreach and satisfy the real provider gates"
+                "test mode is disabled; use the dedicated live rail instead "
+                "(business_x_publish_outreach for X, business_reddit_ad_launch for Reddit ads)"
             )
 
         if action == "conversation.thread.upsert":
@@ -16162,24 +16163,59 @@ def handle_business_enqueue_job(args: dict, **_: Any) -> str:
 
 
 def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
+    store = _store()
+    business = _resolved_business_slug(args, required=True)
+    body = _normalize_outreach_body(args.get("body") or args.get("content"))
+    if not body:
+        raise TakyonError("body is required")
+    with store._connect() as conn:
+        canonical_product_url = _canonical_product_url(store, conn, business)
+    body, canonical_replacements = _canonicalize_business_product_links(
+        body,
+        business=business,
+        canonical_url=canonical_product_url,
+    )
+    metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+    metadata = {
+        **metadata,
+        "canonical_product_url": canonical_product_url,
+    }
+    if canonical_replacements:
+        metadata["canonicalized_product_links"] = canonical_replacements
     operation = {
         "action": "outreach.local_publish",
-        "business": args.get("business"),
+        "business": business,
         "channel": args.get("channel") or args.get("provider"),
         "provider": args.get("provider"),
         "target": args.get("target") or args.get("recipient"),
         "recipient": args.get("recipient"),
         "subject": args.get("subject") or args.get("title"),
-        "body": args.get("body"),
+        "body": body,
         "destination_url": args.get("destination_url") or args.get("intended_destination_url"),
         "destination_label": args.get("destination_label"),
         "thread_external_id": args.get("thread_external_id"),
-        "metadata": args.get("metadata") or {},
+        "metadata": metadata,
     }
     return _commit_tool(args, operation)
 
 
-def handle_business_publish_outreach(args: dict, **_: Any) -> str:
+def handle_business_x_publish_outreach(args: dict, **_: Any) -> str:
+    try:
+        x_args = dict(args)
+        channel = str(x_args.get("channel") or "").strip()
+        provider = str(x_args.get("provider") or "").strip()
+        if channel and not _is_x_provider_name(channel):
+            raise TakyonError("business_x_publish_outreach only supports the X channel")
+        if provider and not _is_x_provider_name(provider):
+            raise TakyonError("business_x_publish_outreach only supports the X provider")
+        x_args["channel"] = "x"
+        x_args["provider"] = "x"
+        return _handle_live_business_x_publish_outreach(x_args)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def _handle_live_business_x_publish_outreach(args: dict) -> str:
     try:
         store = _store()
         business = _resolved_business_slug(args, required=True)
@@ -16223,6 +16259,12 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             metadata=metadata,
         )
         destination_label = str(args.get("destination_label") or metadata.get("destination_label") or "").strip()
+        is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
+        if not is_x_outreach:
+            raise TakyonError(
+                "business_x_publish_outreach only supports X; use takyon-x for X posts, "
+                "business_reddit_ad_launch for Reddit ads, or a dedicated channel-owned rail for other live providers"
+            )
         requires_api = [
             str(item).strip()
             for item in _as_list(args.get("requires_api"))
@@ -16251,7 +16293,6 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             "metadata": metadata,
             "requested_external_side_effect": "publish_outreach",
         }
-        is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
         if is_x_outreach:
             credit_gate = _creative_credit_preflight_gate(
                 business,
@@ -16264,7 +16305,7 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
                     {
                         "success": False,
                         "blocked": True,
-                        "action": "business_publish_outreach",
+                        "action": "business_x_publish_outreach",
                         "business": business,
                         "channel": channel,
                         "provider": provider,
@@ -16286,15 +16327,14 @@ def handle_business_publish_outreach(args: dict, **_: Any) -> str:
             "action": "job.enqueue",
             "business": business,
             "scope": args.get("scope") or f"business:{business}",
-            "kind": "x.publish_outreach" if is_x_outreach else args.get("kind") or f"{_file_slug(channel, 'outreach')}.publish_outreach",
+            "kind": "x.publish_outreach",
             "status": args.get("status") or "pending",
             "payload": payload,
             "requires_api": sorted(set(requires_api)),
             "requires_env": sorted(set(requires_env)),
         }
-        if is_x_outreach:
-            operation["worker_queue"] = True
-            operation["worker_max_attempts"] = 1
+        operation["worker_queue"] = True
+        operation["worker_max_attempts"] = 1
         return _commit_tool(canonical_args, operation, scope=operation["scope"])
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -22579,24 +22619,24 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_enqueue_job", "Record a guarded business work request.", {"business": _BUSINESS_PROP, "scope": {"type": "string"}, "kind": {"type": "string"}, "payload": {"type": "object"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "kind", "idempotency_key"]),
     },
     {
-        "name": "business_publish_outreach",
-        "description": "Publish outreach through the canonical product URL with real provider gates. Missing credentials or provider access hard-fail instead of falling back to local suppressed publication. Live X publication charges the fixed X creative-credit price against the business X budget bucket.",
-        "handler": handle_business_publish_outreach,
+        "name": "business_x_publish_outreach",
+        "description": "Publish a business X post or reply through the dedicated live X worker path. Missing credentials or budget gates hard-fail instead of falling back to local suppressed publication.",
+        "handler": handle_business_x_publish_outreach,
         "schema": _schema(
-            "business_publish_outreach",
-            "Publish outreach using the live provider path.",
-            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "kind": {"type": "string"}, "status": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            "business_x_publish_outreach",
+            "Publish a business X post or reply using the live X provider path.",
+            {"business": _BUSINESS_PROP, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this X outreach would be posted."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },
     {
         "name": "business_publish_test_outreach",
-        "description": "Disabled compatibility stub for the removed test-mode local outreach path.",
+        "description": "Publish a suppressed local outreach artifact without live provider side effects. Use this for generic local/test publication and durable receipts under distribution/local-published/.",
         "handler": handle_business_publish_test_outreach,
         "schema": _schema(
             "business_publish_test_outreach",
-            "Disabled compatibility stub.",
-            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            "Publish a suppressed local outreach artifact.",
+            {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },

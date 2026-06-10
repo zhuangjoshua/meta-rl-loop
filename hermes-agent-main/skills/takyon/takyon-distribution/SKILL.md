@@ -1,6 +1,6 @@
 ---
 name: takyon-distribution
-description: Create, publish, review, and continue honest Takyon distribution campaign work for one business, including lane planning, campaign artifacts, and broader demand-creation coordination.
+description: Create, review, and continue honest Takyon distribution campaign work for one business, including lane planning, campaign artifacts, local test publication, and broader demand-creation coordination. Route X-native posting to takyon-x and Reddit paid execution to takyon-reddit-ads.
 version: 1.0.0
 author: Four Manifold
 license: Proprietary
@@ -11,7 +11,7 @@ metadata:
     tags: [takyon, distribution, outreach, campaigns]
     related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, ugc-video-ad, takyon-meta-ads, takyon-reddit-ads, takyon-static-ad-creative-generator]
     requires_toolsets: [takyon]
-    requires_tools: [business_read_business, business_create_workspace, business_publish_outreach]
+    requires_tools: [business_read_business, business_create_workspace, business_publish_test_outreach, business_enqueue_job]
     routing:
       owns: campaign work, lane planning, campaign artifacts, and broader demand-creation coordination
       when_to_use:
@@ -19,6 +19,7 @@ metadata:
         - the operator asks to launch, continue, or review outreach or campaigns
       do_not_use_for:
         - channel-native X drafting or X thread handling
+        - channel-owned Reddit execution, including paid Reddit ad launch/control/metrics work
         - live paid Meta ad execution
         - live paid Reddit ad execution
         - product-surface changes
@@ -55,7 +56,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Publication paths: `distribution/surface.md`, `distribution/campaign/`, `distribution/local-published/`
 - Best call points: campaign continuation, lane planning, broader demand-creation coordination
 - Publication lane: `distribution/surface.md` is the coarse snapshot; visible campaign artifacts live under `distribution/campaign/`; suppressed/local publication goes to `distribution/local-published/`; live sends/posts require tools and receipts
-- Tool names used by this skill: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_create_workspace`, `business_write_file`, `business_patch_file`, `business_publish_outreach`, `business_publish_test_outreach`, `business_enqueue_job`, `business_ugc_ad_write`
+- Tool names used by this skill: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_create_workspace`, `business_write_file`, `business_patch_file`, `business_publish_test_outreach`, `business_enqueue_job`, `business_ugc_ad_write`
 - Paid-channel boundary: use this skill to decide the campaign and creative lane; use the channel-owned paid skill when the next move is a real Meta or Reddit ad launch/control/metrics action.
 
 ## Prerequisites
@@ -92,7 +93,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Use `ugc-video-ad` when the campaign needs the copied multi-clip UGC video ad pipeline. That skill publishes under `product/ugc-ads/` and records the finished asset with `business_ugc_ad_write`.
 - Use `takyon-static-ad-creative-generator` or `ugc-video-ad` when the campaign needs fresh paid creative before a channel-owned launch skill can execute it.
 - When a downstream channel or publish rail can make a truthful best-fit target choice from current business state, choose it and proceed; do not stop for a generic preference question just to keep the campaign moving.
-- Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
+- Prefer `business_publish_test_outreach` for generic local/suppressed publication only. For live X posting, hand off to `takyon-x` / `business_x_publish_outreach`; for live Reddit execution, hand off to `takyon-reddit-ads`.
 - If the publish path needs deferred vendor, ads, or external work rather than an immediate publish, use `business_enqueue_job` instead of inventing a successful send.
 
 ## Procedure
@@ -103,8 +104,8 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 4. Update the visible campaign artifacts: objective, audience, lanes, assets, current blockers, and next iteration. Keep them business-scoped and durable instead of burying them in chat output.
 5. If the campaign needs the copied UGC video ad path, run `ugc-video-ad`, then store the resulting `product/ugc-ads/<slug>/` publication path in the campaign workspace after `business_ugc_ad_write` records it.
 6. If the next move is a live paid Meta or Reddit campaign, keep the strategy and asset decisions here, but hand the execution to `takyon-meta-ads` or `takyon-reddit-ads` instead of stretching this skill into channel-owned launch/control work.
-7. If the business is in test mode or the publish path should remain local, call `business_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
-8. If the business is in live mode and the publish path is provider-backed, call `business_publish_outreach` and inspect the resulting job, receipt, or blocker. If the channel requires deferred external work rather than immediate publication, record it with `business_enqueue_job`.
+7. If the publish path should remain local, call `business_publish_test_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a receipt.
+8. If the business is in live mode and the next move is provider-backed, route X work to `takyon-x`, route Reddit paid work to `takyon-reddit-ads`, and use `business_enqueue_job` only to record deferred external work that already belongs to a truthful owned rail.
 9. Before choosing or changing a campaign angle, read current `research/` state and keep the audience, promise, objection, and angle aligned so the updated distribution direction stays consistent with `research/strategy.md` rather than drifting into a shadow strategy.
 
 ## Output Format

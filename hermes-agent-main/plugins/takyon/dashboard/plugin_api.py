@@ -606,7 +606,16 @@ async def graph() -> dict[str, Any]:
         elif name in {"run", "goal"}:
             _add_edge(edges, edge_keys, node_id, "manual-ceo-prompt", "manual instruction")
     # Derive cross-skill and skill-to-tool references from the actual skill text.
-    tool_names = ["business_calculate_pulse", "business_schedule_ceo_wakeup", "business_claude_agent_task", "business_publish_outreach"]
+    tool_names = [
+        "business_calculate_pulse",
+        "business_schedule_ceo_wakeup",
+        "business_claude_agent_task",
+        "business_x_publish_outreach",
+        "business_publish_test_outreach",
+        "business_reddit_ad_launch",
+        "business_reddit_ad_control",
+        "business_reddit_ad_insights_sync",
+    ]
     skill_refs = sorted(skill_files.keys(), key=len, reverse=True)
     for skill_ref, file_info in skill_files.items():
         source_id = f"skill:{skill_ref}"
