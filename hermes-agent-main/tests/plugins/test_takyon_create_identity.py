@@ -4,6 +4,7 @@ import types
 from plugins.takyon.cli import (
     TakyonError,
     _business_bootstrap_instruction,
+    _ceo_bootstrap_turn_config,
     _derive_name_from_goal_with_llm,
     _resolve_create_identity,
     _resolve_dashboard_create_identity,
@@ -73,6 +74,17 @@ def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_block
     assert "do not continue to X as if the product build completed." in prompt
     assert "Do not inspect the worker result." not in prompt
     assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
+
+
+def test_bootstrap_turn_config_uses_expanded_shared_turn_budget():
+    config = _ceo_bootstrap_turn_config(
+        "crm",
+        "construction CRM",
+        "live",
+        business_name="CRM",
+    )
+
+    assert config["max_turns"] == 30
 
 
 def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):

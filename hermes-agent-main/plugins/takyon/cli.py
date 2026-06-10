@@ -31,7 +31,7 @@ _TAKYON_SKILL_ALIASES = {
     "claude-agent-sdk": "takyon-claude-agent-sdk",
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
-_DEFAULT_BOOTSTRAP_MAX_TURNS = 20
+_DEFAULT_BOOTSTRAP_MAX_TURNS = 30
 _CREATE_NAME_LLM_PROMPT = (
     "Choose the canonical initial product or company name from the user's idea. "
     "If the user explicitly gives or strongly implies a name, use that exact name. "
