@@ -25756,7 +25756,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 stdout = proc.stdout.strip()
                 stderr = proc.stderr.strip()
                 try:
-                    sdk_result = json.loads(stdout) if stdout else {}
+                    parsed_result = json.loads(stdout) if stdout else {}
+                    sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
                 except json.JSONDecodeError:
                     sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
                 try:
@@ -25765,7 +25766,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     worker_actual_cents = None
                 if proc.returncode != 0:
                     sdk_result.setdefault("success", False)
-                    sdk_result["error"] = _truncate_text(stderr or sdk_result.get("error") or f"node exited {proc.returncode}", 8000)
+                    sdk_result["worker_returncode"] = proc.returncode
+                    if stderr:
+                        sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
+                    sdk_result["error"] = _truncate_text(
+                        stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or f"node exited {proc.returncode}",
+                        8000,
+                    )
                 if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
                     sdk_result["blocked"] = True
                 if sdk_result.get("success"):
@@ -25906,6 +25913,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "summary": sdk_result.get("summary") or "",
                         "error": sdk_result.get("error") or None,
                         "blocked": bool(sdk_result.get("blocked")),
+                        "worker_returncode": sdk_result.get("worker_returncode"),
+                        "worker_stderr": sdk_result.get("worker_stderr"),
+                        "raw_stdout": sdk_result.get("raw_stdout"),
                         "worker_attempts": worker_attempts,
                         "local_repair_retries": local_repair_retries,
                         "pretend_product_findings": pretend_findings,
@@ -25947,6 +25957,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "summary": sdk_result.get("summary") or "",
             "actual_cost_cents": worker_actual_cents,
             "error": sdk_result.get("error"),
+            "worker_returncode": sdk_result.get("worker_returncode"),
+            "worker_stderr": sdk_result.get("worker_stderr"),
+            "raw_stdout": sdk_result.get("raw_stdout"),
             "pretend_product_findings": pretend_findings,
         }
         if status != "completed":

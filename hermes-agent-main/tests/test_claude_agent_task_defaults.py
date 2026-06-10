@@ -546,3 +546,61 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     assert worker_cwd == str(repo_root)
     assert worker_env.get("HOME") != "/tmp"
     assert "HOME=/tmp" in run_cmd
+
+
+def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    class _CapturingStore(_FakeStore):
+        def __init__(self, root: Path):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _CapturingStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"])).mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(returncode=1, stdout="plain worker failure output", stderr="fatal: missing claude auth")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-worker-failure-diagnostics",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "fatal: missing claude auth"
+    assert result["worker_returncode"] == 1
+    assert result["worker_stderr"] == "fatal: missing claude auth"
+    assert result["raw_stdout"] == "plain worker failure output"
+    operations = store.commits[-1]["operations"]
+    agent_record = next(op for op in operations if op.get("action") == "agent.record")
+    assert agent_record["result"]["worker_returncode"] == 1
+    assert agent_record["result"]["worker_stderr"] == "fatal: missing claude auth"
+    assert agent_record["result"]["raw_stdout"] == "plain worker failure output"

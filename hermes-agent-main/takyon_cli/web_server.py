@@ -3705,6 +3705,7 @@ def _read_takyon_business_site_preview(
 
     store = TakyonStore(operator_user_id=operator_user_id)
     normalized_requested_path = requested_path.strip().strip("/") or "product/site"
+    publish_status = ""
     if normalized_requested_path in {"product/site", "product/site/index.html"}:
         try:
             summary = store.read(
@@ -3729,9 +3730,32 @@ def _read_takyon_business_site_preview(
                     "mode": "live_url",
                     "status": publish_status or "ready",
                 }
+    business_root = store._business_root(business, sync=False)
+    source_root = (business_root / "product/site").resolve()
     candidate = store._resolve_business_file(business, requested_path, sync=False)
     if candidate.is_dir() or not candidate.suffix:
         candidate = candidate / "index.html"
+    if (
+        normalized_requested_path in {"product/site", "product/site/index.html"}
+        and (not candidate.exists() or not candidate.is_file())
+        and _takyon_site_preview_has_unpublished_app_source(source_root)
+    ):
+        html_text = _takyon_unpublished_app_site_preview_html(
+            business=business,
+            source_path="product/site",
+            publish_status=publish_status or "not_published",
+        )
+        encoded = base64.b64encode(html_text.encode("utf-8")).decode("ascii")
+        return {
+            "business_slug": business,
+            "path": "product/site",
+            "size": len(html_text.encode("utf-8")),
+            "url": f"data:text/html;charset=utf-8;base64,{encoded}",
+            "mode": "inline_html",
+            "status": publish_status or "not_published",
+            "preview_state": "unpublished_app_source",
+            "detail": "product/site source exists but is not published yet",
+        }
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"site preview not found: {requested_path}")
     if candidate.name != "index.html" and candidate.suffix.lower() != ".html":
@@ -3739,8 +3763,6 @@ def _read_takyon_business_site_preview(
     size = candidate.stat().st_size
     if size > _TAKYON_MAX_SITE_PREVIEW_BYTES:
         raise HTTPException(status_code=413, detail=f"site preview is too large: {size} bytes")
-    business_root = store._business_root(business, sync=False)
-    source_root = (business_root / "product/site").resolve()
     candidate_resolved = candidate.resolve()
     html_text = _takyon_inline_static_site(
         candidate,
@@ -3756,6 +3778,57 @@ def _read_takyon_business_site_preview(
         "mode": "inline_html",
         "status": "ready",
     }
+
+
+def _takyon_site_preview_has_unpublished_app_source(site_root: Path) -> bool:
+    try:
+        root = site_root.resolve()
+    except Exception:
+        root = site_root
+    if not root.exists() or not root.is_dir():
+        return False
+    if (root / "index.html").exists():
+        return False
+    has_package = (root / "package.json").is_file()
+    has_app_tree = (root / "src" / "app").is_dir() or (root / "app").is_dir()
+    return has_package and has_app_tree
+
+
+def _takyon_unpublished_app_site_preview_html(*, business: str, source_path: str, publish_status: str) -> str:
+    escaped_business = html.escape(str(business or "").strip() or "business")
+    escaped_source_path = html.escape(str(source_path or "product/site"), quote=True)
+    escaped_status = html.escape(str(publish_status or "not_published"), quote=True)
+    return (
+        "<!doctype html>"
+        "<html><head>"
+        '<meta charset="utf-8" />'
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+        "<title>Takyon Product Preview</title>"
+        "<style>"
+        "body{margin:0;background:#0b1020;color:#e5eefc;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;}"
+        ".shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px;}"
+        ".card{max-width:760px;width:100%;background:#11192e;border:1px solid #22304f;border-radius:20px;padding:28px 30px;box-shadow:0 24px 64px rgba(0,0,0,.35);}"
+        ".eyebrow{display:inline-block;margin-bottom:12px;padding:6px 10px;border-radius:999px;background:#17223d;color:#93c5fd;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}"
+        "h1{margin:0 0 10px;font-size:28px;line-height:1.15;}"
+        "p{margin:0 0 14px;color:#c8d4ea;line-height:1.55;}"
+        "code{background:#0a1223;border:1px solid #22304f;border-radius:8px;padding:2px 6px;color:#bfdbfe;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
+        "ul{margin:16px 0 0;padding-left:20px;color:#c8d4ea;line-height:1.6;}"
+        "li+li{margin-top:8px;}"
+        "</style>"
+        "</head><body>"
+        '<div class="shell"><div class="card">'
+        '<div class="eyebrow">Unpublished app source</div>'
+        f"<h1>{escaped_business} has product source, but no live preview yet.</h1>"
+        f"<p>Takyon found an app source tree at <code>{escaped_source_path}</code>, but it has not been refreshed/published into a live product preview.</p>"
+        f"<p>Current publish status: <code>{escaped_status}</code>.</p>"
+        "<ul>"
+        "<li>The product build wrote source files instead of a static <code>index.html</code> preview.</li>"
+        "<li>Preview this business by running the product surface refresh/publish path after the worker succeeds.</li>"
+        "<li>If the worker failed, inspect the recorded Claude worker stderr/return code for the real blocker.</li>"
+        "</ul>"
+        "</div></div>"
+        "</body></html>"
+    )
 
 
 def _takyon_live_site_preview_wrapper_html(url: str) -> str:

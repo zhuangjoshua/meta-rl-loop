@@ -1,6 +1,7 @@
 """Tests for takyon_cli.web_server and related config utilities."""
 
 import asyncio
+import base64
 import json
 import os
 import stat
@@ -1369,6 +1370,69 @@ def test_business_site_preview_uses_inline_html_for_unpublished_local_site(monke
     assert body["mode"] == "inline_html"
     assert body["status"] == "ready"
     assert str(body["url"]).startswith("data:text/html;charset=utf-8;base64,")
+
+
+def test_business_site_preview_reports_unpublished_app_source_tree_truthfully(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    business_root = tmp_path / "businesses" / "alpha"
+    site_root = business_root / "product" / "site"
+    (site_root / "src" / "app").mkdir(parents=True, exist_ok=True)
+    (site_root / "package.json").write_text('{"name":"alpha-site"}\n', encoding="utf-8")
+    (site_root / "src" / "app" / "page.js").write_text("export default function Page(){return null}\n", encoding="utf-8")
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None):
+            self.operator_user_id = operator_user_id
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            assert slug == "alpha"
+            return business_root / rel
+
+        def _business_root(self, slug, sync=False):
+            assert slug == "alpha"
+            return business_root
+
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:alpha"
+            assert query == "summary"
+            return {"app": {"surface_contract": {"publish_status": "not_published", "public_url": ""}}}
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get("/api/takyon/businesses/alpha/site-preview")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["business_slug"] == "alpha"
+    assert body["path"] == "product/site"
+    assert body["mode"] == "inline_html"
+    assert body["status"] == "not_published"
+    assert body["preview_state"] == "unpublished_app_source"
+    assert body["detail"] == "product/site source exists but is not published yet"
+    prefix = "data:text/html;charset=utf-8;base64,"
+    assert str(body["url"]).startswith(prefix)
+    html_text = base64.b64decode(str(body["url"])[len(prefix):]).decode("utf-8")
+    assert "Unpublished app source" in html_text
+    assert "product/site" in html_text
+    assert "worker stderr/return code" in html_text
+
+    doc = client.get("/api/takyon/site-preview/alpha", params={"path": "product/site"})
+    assert doc.status_code == 200, doc.text
+    assert "Unpublished app source" in doc.text
 
 
 def test_business_site_preview_does_not_mask_missing_explicit_html_path_with_public_url(monkeypatch, tmp_path):
