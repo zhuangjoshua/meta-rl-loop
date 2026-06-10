@@ -64,6 +64,7 @@ function Router() {
     tractionRange,
     buildState,
     chatMessages,
+    chatProgress,
     submitting,
     billingBusy,
     topupBusy,
@@ -199,6 +200,7 @@ function Router() {
         tractionRange={tractionRange}
         theme={theme}
         chatMessages={chatMessages}
+        chatProgress={chatProgress}
         sending={submitting}
         onTheme={setTheme}
         onNav={nav}

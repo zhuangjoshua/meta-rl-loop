@@ -11,7 +11,7 @@ import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
-import type { ChatMessage, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import type { ChatMessage, ChatProgress, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { CompanyTab } from "./CompanyTab";
 import { BulbMark } from "../shared/icons";
 import "./product.css";
@@ -383,6 +383,7 @@ export function Product({
   tractionRange,
   theme,
   chatMessages,
+  chatProgress,
   sending,
   onTheme,
   onNav,
@@ -400,6 +401,7 @@ export function Product({
   tractionRange: "D" | "W" | "M" | "Y";
   theme: Theme;
   chatMessages: ChatMessage[];
+  chatProgress: ChatProgress | null;
   sending: boolean;
   onTheme: (theme: Theme) => void;
   onNav: (hash: string) => void;
@@ -418,7 +420,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  const effectiveProgress = liveStateProgress(workspace);
+  const effectiveProgress = chatProgress ?? liveStateProgress(workspace);
 
   useEffect(() => {
     setTab("company");

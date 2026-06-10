@@ -91,6 +91,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` to create or update the canonical campaign workspace under `distribution/campaign/`.
 - Use `ugc-video-ad` when the campaign needs the copied multi-clip UGC video ad pipeline. That skill publishes under `product/ugc-ads/` and records the finished asset with `business_ugc_ad_write`.
 - Use `takyon-static-ad-creative-generator` or `ugc-video-ad` when the campaign needs fresh paid creative before a channel-owned launch skill can execute it.
+- When a downstream channel or publish rail can make a truthful best-fit target choice from current business state, choose it and proceed; do not stop for a generic preference question just to keep the campaign moving.
 - Prefer `business_publish_outreach` as the main publish path. It will use test-mode behavior when the business is in test mode. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
 - If the publish path needs deferred vendor, ads, or external work rather than an immediate publish, use `business_enqueue_job` instead of inventing a successful send.
 

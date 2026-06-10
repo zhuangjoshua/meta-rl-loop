@@ -645,6 +645,19 @@ export function useTakyonLitebulb() {
     assistantMessageIdRef.current = "";
   }, [ensureAssistantMessage]);
 
+  const discardAssistantMessage = useCallback(() => {
+    const id = assistantMessageIdRef.current;
+    assistantMessageIdRef.current = "";
+    if (!id) return;
+    setChatMessages((messages) => {
+      const next = messages.filter((message) => (
+        message.id !== id || Boolean(trimText(message.text))
+      ));
+      chatMessagesRef.current = next;
+      return next;
+    });
+  }, []);
+
   const startChatProgress = useCallback((text = "Working…") => {
     const line = trimText(text) || "Working…";
     setChatProgress((current) => (
@@ -668,6 +681,7 @@ export function useTakyonLitebulb() {
     startChatProgress();
     try {
       const gateway = ensureGateway();
+      ensureAssistantMessage();
       await gateway.request("prompt.submit", {
         session_id: sessionId,
         text,
@@ -675,7 +689,7 @@ export function useTakyonLitebulb() {
     } catch {
       /* best effort replay on reload */
     }
-  }, [ensureGateway, startChatProgress]);
+  }, [ensureAssistantMessage, ensureGateway, startChatProgress]);
 
   const resetBuildState = useCallback(() => {
     setBuildState(createEmptyBuildState());
@@ -741,23 +755,27 @@ export function useTakyonLitebulb() {
       const text = trimText(payload.text);
       if (text) pushBuildTerminal(text);
       if (text && shouldMirrorStatusInChat(payload.kind)) {
-        startChatProgress();
+        startChatProgress(text);
       }
     });
     const offToolStart = gateway.on("tool.start", (event) => {
       const payload = (event.payload as { name?: string; context?: string } | undefined) || {};
       const name = trimText(payload.name || payload.context || "tool");
-      pushBuildTerminal(`Running ${name}`);
+      const line = `Running ${name}`;
+      pushBuildTerminal(line);
+      startChatProgress(line);
     });
     const offToolComplete = gateway.on("tool.complete", (event) => {
       const payload = (event.payload as { name?: string; summary?: string } | undefined) || {};
       const text = trimText(payload.summary || payload.name || "Tool complete");
       pushBuildTerminal(text);
+      startChatProgress(text);
     });
     const offError = gateway.on("error", () => {
       setSubmitting(false);
       sessionRunningRef.current = false;
       setSessionRunning(false);
+      discardAssistantMessage();
       clearChatProgress();
       if (sessionBusinessRef.current) {
         clearStoredPendingTurn(sessionBusinessRef.current);
@@ -778,6 +796,7 @@ export function useTakyonLitebulb() {
     appendAssistantText,
     clearChatProgress,
     completeAssistantText,
+    discardAssistantMessage,
     ensureGateway,
     loadTraction,
     loadWorkspace,
@@ -958,9 +977,20 @@ export function useTakyonLitebulb() {
   const sendPrompt = useCallback(async (text: string) => {
     const value = trimText(text);
     if (!value || !activeBusiness) return;
-    let pendingTurn: PendingTurn | null = null;
+    const pendingTurn: PendingTurn = {
+      id: `pending-user-${Date.now()}`,
+      text: value,
+      createdAt: Date.now(),
+      userCountBefore: chatMessagesRef.current.filter((message) => message.who === "user").length,
+    };
     setSubmitting(true);
     startChatProgress();
+    writeStoredPendingTurn(activeBusiness.slug, pendingTurn);
+    setChatMessages((messages) => {
+      const next = [...messages, pendingTurnMessage(pendingTurn)];
+      chatMessagesRef.current = next;
+      return next;
+    });
     try {
       let sessionId = await ensureSession(activeBusiness.slug);
       const gateway = ensureGateway();
@@ -970,18 +1000,7 @@ export function useTakyonLitebulb() {
         }).catch(() => undefined);
         await wait(400);
       }
-      pendingTurn = {
-        id: `pending-user-${Date.now()}`,
-        text: value,
-        createdAt: Date.now(),
-        userCountBefore: chatMessagesRef.current.filter((message) => message.who === "user").length,
-      };
-      writeStoredPendingTurn(activeBusiness.slug, pendingTurn);
-      setChatMessages((messages) => {
-        const next = [...messages, pendingTurnMessage(pendingTurn!)];
-        chatMessagesRef.current = next;
-        return next;
-      });
+      ensureAssistantMessage();
       for (let attempt = 0; attempt < 8; attempt += 1) {
         try {
           await gateway.request("prompt.submit", {
@@ -1006,21 +1025,20 @@ export function useTakyonLitebulb() {
         }
       }
     } catch (error) {
-      if (pendingTurn) {
-        clearStoredPendingTurn(activeBusiness.slug);
-        setChatMessages((messages) => {
-          const next = messages.filter((message) => message.id !== pendingTurn?.id);
-          chatMessagesRef.current = next;
-          return next;
-        });
-      }
+      clearStoredPendingTurn(activeBusiness.slug);
+      setChatMessages((messages) => {
+        const next = messages.filter((message) => message.id !== pendingTurn.id);
+        chatMessagesRef.current = next;
+        return next;
+      });
+      discardAssistantMessage();
       if (!isBusyError(error) && !isMissingSessionError(error)) {
         completeAssistantText(error instanceof Error ? error.message : "Failed to send message.");
       }
       clearChatProgress();
       setSubmitting(false);
     }
-  }, [activeBusiness, clearChatProgress, completeAssistantText, ensureGateway, ensureSession, loadWorkspace, startChatProgress]);
+  }, [activeBusiness, clearChatProgress, completeAssistantText, discardAssistantMessage, ensureAssistantMessage, ensureGateway, ensureSession, loadWorkspace, startChatProgress]);
 
   const createBusiness = useCallback(async (goal: string) => {
     const idea = trimText(goal);

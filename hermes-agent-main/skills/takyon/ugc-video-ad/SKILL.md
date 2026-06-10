@@ -69,6 +69,7 @@ multi-business assets (this skill is business-scoped).
 - Publication paths: `product/ugc-ads/<slug>/ad.mp4`, `.../script.json`, `.../reference.png`
 - Tool used by this skill: **`business_ugc_ad_generate`** for the live path (`business_ugc_ad_write` is committed internally by that tool)
 - Live budget rule: if the creative is meant for Meta, Reddit, or X, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel` so the spend lands on the right business channel budget
+- Live execution rule: when the channel bucket and credentials are present, run the canonical tool directly. Do not stop for a generic operator re-confirmation about bounded provider spend; the creative-credit gate and receipt are the approval rail.
 - Main entrypoint: `${HERMES_SKILL_DIR}/scripts/build_ad.py`
 - Free planning: `build_ad.py --brief <brief> --dry-run` (no API calls, no spend)
 
