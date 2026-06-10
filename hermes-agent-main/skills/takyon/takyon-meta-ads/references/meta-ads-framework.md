@@ -1,6 +1,6 @@
 # Meta Ads Framework (PRODUCTION / LAUNCH layer)
 
-How `business_meta_ad_launch` turns a UGC video into a **PAUSED** Meta ad, and the rails
+How `business_meta_ad_launch` turns a UGC video into a bounded Meta ad under a reserved credit cap, and the rails
 that keep it safe. This is the launch layer; the *video* itself is the asset layer owned by
 `ugc-video-ad`.
 
@@ -14,18 +14,18 @@ ad.mp4 (product asset)
    ▼
 AdVideo  ──referenced by──▶  AdCreative  (act_<id>/adcreatives, object_story_spec.video_data)
                                   │
-Campaign (act_<id>/campaigns, objective, PAUSED)
-   └── AdSet (act_<id>/adsets, daily_budget, optimization_goal, billing_event, targeting, PAUSED)
-          └── Ad (act_<id>/ads, links AdSet + AdCreative, PAUSED)
+Campaign (act_<id>/campaigns, objective, bounded start/end schedule)
+   └── AdSet (act_<id>/adsets, daily_budget, optimization_goal, billing_event, targeting, bounded by reserved credits)
+          └── Ad (act_<id>/ads, links AdSet + AdCreative)
 ```
 
 - **AdVideo** — the uploaded mp4. A multipart upload to the `graph-video.facebook.com` host.
 - **AdCreative** — the renderable ad: a `object_story_spec` with `page_id` + `video_data`
   (`video_id`, `message`, `image_url` thumbnail, and a `call_to_action` linking out).
-- **Campaign** — the objective container (Outcome objective; created `PAUSED`).
+- **Campaign** — the objective container (Outcome objective; created under the reserved spend policy).
 - **AdSet** — budget + audience + delivery (`daily_budget`, `optimization_goal`,
-  `billing_event`, `targeting`; created `PAUSED`).
-- **Ad** — binds one AdSet to one AdCreative (created `PAUSED`).
+  `billing_event`, `targeting`; bounded by the reserved spend policy).
+- **Ad** — binds one AdSet to one AdCreative.
 
 ## Objectives (ODAX / Outcome)
 
@@ -61,13 +61,13 @@ test — narrow audiences + tiny budgets often under-deliver.
   (cents) for the API.
 - It is **capped** by `TAKYON_META_MAX_DAILY_BUDGET_USD` (default **50**). Over-cap launches
   are rejected. Raise the env var deliberately if you really need more.
-- Because every object is **PAUSED**, the budget is only a *configured ceiling* — nothing
-  spends until a human activates the ad in Ads Manager.
+- Live launch also has a **total campaign cap** equal to the reserved remaining Meta channel
+  credits after setup. If daily pace or requested end time would exceed that total, or if the
+  remaining cap is below the live minimum (default 5 USD), launch fails closed.
 
 ## Safety rails (why this is testable without burning money)
 
-1. **PAUSED, always.** The tool sets `status: PAUSED` on Campaign, AdSet, and Ad. It refuses
-   any `activate`/`status: ACTIVE` input. PAUSED objects never serve and never spend.
+1. **Reserved cap first.** The tool reserves the remaining Meta channel credits before provider-side launch. If reservation fails, nothing launches.
 2. **Budget cap.** `daily_budget_usd` above the cap is rejected before any call.
 3. **Test mode.** A test-mode business suppresses *all* Meta calls and writes a local
    `receipt.json` only. Use this to exercise the path with zero external effect.
@@ -93,9 +93,8 @@ test — narrow audiences + tiny budgets often under-deliver.
   after upload; the tool fetches it from the video's `thumbnails` edge. If it is not ready,
   pass `ad.image_url` (any public image URL, e.g. a frame you host) or retry.
 
-## Activation (out of scope here, on purpose)
+## Activation
 
-Going live = spending money. That decision is intentionally **not** in this skill or tool.
-A human reviews the PAUSED ad in Meta Ads Manager and activates it there. If a future
-Takyon-native activation path is wanted, it should be its own guarded tool with an explicit
-confirm flag, a budget authority check, and its own receipt — not a flag bolted onto launch.
+Launch intent is live by default, but it is still bounded by the reserved credit cap, daily safety cap,
+and derived end time. If the operator wants review first, the launch request can explicitly stage the
+campaign paused instead.

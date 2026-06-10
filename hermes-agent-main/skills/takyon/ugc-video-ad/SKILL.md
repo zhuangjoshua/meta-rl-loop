@@ -71,14 +71,14 @@ multi-business assets (this skill is business-scoped).
 - Live budget rule: if the creative is meant for Meta, Reddit, or X, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel` so the spend lands on the right business channel budget
 - Live execution rule: when the channel bucket and credentials are present, run the canonical tool directly. Do not stop for a generic operator re-confirmation about bounded provider spend; the creative-credit gate and receipt are the approval rail.
 - Main entrypoint: `${HERMES_SKILL_DIR}/scripts/build_ad.py`
-- Free planning: `build_ad.py --brief <brief> --dry-run` (no API calls, no spend)
+- Canonical path: the Takyon business rail is live-only and should render through `business_ugc_ad_generate`
 
 ## Prerequisites
 
 - **`OPENAI_API_KEY`** — gpt-image-2 reference image (env or a local `.env`; never hardcode).
 - **`FAL_KEY`** — Kling image-to-video via fal.ai (env or `.env`).
 - **`ffmpeg` + `ffprobe`** on `PATH` — stitching and post.
-- Python deps for the live path: `httpx`, `fal-client`. (`--dry-run` needs neither.)
+- Python deps for the live path: `httpx`, `fal-client`.
 - The **`business_ugc_ad_generate`** tool must be registered (gated in frontmatter
   `metadata.hermes.requires_tools`). Use it for any live spendful generation so creative
   credits and the canonical receipt path stay truthful.
@@ -94,26 +94,22 @@ multi-business assets (this skill is business-scoped).
 
 - [templates/brief.json](templates/brief.json) — production inputs (business, product, classification, subject/wardrobe/setting, persona, cta).
 - [templates/script.json](templates/script.json) — SCRIPT-layer output: ordered `dialogue_action` beats.
-- [assets/example-brief.json](assets/example-brief.json) — a filled brief (script embedded) for the dry-run and smoke test.
+- [assets/example-brief.json](assets/example-brief.json) — a filled brief (script embedded) for smoke testing the live pipeline.
 
 ## Scripts
 
-- `${HERMES_SKILL_DIR}/scripts/build_ad.py` — orchestrator (planning + full build).
+- `${HERMES_SKILL_DIR}/scripts/build_ad.py` — orchestrator for the live build.
 - `${HERMES_SKILL_DIR}/scripts/pipeline.py` — vendored primitives (image, Kling, ffmpeg).
 - `${HERMES_SKILL_DIR}/scripts/postpass.sh` — grain pass (default) + optional `--jumpcuts`.
 
 ## How to Run
 
-Common path:
+Canonical path:
 
-```bash
-# 1) FREE: plan only — clip split + every compiled prompt, zero API calls/spend.
-python ${HERMES_SKILL_DIR}/scripts/build_ad.py \
-  --brief assets/example-brief.json --dry-run
-
-# 2) LIVE / CANONICAL: call business_ugc_ad_generate so credits + receipt are enforced.
-#    When the destination channel is already known, include budget_bucket or ad_metadata.channel.
-```
+- Call `business_ugc_ad_generate` with `brief_path`, optional `script_path`, `slug`, and
+  `budget_bucket` or `ad_metadata.channel` so credits + receipt are enforced on the live path.
+- Use the copied `build_ad.py` helper directly only for local pipeline debugging, not as the
+  canonical business action surface.
 
 Useful flags: `--jumpcuts` (extra silence-drop reframe cuts in post), `--skip-post`,
 `--transition-mode continuity|jumpcut` (continuity chains the last frame; jumpcut
@@ -134,13 +130,11 @@ agent then calls that tool to record the asset (the script does not).
    ideal; pick one to produce). This sets **only** words + paired actions.
 3. **Production layer** — fill `brief.json` (subject/wardrobe/setting/persona/cta) per
    [realism-framework.md](references/realism-framework.md).
-4. **Plan (free)** — `build_ad.py --dry-run` to verify the ≤10s clip split and the
-   compiled prompts before spending.
-5. **Build** — run `build_ad.py` to generate the reference image, per-clip Kling i2v with
+4. **Build** — run `build_ad.py` through `business_ugc_ad_generate` to generate the reference image, per-clip Kling i2v with
    either last-frame continuity or jumpcut re-anchoring, then stitch and post-process.
-6. **Charge the right bucket** — when this creative is being built for a known downstream ad or channel, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel`, plus any useful launch metadata such as campaign slug.
-7. **Publish** — outputs are written under `product/ugc-ads/<slug>/`.
-8. **Record** — call **`business_ugc_ad_write`** with the printed payload to commit the
+5. **Charge the right bucket** — when this creative is being built for a known downstream ad or channel, call `business_ugc_ad_generate` with `budget_bucket` or `ad_metadata.channel`, plus any useful launch metadata such as campaign slug.
+6. **Publish** — outputs are written under `product/ugc-ads/<slug>/`.
+7. **Record** — call **`business_ugc_ad_write`** with the printed payload to commit the
    durable Takyon asset record (idempotent).
 
 ## Output Format
@@ -177,7 +171,7 @@ Published under `product/ugc-ads/<slug>/`:
 
 ## Verification Checklist
 
-- [ ] `--dry-run` shows beats grouped into clips each ≤10s, with continuity noted.
+- [ ] The final stitched clips keep each spoken segment within the supported clip cap with continuity preserved.
 - [ ] Reference image reads as a real photo (skin texture, directional light); real ≠ ugly.
 - [ ] One consistent voice/identity across all stitched clips.
 - [ ] Cuts are motivated (stitch seams / silence-drop), never zoom ramps; tight shots sharp.
@@ -206,4 +200,4 @@ Published under `product/ugc-ads/<slug>/`:
 | Tight shots look blurry | You upscaled — deliver at the native-crop size or regen at higher res. |
 | Cuts feel like pauses | Use `--jumpcuts` (drops inter-phrase silence so position pops). |
 | `--jumpcuts` made no cuts | No phrase silences detected; tune `SILENCE_DB`/`SILENCE_DUR` env or rely on stitch-seam cuts. |
-| Live deps missing | `--dry-run` needs none; the full build needs `httpx` + `fal-client`. |
+| Live deps missing | Install `httpx` + `fal-client` for the full build. |

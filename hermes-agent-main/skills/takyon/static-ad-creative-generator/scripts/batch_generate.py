@@ -9,8 +9,8 @@ Each spec runs through the same single-creative pipeline (validate -> compile ->
 QA -> bundle). A manifest.json summarizing every creative is written to the output dir.
 
 CLI:
-    python batch_generate.py <batch.json | dir/> [-o output/] [--dry-run] [--crop]
-                            [--max N] [--quality high] [--backend openai|mock] [--strict]
+    python batch_generate.py <batch.json | dir/> [-o output/] [--crop]
+                            [--max N] [--quality high] [--backend openai] [--strict]
                             [--stop-on-error]
 """
 
@@ -35,11 +35,10 @@ def _main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser(description="Batch-generate static ad creatives from specs.")
     ap.add_argument("input", help="batch JSON (array or {creatives:[...]}) or a directory of specs")
     ap.add_argument("-o", "--out", default="output", help="output directory (default: output/)")
-    ap.add_argument("--dry-run", action="store_true", help="use the mock backend (no API key needed)")
     ap.add_argument("--crop", action="store_true", help="center-crop to exact aspect ratio (needs Pillow)")
     ap.add_argument("--max", type=int, default=None, help="cap the number of creatives generated")
     ap.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
-    ap.add_argument("--backend", default=None, help="backend name (default: env IMAGE_BACKEND or 'openai')")
+    ap.add_argument("--backend", default=None, help="backend name (default: openai)")
     ap.add_argument("--api-key-file", default=None,
                     help="read the API key from this file and pass it straight to the client (never sets an env var)")
     ap.add_argument("--aspect-ratio", default=None,
@@ -55,7 +54,7 @@ def _main(argv: List[str]) -> int:
             print(f"NOTE: capping at --max {args.max} of {len(specs)} specs.", file=sys.stderr)
         specs = specs[: args.max]
     os.makedirs(args.out, exist_ok=True)
-    backend = get_backend(name=args.backend, dry_run=args.dry_run,
+    backend = get_backend(name=args.backend,
                           api_key=read_api_key_file(args.api_key_file))
 
     print(f"Generating {len(specs)} creative(s) -> {args.out} (backend={backend.name})")
@@ -64,7 +63,7 @@ def _main(argv: List[str]) -> int:
         cid = spec.get("creative_id", "?")
         try:
             records.append(generate_one(
-                spec, args.out, backend=backend, dry_run=args.dry_run, crop=args.crop,
+                spec, args.out, backend=backend, crop=args.crop,
                 quality=args.quality, strict=args.strict, aspect_ratios=aspect_ratios,
             ))
         except Exception as exc:  # keep going by default so one bad spec doesn't sink the batch
@@ -76,7 +75,6 @@ def _main(argv: List[str]) -> int:
     manifest = {
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "backend": backend.name,
-        "dry_run": args.dry_run,
         "requested": len(specs),
         "succeeded": len(records),
         "failed": len(failures),

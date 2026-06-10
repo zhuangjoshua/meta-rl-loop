@@ -10,7 +10,7 @@ action paired with each line are the SCRIPT layer and come from a script.json
 authored with references/dialogue-action-framework.md. Nothing here writes copy.
 
 Network/codec deps (httpx, fal_client, ffmpeg) are imported lazily inside the
-functions that need them so `build_ad.py --dry-run` runs with nothing installed.
+functions that need them so the live build can fail only when a provider-backed step is reached.
 Credentials are read from the environment / a local .env ONLY (never hardcoded):
 OPENAI_API_KEY for gpt-image-2, FAL_KEY for Kling via fal.ai.
 """

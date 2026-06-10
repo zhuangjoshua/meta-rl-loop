@@ -27,18 +27,17 @@ Reddit changes the official docs. Debug auth, permissions, and account setup fir
 ## Object Model
 
 - `Campaign`
-  - paused first
+  - bounded by the reserved spend policy
   - carries the high-level objective
   - must point at a funding instrument in live mode
 - `Ad Group`
-  - paused first
+  - bounded by the reserved spend policy
   - carries targeting + daily spend (`goal_type: DAILY_SPEND`, `goal_value` in microcurrency)
   - carries the conversion pixel id for the staged launch path
 - `Post`
   - optional if you already have `post_id`
   - otherwise created from public image/video/carousel URLs
 - `Ad`
-  - paused first
   - binds the ad group to the post
 
 ## Launch Shape
@@ -49,12 +48,12 @@ Takyon’s first Reddit launch rail is intentionally small:
 - one ad group
 - one post (optional if reusing `post_id`)
 - one ad
-- everything created `PAUSED`
+- everything created under one reserved total spend cap
 
 This keeps the control surface parallel to Meta:
 
-- `launch` = stage paused
-- `control activate|pause|set_budget` = mutate explicitly
+- `launch` = reserve credits, create provider objects, and activate unless explicitly paused
+- `control activate|pause|set_budget` = mutate explicitly inside the same reservation
 - `insights_sync` = record platform metrics only
 
 ## Best Programmatic Path
@@ -65,8 +64,8 @@ The normal Reddit API launch shape is:
 2. complete OAuth2 and store a refresh token
 3. preflight business, ad account, profile, funding instrument, and pixel
 4. reuse an existing `post_id`, or create a new promoted post from public media URLs
-5. create one paused campaign, one paused ad group, and one paused ad
-6. activate later only if the operator explicitly wants live delivery
+5. create one bounded campaign, ad group, and ad under the reserved cap
+6. pause or re-activate later only if the operator explicitly asks
 
 Takyon already owns steps 3 through 6, and the launch tool now also stages local business media
 into canonical `product/public-assets/<slug>/` receipts before step 4 when needed. In live mode,
@@ -98,12 +97,14 @@ Preflight is the safe way to discover these. The guarded tool returns:
 - Values sent to Reddit are in **microcurrency**.
 - Takyon accepts USD in the tool surface and converts internally.
 - The same safety cap pattern as Meta applies through `TAKYON_REDDIT_MAX_DAILY_BUDGET_USD`.
+- Live launch also fails closed when the remaining reserved Reddit credits are below the live minimum
+  (`TAKYON_REDDIT_MIN_LIVE_BUDGET_USD`, default 5 USD).
 
 ## Current Takyon Rails
 
 - `business_reddit_ad_launch`
   - `mode: preflight` is read-only
-  - `mode: launch` stages paused objects only
+- `mode: launch` reserves credits, creates provider objects, and activates unless explicitly paused
 - `business_reddit_ad_control`
   - `activate`
   - `pause`

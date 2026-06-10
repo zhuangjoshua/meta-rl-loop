@@ -1,4 +1,4 @@
-"""Swappable image-generation backends.
+"""Image-generation backends.
 
 Default backend: OpenAI **gpt-image-2** (configurable via OPENAI_IMAGE_MODEL). The image
 model is the only place that talks to a generation API; everything upstream (intake,
@@ -27,12 +27,6 @@ _MIN_ASPECT, _MAX_ASPECT = 1 / 3, 3.0
 
 # The deprecated gpt-image-1 only supports these three fixed sizes; we snap to the nearest.
 GPT_IMAGE_1_SIZES = {"1024x1024": 1.0, "1536x1024": 1.5, "1024x1536": 1024 / 1536}
-
-# 1x1 transparent PNG, used as a last-resort placeholder when Pillow is unavailable.
-_TINY_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg=="
-)
-
 
 def parse_ratio(aspect_ratio: str):
     """Parse 'W:H' (decimals allowed, e.g. '1.91:1') into (w, h) floats."""
@@ -141,8 +135,7 @@ class OpenAIImageBackend(ImageBackend):
         key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise RuntimeError(
-                "No API key available. Pass --api-key-file PATH, set OPENAI_API_KEY, or use "
-                "--dry-run to exercise the pipeline with the mock backend."
+                "No API key available. Pass --api-key-file PATH or set OPENAI_API_KEY."
             )
         try:
             from openai import OpenAI
@@ -188,61 +181,6 @@ class OpenAIImageBackend(ImageBackend):
         return [base64.b64decode(item.b64_json) for item in resp.data]
 
 
-class MockImageBackend(ImageBackend):
-    """Offline backend for --dry-run. Renders a labeled placeholder (Pillow) or a 1x1 PNG."""
-
-    name = "mock"
-
-    def generate(
-        self,
-        prompt: str,
-        size: str,
-        n: int = 1,
-        reference_images: Optional[List[str]] = None,
-        quality: str = "high",
-        background: str = "auto",
-        output_format: str = "png",
-    ) -> List[bytes]:
-        return [self._placeholder(size, prompt, i, n) for i in range(n)]
-
-    @staticmethod
-    def _placeholder(size: str, prompt: str, idx: int, n: int) -> bytes:
-        try:
-            import io
-
-            from PIL import Image, ImageDraw
-
-            w, h = (int(x) for x in size.lower().split("x"))
-            img = Image.new("RGB", (w, h), (240, 240, 244))
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([8, 8, w - 8, h - 8], outline=(180, 180, 190), width=4)
-            lines = [
-                "MOCK CREATIVE (--dry-run)",
-                f"{w}x{h}" + (f"  [{idx + 1}/{n}]" if n > 1 else ""),
-                "",
-                *_wrap(prompt[:240], 38),
-            ]
-            draw.multiline_text((28, 28), "\n".join(lines), fill=(40, 40, 50), spacing=6)
-            out = io.BytesIO()
-            img.save(out, format="PNG")
-            return out.getvalue()
-        except Exception:
-            return _TINY_PNG
-
-
-def _wrap(text: str, width: int) -> List[str]:
-    words, line, out = text.split(), "", []
-    for wd in words:
-        if len(line) + len(wd) + 1 > width:
-            out.append(line)
-            line = wd
-        else:
-            line = f"{line} {wd}".strip()
-    if line:
-        out.append(line)
-    return out[:10]
-
-
 def read_api_key_file(path: Optional[str]) -> Optional[str]:
     """Read an API key from a file (first non-empty line), or return None. Never logs it."""
     if not path:
@@ -255,14 +193,12 @@ def read_api_key_file(path: Optional[str]) -> Optional[str]:
     raise RuntimeError(f"--api-key-file {path!r} contained no key")
 
 
-def get_backend(name: Optional[str] = None, dry_run: bool = False, api_key: Optional[str] = None) -> ImageBackend:
-    """Factory. ``dry_run`` forces the mock backend. ``name`` selects a registered backend.
+def get_backend(name: Optional[str] = None, api_key: Optional[str] = None) -> ImageBackend:
+    """Factory. ``name`` selects a registered backend.
 
     ``api_key``, when given, is handed directly to the backend (not exported to the env).
     """
-    if dry_run or name == "mock":
-        return MockImageBackend()
-    name = name or os.environ.get("IMAGE_BACKEND", "openai")
+    name = name or "openai"
     if name == "openai":
         return OpenAIImageBackend(api_key=api_key)
-    raise ValueError(f"Unknown backend {name!r}. Registered: openai, mock.")
+    raise ValueError(f"Unknown backend {name!r}. Registered: openai.")

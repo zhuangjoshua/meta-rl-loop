@@ -42,6 +42,10 @@ function joinRoute(base, route) {
   return cleanBase ? `${cleanBase}/${cleanRoute}` : `/${cleanRoute}`;
 }
 
+function encodeRoutePart(value) {
+  return encodeURIComponent(String(value || "").trim());
+}
+
 function defaultLocation() {
   if (typeof window !== "undefined" && window.location) return window.location;
   return { hostname: "", href: "", pathname: "/", origin: "" };
@@ -192,6 +196,52 @@ export function createSubuserRuntimeClient(context = {}) {
         method: "POST",
         body: JSON.stringify(payload),
       });
+    },
+    async listRecords(options = {}) {
+      ensureRail("records");
+      const params = new URLSearchParams();
+      const recordType = String(options.record_type || options.type || "").trim();
+      if (recordType) params.set("type", recordType);
+      if (options.limit != null && options.limit !== "") {
+        params.set("limit", String(options.limit));
+      }
+      const suffix = params.toString();
+      return jsonRequest(`${routeUrl("records")}${suffix ? `?${suffix}` : ""}`, {
+        method: "GET",
+      });
+    },
+    async getRecord(type, id) {
+      ensureRail("records");
+      return jsonRequest(
+        routeUrl(`records/${encodeRoutePart(type)}/${encodeRoutePart(id)}`),
+        { method: "GET" },
+      );
+    },
+    async saveRecord(payload = {}) {
+      ensureRail("records");
+      const recordType = String(payload.record_type || payload.type || "").trim();
+      if (!recordType) {
+        throw new Error("record_type is required");
+      }
+      const recordId = String(payload.record_id || payload.id || "").trim();
+      const route = recordId
+        ? `records/${encodeRoutePart(recordType)}/${encodeRoutePart(recordId)}`
+        : "records";
+      return jsonRequest(routeUrl(route), {
+        method: "POST",
+        body: JSON.stringify({
+          ...payload,
+          record_type: recordType,
+          record_id: recordId || undefined,
+        }),
+      });
+    },
+    async deleteRecord(type, id) {
+      ensureRail("records");
+      return jsonRequest(
+        routeUrl(`records/${encodeRoutePart(type)}/${encodeRoutePart(id)}`),
+        { method: "DELETE" },
+      );
     },
     async checkout(payload = {}) {
       ensureRail("checkout");

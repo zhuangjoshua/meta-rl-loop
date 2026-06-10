@@ -32,27 +32,22 @@ export OPENAI_API_KEY=sk-...                  # never hardcode  — OR pass --ap
 ```
 
 The key can be supplied two ways: `OPENAI_API_KEY` in the environment, or `--api-key-file PATH`
-(read at runtime and handed straight to the client, never exported to an env var). No key is
-needed for `--dry-run`.
+(read at runtime and handed straight to the client, never exported to an env var).
 
 - **Python 3.9+.**
-- `openai` is needed only for real generation. `Pillow` enables exact `--crop` and nicer
-  dry-run placeholders. `jsonschema` improves validation (a zero-dependency fallback runs
-  without it). Everything works in `--dry-run` with no key and no `openai`.
+- `openai` is needed for generation. `Pillow` enables exact `--crop`. `jsonschema` improves
+  validation (a zero-dependency fallback runs without it).
 
 ## Quickstart
 
 ```bash
-# 0) (optional) rehearse the whole pipeline offline — no API key needed
-python scripts/batch_generate.py examples/example-batch.json -o output/ --dry-run --crop
-
 # 1) validate an ad spec
 python scripts/validate_spec.py examples/example-spec.json
 
 # 2) preview the compiled image prompt
 python scripts/compile_prompt.py examples/example-spec.json
 
-# 3) generate one creative (real)
+# 3) generate one creative
 python scripts/generate_image.py examples/example-spec.json -o output/ --crop
 
 # 4) batch a test matrix of angles/placements
@@ -99,12 +94,11 @@ python scripts/generate_image.py examples/example-spec.json -o output/ --crop \
 
 The deprecated `gpt-image-1` snaps any ratio to its nearest of three fixed sizes (then `--crop`).
 
-## Swapping the image backend
+## Image backend
 
 The only place that talks to a generation API is `scripts/backends.py`.
 
 - **Change model:** `export OPENAI_IMAGE_MODEL=gpt-image-1` (or any future model id).
-- **Offline:** `export IMAGE_BACKEND=mock` (or pass `--dry-run`).
 - **New backend:** subclass `ImageBackend`, implement `generate(...)`, and register it in
   `get_backend(...)`. Nothing upstream (intake → strategy → spec → prompt → QA) changes.
 
@@ -128,7 +122,7 @@ static-ad-creative-generator/
 ├── scripts/
 │   ├── validate_spec.py          # schema + performance/policy lint
 │   ├── compile_prompt.py         # spec → art-directed prompt (deterministic)
-│   ├── backends.py               # swappable backends (OpenAI default, mock), size map, crop
+│   ├── backends.py               # backend adapter (OpenAI default), size map, crop
 │   ├── generate_image.py         # single-creative pipeline
 │   ├── batch_generate.py         # batch + manifest
 │   ├── qa_check.py               # QA report scaffolder

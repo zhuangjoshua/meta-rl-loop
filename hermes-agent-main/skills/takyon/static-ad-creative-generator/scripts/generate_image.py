@@ -16,8 +16,8 @@ Bundle written next to the image(s):
 
 CLI:
     python generate_image.py <spec.json> [-o output/] [--aspect-ratio 1:1,9:16,1.91:1]
-                             [--dry-run] [--crop] [--n 1] [--quality high]
-                             [--backend openai|mock] [--api-key-file PATH]
+                             [--crop] [--n 1] [--quality high]
+                             [--backend openai] [--api-key-file PATH]
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ def generate_one(
     spec: Dict,
     out_dir: str,
     backend=None,
-    dry_run: bool = False,
     crop: bool = False,
     n: int = 1,
     quality: str = "high",
@@ -79,14 +78,14 @@ def generate_one(
         raise ValueError(f"[{cid}] --strict: {len(warnings)} lint warning(s); fix before generating")
 
     os.makedirs(out_dir, exist_ok=True)
-    backend = backend or get_backend(dry_run=dry_run)
+    backend = backend or get_backend()
     model = getattr(backend, "model", backend.name)
     model_str = model if isinstance(model, str) else "gpt-image-2"
 
     ratios = aspect_ratios or [spec["aspect_ratio"]]
     multi = len(ratios) > 1
     refs = spec.get("prompting", {}).get("reference_images") or []
-    refs = [r for r in refs if os.path.exists(r)] if not dry_run else []
+    refs = [r for r in refs if os.path.exists(r)]
 
     renders: List[Dict] = []
     for ratio in ratios:
@@ -132,7 +131,6 @@ def generate_one(
         "generated_at": _now(),
         "backend": backend.name,
         "model": model_str if backend.name == "openai" else backend.name,
-        "dry_run": dry_run,
         "platform": spec.get("platform"),
         "placement": spec.get("placement"),
         "angle": spec.get("strategy", {}).get("angle"),
@@ -165,11 +163,10 @@ def _main(argv: List[str]) -> int:
     ap.add_argument("-o", "--out", default="output", help="output directory (default: output/)")
     ap.add_argument("--aspect-ratio", default=None,
                     help="override the spec ratio; comma-separated for multi-size, e.g. 1:1,9:16,1.91:1")
-    ap.add_argument("--dry-run", action="store_true", help="use the mock backend (no API key needed)")
     ap.add_argument("--crop", action="store_true", help="center-crop to the exact aspect ratio (needs Pillow)")
     ap.add_argument("--n", type=int, default=1, help="images to generate per ratio")
     ap.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
-    ap.add_argument("--backend", default=None, help="backend name (default: env IMAGE_BACKEND or 'openai')")
+    ap.add_argument("--backend", default=None, help="backend name (default: openai)")
     ap.add_argument("--api-key-file", default=None,
                     help="read the API key from this file and pass it straight to the client (never sets an env var)")
     ap.add_argument("--strict", action="store_true", help="treat lint warnings as errors")
@@ -177,8 +174,8 @@ def _main(argv: List[str]) -> int:
 
     with open(args.spec, "r", encoding="utf-8") as fh:
         spec = json.load(fh)
-    backend = get_backend(name=args.backend, dry_run=args.dry_run, api_key=read_api_key_file(args.api_key_file))
-    generate_one(spec, args.out, backend=backend, dry_run=args.dry_run, crop=args.crop, n=args.n,
+    backend = get_backend(name=args.backend, api_key=read_api_key_file(args.api_key_file))
+    generate_one(spec, args.out, backend=backend, crop=args.crop, n=args.n,
                  quality=args.quality, strict=args.strict, aspect_ratios=parse_aspect_ratios(args.aspect_ratio))
     return 0
 

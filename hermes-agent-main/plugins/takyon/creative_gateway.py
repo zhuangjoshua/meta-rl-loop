@@ -1,7 +1,7 @@
 """Internal creative gateway — the server-side broker for live creative/ad actions.
 
 This mirrors the AI gateway pattern narrowly for spendful creative operations: the caller keeps
-local planning, dry-run, receipts, and asset records, while the gateway owns the live provider
+local planning, receipts, and asset records, while the gateway owns the live provider
 credential use plus creative-credit reserve/commit/release.
 
 Calls are machine-facing only and require the dashboard session token header. The gateway never
@@ -66,13 +66,18 @@ def _meta_campaign_create_payload(plan: dict[str, Any]) -> dict[str, Any]:
     # Meta now requires an explicit ad-set budget sharing toggle when the
     # campaign itself is not budget-managed. This launch rail always stages
     # a non-CBO campaign and assigns budget at the ad set level.
-    return {
+    payload = {
         "name": plan["campaign_name"],
         "objective": plan["objective"],
         "status": "PAUSED",
         "special_ad_categories": "[]",
         "is_adset_budget_sharing_enabled": False,
     }
+    if plan.get("campaign_start_time"):
+        payload["start_time"] = plan["campaign_start_time"]
+    if plan.get("campaign_end_time"):
+        payload["stop_time"] = plan["campaign_end_time"]
+    return payload
 
 
 def build_creative_gateway_router() -> APIRouter:
@@ -726,6 +731,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "billing_event": plan["billing_event"],
                 "optimization_goal": plan["optimization_goal"],
                 "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+                "start_time": plan.get("adset_start_time"),
+                "end_time": plan.get("adset_end_time"),
                 "targeting": json.dumps(plan["targeting"]),
             }, cfg)
             created["adset_id"] = str(adset.get("id") or "").strip()

@@ -62,14 +62,18 @@ from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.core import (
     handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
+    handle_business_delete_app_record,
     handle_business_enqueue_job,
     handle_business_meta_ad_bind_manual_launch,
     handle_business_meta_ad_insights_sync,
     handle_business_read_app_account,
     handle_business_read_app_profile,
+    handle_business_read_app_record,
     handle_business_record_app_usage,
     handle_business_record_stripe_webhook,
     handle_business_request_app_magic_link,
+    handle_business_list_app_records,
+    handle_business_upsert_app_record,
     handle_business_upsert_app_profile,
     handle_business_verify_app_magic_link,
     _is_reserved_public_subdomain,
@@ -1423,6 +1427,8 @@ async def product_app_rail_middleware(request: Request, call_next):
                 return await _takyon_app_get(request, business, route)
             if request.method == "POST":
                 return await _takyon_app_post(request, business, route)
+            if request.method == "DELETE":
+                return await _takyon_app_delete(request, business, route)
     return await call_next(request)
 
 
@@ -2272,13 +2278,14 @@ def _takyon_app_broker_generate(
 # embedded slug ("/api/takyon/apps/<slug>/...") — and the runtime resolves
 # them to the host's business. This removes the recurring "rail not wired"
 # 404 when a generated site guesses the wrong API base. See CLAUDE.md: the
-# shared app runtime owns auth/session/account/profile/checkout/usage/generate.
+# shared app runtime owns auth/session/account/profile/records/checkout/usage/generate.
 _PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
     "auth/request",
     "auth/verify",
     "session",
     "account",
     "profile",
+    "records",
     "checkout",
     "usage",
     "generate",
@@ -2301,7 +2308,11 @@ def _normalize_product_rail_route(path: str) -> Optional[str]:
             _slug, _, tail = candidate[len(prefix):].partition("/")
             candidate = tail
             break
-    return candidate if candidate in _PRODUCT_APP_RAIL_ROUTES else None
+    if candidate in _PRODUCT_APP_RAIL_ROUTES:
+        return candidate
+    if candidate == "records" or candidate.startswith("records/"):
+        return candidate
+    return None
 
 
 async def _takyon_app_get(request: Request, business: str, route: str) -> Response:
@@ -2343,6 +2354,28 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             "session_token": token,
         }))
         return _takyon_app_json(status, payload)
+
+    if parts and parts[0] == "records":
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        if len(parts) == 1:
+            status, payload = _takyon_app_tool(handle_business_list_app_records({
+                "business": business,
+                "session_token": token,
+                "record_type": request.query_params.get("record_type") or request.query_params.get("type"),
+                "limit": request.query_params.get("limit"),
+            }))
+            return _takyon_app_json(status, payload)
+        if len(parts) == 3:
+            status, payload = _takyon_app_tool(handle_business_read_app_record({
+                "business": business,
+                "session_token": token,
+                "record_type": parts[1],
+                "record_id": parts[2],
+            }))
+            return _takyon_app_json(status, payload)
+        return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
     if parts == ["checkout"]:
         intent_id = str(
@@ -2450,6 +2483,22 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         }))
         return _takyon_app_json(status, payload)
 
+    if parts and parts[0] == "records":
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_upsert_app_record({
+            "business": business,
+            "session_token": token,
+            "record_type": parts[1] if len(parts) >= 2 else body.get("record_type") or body.get("type"),
+            "record_id": parts[2] if len(parts) >= 3 else body.get("record_id") or body.get("id"),
+            "title": body.get("title"),
+            "data": body.get("data"),
+            "metadata": body.get("metadata"),
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"record:{business}:{uuid.uuid4().hex}",
+        }))
+        return _takyon_app_json(status, payload)
+
     if parts == ["usage"]:
         token = _takyon_app_session_token(request)
         if not token:
@@ -2494,6 +2543,28 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
+async def _takyon_app_delete(request: Request, business: str, route: str) -> Response:
+    if _takyon_owner_token_on_app_plane(request):
+        return _takyon_app_json(
+            HTTPStatus.FORBIDDEN,
+            {"success": False, "error": "owner_token_rejected_on_app_plane"},
+        )
+    parts = _takyon_app_route_parts(route)
+    if parts and parts[0] == "records" and len(parts) == 3:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_delete_app_record({
+            "business": business,
+            "session_token": token,
+            "record_type": parts[1],
+            "record_id": parts[2],
+            "idempotency_key": f"record-delete:{business}:{parts[1]}:{parts[2]}",
+        }))
+        return _takyon_app_json(status, payload)
+    return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+
+
 @app.get("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_get(request: Request, business: str, route: str):
     return await _takyon_app_get(request, business, route)
@@ -2512,6 +2583,16 @@ async def takyon_generated_app_api_get(request: Request, business: str, route: s
 @app.post("/api/generated-apps/{business}/{route:path}")
 async def takyon_generated_app_api_post(request: Request, business: str, route: str):
     return await _takyon_app_post(request, business, route)
+
+
+@app.delete("/api/takyon/apps/{business}/{route:path}")
+async def takyon_app_api_delete(request: Request, business: str, route: str):
+    return await _takyon_app_delete(request, business, route)
+
+
+@app.delete("/api/generated-apps/{business}/{route:path}")
+async def takyon_generated_app_api_delete(request: Request, business: str, route: str):
+    return await _takyon_app_delete(request, business, route)
 
 
 @app.post("/api/webhooks/stripe")

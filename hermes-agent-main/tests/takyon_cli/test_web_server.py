@@ -1735,9 +1735,12 @@ def test_normalize_product_rail_route_handles_path_variants():
     assert norm("/api/takyon/apps/mathflow/auth/request") == "auth/request"
     assert norm("/api/generated-apps/mathflow/auth/verify") == "auth/verify"
     assert norm("/api/takyon/apps/otherslug/generate") == "generate"
+    assert norm("/api/takyon/apps/otherslug/records/draft/abc123") == "records/draft/abc123"
     assert norm("session") == "session"
     assert norm("/account") == "account"
     assert norm("/profile") == "profile"
+    assert norm("/records") == "records"
+    assert norm("/records/draft/abc123") == "records/draft/abc123"
     assert norm("/checkout") == "checkout"
     assert norm("/usage") == "usage"
     # Non-rail paths and static pages must not be claimed.
@@ -1978,6 +1981,103 @@ def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
     assert response.status_code == 200
     assert response.json()["cancel_at_period_end"] is True
     assert calls == [{"business": "mathflow", "session_token": "session_123"}]
+
+
+def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    list_calls: list[dict[str, object]] = []
+    read_calls: list[dict[str, object]] = []
+    save_calls: list[dict[str, object]] = []
+    delete_calls: list[dict[str, object]] = []
+
+    def fake_list_handler(args):
+        list_calls.append(args)
+        return json.dumps({"success": True, "records": []})
+
+    def fake_read_handler(args):
+        read_calls.append(args)
+        return json.dumps({"success": True, "record": {"id": args["record_id"]}})
+
+    def fake_save_handler(args):
+        save_calls.append(args)
+        return json.dumps({"success": True, "record": {"id": args.get("record_id") or "generated"}})
+
+    def fake_delete_handler(args):
+        delete_calls.append(args)
+        return json.dumps({"success": True, "deleted": True})
+
+    monkeypatch.setattr(web_server, "handle_business_list_app_records", fake_list_handler)
+    monkeypatch.setattr(web_server, "handle_business_read_app_record", fake_read_handler)
+    monkeypatch.setattr(web_server, "handle_business_upsert_app_record", fake_save_handler)
+    monkeypatch.setattr(web_server, "handle_business_delete_app_record", fake_delete_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        list_response = client.get(
+            "/api/takyon/apps/mathflow/records?type=draft&limit=10",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        read_response = client.get(
+            "/api/takyon/apps/mathflow/records/draft/abc123",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        save_response = client.post(
+            "/api/takyon/apps/mathflow/records/draft/abc123",
+            json={"title": "Investor update", "data": {"body": "Saved"}},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        delete_response = client.delete(
+            "/api/takyon/apps/mathflow/records/draft/abc123",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert list_response.status_code == 200
+    assert read_response.status_code == 200
+    assert save_response.status_code == 200
+    assert delete_response.status_code == 200
+    assert list_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "record_type": "draft",
+        "limit": "10",
+    }]
+    assert read_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "record_type": "draft",
+        "record_id": "abc123",
+    }]
+    assert save_calls[0]["business"] == "mathflow"
+    assert save_calls[0]["session_token"] == "session_123"
+    assert save_calls[0]["record_type"] == "draft"
+    assert save_calls[0]["record_id"] == "abc123"
+    assert save_calls[0]["data"] == {"body": "Saved"}
+    assert delete_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "record_type": "draft",
+        "record_id": "abc123",
+        "idempotency_key": "record-delete:mathflow:draft:abc123",
+    }]
 
 
 def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):

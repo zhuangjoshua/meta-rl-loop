@@ -17,10 +17,6 @@ Layer separation: the WORDS + ACTIONS come from the SCRIPT layer (script.json,
 authored via references/dialogue-action-framework.md). Everything this script does
 is the PRODUCTION layer (references/realism-framework.md, editing-and-stitching.md).
 
-`--dry-run` performs planning ONLY — it prints the clip plan, every compiled Kling
-prompt, and the gpt-image prompt, and makes ZERO API calls (no spend). Use it to
-verify splitting + the two-layer separation for free.
-
 This script writes durable files into product/ugc-ads/<slug>/ and PRINTS the
 business_ugc_ad_write tool payload for the agent to commit. It never fakes that
 tool call (see SKILL.md Rules).
@@ -172,33 +168,6 @@ def clip_start_label(clip_idx: int, transition_mode: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dry-run / planning report
-# ---------------------------------------------------------------------------
-def print_plan(brief, image_prompt, clips, persona, slug, transition_mode):
-    line = "=" * 72
-    print(line)
-    print(f"UGC AD PLAN  ·  business={brief.get('business')}  product={brief.get('product')}")
-    print(f"slug={slug}   publish -> product/ugc-ads/{slug}/")
-    total = sum(c["duration"] for c in clips)
-    print(f"clips={len(clips)}   total≈{total}s   (each clip <= {MAX_CLIP}s of speech)")
-    print(f"transition_mode={transition_mode}")
-    print(line)
-    print("\n[gpt-image-2 REFERENCE PROMPT]  (9:16, anti-sheen realism)\n")
-    print(image_prompt)
-    for i, c in enumerate(clips):
-        prompt = pl.compile_clip_prompt(c["beats"], clip_persona(persona, i, transition_mode))
-        flag = "  ⚠ speech > cap, clamped (tighten the script)" if c["over"] else ""
-        print(f"\n{line}\n[CLIP {i}]  est={c['est']}s  ->  duration={c['duration']}s{flag}")
-        start = clip_start_label(i, transition_mode)
-        print(f"  start_image = {start}   cfg_scale={pl.CFG_SCALE}   generate_audio=True")
-        for j, b in enumerate(c["beats"], 1):
-            act = f"  | action: {b.action}" if b.action else ""
-            print(f"  beat {j}: \"{b.dialogue}\"{act}")
-        print("\n  [compiled Kling prompt]\n  " + prompt.replace("\n", "\n  "))
-    print(f"\n{line}\nDRY RUN — no API calls were made, no files written, zero spend.\n{line}")
-
-
-# ---------------------------------------------------------------------------
 # Live generation
 # ---------------------------------------------------------------------------
 def generate(brief, script, beats, image, persona, clips, slug, args):
@@ -308,7 +277,6 @@ def main(argv=None):
     ap.add_argument("--script", help="script.json of dialogue_action beats (else brief['script'])")
     ap.add_argument("--out-root", default="product", help="publication root (default: product)")
     ap.add_argument("--slug", help="override the publication slug")
-    ap.add_argument("--dry-run", action="store_true", help="plan only; no API calls, no spend")
     ap.add_argument("--jumpcuts", action="store_true", help="extra silence-drop reframe cuts in postpass")
     ap.add_argument(
         "--transition-mode",
@@ -328,11 +296,6 @@ def main(argv=None):
     brief, script, beats, image, persona = load_inputs(args.brief, args.script)
     clips = plan_clips(beats, args.wps, args.min_clip, args.max_clip)
     slug = args.slug or slugify(brief.get("business", ""), brief.get("product", ""))
-    image_prompt = pl.compile_image_prompt(image)
-
-    if args.dry_run:
-        print_plan(brief, image_prompt, clips, persona, slug, args.transition_mode)
-        return 0
 
     generate(brief, script, beats, image, persona, clips, slug, args)
     return 0

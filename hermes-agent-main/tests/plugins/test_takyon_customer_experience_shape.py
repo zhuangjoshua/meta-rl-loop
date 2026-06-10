@@ -104,6 +104,13 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "next.config.js").exists()
     assert (workspace_root / "src" / "app" / "layout.js").exists()
     assert (workspace_root / "src" / "app" / "globals.css").exists()
+    assert (workspace_root / "src" / "app" / "opengraph-image.js").exists()
+    assert (workspace_root / "src" / "app" / "pricing" / "page.js").exists()
+    assert (workspace_root / "src" / "app" / "privacy" / "page.js").exists()
+    assert (workspace_root / "src" / "app" / "robots.js").exists()
+    assert (workspace_root / "src" / "app" / "sitemap.js").exists()
+    assert (workspace_root / "src" / "app" / "terms" / "page.js").exists()
+    assert (workspace_root / "src" / "app" / "twitter-image.js").exists()
     assert (workspace_root / "src" / "app" / "app" / "layout.js").exists()
     assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
     assert (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").exists()
@@ -111,8 +118,12 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "src" / "components" / "starter-primitives.js").exists()
     assert (workspace_root / "src" / "components" / "starter-access-page.js").exists()
     assert (workspace_root / "src" / "components" / "starter-account-page.js").exists()
+    assert (workspace_root / "src" / "components" / "starter-metadata.js").exists()
+    assert (workspace_root / "src" / "components" / "starter-site-page.js").exists()
     assert (workspace_root / "src" / "components" / "starter-server.js").exists()
     starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
+    starter_metadata = (workspace_root / "src" / "components" / "starter-metadata.js").read_text()
+    starter_site_page = (workspace_root / "src" / "components" / "starter-site-page.js").read_text()
     globals_css = (workspace_root / "src" / "app" / "globals.css").read_text()
     next_config = (workspace_root / "next.config.js").read_text()
     assert 'export const starterDefaultPlanKey =' in starter_context
@@ -160,16 +171,52 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert 'const target = "takyon_app_session="' in starter_server
     assert 'if (!requestHasSessionCookie()) {' in starter_server
     assert "return starterAppState({}, null, { errors });" in starter_server
+    assert "starterRootMetadata" in starter_metadata
+    assert "starterAppRobotsMetadata" in starter_metadata
+    assert "starterDefaultPublicRoutes" in starter_metadata
+    assert "starterPageMetadata" in starter_metadata
+    assert "starterPublicRoutes()" in starter_metadata
+    assert 'card: "summary_large_image"' in starter_metadata
+    assert '"/pricing"' in starter_metadata
+    assert 'normalized === "/app"' in starter_metadata
+    assert 'starterAbsoluteUrl("/sitemap.xml")' in starter_metadata
     home_page = (workspace_root / "src" / "app" / "page.js").read_text()
+    pricing_page = (workspace_root / "src" / "app" / "pricing" / "page.js").read_text()
+    privacy_page = (workspace_root / "src" / "app" / "privacy" / "page.js").read_text()
+    root_layout = (workspace_root / "src" / "app" / "layout.js").read_text()
+    app_layout = (workspace_root / "src" / "app" / "app" / "layout.js").read_text()
     app_page = (workspace_root / "src" / "app" / "app" / "page.js").read_text()
     product_layout = (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").read_text()
-    assert 'import Link from "next/link";' not in home_page
-    assert "starter-landing-card" not in home_page
-    assert '<div className="starter-wrap" />' in home_page
+    sitemap_page = (workspace_root / "src" / "app" / "sitemap.js").read_text()
+    terms_page = (workspace_root / "src" / "app" / "terms" / "page.js").read_text()
+    twitter_image = (workspace_root / "src" / "app" / "twitter-image.js").read_text()
+    robots_page = (workspace_root / "src" / "app" / "robots.js").read_text()
+    opengraph_image = (workspace_root / "src" / "app" / "opengraph-image.js").read_text()
+    assert "StarterHomePage" in home_page
+    assert "StarterPricingPage" in pricing_page
+    assert 'path: "/pricing"' in pricing_page
+    assert "StarterPrivacyPage" in privacy_page
+    assert 'path: "/privacy"' in privacy_page
+    assert "export const metadata = starterRootMetadata;" in root_layout
+    assert "metadataBase: starterMetadataBase" in starter_metadata
+    assert "openGraph:" in starter_metadata
+    assert "twitter:" in starter_metadata
+    assert "export const metadata = starterAppRobotsMetadata;" in app_layout
     assert "loadServerAppState" in app_page
     assert "StarterAccessPage initialAppState={initialAppState}" in app_page
     assert 'if (initialAppState?.access?.state !== "ready")' in product_layout
     assert 'redirect("/app")' in product_layout
+    assert "starterSitemapEntries" in sitemap_page
+    assert "StarterTermsPage" in terms_page
+    assert 'path: "/terms"' in terms_page
+    assert "starterRobotsConfig" in robots_page
+    assert "ImageResponse" in opengraph_image
+    assert "starterSiteName" in opengraph_image
+    assert 'export { alt, contentType, default, size } from "./opengraph-image.js";' in twitter_image
+    assert "StarterHomePage" in starter_site_page
+    assert "StarterPricingPage" in starter_site_page
+    assert "StarterPrivacyPage" in starter_site_page
+    assert "StarterTermsPage" in starter_site_page
     assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert '"includedAiBudgetMicrousd": 5000000' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
     assert '"auth": "declared"' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
@@ -202,7 +249,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "starterAppState(...)" in block
     assert "starterLoadViewer()" in block
     assert "starterLoadAppState()" in block
-    assert "minimal landing stub at `/`, a thin `/app` access gate, and a thin `/app/profile` account page" in block
+    assert "minimal landing stub at `/`, a thin `/app` entrypoint that decides between access-gate and product-root state" in block
     assert "Keep customer-facing copy free of developer framing." in block
 
 

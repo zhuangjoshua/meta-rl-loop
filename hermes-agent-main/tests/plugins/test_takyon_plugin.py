@@ -33,6 +33,8 @@ from plugins.takyon.core import (
     _test_app_checkout_url,
     _surface_subuser_app_shape,
     _surface_customer_experience_shape,
+    _surface_product_workflow_shape,
+    _subuser_surface_context_payload,
     _meta_load_launch_receipt,
     _validate_product_surface_contract,
     handle_business_check_runtime_capabilities,
@@ -51,8 +53,11 @@ from plugins.takyon.core import (
     handle_business_x_publish_outreach,
     handle_business_x_metrics_sync,
     handle_business_read_app_account,
+    handle_business_read_app_record,
+    handle_business_list_app_records,
     handle_business_request_app_magic_link,
     handle_business_record_stripe_webhook,
+    handle_business_delete_app_record,
     handle_business_verify_app_magic_link,
     handle_business_static_ad_generate,
     handle_business_ugc_ad_generate,
@@ -64,6 +69,7 @@ from plugins.takyon.core import (
     handle_business_list_conversation_messages,
     handle_business_read_conversation_thread,
     handle_business_upsert_app_surface_contract,
+    handle_business_upsert_app_record,
     handle_business_upsert_business,
     takyon_toolset_name,
     handle_business_refresh_product_surface,
@@ -1910,6 +1916,328 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     assert "Runtime features: auth, account, checkout, generate" in surface_md
 
 
+def test_app_surface_contract_records_product_workflow_in_contract_render_and_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-product-workflow",
+    )
+
+    product_workflow = {
+        "primary_user": "signed-in product subuser",
+        "workspace_model": "one user = one workspace",
+        "primary_job": "A founder opens the app to turn rough notes into a saved investor update.",
+        "scope_rules": {
+            "no_teams": True,
+            "no_roles": True,
+            "no_invites": True,
+            "no_sharing": True,
+            "no_public_pages": True,
+            "no_admin_console": True,
+        },
+        "core_loop": {
+            "input": "paste rough company notes",
+            "action": "generate a cleaned investor update draft",
+            "result": "show the finished update on screen",
+            "save_record": True,
+            "return_to_record_later": True,
+        },
+        "persistence_rules": {
+            "requires_server_state": True,
+            "persistence_rail": "records",
+            "survives_sign_out": True,
+            "truthful_empty_state": True,
+            "reopenable_history": True,
+            "no_local_only_state": True,
+        },
+        "product_budget": {
+            "screens": {"min": 2, "max": 5},
+            "entity_types": {"min": 3, "max": 6},
+            "backend_actions": {"min": 5, "max": 10},
+            "ai_flows": {"min": 0, "max": 2},
+        },
+        "first_run": {
+            "strategy": "guided_first_run",
+            "empty_state_required": True,
+            "pending_state_required": True,
+            "error_state_required": True,
+        },
+        "success_moment": "user pastes notes, clicks Generate, sees the polished update, and finds it in history",
+        "acceptance_tests": [
+            "new user sees a truthful first-run state",
+            "completed loop creates a saved record",
+            "saved record appears in history",
+            "sign out and back in preserves the record",
+        ],
+        "not_now": ["team collaboration", "sharing", "admin tools"],
+    }
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["records", "generate"],
+                "app_mode": "ai_tool",
+                "product_workflow": product_workflow,
+                "idempotency_key": "surface-product-workflow",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    shape = _surface_product_workflow_shape(app["surface_contract"])
+    assert shape["primary_user"] == "signed-in product subuser"
+    assert shape["workspace_model"] == "one user = one workspace"
+    assert shape["core_loop"]["save_record"] is True
+    assert shape["persistence_rules"]["persistence_rail"] == "records"
+    assert shape["product_budget"]["backend_actions"] == {"min": 5, "max": 10}
+    assert shape["first_run"]["strategy"] == "guided_first_run"
+
+    context_payload = _subuser_surface_context_payload(app["surface_contract"], slug="latexflow")
+    assert context_payload["productWorkflow"]["primaryUser"] == "signed-in product subuser"
+    assert context_payload["productWorkflow"]["persistenceRules"]["persistenceRail"] == "records"
+    assert context_payload["productWorkflow"]["complexityTarget"]["entityTypes"] == {"min": 3, "max": 6}
+    assert "saved record" in context_payload["productWorkflow"]["successMoment"]
+
+    surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
+    assert "## Product Workflow" in surface_md
+    assert "Primary user: signed-in product subuser" in surface_md
+    assert "Closed loop: paste rough company notes -> generate a cleaned investor update draft -> show the finished update on screen -> save a real record -> return to it later" in surface_md
+    assert "Scope guardrails: no teams, no roles, no invites, no sharing, no public pages, no admin console" in surface_md
+    assert "Persistence requirements: persistence rail `records`, server-side state, survives sign-out/sign-in, truthful empty state, reopenable history, no local-only pretend state" in surface_md
+    assert "Complexity target: screens 2-5; entity types 3-6; backend actions 5-10; AI flows 0-2" in surface_md
+    assert "First-run requirements: strategy `guided_first_run`, truthful empty state, pending states, error states" in surface_md
+    assert "Acceptance tests: 4 recorded" in surface_md
+    assert "Not now: team collaboration, sharing, admin tools" in surface_md
+
+
+def test_app_records_rail_persists_lists_reads_and_deletes_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-app-records",
+    )
+    customer_commit = _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.customer.upsert",
+                "business": "latexflow",
+                "email": "founder@example.com",
+                "name": "Founder",
+            }
+        ],
+        "seed-app-customer",
+    )
+    app_user_id = customer_commit["results"][0]["app_user_id"]
+
+    saved = json.loads(
+        handle_business_upsert_app_record(
+            {
+                "business": "latexflow",
+                "app_user_id": app_user_id,
+                "record_type": "draft",
+                "title": "Investor update",
+                "data": {"body": "First saved note", "status": "ready"},
+                "metadata": {"source": "test"},
+                "idempotency_key": "record-save-1",
+            }
+        )
+    )
+    assert saved["success"] is True
+    record_id = saved["record"]["id"]
+    assert saved["record"]["type"] == "draft"
+    assert saved["record"]["data"]["status"] == "ready"
+
+    listed = json.loads(
+        handle_business_list_app_records(
+            {
+                "business": "latexflow",
+                "app_user_id": app_user_id,
+                "record_type": "draft",
+            }
+        )
+    )
+    assert listed["success"] is True
+    assert listed["count"] == 1
+    assert listed["records"][0]["id"] == record_id
+
+    read_back = json.loads(
+        handle_business_read_app_record(
+            {
+                "business": "latexflow",
+                "app_user_id": app_user_id,
+                "record_type": "draft",
+                "record_id": record_id,
+            }
+        )
+    )
+    assert read_back["success"] is True
+    assert read_back["record"]["title"] == "Investor update"
+    assert read_back["record"]["data"]["body"] == "First saved note"
+
+    deleted = json.loads(
+        handle_business_delete_app_record(
+            {
+                "business": "latexflow",
+                "app_user_id": app_user_id,
+                "record_type": "draft",
+                "record_id": record_id,
+                "idempotency_key": "record-delete-1",
+            }
+        )
+    )
+    assert deleted["success"] is True
+    assert deleted["deleted"] is True
+
+    listed_after_delete = json.loads(
+        handle_business_list_app_records(
+            {
+                "business": "latexflow",
+                "app_user_id": app_user_id,
+                "record_type": "draft",
+            }
+        )
+    )
+    assert listed_after_delete["success"] is True
+    assert listed_after_delete["count"] == 0
+
+
+def test_app_surface_contract_rejects_unselected_product_workflow_persistence_rail(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-product-workflow-rail-check",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["generate"],
+                "product_workflow": {
+                    "primary_job": "Turn notes into a saved update.",
+                    "persistence_rules": {
+                        "requires_server_state": True,
+                        "persistence_rail": "records",
+                    },
+                },
+                "idempotency_key": "surface-product-workflow-missing-records",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "persistence_rail `records` must also be selected in runtime_features" in result["error"]
+
+
+def test_app_surface_contract_rejects_landing_only_product_workflow_contradiction(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-product-workflow-landing-check",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["records"],
+                "constraints": {"landing_page_only": True},
+                "product_workflow": {
+                    "primary_job": "Save customer work.",
+                    "persistence_rules": {"persistence_rail": "records"},
+                },
+                "idempotency_key": "surface-product-workflow-landing-only",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "landing_page_only surfaces cannot also declare product_workflow" in result["error"]
+
+
+def test_app_surface_contract_rejects_product_workflow_screen_budget_contradiction(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-product-workflow-screen-budget",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site" / "app"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "page.tsx").write_text("export default function Page() { return null; }\n", encoding="utf-8")
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["records"],
+                "required_app_tabs": ["workspace", "history", "detail"],
+                "product_workflow": {
+                    "primary_job": "Save customer work.",
+                    "persistence_rules": {"persistence_rail": "records"},
+                    "product_budget": {"screens": {"min": 2, "max": 2}},
+                },
+                "idempotency_key": "surface-product-workflow-screen-budget-fail",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "product_workflow.product_budget.screens max is contradicted" in result["error"]
+
+
+def test_app_surface_contract_rejects_invalid_product_workflow_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-product-workflow-range-check",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["records"],
+                "product_workflow": {
+                    "primary_job": "Save customer work.",
+                    "persistence_rules": {"persistence_rail": "records"},
+                    "product_budget": {"screens": {"min": 5, "max": 2}},
+                },
+                "idempotency_key": "surface-product-workflow-range-fail",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "product_workflow.product_budget.screens min cannot exceed max" in result["error"]
+
+
 def test_app_surface_contract_normalizes_legacy_billing_to_account_and_checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -1981,7 +2309,44 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
                 "action": "app.surface.upsert",
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["auth", "checkout", "generate"],
+                "runtime_features": ["auth", "checkout", "records", "generate"],
+                "product_workflow": {
+                    "primary_user": "signed-in product subuser",
+                    "workspace_model": "one user = one workspace",
+                    "primary_job": "A founder opens the app to turn rough notes into a saved investor update.",
+                    "core_loop": {
+                        "input": "paste rough company notes",
+                        "action": "generate a cleaned investor update draft",
+                        "result": "show the finished update on screen",
+                        "save_record": True,
+                        "return_to_record_later": True,
+                    },
+                    "persistence_rules": {
+                        "requires_server_state": True,
+                        "persistence_rail": "records",
+                        "survives_sign_out": True,
+                        "truthful_empty_state": True,
+                        "reopenable_history": True,
+                        "no_local_only_state": True,
+                    },
+                    "product_budget": {
+                        "screens": {"min": 2, "max": 5},
+                        "entity_types": {"min": 3, "max": 6},
+                        "backend_actions": {"min": 5, "max": 10},
+                        "ai_flows": {"min": 0, "max": 2},
+                    },
+                    "first_run": {
+                        "strategy": "guided_first_run",
+                        "empty_state_required": True,
+                        "pending_state_required": True,
+                        "error_state_required": True,
+                    },
+                    "acceptance_tests": [
+                        "completed loop creates a saved record",
+                        "sign out and back in preserves the record",
+                    ],
+                    "not_now": ["team collaboration", "sharing"],
+                },
             }
         ],
         "surface-contract-runtime-features",
@@ -2019,14 +2384,26 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert result["success"] is True
     assert "Hermes runtime UI contract" in instruction
     assert "Hermes sub-user app plane contract" in instruction
-    assert "Declared runtime-backed features: auth, account, checkout, generate" in instruction
+    assert "The surface contract records an MVP-complete product workflow for the gated app." in instruction
+    assert "Primary user: signed-in product subuser" in instruction
+    assert "Workspace model: one user = one workspace" in instruction
+    assert "Closed-loop requirement: paste rough company notes -> generate a cleaned investor update draft -> show the finished update on screen -> save a real record -> return to it later" in instruction
+    assert "Persistence requirements: use the `records` persistence rail, server-side state, survive sign-out/sign-in, truthful empty state, reopenable history, no local-only pretend state" in instruction
+    assert "Complexity target: screens 2-5; entity types 3-6; backend actions 5-10; AI flows 0-2" in instruction
+    assert "First-run requirements: strategy `guided_first_run`, truthful empty state, pending states, error states" in instruction
+    assert "Acceptance tests that must read back true before you call this done:" in instruction
+    assert "completed loop creates a saved record" in instruction
+    assert "Explicitly out of scope for this MVP: team collaboration, sharing" in instruction
+    assert "Declared runtime-backed features: auth, account, records, checkout, generate" in instruction
     assert "Runtime API base fallback: /api/takyon/apps/latexflow" in instruction
     assert "account (owner: takyon-app-runtime)" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
     assert "Canonical tools: business_read_app_account" in instruction
+    assert "Canonical tools: business_list_app_records, business_read_app_record, business_upsert_app_record, business_delete_app_record" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
     assert "Reachable runtime endpoints: POST /auth/request on product hosts or POST /api/takyon/apps/latexflow/auth/request off-host" in instruction
     assert "Reachable runtime endpoints: GET /account on product hosts or GET /api/takyon/apps/latexflow/account off-host" in instruction
+    assert "Reachable runtime endpoints: GET /records on product hosts or GET /api/takyon/apps/latexflow/records off-host; POST /records on product hosts or POST /api/takyon/apps/latexflow/records off-host; GET /records/<type>/<id> on product hosts or GET /api/takyon/apps/latexflow/records/<type>/<id> off-host; POST /records/<type>/<id> on product hosts or POST /api/takyon/apps/latexflow/records/<type>/<id> off-host; DELETE /records/<type>/<id> on product hosts or DELETE /api/takyon/apps/latexflow/records/<type>/<id> off-host" in instruction
     assert "Reachable runtime endpoints: POST /checkout on product hosts or POST /api/takyon/apps/latexflow/checkout off-host" in instruction
     assert "Reachable runtime endpoints: POST /generate on product hosts or POST /api/takyon/apps/latexflow/generate off-host" in instruction
     assert "Treat POST /generate on product hosts or POST <runtime_api_base>/generate off-host as the public product contract for AI generation" in instruction
@@ -2667,7 +3044,7 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
     assert "latexflow.fourmanifold.com" in caddyfile
     assert f"root * {service_root}" in caddyfile
     assert f"root * {service_root / '_takyon' / 'assets'}" not in caddyfile
-    assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /checkout /usage /generate" in caddyfile
+    assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /records /records/* /checkout /usage /generate" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
 
 
@@ -4614,7 +4991,7 @@ def test_business_ugc_ad_write_records_existing_publication(tmp_path, monkeypatc
     assert payload["script"] == script
 
 
-def test_business_static_ad_generate_test_mode_writes_mock_bundle(tmp_path, monkeypatch):
+def test_business_static_ad_generate_rejects_test_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -4646,12 +5023,8 @@ def test_business_static_ad_generate_test_mode_writes_mock_bundle(tmp_path, monk
         )
     )
 
-    assert result["success"] is True
-    assert result["status"] == "suppressed_test_mode"
-    manifest = tmp_path / "businesses" / "frameforge" / "product" / "static-ads" / "frameforge-static" / "manifest.json"
-    receipt = tmp_path / "businesses" / "frameforge" / result["receipt"]
-    assert manifest.is_file()
-    assert receipt.is_file()
+    assert result["success"] is False
+    assert "requires a live business" in result["error"]
 
 
 def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch):
@@ -4789,6 +5162,73 @@ def test_business_read_channel_credit_budgets_returns_snapshot_and_action_costs(
     assert result["value"]["channels"]["meta"]["allocated_credits"] == 3
     assert result["value"]["action_costs"]["x_publish_outreach"]["default_bucket"] == "x"
     assert result["value"]["action_costs"]["meta_ad_launch"]["credits"] >= 1
+
+
+def test_business_set_channel_credit_budgets_persists_credits_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "live"}],
+        "init-frameforge-launch-defaults",
+    )
+    _grant_creative_credits(store, "frameforge", 43, "frameforge-launch-defaults-grant")
+
+    result = _set_channel_credit_budgets(
+        "frameforge",
+        {"x": 1, "meta": 12, "reddit": 30},
+        key="frameforge-channel-budgets-defaults-v1",
+    )
+
+    assert result["success"] is True
+    assert result["value"]["channels"]["x"] == {
+        "allocated_credits": 1,
+        "used_credits": 0,
+        "reserved_credits": 0,
+        "remaining_credits": 1,
+    }
+    assert "launch_defaults" not in result["value"]["channels"]["meta"]
+    assert "launch_defaults" not in result["value"]["channels"]["reddit"]
+
+
+def test_business_set_channel_credit_budgets_rejects_drop_below_reserved_live_spend(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "live"}],
+        "init-frameforge-live-reserved-budget",
+    )
+    _grant_creative_credits(store, "frameforge", 100, "frameforge-live-reserved-budget-grant")
+    _set_channel_credit_budgets(
+        "frameforge",
+        {"x": 0, "meta": 100, "reddit": 0},
+        key="frameforge-live-reserved-budget-initial",
+    )
+
+    reservation = takyon_core._reserve_channel_spend_credits(
+        "frameforge",
+        channel="meta",
+        requested_credits=60,
+        reservation_key="frameforge-meta-media-spend-v1",
+        metadata={"slug": "demo"},
+    )
+
+    result = json.loads(
+        handle_business_set_channel_credit_budgets(
+            {
+                "business": "frameforge",
+                "allocations": {"x": 0, "meta": 50, "reddit": 0},
+                "idempotency_key": "frameforge-live-reserved-budget-lower",
+            }
+        )
+    )
+
+    assert reservation["requested_credits"] == 60
+    assert result["success"] is False
+    assert "meta budget cannot drop below 60 credits" in result["error"]
 
 
 def test_business_ugc_ad_generate_live_requires_channel_budget_context(tmp_path, monkeypatch):
@@ -4981,7 +5421,7 @@ def _grant_creative_credits(store: TakyonStore, business: str, credits: int, key
 
 def _set_channel_credit_budgets(
     business: str,
-    allocations: dict[str, int],
+    allocations: dict[str, Any],
     *,
     key: str,
 ) -> dict[str, Any]:
@@ -5157,14 +5597,60 @@ def test_business_meta_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
     assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads").exists()
 
 
-def test_business_meta_ad_launch_refuses_activation(tmp_path, monkeypatch):
-    _meta_test_business(tmp_path, monkeypatch)
+def test_business_meta_ad_launch_defaults_to_activation_when_live(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-meta-activate-default-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 3000, "reddit": 0},
+        key="clipbook-meta-activate-default-budget",
+    )
+    video_dir = tmp_path / "businesses" / "clipbook" / "product" / "ugc-ads" / "demo-meta"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    (video_dir / "ad.mp4").write_bytes(b"fake mp4 bytes")
 
-    result = json.loads(handle_business_meta_ad_launch(_meta_launch_args(activate=True)))
+    def fake_gateway(endpoint, payload):
+        if endpoint == "meta-launch":
+            return {
+                "success": True,
+                "status": "created_paused",
+                "ad_account_id": "act_123456",
+                "graph_version": "v23.0",
+                "ids": {
+                    "creative_id": "creative-1",
+                    "campaign_id": "campaign-1",
+                    "adset_id": "adset-1",
+                    "ad_id": "ad-1",
+                },
+                "thumbnail_url": "https://example.com/thumb.png",
+                "credits_charged": 1,
+                "balance_credits": 2999,
+                "reserved_credits": 2999,
+            }
+        assert endpoint == "meta-control"
+        return {
+            "success": True,
+            "status": "activated",
+            "graph_version": "v23.0",
+            "applied": [
+                {"object": "campaign", "id": "campaign-1", "status": "ACTIVE"},
+                {"object": "adset", "id": "adset-1", "status": "ACTIVE"},
+                {"object": "ad", "id": "ad-1", "status": "ACTIVE"},
+            ],
+        }
 
-    assert result["success"] is False
-    assert "PAUSED" in result["error"]
-    assert "activation" in result["error"].lower()
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(handle_business_meta_ad_launch(_meta_launch_args()))
+
+    assert result["success"] is True
+    assert result["status"] == "activated"
+    assert result["paused"] is False
+    assert result["value"]["reserved_credits"] == 2999
+    assert result["value"]["total_budget_usd"] == 29.99
 
 
 def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
@@ -5280,18 +5766,69 @@ def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, mon
     image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
     image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / "creative.png").write_bytes(b"fake png bytes")
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-live",
+            )
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_channel_budget_exhausted"
+    assert "allocate more Meta credits" in result["error"]
+
+
+def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatch):
+    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-meta-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 3000, "reddit": 0},
+        key="clipbook-meta-budget-v1",
+    )
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
     monkeypatch.setattr(
         takyon_core,
         "_call_creative_runtime_gateway",
-        lambda endpoint, payload: {
-            "success": False,
-            "status": "blocked_insufficient_creative_credits",
-            "requested_credits": 1,
-            "available_credits": 0,
-            "balance_credits": 0,
-            "reserved_credits": 0,
-            "error": "insufficient_creative_credits",
-        },
+        lambda endpoint, payload: (
+            {
+                "success": True,
+                "status": "created_paused",
+                "ad_account_id": "act_123456",
+                "graph_version": "v23.0",
+                "ids": {
+                    "image_hash": "hash123",
+                    "creative_id": "creative-1",
+                    "campaign_id": "campaign-1",
+                    "adset_id": "adset-1",
+                    "ad_id": "ad-1",
+                },
+                "thumbnail_url": "https://example.com/image.png",
+                "credits_charged": 1,
+                "balance_credits": 2999,
+                "reserved_credits": 2999,
+            }
+            if endpoint == "meta-launch"
+            else {
+                "success": True,
+                "status": "activated",
+                "graph_version": "v23.0",
+                "applied": [
+                    {"object": "campaign", "id": "campaign-1", "status": "ACTIVE"},
+                    {"object": "adset", "id": "adset-1", "status": "ACTIVE"},
+                    {"object": "ad", "id": "ad-1", "status": "ACTIVE"},
+                ],
+            }
+        ),
     )
 
     result = json.loads(
@@ -5305,17 +5842,22 @@ def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, mon
         )
     )
 
-    assert result["success"] is False
-    assert result["status"] == "blocked_insufficient_creative_credits"
-    assert "insufficient_creative_credits" in result["error"]
+    assert result["success"] is True
+    assert result["status"] == "activated"
+    assert result["balance_credits"] == 2999
 
 
-def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatch):
+def test_business_meta_ad_launch_derives_bounded_budget_when_omitted(tmp_path, monkeypatch):
     monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
-    _grant_creative_credits(store, "clipbook", 5, "clipbook-meta-grant")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-meta-default-budget-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 3000, "reddit": 0},
+        key="clipbook-meta-default-budget-v1",
+    )
     image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
     image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / "creative.png").write_bytes(b"fake png bytes")
@@ -5336,8 +5878,8 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
             },
             "thumbnail_url": "https://example.com/image.png",
             "credits_charged": 1,
-            "balance_credits": 4,
-            "reserved_credits": 0,
+            "balance_credits": 2999,
+            "reserved_credits": 2999,
         },
     )
 
@@ -5347,14 +5889,21 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
                 asset_kind="image",
                 ad_video_path="",
                 ad_image_path="product/static-ads/demo-image/creative.png",
-                slug="demo-image-live",
+                slug="demo-image-default-budget",
+                adset={"optimization_goal": "LINK_CLICKS"},
+                activate=False,
+                idempotency_key="clipbook-meta-default-budget-launch-v1",
             )
         )
     )
 
     assert result["success"] is True
     assert result["status"] == "created_paused"
-    assert result["balance_credits"] == 4
+    assert result["value"]["daily_budget_usd"] == 29.99
+    assert result["value"]["total_budget_usd"] == 29.99
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["value"]["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["adset"]["daily_budget_usd"] == 29.99
 
 
 def test_business_meta_ad_bind_manual_launch_updates_receipt_and_records_event(tmp_path, monkeypatch):
@@ -5448,6 +5997,21 @@ def test_business_meta_ad_control_live_activate_records_event(tmp_path, monkeypa
     monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="meta",
+        slug="demo-meta",
+        provider_account_id="act_policy",
+        provider_campaign_id="campaign-policy",
+        provider_group_id="adset-policy",
+        provider_ad_id="ad-policy",
+    )
+    receipt_abs = tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads" / "demo-meta" / "receipt.json"
+    tampered = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    tampered["ids"]["campaign_id"] = "campaign-tampered"
+    tampered["ids"]["adset_id"] = "adset-tampered"
+    tampered["ids"]["ad_id"] = "ad-tampered"
+    receipt_abs.write_text(json.dumps(tampered), encoding="utf-8")
     calls: list[tuple[str, dict]] = []
 
     def fake_gateway(endpoint, payload):
@@ -5479,7 +6043,9 @@ def test_business_meta_ad_control_live_activate_records_event(tmp_path, monkeypa
     assert result["success"] is True
     assert result["status"] == "activated"
     assert calls[0][0] == "meta-control"
-    assert calls[0][1]["campaign_id"] == "campaign-1"
+    assert calls[0][1]["campaign_id"] == "campaign-policy"
+    assert calls[0][1]["adset_id"] == "adset-policy"
+    assert calls[0][1]["ad_id"] == "ad-policy"
 
     with store._connect() as conn:
         row = conn.execute(
@@ -5495,6 +6061,14 @@ def test_business_meta_ad_control_rejects_over_cap_budget(tmp_path, monkeypatch)
     monkeypatch.setenv("TAKYON_META_MAX_DAILY_BUDGET_USD", "10")
     _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="meta",
+        slug="demo-meta",
+        provider_campaign_id="campaign-1",
+        provider_group_id="adset-1",
+        provider_ad_id="ad-1",
+    )
 
     result = json.loads(
         handle_business_meta_ad_control(
@@ -5516,18 +6090,33 @@ def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypat
     monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="meta",
+        slug="demo-meta",
+        provider_account_id="act_policy",
+        provider_campaign_id="campaign-policy",
+        provider_group_id="adset-policy",
+        provider_ad_id="ad-policy",
+        total_budget_cents=5000,
+    )
+    receipt_abs = tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads" / "demo-meta" / "receipt.json"
+    tampered = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    tampered["ids"]["campaign_id"] = "campaign-tampered"
+    receipt_abs.write_text(json.dumps(tampered), encoding="utf-8")
+    seen_payloads: list[dict[str, Any]] = []
 
     monkeypatch.setattr(
         takyon_core,
         "_call_creative_runtime_gateway",
-        lambda endpoint, payload: {
+        lambda endpoint, payload: seen_payloads.append(payload) or {
             "success": True,
             "status": "synced",
             "graph_version": "v23.0",
             "rows": [
                 {
                     "account_currency": "USD",
-                    "campaign_id": "campaign-1",
+                    "campaign_id": "campaign-policy",
                     "campaign_name": "Demo Campaign",
                     "date_start": "2026-06-01",
                     "date_stop": "2026-06-01",
@@ -5559,6 +6148,8 @@ def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypat
     assert result["status"] == "synced"
     assert result["totals"]["spend_cents"] == 1234
     assert result["totals"]["clicks"] == 25
+    assert seen_payloads[0]["campaign_id"] == "campaign-policy"
+    assert seen_payloads[0]["ad_account_id"] == "act_policy"
 
     metrics_abs = tmp_path / "businesses" / "clipbook" / result["metrics_path"]
     assert metrics_abs.is_file()
@@ -5693,6 +6284,43 @@ def _write_reddit_launch_receipt(tmp_path, *, business="clipbook", slug="demo-re
     }
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     return receipt_path
+
+
+def _seed_live_ad_spend_policy(
+    *,
+    business: str,
+    channel: str,
+    slug: str,
+    reserved_credits: int = 5_000,
+    daily_budget_cents: int = 500,
+    total_budget_cents: int = 5_000,
+    provider_account_id: str = "account-1",
+    provider_campaign_id: str = "campaign-1",
+    provider_group_id: str = "group-1",
+    provider_ad_id: str = "ad-1",
+    provider_post_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+):
+    start_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    end_at = start_at + timedelta(days=10)
+    return takyon_core._upsert_ad_spend_policy(
+        business,
+        channel=channel,
+        slug=slug,
+        reservation_key=f"{business}-{channel}-{slug}-reservation",
+        reserved_credits=reserved_credits,
+        daily_budget_cents=daily_budget_cents,
+        total_budget_cents=total_budget_cents,
+        start_at=start_at,
+        end_at=end_at,
+        provider_account_id=provider_account_id,
+        provider_campaign_id=provider_campaign_id,
+        provider_group_id=provider_group_id,
+        provider_ad_id=provider_ad_id,
+        provider_post_id=provider_post_id,
+        status="created_paused",
+        metadata=metadata or {},
+    )
 
 
 def test_business_reddit_ad_launch_test_mode_suppresses_and_is_idempotent(tmp_path, monkeypatch):
@@ -6013,33 +6641,64 @@ def test_business_reddit_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch
     assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "reddit-ads").exists()
 
 
-def test_business_reddit_ad_launch_refuses_activation(tmp_path, monkeypatch):
+def test_business_reddit_ad_launch_defaults_to_activation_when_live(tmp_path, monkeypatch):
     _stub_reddit_ads_config(monkeypatch)
-    _meta_test_business(tmp_path, monkeypatch)
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-reddit-activate-default-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 0, "reddit": 3000},
+        key="clipbook-reddit-activate-default-budget",
+    )
 
-    result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args(activate=True)))
+    def fake_gateway(endpoint, payload):
+        if endpoint == "reddit-launch":
+            return {
+                "success": True,
+                "status": "created_paused",
+                "business_id": "business-1",
+                "ad_account_id": "a2_demo",
+                "profile_id": "t2_profile",
+                "funding_instrument_id": "fi_1",
+                "pixel_id": "pixel_1",
+                "ids": {
+                    "campaign_id": "campaign-1",
+                    "ad_group_id": "adgroup-1",
+                    "ad_id": "ad-1",
+                    "post_id": "t3_demo123",
+                },
+                "preview_url": "https://www.reddit.com/?ad=preview",
+                "preview_expiry": "2026-06-04T00:00:00Z",
+                "post_url": "https://www.reddit.com/comments/demo",
+                "credits_charged": 1,
+                "balance_credits": 2999,
+                "reserved_credits": 2999,
+            }
+        assert endpoint == "reddit-control"
+        return {
+            "success": True,
+            "status": "activated",
+            "applied": [
+                {"object": "campaign", "id": "campaign-1", "configured_status": "ACTIVE"},
+                {"object": "ad_group", "id": "adgroup-1", "configured_status": "ACTIVE"},
+                {"object": "ad", "id": "ad-1", "configured_status": "ACTIVE"},
+            ],
+        }
 
-    assert result["success"] is False
-    assert "PAUSED" in result["error"]
-    assert "activation" in result["error"].lower()
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args()))
+
+    assert result["success"] is True
+    assert result["status"] == "activated"
+    assert result["paused"] is False
+    assert result["value"]["reserved_credits"] == 2999
+    assert result["value"]["total_budget_usd"] == 29.99
 
 
 def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeypatch):
     _stub_reddit_ads_config(monkeypatch)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
-    monkeypatch.setattr(
-        takyon_core,
-        "_call_creative_runtime_gateway",
-        lambda endpoint, payload: {
-            "success": False,
-            "status": "blocked_insufficient_creative_credits",
-            "requested_credits": 1,
-            "available_credits": 0,
-            "balance_credits": 0,
-            "reserved_credits": 0,
-            "error": "insufficient_creative_credits",
-        },
-    )
 
     result = json.loads(
         handle_business_reddit_ad_launch(
@@ -6054,38 +6713,55 @@ def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeyp
     )
 
     assert result["success"] is False
-    assert result["status"] == "blocked_insufficient_creative_credits"
-    assert "insufficient_creative_credits" in result["error"]
+    assert result["status"] == "blocked_channel_budget_exhausted"
+    assert "allocate more Reddit credits" in result["error"]
 
 
 def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
     _stub_reddit_ads_config(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
-    _grant_creative_credits(store, "clipbook", 5, "clipbook-reddit-grant")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-reddit-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 0, "reddit": 3000},
+        key="clipbook-reddit-budget-v1",
+    )
     monkeypatch.setattr(
         takyon_core,
         "_call_creative_runtime_gateway",
-        lambda endpoint, payload: {
-            "success": True,
-            "status": "created_paused",
-            "business_id": "business-1",
-            "ad_account_id": "a2_demo",
-            "profile_id": "t2_profile",
-            "funding_instrument_id": "fi_1",
-            "pixel_id": "pixel_1",
-            "ids": {
-                "campaign_id": "campaign-1",
-                "ad_group_id": "adgroup-1",
-                "ad_id": "ad-1",
-                "post_id": "t3_demo123",
-            },
-            "preview_url": "https://www.reddit.com/?ad=preview",
-            "preview_expiry": "2026-06-04T00:00:00Z",
-            "post_url": "https://www.reddit.com/comments/demo",
-            "credits_charged": 1,
-            "balance_credits": 4,
-            "reserved_credits": 0,
-        },
+        lambda endpoint, payload: (
+            {
+                "success": True,
+                "status": "created_paused",
+                "business_id": "business-1",
+                "ad_account_id": "a2_demo",
+                "profile_id": "t2_profile",
+                "funding_instrument_id": "fi_1",
+                "pixel_id": "pixel_1",
+                "ids": {
+                    "campaign_id": "campaign-1",
+                    "ad_group_id": "adgroup-1",
+                    "ad_id": "ad-1",
+                    "post_id": "t3_demo123",
+                },
+                "preview_url": "https://www.reddit.com/?ad=preview",
+                "preview_expiry": "2026-06-04T00:00:00Z",
+                "post_url": "https://www.reddit.com/comments/demo",
+                "credits_charged": 1,
+                "balance_credits": 2999,
+                "reserved_credits": 2999,
+            }
+            if endpoint == "reddit-launch"
+            else {
+                "success": True,
+                "status": "activated",
+                "applied": [
+                    {"object": "campaign", "id": "campaign-1", "configured_status": "ACTIVE"},
+                    {"object": "ad_group", "id": "adgroup-1", "configured_status": "ACTIVE"},
+                    {"object": "ad", "id": "ad-1", "configured_status": "ACTIVE"},
+                ],
+            }
+        ),
     )
     synced: list[str] = []
     monkeypatch.setattr(
@@ -6107,9 +6783,64 @@ def test_business_reddit_ad_launch_live_charges_credits(tmp_path, monkeypatch):
     )
 
     assert result["success"] is True
-    assert result["status"] == "created_paused"
-    assert result["balance_credits"] == 4
+    assert result["status"] == "activated"
+    assert result["balance_credits"] == 2999
     assert synced == ["clipbook"]
+
+
+def test_business_reddit_ad_launch_derives_bounded_budget_when_omitted(tmp_path, monkeypatch):
+    _stub_reddit_ads_config(monkeypatch)
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-reddit-default-budget-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 0, "reddit": 3000},
+        key="clipbook-reddit-default-budget-v1",
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: {
+            "success": True,
+            "status": "created_paused",
+            "business_id": "business-1",
+            "ad_account_id": "a2_demo",
+            "profile_id": "t2_profile",
+            "funding_instrument_id": "fi_1",
+            "pixel_id": "pixel_1",
+            "ids": {
+                "campaign_id": "campaign-1",
+                "ad_group_id": "adgroup-1",
+                "ad_id": "ad-1",
+                "post_id": "t3_demo123",
+            },
+            "preview_url": "https://www.reddit.com/?ad=preview",
+            "preview_expiry": "2026-06-04T00:00:00Z",
+            "post_url": "https://www.reddit.com/comments/demo",
+            "credits_charged": 1,
+            "balance_credits": 2999,
+            "reserved_credits": 2999,
+        },
+    )
+
+    result = json.loads(
+        handle_business_reddit_ad_launch(
+            _reddit_launch_args(
+                ad_group={"optimization_goal": "CLICKS"},
+                slug="demo-reddit-default-budget",
+                activate=False,
+                idempotency_key="clipbook-reddit-default-budget-launch-v1",
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created_paused"
+    assert result["value"]["daily_budget_usd"] == 29.99
+    assert result["value"]["total_budget_usd"] == 29.99
+    plan_abs = tmp_path / "businesses" / "clipbook" / result["value"]["plan_path"]
+    plan = json.loads(plan_abs.read_text(encoding="utf-8"))
+    assert plan["ad_group"]["daily_budget_usd"] == 29.99
 
 
 def test_reddit_launch_plan_passes_structured_post_payload(tmp_path, monkeypatch):
@@ -6259,6 +6990,23 @@ def test_business_reddit_ad_control_test_mode_suppresses_and_is_idempotent(tmp_p
 def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_reddit_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="reddit",
+        slug="demo-reddit",
+        provider_account_id="account-policy",
+        provider_campaign_id="campaign-policy",
+        provider_group_id="adgroup-policy",
+        provider_ad_id="ad-policy",
+        provider_post_id="post-policy",
+        metadata={"budget_scope": "ad_group"},
+    )
+    receipt_abs = tmp_path / "businesses" / "clipbook" / "distribution" / "reddit-ads" / "demo-reddit" / "receipt.json"
+    tampered = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    tampered["ids"]["campaign_id"] = "campaign-tampered"
+    tampered["ids"]["ad_group_id"] = "adgroup-tampered"
+    tampered["ids"]["ad_id"] = "ad-tampered"
+    receipt_abs.write_text(json.dumps(tampered), encoding="utf-8")
     calls: list[tuple[str, dict]] = []
     synced: list[str] = []
 
@@ -6295,7 +7043,9 @@ def test_business_reddit_ad_control_live_activate_records_event(tmp_path, monkey
     assert result["success"] is True
     assert result["status"] == "activated"
     assert calls[0][0] == "reddit-control"
-    assert calls[0][1]["campaign_id"] == "campaign-1"
+    assert calls[0][1]["campaign_id"] == "campaign-policy"
+    assert calls[0][1]["ad_group_id"] == "adgroup-policy"
+    assert calls[0][1]["ad_id"] == "ad-policy"
     assert synced == ["clipbook"]
 
     with store._connect() as conn:
@@ -6312,6 +7062,15 @@ def test_business_reddit_ad_control_rejects_over_cap_budget(tmp_path, monkeypatc
     monkeypatch.setenv("TAKYON_REDDIT_MAX_DAILY_BUDGET_USD", "10")
     _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_reddit_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="reddit",
+        slug="demo-reddit",
+        provider_campaign_id="campaign-1",
+        provider_group_id="adgroup-1",
+        provider_ad_id="ad-1",
+        metadata={"budget_scope": "ad_group"},
+    )
 
     result = json.loads(
         handle_business_reddit_ad_control(
@@ -6332,6 +7091,23 @@ def test_business_reddit_ad_control_rejects_over_cap_budget(tmp_path, monkeypatc
 def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_reddit_launch_receipt(tmp_path)
+    _seed_live_ad_spend_policy(
+        business="clipbook",
+        channel="reddit",
+        slug="demo-reddit",
+        provider_account_id="account-policy",
+        provider_campaign_id="campaign-policy",
+        provider_group_id="adgroup-policy",
+        provider_ad_id="ad-policy",
+        provider_post_id="post-policy",
+        total_budget_cents=5000,
+        metadata={"budget_scope": "ad_group"},
+    )
+    receipt_abs = tmp_path / "businesses" / "clipbook" / "distribution" / "reddit-ads" / "demo-reddit" / "receipt.json"
+    tampered = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    tampered["ad_account_id"] = "account-tampered"
+    tampered["ids"]["campaign_id"] = "campaign-tampered"
+    receipt_abs.write_text(json.dumps(tampered), encoding="utf-8")
     calls: list[tuple[str, dict[str, Any]]] = []
     synced: list[str] = []
 
@@ -6378,6 +7154,8 @@ def test_business_reddit_ad_insights_sync_live_writes_snapshot(tmp_path, monkeyp
     assert result["totals"]["spend_micros"] == 12340000
     assert result["totals"]["clicks"] == 25
     assert calls[0][0] == "reddit-insights"
+    assert calls[0][1]["campaign_id"] == "campaign-policy"
+    assert calls[0][1]["ad_account_id"] == "account-policy"
     assert calls[0][1]["fields"] == ["SPEND", "IMPRESSIONS", "CLICKS", "CTR", "CPC", "ECPM"]
     assert synced == ["clipbook"]
 

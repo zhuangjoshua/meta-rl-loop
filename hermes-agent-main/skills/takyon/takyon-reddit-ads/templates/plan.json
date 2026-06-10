@@ -8,7 +8,7 @@
   },
   "ad_group": {
     "name": "Demo Reddit Ad Group",
-    "daily_budget_usd": 5.0,
+    "daily_budget_usd": null,
     "optimization_goal": "CLICKS",
     "targeting": {
       "geolocations": ["US"],
@@ -28,5 +28,9 @@
   "ad": {
     "name": "Clipbook Reddit Ad",
     "click_url": "https://example.com/clipbook"
+  },
+  "_notes": {
+    "activate": "Launch activates by default when the operator asked to launch. Set activate=false or status='PAUSED' only when you intentionally want a staged paused campaign.",
+    "budget": "Leave ad_group.daily_budget_usd null to let the backend derive a bounded daily pace and end time from the remaining Reddit channel credits after setup. Explicit values are still capped by TAKYON_REDDIT_MAX_DAILY_BUDGET_USD (default 50), must meet the live minimum (default 5 USD/day), and cannot exceed the reserved total cap."
   }
 }

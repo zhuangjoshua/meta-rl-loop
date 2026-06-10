@@ -9,7 +9,7 @@
   },
   "adset": {
     "name": "<campaign-slug> ad set",
-    "daily_budget_usd": 5.0,
+    "daily_budget_usd": null,
     "optimization_goal": "LINK_CLICKS",
     "billing_event": "IMPRESSIONS",
     "targeting": { "geo_locations": { "countries": ["US"] } }
@@ -23,12 +23,12 @@
     "image_url": ""
   },
   "idempotency_key": "meta-ad-<business-slug>-<campaign-slug>-v1",
-  "reason": "launch paused meta ad from ugc video",
+  "reason": "launch bounded meta ad from ugc video",
   "actor": "agent",
   "_notes": {
     "mode": "Call business_meta_ad_launch with mode='preflight' first (read-only), then mode='launch'.",
-    "paused": "Every object is created PAUSED. This tool never activates or spends.",
-    "budget": "daily_budget_usd is capped by TAKYON_META_MAX_DAILY_BUDGET_USD (default 50).",
+    "activate": "Launch activates by default when the operator asked to launch. Set activate=false or status='PAUSED' only when you intentionally want a staged paused campaign.",
+    "budget": "Leave daily_budget_usd null to let the backend derive a bounded daily pace and end time from the remaining Meta channel credits after setup. Explicit values are still capped by TAKYON_META_MAX_DAILY_BUDGET_USD (default 50), must meet the live minimum (default 5 USD/day), and cannot exceed the reserved total cap.",
     "ad_account_id": "Blank = use META_AD_ACCOUNT_ID. Pass a sandbox account id here for a zero-risk live test.",
     "page_id": "Blank = use META_PAGE_ID. Required for the video creative.",
     "image_url": "Blank = use the uploaded video's auto thumbnail; set a public image URL if it is not ready."
