@@ -4415,6 +4415,69 @@ async def create_takyon_business_creative_credit_checkout(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/takyon/businesses/{slug}/creative-credits/reconcile")
+async def reconcile_takyon_business_creative_credit_checkout(
+    request: Request, slug: str
+) -> dict[str, Any]:
+    """Dashboard wrapper that settles a paid creative-credit checkout on return."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = str(body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    try:
+        from plugins.takyon import stripe_util
+        from plugins.takyon.control_api import reconcile_creative_credit_checkout_session
+        from plugins.takyon.core import TakyonStore, _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        with store._connect() as conn:
+            reconcile_creative_credit_checkout_session(
+                conn,
+                session_id=session_id,
+                expected_business_slug=slug,
+            )
+        return await get_takyon_business_creative_credits(request, slug)
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "creative_credit_checkout_unpaid":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except stripe_util.StripeError as exc:
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(
+                status_code=503, detail="creative_credit_reconcile_unconfigured"
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"stripe_error: {message}") from exc
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business creative credit reconcile failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/takyon/businesses/{slug}/outreach/start")
 async def start_takyon_business_outreach_channel(
     request: Request,

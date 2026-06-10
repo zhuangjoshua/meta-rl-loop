@@ -52,6 +52,12 @@ class CreativeCreditCheckoutRequest(BaseModel):
     cancel_url: str = Field(..., min_length=1)
 
 
+class CreativeCreditReconcileRequest(BaseModel):
+    """Body for POST /v1/businesses/{slug}/creative-credits/reconcile."""
+
+    session_id: str = Field(..., min_length=1)
+
+
 class PayoutConnectRequest(BaseModel):
     """Body for POST /v1/me/payouts/connect."""
 
@@ -1000,6 +1006,99 @@ def create_creative_credit_checkout_session(
     return session, charge
 
 
+def reconcile_creative_credit_checkout_session(
+    conn,
+    *,
+    session_id: str,
+    expected_business_slug: str | None = None,
+) -> dict[str, Any]:
+    """Settle one paid creative-credit checkout session exactly once.
+
+    This is the safe return-path fallback when the dedicated billing webhook is
+    missing or delayed: read the authoritative Stripe checkout session, verify
+    it is a paid creative-credit purchase, then grant credits idempotently on
+    the Stripe checkout session id.
+    """
+
+    stripe_session_id = str(session_id or "").strip()
+    if not stripe_session_id:
+        raise ValueError("session_id is required")
+    expected_slug = str(expected_business_slug or "").strip()
+    try:
+        session = stripe_util.stripe_request(
+            f"checkout/sessions/{stripe_session_id}",
+            {},
+            method="GET",
+        )
+    except stripe_util.StripeError as exc:
+        message = str(exc)
+        if " failed: 404" in message:
+            raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}") from exc
+        raise
+    if not isinstance(session, dict) or not session:
+        raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}")
+
+    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+    purpose = str(metadata.get("purpose") or "").strip()
+    if purpose not in {"creative_credit_pack", "creative_credit_topup"}:
+        raise ValueError("not a creative credit checkout session")
+    payment_status = str(session.get("payment_status") or "").strip()
+    if payment_status not in {"paid", "no_payment_required"}:
+        raise RuntimeError("creative_credit_checkout_unpaid")
+
+    business_slug = str(
+        metadata.get("business_slug") or session.get("client_reference_id") or ""
+    ).strip()
+    if not business_slug:
+        raise ValueError("creative credit checkout session missing business_slug")
+    if expected_slug and business_slug != expected_slug:
+        raise ValueError("checkout session does not belong to requested business")
+
+    try:
+        credits = int(metadata.get("credits") or 0)
+    except (TypeError, ValueError):
+        credits = 0
+    if credits <= 0:
+        raise ValueError("creative credit checkout session missing credits")
+    try:
+        amount_cents = int(session.get("amount_total") or 0)
+    except (TypeError, ValueError):
+        amount_cents = 0
+    try:
+        price_cents_per_credit = int(metadata.get("price_cents_per_credit") or 0)
+    except (TypeError, ValueError):
+        price_cents_per_credit = 0
+    pack_id = str(metadata.get("pack_id") or "").strip()
+
+    grant_metadata = {
+        "purpose": purpose,
+        "user_id": metadata.get("user_id"),
+        "stripe_checkout_session_id": stripe_session_id,
+        "amount_cents": amount_cents,
+        "price_cents_per_credit": price_cents_per_credit,
+        "reconciled_via": "checkout_session_read",
+    }
+    if pack_id:
+        grant_metadata["pack_id"] = pack_id
+
+    balances = safebox.grant_credits(
+        conn,
+        business_slug,
+        credits,
+        idempotency_key=f"stripe_checkout_session:{stripe_session_id}",
+        metadata=grant_metadata,
+        stripe_ref=stripe_session_id,
+    )
+    return {
+        "ok": True,
+        "business_slug": business_slug,
+        "credited_credits": credits,
+        "balance_credits": balances.balance_credits,
+        "reserved_credits": balances.reserved_credits,
+        "session_id": stripe_session_id,
+    }
+
+
 def _rate_limited_principal(
     principal: ResolvedPrincipal = Depends(_resolve_principal),
     conn=Depends(get_control_conn),
@@ -1184,6 +1283,43 @@ def build_control_router() -> APIRouter:
             if "STRIPE_SECRET_KEY" in msg or "creative_credit_checkout_unconfigured" in msg:
                 raise HTTPException(
                     status_code=503, detail="creative_credit_checkout_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
+
+    @router.post("/businesses/{slug}/creative-credits/reconcile")
+    def reconcile_creative_credit_checkout(
+        slug: str,
+        body: CreativeCreditReconcileRequest,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        if slug not in principal.business_slugs:
+            raise HTTPException(status_code=404, detail="not_found")
+        row = conn.execute(
+            "select slug from businesses where slug = %s",
+            (slug,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        try:
+            return reconcile_creative_credit_checkout_session(
+                conn,
+                session_id=body.session_id,
+                expected_business_slug=slug,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            if str(exc) == "creative_credit_checkout_unpaid":
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except stripe_util.StripeError as exc:
+            msg = str(exc)
+            if "STRIPE_SECRET_KEY" in msg:
+                raise HTTPException(
+                    status_code=503, detail="creative_credit_reconcile_unconfigured"
                 ) from exc
             raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
 

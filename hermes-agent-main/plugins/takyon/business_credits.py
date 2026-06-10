@@ -192,8 +192,27 @@ def grant_credits(
     key = str(idempotency_key or "").strip()
     if not key:
         raise ValueError("idempotency_key is required")
+    stripe_reference = str(stripe_ref or "").strip() or None
     with conn.transaction():
         business_slug, balance = _ensure_account_locked(conn, business_slug)
+        if stripe_reference:
+            prior_session = conn.execute(
+                """
+                select 1
+                from business_creative_credit_entries
+                where business_slug = %s
+                  and kind = 'grant'
+                  and stripe_ref = %s
+                limit 1
+                """,
+                (business_slug, stripe_reference),
+            ).fetchone()
+            if prior_session is not None:
+                return CreativeCreditBalances(
+                    business_slug=business_slug,
+                    balance_credits=balance,
+                    reserved_credits=_reserved_credits(conn, business_slug),
+                )
         prior = conn.execute(
             "select 1 from business_creative_credit_entries where idempotency_key = %s",
             (key,),
@@ -227,7 +246,7 @@ def grant_credits(
                 new_balance,
                 key,
                 _json_dumps(metadata or {}),
-                stripe_ref,
+                stripe_reference,
             ),
         )
         return CreativeCreditBalances(

@@ -194,7 +194,13 @@ export const api = {
     ),
   createTakyonBusinessCreativeCreditCheckout: (
     slug: string,
-    options: { packId?: string | null; credits?: number | null; returnPath: string },
+    options: {
+      packId?: string | null;
+      credits?: number | null;
+      returnPath?: string;
+      successPath?: string;
+      cancelPath?: string;
+    },
   ) =>
     fetchJSON<{
       checkout_url?: string;
@@ -209,10 +215,19 @@ export const api = {
       body: JSON.stringify({
         pack_id: options.packId || undefined,
         credits: options.credits || undefined,
-        success_path: options.returnPath,
-        cancel_path: options.returnPath,
+        success_path: options.successPath || options.returnPath || "/",
+        cancel_path: options.cancelPath || options.returnPath || options.successPath || "/",
       }),
     }),
+  reconcileTakyonBusinessCreativeCreditCheckout: (slug: string, sessionId: string) =>
+    fetchJSON<TakyonBusinessCreativeCreditsResponse>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/reconcile`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      },
+    ),
   getTakyonBusinessFile: (slug: string, path: string) =>
     fetchJSONWithTimeout<TakyonBusinessFileReadResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/file?path=${encodeURIComponent(path)}`,

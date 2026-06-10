@@ -581,6 +581,104 @@ def test_creative_credit_checkout_rejects_below_stripe_minimum(client, pg_conn, 
     assert "minimum creative credit purchase is 50 credits ($0.50)" in resp.json()["detail"]
 
 
+def test_creative_credit_reconcile_session_credits_business_and_dedupes_webhook(
+    client, pg_conn, monkeypatch
+):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    session_id = "cs_credit_paid_1"
+
+    def _fake_request(path, params, *, method="POST"):
+        assert path == f"checkout/sessions/{session_id}"
+        assert params == {}
+        assert method == "GET"
+        return {
+            "id": session_id,
+            "client_reference_id": slug,
+            "amount_total": 125,
+            "payment_status": "paid",
+            "metadata": {
+                "purpose": "creative_credit_topup",
+                "user_id": uid,
+                "business_slug": slug,
+                "credits": "125",
+                "price_cents_per_credit": "1",
+            },
+        }
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        f"/v1/businesses/{slug}/creative-credits/reconcile",
+        headers=_auth(raw),
+        json={"session_id": session_id},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "ok": True,
+        "business_slug": slug,
+        "credited_credits": 125,
+        "balance_credits": 125,
+        "reserved_credits": 0,
+        "session_id": session_id,
+    }
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 125
+
+    event = _creative_credit_event(
+        slug,
+        user_id=uid,
+        credits=125,
+        amount=125,
+        event_id="evt_credit_late_webhook",
+    )
+    event["data"]["object"]["id"] = session_id
+    event["data"]["object"]["metadata"]["price_cents_per_credit"] = "1"
+    resp2 = _post_webhook(client, event, "whsec_test_xyz")
+    assert resp2.status_code == 200, resp2.text
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 125
+    grant_entries = [
+        entry for entry in business_credits.list_credit_entries(pg_conn, slug)
+        if entry.kind == "grant"
+    ]
+    assert len(grant_entries) == 1
+    assert grant_entries[0].stripe_ref == session_id
+
+
+def test_creative_credit_reconcile_session_rejects_unpaid(client, pg_conn, monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
+    slug = _add_business(pg_conn, uid)
+    session_id = "cs_credit_open_1"
+
+    def _fake_request(path, params, *, method="POST"):
+        assert path == f"checkout/sessions/{session_id}"
+        assert params == {}
+        assert method == "GET"
+        return {
+            "id": session_id,
+            "client_reference_id": slug,
+            "amount_total": 125,
+            "payment_status": "open",
+            "metadata": {
+                "purpose": "creative_credit_topup",
+                "user_id": uid,
+                "business_slug": slug,
+                "credits": "125",
+            },
+        }
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        f"/v1/businesses/{slug}/creative-credits/reconcile",
+        headers=_auth(raw),
+        json={"session_id": session_id},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "creative_credit_checkout_unpaid"
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 0
+
+
 def test_billing_webhook_blocked_without_secret(client, monkeypatch):
     monkeypatch.delenv("STRIPE_BILLING_WEBHOOK_SECRET", raising=False)
     resp = client.post(

@@ -61,12 +61,23 @@ type SessionTitlePayload = {
 
 const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";
 const LITEBULB_PENDING_TURN_STORAGE_KEY = "takyon.litebulb.pendingTurns.v1";
+const LITEBULB_PENDING_CREATIVE_CREDIT_CHECKOUT_STORAGE_KEY =
+  "takyon.litebulb.pendingCreativeCreditCheckout.v1";
+const LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY =
+  "creative_credit_checkout_session_id";
 
 type PendingTurn = {
   id: string;
   text: string;
   createdAt: number;
   userCountBefore: number;
+};
+
+type PendingCreativeCreditCheckout = {
+  businessSlug: string;
+  sessionId: string;
+  credits: number;
+  createdAt: number;
 };
 
 function trimText(value: unknown) {
@@ -266,6 +277,61 @@ function clearStoredPendingTurn(slug: string) {
   }
 }
 
+function readStoredPendingCreativeCreditCheckout(): PendingCreativeCreditCheckout | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(LITEBULB_PENDING_CREATIVE_CREDIT_CHECKOUT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed as PendingCreativeCreditCheckout : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPendingCreativeCreditCheckout(value: PendingCreativeCreditCheckout) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      LITEBULB_PENDING_CREATIVE_CREDIT_CHECKOUT_STORAGE_KEY,
+      JSON.stringify(value),
+    );
+  } catch {
+    /* best effort */
+  }
+}
+
+function clearStoredPendingCreativeCreditCheckout() {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(LITEBULB_PENDING_CREATIVE_CREDIT_CHECKOUT_STORAGE_KEY);
+  } catch {
+    /* best effort */
+  }
+}
+
+function readCreativeCreditCheckoutSessionIdFromUrl() {
+  if (typeof window === "undefined") return "";
+  try {
+    const url = new URL(window.location.href);
+    return trimText(url.searchParams.get(LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY));
+  } catch {
+    return "";
+  }
+}
+
+function clearCreativeCreditCheckoutSessionIdFromUrl() {
+  if (typeof window === "undefined") return;
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has(LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY)) return;
+    url.searchParams.delete(LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    /* best effort */
+  }
+}
+
 function historyUserTexts(payload: HistoryPayload | null | undefined) {
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   return messages
@@ -433,7 +499,25 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
     try {
-      const payload = await api.getTakyonBusinessCreativeCredits(businessSlug);
+      const pendingCheckout = readStoredPendingCreativeCreditCheckout();
+      const pendingSessionId = (
+        pendingCheckout
+        && trimText(pendingCheckout.businessSlug).toLowerCase() === businessSlug
+      )
+        ? trimText(pendingCheckout.sessionId)
+        : "";
+      const returnSessionId = readCreativeCreditCheckoutSessionIdFromUrl();
+      const reconcileSessionId = returnSessionId || pendingSessionId;
+      const payload = reconcileSessionId
+        ? await api.reconcileTakyonBusinessCreativeCreditCheckout(
+          businessSlug,
+          reconcileSessionId,
+        ).catch(() => api.getTakyonBusinessCreativeCredits(businessSlug))
+        : await api.getTakyonBusinessCreativeCredits(businessSlug);
+      if (reconcileSessionId && payload?.available) {
+        clearStoredPendingCreativeCreditCheckout();
+        clearCreativeCreditCheckoutSessionIdFromUrl();
+      }
       if (!isVisibleBusiness(businessSlug)) return;
       setCreativeCredits(payload);
     } catch {
@@ -458,14 +542,36 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     const creditCount = Number.isFinite(credits) ? Math.max(0, Math.round(credits)) : 0;
     if (!businessSlug || creditCount <= 0) return;
-    const returnPath = window.location.pathname + window.location.search + window.location.hash;
+    const cancelPath = window.location.pathname + window.location.search + window.location.hash;
+    const successUrl = new URL(window.location.href);
+    successUrl.searchParams.set(
+      LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY,
+      "{CHECKOUT_SESSION_ID}",
+    );
+    const successPath = `${successUrl.pathname}${successUrl.search}${successUrl.hash}`.replace(
+      encodeURIComponent("{CHECKOUT_SESSION_ID}"),
+      "{CHECKOUT_SESSION_ID}",
+    );
     const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
       businessSlug,
-      { credits: creditCount, returnPath },
+      {
+        credits: creditCount,
+        successPath,
+        cancelPath,
+      },
     );
     const checkoutUrl = trimText(checkout.checkout_url);
     if (!checkoutUrl) {
       throw new Error("Creative credit checkout unavailable.");
+    }
+    const sessionId = trimText(checkout.session_id);
+    if (sessionId) {
+      writeStoredPendingCreativeCreditCheckout({
+        businessSlug,
+        sessionId,
+        credits: creditCount,
+        createdAt: Date.now(),
+      });
     }
     window.location.assign(checkoutUrl);
   }, []);
