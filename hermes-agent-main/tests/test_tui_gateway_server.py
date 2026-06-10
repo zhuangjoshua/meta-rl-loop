@@ -607,6 +607,21 @@ def test_history_to_messages_hides_budget_guarded_global_wrapper():
     ]
 
 
+def test_takyon_prompt_create_business_detector_ignores_existing_company_campaign_requests():
+    assert (
+        server._takyon_prompt_may_create_business(
+            "can you generate a video ugc and make a reddit ads campaign for this company"
+        )
+        is False
+    )
+
+
+def test_takyon_prompt_create_business_detector_still_catches_real_create_requests():
+    assert server._takyon_prompt_may_create_business(
+        "create a new business for dog grooming"
+    )
+
+
 def test_history_to_messages_collapses_adjacent_raw_and_scoped_duplicate_user_prompt():
     history = [
         {"role": "user", "content": "hello"},

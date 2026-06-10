@@ -106,10 +106,16 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_verify_app_magic_link",
         "business_read_app_account",
         "business_read_app_profile",
+        "business_list_app_directory_entries",
+        "business_read_app_directory_entry",
+        "business_upsert_app_directory_entry",
+        "business_disable_app_directory_entry",
         "business_list_app_records",
         "business_read_app_record",
         "business_upsert_app_record",
         "business_delete_app_record",
+        "business_list_app_connections",
+        "business_act_on_app_connection",
         "business_create_app_checkout",
         "business_record_stripe_webhook",
         "business_record_app_usage",
@@ -435,6 +441,27 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "Do not persist profile edits only in browser state or local files.",
         ],
     },
+    "directory": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": [
+            "business_list_app_directory_entries",
+            "business_read_app_directory_entry",
+            "business_upsert_app_directory_entry",
+            "business_disable_app_directory_entry",
+        ],
+        "endpoints": [
+            ("GET", "directory"),
+            ("GET", "directory/me"),
+            ("GET", "directory/<app_user_id>"),
+            ("POST", "directory/me"),
+            ("DELETE", "directory/me"),
+        ],
+        "worker_contract": [
+            "Treat the directory rail as authenticated in-app discoverability of other opted-in subusers, not as a public page index.",
+            "Directory results must come only from real opted-in subusers through the shared directory rail; never seed, fake, or pad the directory, and keep truthful empty states.",
+            "The published directory profile is a consented snapshot written through the directory rail, not a live mirror of private profile fields.",
+        ],
+    },
     "records": {
         "owner_skill": "takyon-app-runtime",
         "tools": [
@@ -453,6 +480,22 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Persist real saved product entities through the shared records rail instead of localStorage or fake synced browser data.",
             "Use the records rail for history/detail/reopen flows so saved state survives sign-out/sign-in honestly.",
+        ],
+    },
+    "connections": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": [
+            "business_list_app_connections",
+            "business_act_on_app_connection",
+        ],
+        "endpoints": [
+            ("GET", "connections"),
+            ("POST", "connections"),
+        ],
+        "worker_contract": [
+            "Use the connections rail for directed cross-user state such as like, pass, and block; do not simulate matches or cross-user state in local client data.",
+            "Treat likes/passes/blocks as outbound user actions and derive matches from reciprocal state; do not invent a likes-received or chat substrate that the runtime does not provide.",
+            "Block must suppress cross-user visibility bidirectionally through the shared runtime instead of product-specific client filters.",
         ],
     },
     "checkout": {
@@ -510,7 +553,9 @@ _RUNTIME_FEATURE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
 _RUNTIME_FEATURE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "account": ("auth",),
     "profile": ("auth", "account"),
+    "directory": ("auth", "account", "profile"),
     "records": ("auth", "account"),
+    "connections": ("auth", "account", "directory"),
     "checkout": ("auth", "account"),
     "entitlements": ("auth", "account"),
     "usage": ("auth", "account"),
@@ -519,7 +564,9 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "auth",
     "account",
     "profile",
+    "directory",
     "records",
+    "connections",
     "checkout",
     "entitlements",
     "usage",
@@ -1474,9 +1521,15 @@ def _validate_product_workflow_contract(
     workflow = product_workflow or _surface_product_workflow_shape(surface)
     if not workflow:
         return
+    selected_runtime_features = set(runtime_features or [])
     if _surface_allows_landing_only(surface):
         raise TakyonError(
             "landing_page_only surfaces cannot also declare product_workflow; remove landing_page_only or clear product_workflow"
+        )
+    scope_rules = workflow.get("scope_rules") if isinstance(workflow.get("scope_rules"), dict) else {}
+    if {"directory", "connections"} & selected_runtime_features and bool(scope_rules.get("no_sharing")):
+        raise TakyonError(
+            "product_workflow.scope_rules.no_sharing cannot stay true when directory or connections rails are selected"
         )
     persistence_rules = workflow.get("persistence_rules") if isinstance(workflow.get("persistence_rules"), dict) else {}
     requires_server_state = bool(persistence_rules.get("requires_server_state"))
@@ -1495,7 +1548,7 @@ def _validate_product_workflow_contract(
                 "product_workflow.persistence_rules.persistence_rail must be one of "
                 + ", ".join(sorted(key for key in PRODUCT_RUNTIME_RAILS if key != "billing"))
             )
-        if persistence_rail not in set(runtime_features or []):
+        if persistence_rail not in selected_runtime_features:
             raise TakyonError(
                 f"product_workflow.persistence_rules.persistence_rail `{persistence_rail}` must also be selected in runtime_features"
             )
@@ -1543,6 +1596,8 @@ def _is_shared_runtime_route_path(path: str) -> bool:
         route = "/" + route
     route = route.lower()
     if route == "/records" or route.startswith("/records/"):
+        return True
+    if route == "/directory" or route.startswith("/directory/"):
         return True
     for rail in PRODUCT_RUNTIME_RAILS.values():
         endpoints = rail.get("endpoints") if isinstance(rail, dict) else ()
@@ -1859,10 +1914,6 @@ def _merge_subuser_app_metadata(
         subscription_style if subscription_style is not None else existing.get("subscription_style")
     )
     normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
-    existing_app_mode = _normalize_subuser_surface_choice(existing.get("app_mode"), allowed=SUBUSER_APP_MODE_CHOICES)
-    existing_subscription = _normalize_subscription_style(existing.get("subscription_style"))
-    existing_api_mode = _normalize_subuser_surface_choice(existing.get("api_mode"), allowed=SUBUSER_API_MODE_CHOICES)
-    existing_runtime_features = _normalize_runtime_features(previous_runtime_features or [], strict=True)
     if normalized_app_mode:
         next_payload["app_mode"] = normalized_app_mode
     elif "app_mode" not in next_payload and existing.get("app_mode"):
@@ -1872,13 +1923,7 @@ def _merge_subuser_app_metadata(
         next_payload["api_mode"] = normalized_api_mode
     elif "api_mode" not in next_payload and existing.get("api_mode"):
         next_payload["api_mode"] = existing.get("api_mode")
-    shape_changed = (
-        normalized_app_mode != existing_app_mode
-        or normalized_subscription != existing_subscription
-        or normalized_api_mode != existing_api_mode
-        or runtime_features != existing_runtime_features
-    )
-    raw_rail_state = rail_state if rail_state is not None else ({} if shape_changed else existing.get("rail_state"))
+    raw_rail_state = rail_state if rail_state is not None else existing.get("rail_state")
     normalized_rail_state = _normalize_subuser_rail_state(raw_rail_state, declared_rails=runtime_features)
     next_payload["rail_state"] = normalized_rail_state
     next_payload["frontend_api_mode"] = SUBUSER_FRONTEND_API_MODE
@@ -6118,7 +6163,7 @@ def _run_claude_agent_task_in_docker(
     workspace_path: Path,
     timeout_ms: int,
 ) -> tuple[list[str], dict[str, Any], str, Mapping[str, str]]:
-    from tools.environments.docker import _build_security_args, find_docker
+    from tools.environments.docker import _build_security_args, _resolve_host_user_spec, find_docker
 
     docker = find_docker()
     if not docker:
@@ -6135,7 +6180,9 @@ def _run_claude_agent_task_in_docker(
         "cwd": "/workspace",
         "root": "/workspace",
     }
-    runtime_env = _runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"})
+    runtime_env = _runtime_env({
+        "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+    })
     env_keys = [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_TOKEN",
@@ -6153,6 +6200,15 @@ def _run_claude_agent_task_in_docker(
         if value is not None and value != "":
             env_args.extend(["-e", f"{key}={value}"])
 
+    user_args: list[str] = []
+    user_spec = _resolve_host_user_spec()
+    if user_spec:
+        user_args = ["--user", user_spec]
+    security_args = _build_security_args(bool(user_args))
+    # Force container HOME onto writable tmpfs without mutating the host-side
+    # docker CLI environment.
+    env_args.extend(["-e", "HOME=/tmp"])
+
     run_cmd = [
         docker,
         "run",
@@ -6160,7 +6216,7 @@ def _run_claude_agent_task_in_docker(
         "--init",
         "-i",
         "--read-only",
-        *(_build_security_args(run_as_host_user=False)),
+        *security_args,
         "--tmpfs",
         "/root:rw,exec,size=512m",
         "--tmpfs",
@@ -6171,6 +6227,7 @@ def _run_claude_agent_task_in_docker(
         f"type=bind,src={repo_root},dst=/repo,readonly",
         "-w",
         "/repo",
+        *user_args,
         *env_args,
         image,
         "node",
@@ -9783,8 +9840,11 @@ def _product_runtime_caddy_paths() -> str:
         "/session",
         "/account",
         "/profile",
+        "/directory",
+        "/directory/*",
         "/records",
         "/records/*",
+        "/connections",
         "/checkout",
         "/usage",
         "/generate",
@@ -11215,16 +11275,18 @@ class TakyonStore:
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
         """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
-        store delegates to on the Postgres backend (identity/profiles/records/entitlements/payments/usage/funding). Imported lazily and only
+        store delegates to on the Postgres backend (identity/profiles/directory/records/connections/entitlements/payments/usage/funding). Imported lazily and only
         on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
         try:
-            from . import app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
+            from . import app_connections, app_directory, app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-            from plugins.takyon import app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
+            from plugins.takyon import app_connections, app_directory, app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
         return {
             "identity": app_identity,
             "profiles": app_profiles,
+            "directory": app_directory,
             "records": app_records,
+            "connections": app_connections,
             "entitlements": app_entitlements,
             "funding": app_funding,
             "payments": app_payments,
@@ -11420,6 +11482,9 @@ class TakyonStore:
               bio TEXT NOT NULL DEFAULT '',
               attributes_json TEXT,
               metadata_json TEXT,
+              directory_enabled INTEGER NOT NULL DEFAULT 0,
+              directory_profile_json TEXT DEFAULT '{}',
+              directory_updated_at TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               UNIQUE (business_slug, id),
@@ -11438,6 +11503,19 @@ class TakyonStore:
               PRIMARY KEY (business_slug, app_user_id, record_type, id),
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
               FOREIGN KEY (business_slug, app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS app_connections (
+              business_slug TEXT NOT NULL,
+              source_app_user_id TEXT NOT NULL,
+              target_app_user_id TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('like', 'pass', 'block')),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, source_app_user_id, target_app_user_id),
+              CHECK (source_app_user_id <> target_app_user_id),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
+              FOREIGN KEY (business_slug, source_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE,
+              FOREIGN KEY (business_slug, target_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS app_magic_links (
               id TEXT PRIMARY KEY,
@@ -11631,6 +11709,48 @@ class TakyonStore:
                     "UPDATE app_surface_contracts SET publish_target = ?, updated_at = COALESCE(updated_at, ?) WHERE business_slug = ?",
                     (_product_publish_target(slug), _now(), slug),
                 )
+        profile_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_user_profiles)").fetchall()}
+        if "directory_enabled" not in profile_columns:
+            conn.execute("ALTER TABLE app_user_profiles ADD COLUMN directory_enabled INTEGER NOT NULL DEFAULT 0")
+            conn.execute("UPDATE app_user_profiles SET directory_enabled = 0 WHERE directory_enabled IS NULL")
+        if "directory_profile_json" not in profile_columns:
+            conn.execute("ALTER TABLE app_user_profiles ADD COLUMN directory_profile_json TEXT")
+            conn.execute(
+                "UPDATE app_user_profiles SET directory_profile_json = ? WHERE directory_profile_json IS NULL OR trim(directory_profile_json) = ''",
+                (_json_dumps({}),),
+            )
+        if "directory_updated_at" not in profile_columns:
+            conn.execute("ALTER TABLE app_user_profiles ADD COLUMN directory_updated_at TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_connections (
+              business_slug TEXT NOT NULL,
+              source_app_user_id TEXT NOT NULL,
+              target_app_user_id TEXT NOT NULL,
+              state TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, source_app_user_id, target_app_user_id),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
+              FOREIGN KEY (business_slug, source_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE,
+              FOREIGN KEY (business_slug, target_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(app_connections)").fetchall()}
+        if "app_connections_source_state_idx" not in connection_indexes:
+            conn.execute(
+                "CREATE INDEX app_connections_source_state_idx ON app_connections(business_slug, source_app_user_id, state, updated_at DESC)"
+            )
+        if "app_connections_target_state_idx" not in connection_indexes:
+            conn.execute(
+                "CREATE INDEX app_connections_target_state_idx ON app_connections(business_slug, target_app_user_id, state, updated_at DESC)"
+            )
+        profile_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(app_user_profiles)").fetchall()}
+        if "app_user_profiles_directory_idx" not in profile_indexes:
+            conn.execute(
+                "CREATE INDEX app_user_profiles_directory_idx ON app_user_profiles(business_slug, directory_enabled, updated_at DESC)"
+            )
         needs_surface_defaults = conn.execute(
             """
             SELECT 1 FROM app_surface_contracts
@@ -13745,9 +13865,12 @@ class TakyonStore:
             "agent.record",
             "app.budget.set",
             "app.customer.upsert",
+            "app.directory.disable",
+            "app.directory.upsert",
             "app.entitlement.upsert",
             "app.plan.upsert",
             "app.profile.upsert",
+            "app.connection.set",
             "app.record.delete",
             "app.record.upsert",
             "app.surface.publish_result",
@@ -14750,6 +14873,286 @@ class TakyonStore:
                 "business": slug,
                 "app_user_id": app_user_id,
                 "profile": profile_payload,
+            }
+
+        if action == "app.directory.upsert":
+            if _db_backend() == "postgres":
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        resolved = leaves["directory"].upsert_entry(
+                            raw,
+                            slug,
+                            app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                            email=(str(op.get("email")) if op.get("email") else None),
+                            session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            display_name=op.get("display_name"),
+                            headline=op.get("headline"),
+                            bio=op.get("bio"),
+                            attributes=op.get("attributes"),
+                        )
+                except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                app_user_id = resolved.user.id
+                user_payload = _app_user_runtime_payload(resolved.user)
+                entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
+            else:
+                user = _resolve_sqlite_app_user(
+                    conn,
+                    slug,
+                    session_token=op.get("session_token"),
+                    app_user_id=op.get("app_user_id"),
+                    email=op.get("email"),
+                    create_if_missing=bool(op.get("email")) and not op.get("session_token") and not op.get("app_user_id"),
+                    create_source="directory_upsert",
+                )
+                if not user:
+                    raise TakyonError("app user not found")
+                app_user_id = str(user["id"])
+                existing = _ensure_sqlite_app_profile(
+                    conn,
+                    slug,
+                    app_user_id,
+                    display_name=user.get("name"),
+                )
+                existing_profile = _json_loads(existing.get("directory_profile_json"), {}) if existing else {}
+                profile_value = _normalize_app_directory_profile(
+                    existing_profile=existing_profile,
+                    display_name=op.get("display_name"),
+                    headline=op.get("headline"),
+                    bio=op.get("bio"),
+                    attributes=op.get("attributes"),
+                )
+                now = _now()
+                created_at = str(existing.get("created_at") or now)
+                conn.execute(
+                    "UPDATE app_user_profiles SET directory_enabled = 1, directory_profile_json = ?, directory_updated_at = ?, updated_at = ? "
+                    "WHERE business_slug = ? AND id = ?",
+                    (_json_dumps(profile_value), now, now, slug, app_user_id),
+                )
+                user_payload = _app_user_runtime_payload(user)
+                entry_payload = {
+                    "app_user_id": app_user_id,
+                    "business_slug": slug,
+                    "enabled": True,
+                    "profile": profile_value,
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={"app_user_id": app_user_id, "directory_enabled": True},
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "app_user_id": app_user_id,
+                "user": user_payload,
+                "directory_entry": entry_payload,
+            }
+
+        if action == "app.directory.disable":
+            if _db_backend() == "postgres":
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        resolved = leaves["directory"].disable_entry(
+                            raw,
+                            slug,
+                            app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                            email=(str(op.get("email")) if op.get("email") else None),
+                            session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                        )
+                except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                app_user_id = resolved.user.id
+                user_payload = _app_user_runtime_payload(resolved.user)
+                entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
+            else:
+                user = _resolve_sqlite_app_user(
+                    conn,
+                    slug,
+                    session_token=op.get("session_token"),
+                    app_user_id=op.get("app_user_id"),
+                    email=op.get("email"),
+                )
+                if not user:
+                    raise TakyonError("app user not found")
+                app_user_id = str(user["id"])
+                existing = _ensure_sqlite_app_profile(
+                    conn,
+                    slug,
+                    app_user_id,
+                    display_name=user.get("name"),
+                )
+                now = _now()
+                created_at = str(existing.get("created_at") or now)
+                conn.execute(
+                    "UPDATE app_user_profiles SET directory_enabled = 0, directory_profile_json = ?, directory_updated_at = ?, updated_at = ? "
+                    "WHERE business_slug = ? AND id = ?",
+                    (_json_dumps({}), now, now, slug, app_user_id),
+                )
+                user_payload = _app_user_runtime_payload(user)
+                entry_payload = {
+                    "app_user_id": app_user_id,
+                    "business_slug": slug,
+                    "enabled": False,
+                    "profile": {},
+                    "created_at": created_at,
+                    "updated_at": now,
+                }
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={"app_user_id": app_user_id, "directory_enabled": False},
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "app_user_id": app_user_id,
+                "user": user_payload,
+                "directory_entry": entry_payload,
+                "disabled": True,
+            }
+
+        if action == "app.connection.set":
+            target_app_user_id = str(op.get("target_app_user_id") or op.get("target_id") or "").strip()
+            if not target_app_user_id:
+                raise TakyonError("target_app_user_id is required")
+            action_value = str(op.get("connection_action") if op.get("connection_action") is not None else op.get("state") or "").strip()
+            action_value = action_value or "like"
+            if _db_backend() == "postgres":
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        user, connection_payload = leaves["connections"].set_connection(
+                            raw,
+                            slug,
+                            target_app_user_id=target_app_user_id,
+                            action=action_value,
+                            app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                            email=(str(op.get("email")) if op.get("email") else None),
+                            session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                        )
+                except (leaves["connections"].AppConnectionError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                app_user_id = user.id
+                user_payload = _app_user_runtime_payload(user)
+                connection_result = _app_connection_runtime_payload(connection_payload)
+            else:
+                normalized_action = _normalize_runtime_rail_name(action_value)
+                if normalized_action not in {"like", "pass", "block", "unblock"}:
+                    raise TakyonError("connection action must be one of like, pass, block, or unblock")
+                user = _resolve_sqlite_app_user(
+                    conn,
+                    slug,
+                    session_token=op.get("session_token"),
+                    app_user_id=op.get("app_user_id"),
+                    email=op.get("email"),
+                    create_if_missing=bool(op.get("email")) and not op.get("session_token") and not op.get("app_user_id"),
+                    create_source="connection_set",
+                )
+                if not user:
+                    raise TakyonError("app user not found")
+                target_user = _resolve_sqlite_app_user(conn, slug, app_user_id=target_app_user_id)
+                if not target_user or str(target_user.get("status") or "active") != "active":
+                    raise TakyonError("app connection target not found")
+                app_user_id = str(user["id"])
+                if app_user_id == str(target_user["id"]):
+                    raise TakyonError("target_app_user_id must not be the current app user")
+                visible_target = _sqlite_directory_entry_for_viewer(
+                    conn,
+                    slug,
+                    viewer_app_user_id=app_user_id,
+                    target_app_user_id=str(target_user["id"]),
+                )
+                if normalized_action in {"like", "pass"} and visible_target is None:
+                    raise TakyonError("app connection target not found")
+                existing = self._row_to_dict(conn.execute(
+                    "SELECT * FROM app_connections WHERE business_slug = ? AND source_app_user_id = ? AND target_app_user_id = ?",
+                    (slug, app_user_id, str(target_user["id"])),
+                ).fetchone())
+                now = _now()
+                if normalized_action == "unblock":
+                    deleted = False
+                    if existing and str(existing.get("state") or "") == "block":
+                        conn.execute(
+                            "DELETE FROM app_connections WHERE business_slug = ? AND source_app_user_id = ? AND target_app_user_id = ?",
+                            (slug, app_user_id, str(target_user["id"])),
+                        )
+                        deleted = True
+                    user_payload = _app_user_runtime_payload(user)
+                    connection_result = {
+                        "business_slug": slug,
+                        "source_app_user_id": app_user_id,
+                        "target_app_user_id": str(target_user["id"]),
+                        "state": "neutral",
+                        "matched": False,
+                        "created_at": "",
+                        "updated_at": "",
+                        "target": _sqlite_directory_entry_for_viewer(
+                            conn,
+                            slug,
+                            viewer_app_user_id=app_user_id,
+                            target_app_user_id=str(target_user["id"]),
+                        ),
+                        "deleted": deleted,
+                    }
+                else:
+                    created_at = str(existing.get("created_at") or now) if existing else now
+                    if existing:
+                        conn.execute(
+                            "UPDATE app_connections SET state = ?, updated_at = ? WHERE business_slug = ? AND source_app_user_id = ? AND target_app_user_id = ?",
+                            (normalized_action, now, slug, app_user_id, str(target_user["id"])),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO app_connections (business_slug, source_app_user_id, target_app_user_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (slug, app_user_id, str(target_user["id"]), normalized_action, now, now),
+                        )
+                        created_at = now
+                    user_payload = _app_user_runtime_payload(user)
+                    connection_result = {
+                        "business_slug": slug,
+                        "source_app_user_id": app_user_id,
+                        "target_app_user_id": str(target_user["id"]),
+                        "state": normalized_action,
+                        "matched": _sqlite_app_connection_is_match(
+                            conn,
+                            slug,
+                            source_app_user_id=app_user_id,
+                            target_app_user_id=str(target_user["id"]),
+                        ),
+                        "created_at": created_at,
+                        "updated_at": now,
+                        "target": (
+                            None
+                            if normalized_action == "block"
+                            else visible_target
+                        ),
+                    }
+            self._record_event(
+                conn,
+                scope=f"business:{slug}/app",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "app_user_id": app_user_id,
+                    "target_app_user_id": target_app_user_id,
+                    "connection_action": connection_result.get("state"),
+                },
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "app_user_id": app_user_id,
+                "user": user_payload,
+                "connection": connection_result,
             }
 
         if action == "app.record.upsert":
@@ -16622,11 +17025,206 @@ def _app_profile_runtime_payload(profile: Any) -> dict[str, Any] | None:
     }
 
 
+_MAX_APP_DIRECTORY_PROFILE_BYTES = 16_384
+_MAX_APP_DIRECTORY_ATTRIBUTES_BYTES = 8_192
+_MAX_APP_DIRECTORY_DISPLAY_NAME_CHARS = 120
+_MAX_APP_DIRECTORY_HEADLINE_CHARS = 240
+_MAX_APP_DIRECTORY_BIO_CHARS = 4_000
+_APP_CONNECTION_STATE_CHOICES = frozenset({"like", "pass", "block"})
+_APP_CONNECTION_LIST_STATE_CHOICES = frozenset({"matches", "likes", "passes", "blocks"})
 _APP_RECORD_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _MAX_APP_RECORDS_PER_USER = 500
 _MAX_APP_RECORD_DATA_BYTES = 262_144
 _MAX_APP_RECORD_METADATA_BYTES = 65_536
 _MAX_APP_RECORD_TITLE_CHARS = 240
+
+
+def _normalize_app_directory_text(
+    raw: Any,
+    *,
+    field: str,
+    max_chars: int,
+    empty_means_none: bool,
+) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None if empty_means_none else ""
+    if len(text) > max_chars:
+        raise TakyonError(f"{field} must be <= {max_chars} characters")
+    return text
+
+
+def _normalize_app_directory_attributes(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TakyonError("directory attributes must be an object")
+    try:
+        size_bytes = len(_json_dumps(raw).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise TakyonError("directory attributes must be JSON-serializable") from exc
+    if size_bytes > _MAX_APP_DIRECTORY_ATTRIBUTES_BYTES:
+        raise TakyonError(
+            f"directory attributes exceed {_MAX_APP_DIRECTORY_ATTRIBUTES_BYTES} bytes ({size_bytes})"
+        )
+    return raw
+
+
+def _normalize_app_directory_profile(
+    *,
+    existing_profile: Mapping[str, Any] | None = None,
+    display_name: Any = None,
+    headline: Any = None,
+    bio: Any = None,
+    attributes: Any = None,
+) -> dict[str, Any]:
+    profile = dict(existing_profile) if isinstance(existing_profile, Mapping) else {}
+    if display_name is not None:
+        normalized = _normalize_app_directory_text(
+            display_name,
+            field="directory display_name",
+            max_chars=_MAX_APP_DIRECTORY_DISPLAY_NAME_CHARS,
+            empty_means_none=True,
+        )
+        if normalized is None:
+            profile.pop("display_name", None)
+        else:
+            profile["display_name"] = normalized
+    if headline is not None:
+        normalized = _normalize_app_directory_text(
+            headline,
+            field="directory headline",
+            max_chars=_MAX_APP_DIRECTORY_HEADLINE_CHARS,
+            empty_means_none=True,
+        )
+        if normalized is None:
+            profile.pop("headline", None)
+        else:
+            profile["headline"] = normalized
+    if bio is not None:
+        normalized = _normalize_app_directory_text(
+            bio,
+            field="directory bio",
+            max_chars=_MAX_APP_DIRECTORY_BIO_CHARS,
+            empty_means_none=False,
+        )
+        if normalized in {None, ""}:
+            profile.pop("bio", None)
+        else:
+            profile["bio"] = normalized
+    if attributes is not None:
+        normalized = _normalize_app_directory_attributes(attributes)
+        if not normalized:
+            profile.pop("attributes", None)
+        else:
+            profile["attributes"] = normalized
+    allowlisted = {
+        key: value
+        for key, value in profile.items()
+        if key in {"display_name", "headline", "bio", "attributes"}
+    }
+    try:
+        size_bytes = len(_json_dumps(allowlisted).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise TakyonError("directory profile must be JSON-serializable") from exc
+    if size_bytes > _MAX_APP_DIRECTORY_PROFILE_BYTES:
+        raise TakyonError(
+            f"directory profile exceeds {_MAX_APP_DIRECTORY_PROFILE_BYTES} bytes ({size_bytes})"
+        )
+    return allowlisted
+
+
+def _app_directory_entry_runtime_payload(entry: Any) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    if isinstance(entry, dict):
+        if "profile" in entry and isinstance(entry.get("profile"), dict):
+            profile_value = dict(entry.get("profile") or {})
+        elif "directory_profile_json" in entry:
+            profile_value = _json_loads(entry.get("directory_profile_json"), {})
+        elif "directory_profile" in entry and isinstance(entry.get("directory_profile"), dict):
+            profile_value = dict(entry.get("directory_profile") or {})
+        else:
+            profile_value = {}
+        return {
+            "app_user_id": str(entry.get("app_user_id") or entry.get("id") or ""),
+            "business_slug": str(entry.get("business_slug") or ""),
+            "enabled": bool(entry.get("enabled") if "enabled" in entry else entry.get("directory_enabled")),
+            "profile": _normalize_app_directory_profile(existing_profile=profile_value),
+            "created_at": str(entry.get("created_at") or ""),
+            "updated_at": str(entry.get("updated_at") or entry.get("directory_updated_at") or ""),
+        }
+    return {
+        "app_user_id": str(getattr(entry, "app_user_id")),
+        "business_slug": str(getattr(entry, "business_slug")),
+        "enabled": bool(getattr(entry, "enabled")),
+        "profile": _normalize_app_directory_profile(existing_profile=getattr(entry, "profile")),
+        "created_at": str(getattr(entry, "created_at")),
+        "updated_at": str(getattr(entry, "updated_at")),
+    }
+
+
+def _normalize_app_connection_state(raw: Any, *, field: str = "connection state") -> str:
+    state = _normalize_runtime_rail_name(raw)
+    if state not in _APP_CONNECTION_STATE_CHOICES:
+        raise TakyonError(
+            f"{field} must be one of {', '.join(sorted(_APP_CONNECTION_STATE_CHOICES))}"
+        )
+    return state
+
+
+def _normalize_app_connection_list_state(raw: Any) -> str:
+    if raw in {None, ""}:
+        return "matches"
+    state = _normalize_runtime_rail_name(raw)
+    if state.endswith("es") and state in _APP_CONNECTION_LIST_STATE_CHOICES:
+        return state
+    if state == "like":
+        return "likes"
+    if state == "pass":
+        return "passes"
+    if state == "block":
+        return "blocks"
+    if state == "match":
+        return "matches"
+    if state not in _APP_CONNECTION_LIST_STATE_CHOICES:
+        raise TakyonError(
+            "connections state must be one of matches, likes, passes, or blocks"
+        )
+    return state
+
+
+def _app_connection_runtime_payload(connection: Any) -> dict[str, Any] | None:
+    if connection is None:
+        return None
+    if isinstance(connection, dict):
+        target_value = (
+            _app_directory_entry_runtime_payload(connection.get("target"))
+            if connection.get("target") is not None
+            else None
+        )
+        return {
+            "business_slug": str(connection.get("business_slug") or ""),
+            "source_app_user_id": str(connection.get("source_app_user_id") or ""),
+            "target_app_user_id": str(connection.get("target_app_user_id") or ""),
+            "state": str(connection.get("state") or ""),
+            "matched": bool(connection.get("matched")),
+            "created_at": str(connection.get("created_at") or ""),
+            "updated_at": str(connection.get("updated_at") or ""),
+            "target": target_value,
+        }
+    return {
+        "business_slug": str(getattr(connection, "business_slug")),
+        "source_app_user_id": str(getattr(connection, "source_app_user_id")),
+        "target_app_user_id": str(getattr(connection, "target_app_user_id")),
+        "state": str(getattr(connection, "state")),
+        "matched": bool(getattr(connection, "matched", False)),
+        "created_at": str(getattr(connection, "created_at")),
+        "updated_at": str(getattr(connection, "updated_at")),
+        "target": _app_directory_entry_runtime_payload(getattr(connection, "target", None)),
+    }
 
 
 def _normalize_app_record_type(raw: Any) -> str:
@@ -16764,6 +17362,114 @@ def _ensure_sqlite_app_profile(
         (business_slug, app_user_id),
     ).fetchone()
     return {} if created is None else dict(created)
+
+
+def _resolve_sqlite_app_user(
+    conn: sqlite3.Connection,
+    business_slug: str,
+    *,
+    session_token: Any = None,
+    app_user_id: Any = None,
+    email: Any = None,
+    create_if_missing: bool = False,
+    create_source: str = "app_runtime",
+) -> dict[str, Any] | None:
+    if session_token:
+        return _store()._row_to_dict(conn.execute(
+            "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id "
+            "WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL "
+            "AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+            (business_slug, _hash_token(str(session_token)), _now()),
+        ).fetchone())
+    if app_user_id:
+        return _store()._row_to_dict(conn.execute(
+            "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+            (business_slug, str(app_user_id)),
+        ).fetchone())
+    if email:
+        normalized_email = _normalize_email(str(email))
+        user = _store()._row_to_dict(conn.execute(
+            "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
+            (business_slug, normalized_email),
+        ).fetchone())
+        if user or not create_if_missing:
+            return user
+        now = _now()
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, NULL, 'active', 'free', ?, ?, ?)",
+            (user_id, business_slug, normalized_email, _json_dumps({"source": create_source}), now, now),
+        )
+        return _store()._row_to_dict(conn.execute(
+            "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+            (business_slug, user_id),
+        ).fetchone())
+    return None
+
+
+def _sqlite_directory_entry_for_viewer(
+    conn: sqlite3.Connection,
+    business_slug: str,
+    *,
+    viewer_app_user_id: str,
+    target_app_user_id: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT p.*, u.status AS user_status FROM app_user_profiles p "
+        "JOIN app_users u ON u.business_slug = p.business_slug AND u.id = p.id "
+        "WHERE p.business_slug = ? "
+        "  AND p.id = ? "
+        "  AND COALESCE(p.directory_enabled, 0) = 1 "
+        "  AND u.status = 'active' "
+        "  AND p.id <> ? "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM app_connections c "
+        "    WHERE c.business_slug = p.business_slug "
+        "      AND c.state = 'block' "
+        "      AND ("
+        "        (c.source_app_user_id = ? AND c.target_app_user_id = p.id) "
+        "        OR (c.source_app_user_id = p.id AND c.target_app_user_id = ?)"
+        "      )"
+        "  ) "
+        "LIMIT 1",
+        (business_slug, target_app_user_id, viewer_app_user_id, viewer_app_user_id, viewer_app_user_id),
+    ).fetchone()
+    return _app_directory_entry_runtime_payload(_store()._row_to_dict(row)) if row is not None else None
+
+
+def _sqlite_app_connection_is_match(
+    conn: sqlite3.Connection,
+    business_slug: str,
+    *,
+    source_app_user_id: str,
+    target_app_user_id: str,
+) -> bool:
+    row = conn.execute(
+        "SELECT 1 "
+        "FROM app_connections c "
+        "JOIN app_connections r "
+        "  ON r.business_slug = c.business_slug "
+        " AND r.source_app_user_id = c.target_app_user_id "
+        " AND r.target_app_user_id = c.source_app_user_id "
+        " AND r.state = 'like' "
+        "WHERE c.business_slug = ? "
+        "  AND c.source_app_user_id = ? "
+        "  AND c.target_app_user_id = ? "
+        "  AND c.state = 'like' "
+        "  AND NOT EXISTS ("
+        "    SELECT 1 FROM app_connections b "
+        "    WHERE b.business_slug = c.business_slug "
+        "      AND b.state = 'block' "
+        "      AND ("
+        "        (b.source_app_user_id = c.source_app_user_id AND b.target_app_user_id = c.target_app_user_id) "
+        "        OR (b.source_app_user_id = c.target_app_user_id AND b.target_app_user_id = c.source_app_user_id)"
+        "      )"
+        "  ) "
+        "LIMIT 1",
+        (business_slug, source_app_user_id, target_app_user_id),
+    ).fetchone()
+    return row is not None
 
 
 def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
@@ -17295,6 +18001,484 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
             "user": user_payload,
             "profile": profile_payload,
         })
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_list_app_directory_entries(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        limit = _clamp_int(args.get("limit"), default=50, minimum=1, maximum=100)
+        include_disabled = bool(args.get("include_disabled") or args.get("includeDisabled"))
+        viewer_mode = bool(args.get("session_token") or args.get("app_user_id") or args.get("email"))
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if viewer_mode:
+                if isinstance(conn, _PGConn):
+                    leaves = store._app_leaves()
+                    try:
+                        with store._leaf_conn(conn) as leaf:
+                            resolved = leaves["directory"].list_visible_entries(
+                                leaf,
+                                business,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                limit=limit,
+                            )
+                    except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                        raise TakyonError(str(exc)) from exc
+                    if resolved is None:
+                        raise TakyonError("app account not found")
+                    viewer, entries = resolved
+                    viewer_payload = _app_user_runtime_payload(viewer)
+                    entry_payloads = [_app_directory_entry_runtime_payload(item.entry) for item in entries]
+                    return tool_result(
+                        {
+                            "success": True,
+                            "business": business,
+                            "viewer": viewer_payload,
+                            "count": len(entry_payloads),
+                            "entries": entry_payloads,
+                        }
+                    )
+                viewer = _resolve_sqlite_app_user(
+                    conn,
+                    business,
+                    session_token=args.get("session_token"),
+                    app_user_id=args.get("app_user_id"),
+                    email=args.get("email"),
+                )
+                if not viewer:
+                    raise TakyonError("app account not found")
+                rows = conn.execute(
+                    "SELECT p.* FROM app_user_profiles p "
+                    "JOIN app_users u ON u.business_slug = p.business_slug AND u.id = p.id "
+                    "WHERE p.business_slug = ? "
+                    "  AND COALESCE(p.directory_enabled, 0) = 1 "
+                    "  AND u.status = 'active' "
+                    "  AND p.id <> ? "
+                    "  AND NOT EXISTS ("
+                    "    SELECT 1 FROM app_connections c "
+                    "    WHERE c.business_slug = p.business_slug "
+                    "      AND c.state = 'block' "
+                    "      AND ("
+                    "        (c.source_app_user_id = ? AND c.target_app_user_id = p.id) "
+                    "        OR (c.source_app_user_id = p.id AND c.target_app_user_id = ?)"
+                    "      )"
+                    "  ) "
+                    "ORDER BY COALESCE(p.directory_updated_at, p.updated_at) DESC, p.id ASC LIMIT ?",
+                    (business, str(viewer["id"]), str(viewer["id"]), str(viewer["id"]), limit),
+                ).fetchall()
+                entry_payloads = [_app_directory_entry_runtime_payload(store._row_to_dict(row)) for row in rows]
+                return tool_result(
+                    {
+                        "success": True,
+                        "business": business,
+                        "viewer": _app_user_runtime_payload(viewer),
+                        "count": len(entry_payloads),
+                        "entries": entry_payloads,
+                    }
+                )
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        entries = leaves["directory"].list_admin_entries(
+                            leaf,
+                            business,
+                            include_disabled=include_disabled,
+                            limit=limit,
+                        )
+                except (leaves["directory"].AppDirectoryError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                payloads = [
+                    {
+                        "user": _app_user_runtime_payload(item.user),
+                        "directory_entry": _app_directory_entry_runtime_payload(item.entry),
+                    }
+                    for item in entries
+                ]
+            else:
+                rows = conn.execute(
+                    "SELECT u.*, p.directory_enabled, p.directory_profile_json, p.created_at AS profile_created_at, "
+                    "COALESCE(p.directory_updated_at, p.updated_at, u.updated_at) AS profile_updated_at "
+                    "FROM app_users u "
+                    "LEFT JOIN app_user_profiles p ON p.business_slug = u.business_slug AND p.id = u.id "
+                    "WHERE u.business_slug = ? "
+                    + ("" if include_disabled else "AND COALESCE(p.directory_enabled, 0) = 1 ")
+                    + "ORDER BY COALESCE(p.directory_updated_at, p.updated_at, u.updated_at) DESC, u.id ASC LIMIT ?",
+                    (business, limit),
+                ).fetchall()
+                payloads = []
+                for row in rows:
+                    row_dict = store._row_to_dict(row)
+                    payloads.append(
+                        {
+                            "user": _app_user_runtime_payload(
+                                {
+                                    "id": row_dict.get("id"),
+                                    "business_slug": row_dict.get("business_slug"),
+                                    "email": row_dict.get("email"),
+                                    "name": row_dict.get("name"),
+                                    "status": row_dict.get("status"),
+                                    "tier": row_dict.get("tier"),
+                                }
+                            ),
+                            "directory_entry": _app_directory_entry_runtime_payload(
+                                {
+                                    "app_user_id": row_dict.get("id"),
+                                    "business_slug": row_dict.get("business_slug"),
+                                    "directory_enabled": row_dict.get("directory_enabled"),
+                                    "directory_profile_json": row_dict.get("directory_profile_json"),
+                                    "created_at": row_dict.get("profile_created_at") or row_dict.get("created_at"),
+                                    "directory_updated_at": row_dict.get("profile_updated_at"),
+                                }
+                            ),
+                        }
+                    )
+        return tool_result({"success": True, "business": business, "count": len(payloads), "entries": payloads})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_read_app_directory_entry(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        target_app_user_id = str(args.get("app_user_id") or "").strip()
+        target_email = str(args.get("email") or "").strip()
+        session_token = str(args.get("session_token") or "").strip()
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if session_token:
+                if isinstance(conn, _PGConn):
+                    leaves = store._app_leaves()
+                    try:
+                        with store._leaf_conn(conn) as leaf:
+                            if target_app_user_id or target_email:
+                                target_id = target_app_user_id
+                                if not target_id and target_email:
+                                    target_user = leaves["identity"].get_app_user(
+                                        leaf,
+                                        business,
+                                        email=target_email,
+                                    )
+                                    target_id = target_user.id if target_user is not None else ""
+                                resolved = leaves["directory"].get_visible_entry(
+                                    leaf,
+                                    business,
+                                    target_app_user_id=target_id,
+                                    session_token=session_token,
+                                )
+                            else:
+                                self_entry = leaves["directory"].get_self_entry(
+                                    leaf,
+                                    business,
+                                    session_token=session_token,
+                                )
+                                if self_entry is None:
+                                    raise TakyonError("app account not found")
+                                return tool_result(
+                                    {
+                                        "success": True,
+                                        "business": business,
+                                        "user": _app_user_runtime_payload(self_entry.user),
+                                        "directory_entry": _app_directory_entry_runtime_payload(self_entry.entry),
+                                    }
+                                )
+                    except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                        raise TakyonError(str(exc)) from exc
+                    if resolved is None:
+                        raise TakyonError("app directory entry not found")
+                    viewer, entry = resolved
+                    return tool_result(
+                        {
+                            "success": True,
+                            "business": business,
+                            "viewer": _app_user_runtime_payload(viewer),
+                            "directory_entry": _app_directory_entry_runtime_payload(entry.entry),
+                        }
+                    )
+                viewer = _resolve_sqlite_app_user(conn, business, session_token=session_token)
+                if not viewer:
+                    raise TakyonError("app account not found")
+                if not target_app_user_id and not target_email:
+                    existing = _ensure_sqlite_app_profile(
+                        conn,
+                        business,
+                        str(viewer["id"]),
+                        display_name=viewer.get("name"),
+                    )
+                    return tool_result(
+                        {
+                            "success": True,
+                            "business": business,
+                            "user": _app_user_runtime_payload(viewer),
+                            "directory_entry": _app_directory_entry_runtime_payload(existing),
+                        }
+                    )
+                target_id = target_app_user_id
+                if not target_id and target_email:
+                    target_user = _resolve_sqlite_app_user(conn, business, email=target_email)
+                    target_id = str(target_user["id"]) if target_user else ""
+                entry_payload = _sqlite_directory_entry_for_viewer(
+                    conn,
+                    business,
+                    viewer_app_user_id=str(viewer["id"]),
+                    target_app_user_id=target_id,
+                )
+                if entry_payload is None:
+                    raise TakyonError("app directory entry not found")
+                return tool_result(
+                    {
+                        "success": True,
+                        "business": business,
+                        "viewer": _app_user_runtime_payload(viewer),
+                        "directory_entry": entry_payload,
+                    }
+                )
+
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        resolved = leaves["directory"].read_admin_entry(
+                            leaf,
+                            business,
+                            app_user_id=(target_app_user_id or None),
+                            email=(target_email or None),
+                        )
+                except (leaves["directory"].AppDirectoryError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if resolved is None:
+                    raise TakyonError("app directory entry not found")
+                return tool_result(
+                    {
+                        "success": True,
+                        "business": business,
+                        "user": _app_user_runtime_payload(resolved.user),
+                        "directory_entry": _app_directory_entry_runtime_payload(resolved.entry),
+                    }
+                )
+            user = _resolve_sqlite_app_user(
+                conn,
+                business,
+                app_user_id=(target_app_user_id or None),
+                email=(target_email or None),
+            )
+            if not user:
+                raise TakyonError("app directory entry not found")
+            profile_row = conn.execute(
+                "SELECT * FROM app_user_profiles WHERE business_slug = ? AND id = ?",
+                (business, str(user["id"])),
+            ).fetchone()
+            return tool_result(
+                {
+                    "success": True,
+                    "business": business,
+                    "user": _app_user_runtime_payload(user),
+                    "directory_entry": _app_directory_entry_runtime_payload(
+                        store._row_to_dict(profile_row)
+                        if profile_row is not None
+                        else {
+                            "app_user_id": user.get("id"),
+                            "business_slug": user.get("business_slug"),
+                            "directory_enabled": False,
+                            "directory_profile_json": _json_dumps({}),
+                            "created_at": "",
+                            "directory_updated_at": "",
+                        }
+                    ),
+                }
+            )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_upsert_app_directory_entry(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "app.directory.upsert",
+        "business": args.get("business"),
+        "app_user_id": args.get("app_user_id"),
+        "email": args.get("email"),
+        "session_token": args.get("session_token"),
+        "display_name": args.get("display_name"),
+        "headline": args.get("headline"),
+        "bio": args.get("bio"),
+        "attributes": args.get("attributes"),
+    }
+    try:
+        result = _commit_tool_data(args, operation)
+        payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
+        return tool_result({"success": True, **payload})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_disable_app_directory_entry(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "app.directory.disable",
+        "business": args.get("business"),
+        "app_user_id": args.get("app_user_id"),
+        "email": args.get("email"),
+        "session_token": args.get("session_token"),
+    }
+    try:
+        result = _commit_tool_data(args, operation)
+        payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
+        return tool_result({"success": True, **payload})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_list_app_connections(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        list_state = _normalize_app_connection_list_state(args.get("state"))
+        limit = _clamp_int(args.get("limit"), default=50, minimum=1, maximum=100)
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        resolved = leaves["connections"].list_connections(
+                            leaf,
+                            business,
+                            state=list_state,
+                            app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                            email=(str(args.get("email")) if args.get("email") else None),
+                            session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                            limit=limit,
+                        )
+                except (leaves["connections"].AppConnectionError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if resolved is None:
+                    raise TakyonError("app account not found")
+                viewer, connections = resolved
+                viewer_payload = _app_user_runtime_payload(viewer)
+                connection_payloads = [_app_connection_runtime_payload(item) for item in connections]
+            else:
+                viewer = _resolve_sqlite_app_user(
+                    conn,
+                    business,
+                    session_token=args.get("session_token"),
+                    app_user_id=args.get("app_user_id"),
+                    email=args.get("email"),
+                )
+                if not viewer:
+                    raise TakyonError("app account not found")
+                if list_state == "matches":
+                    rows = conn.execute(
+                        "SELECT c.* FROM app_connections c "
+                        "JOIN app_connections r ON r.business_slug = c.business_slug AND r.source_app_user_id = c.target_app_user_id "
+                        "  AND r.target_app_user_id = c.source_app_user_id AND r.state = 'like' "
+                        "JOIN app_users u ON u.business_slug = c.business_slug AND u.id = c.target_app_user_id "
+                        "JOIN app_user_profiles p ON p.business_slug = c.business_slug AND p.id = c.target_app_user_id AND COALESCE(p.directory_enabled, 0) = 1 "
+                        "WHERE c.business_slug = ? AND c.source_app_user_id = ? AND c.state = 'like' "
+                        "  AND u.status = 'active' "
+                        "  AND NOT EXISTS ("
+                        "    SELECT 1 FROM app_connections b "
+                        "    WHERE b.business_slug = c.business_slug AND b.state = 'block' "
+                        "      AND ("
+                        "        (b.source_app_user_id = c.source_app_user_id AND b.target_app_user_id = c.target_app_user_id) "
+                        "        OR (b.source_app_user_id = c.target_app_user_id AND b.target_app_user_id = c.source_app_user_id)"
+                        "      )"
+                        "  ) "
+                        "ORDER BY c.updated_at DESC, c.target_app_user_id ASC LIMIT ?",
+                        (business, str(viewer["id"]), limit),
+                    ).fetchall()
+                    connection_payloads = []
+                    for row in rows:
+                        row_dict = store._row_to_dict(row)
+                        target_id = str(row_dict.get("target_app_user_id") or "")
+                        connection_payloads.append(
+                            {
+                                "business_slug": business,
+                                "source_app_user_id": str(viewer["id"]),
+                                "target_app_user_id": target_id,
+                                "state": "like",
+                                "matched": True,
+                                "created_at": str(row_dict.get("created_at") or ""),
+                                "updated_at": str(row_dict.get("updated_at") or ""),
+                                "target": _sqlite_directory_entry_for_viewer(
+                                    conn,
+                                    business,
+                                    viewer_app_user_id=str(viewer["id"]),
+                                    target_app_user_id=target_id,
+                                ),
+                            }
+                        )
+                else:
+                    row_state = {"likes": "like", "passes": "pass", "blocks": "block"}[list_state]
+                    rows = conn.execute(
+                        "SELECT * FROM app_connections WHERE business_slug = ? AND source_app_user_id = ? AND state = ? "
+                        "ORDER BY updated_at DESC, target_app_user_id ASC LIMIT ?",
+                        (business, str(viewer["id"]), row_state, limit),
+                    ).fetchall()
+                    connection_payloads = []
+                    for row in rows:
+                        row_dict = store._row_to_dict(row)
+                        target_id = str(row_dict.get("target_app_user_id") or "")
+                        connection_payloads.append(
+                            {
+                                "business_slug": business,
+                                "source_app_user_id": str(viewer["id"]),
+                                "target_app_user_id": target_id,
+                                "state": row_state,
+                                "matched": row_state == "like" and _sqlite_app_connection_is_match(
+                                    conn,
+                                    business,
+                                    source_app_user_id=str(viewer["id"]),
+                                    target_app_user_id=target_id,
+                                ),
+                                "created_at": str(row_dict.get("created_at") or ""),
+                                "updated_at": str(row_dict.get("updated_at") or ""),
+                                "target": (
+                                    None
+                                    if row_state == "block"
+                                    else _sqlite_directory_entry_for_viewer(
+                                        conn,
+                                        business,
+                                        viewer_app_user_id=str(viewer["id"]),
+                                        target_app_user_id=target_id,
+                                    )
+                                ),
+                            }
+                        )
+                viewer_payload = _app_user_runtime_payload(viewer)
+                connection_payloads = [_app_connection_runtime_payload(item) for item in connection_payloads]
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "viewer": viewer_payload,
+                "state": list_state,
+                "count": len(connection_payloads),
+                "connections": connection_payloads,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_act_on_app_connection(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "app.connection.set",
+        "business": args.get("business"),
+        "app_user_id": args.get("app_user_id"),
+        "email": args.get("email"),
+        "session_token": args.get("session_token"),
+        "target_app_user_id": args.get("target_app_user_id") if args.get("target_app_user_id") is not None else args.get("target_id"),
+        "connection_action": args.get("connection_action") if args.get("connection_action") is not None else args.get("state"),
+    }
+    try:
+        result = _commit_tool_data(args, operation)
+        payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
+        return tool_result({"success": True, **payload})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -22679,7 +23863,7 @@ def handle_business_reddit_ad_launch(args: dict, **_: Any) -> str:
                 "slug": slug,
                 "idempotent": True,
                 "status": prior.get("status"),
-                "paused": True,
+                "paused": bool(prior.get("paused", True)),
                 "plan_path": prior.get("plan_path") or plan_rel,
                 "receipt": receipt_rel,
                 "value": prior,
@@ -25021,7 +26205,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "status": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, records, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, directory, records, connections, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
                 "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
                 "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now, and it should be treated as a paid-only monthly subscription path unless the operator explicitly records another offer shape."},
                 "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
@@ -25148,6 +26332,82 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
+        "name": "business_list_app_directory_entries",
+        "description": "List authenticated visible directory entries for a product subuser, or operator-inspect directory entries for a business.",
+        "handler": handle_business_list_app_directory_entries,
+        "schema": _schema(
+            "business_list_app_directory_entries",
+            "List product app directory entries.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string", "description": "Optional viewer app user id for actor-scoped listing; omit for operator inspection mode."},
+                "email": {"type": "string", "description": "Optional viewer email for actor-scoped listing; omit for operator inspection mode."},
+                "include_disabled": {"type": "boolean", "description": "Operator mode only: include opted-out entries and users without an enabled directory projection."},
+                "limit": {"type": "integer"},
+            },
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_read_app_directory_entry",
+        "description": "Read one directory entry: self/visible entry in app mode, or one operator-visible entry by app user id/email.",
+        "handler": handle_business_read_app_directory_entry,
+        "schema": _schema(
+            "business_read_app_directory_entry",
+            "Read one product app directory entry.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string", "description": "Target app user id when session_token is present, otherwise the operator lookup id."},
+                "email": {"type": "string", "description": "Target email when session_token is absent and operator lookup is desired."},
+            },
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_upsert_app_directory_entry",
+        "description": "Create or update one consented public directory projection for a product subuser.",
+        "handler": handle_business_upsert_app_directory_entry,
+        "schema": _schema(
+            "business_upsert_app_directory_entry",
+            "Create/update one product app directory entry.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+                "display_name": {"type": "string"},
+                "headline": {"type": "string"},
+                "bio": {"type": "string"},
+                "attributes": {"type": "object"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_disable_app_directory_entry",
+        "description": "Disable one consented public directory projection for a product subuser.",
+        "handler": handle_business_disable_app_directory_entry,
+        "schema": _schema(
+            "business_disable_app_directory_entry",
+            "Disable one product app directory entry.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_list_app_records",
         "description": "List durable saved product records for one business-scoped product customer.",
         "handler": handle_business_list_app_records,
@@ -25226,6 +26486,45 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "record_type", "record_id", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_list_app_connections",
+        "description": "List one product subuser's outbound or matched connections on the shared app plane.",
+        "handler": handle_business_list_app_connections,
+        "schema": _schema(
+            "business_list_app_connections",
+            "List product app connections.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+                "state": {"type": "string", "description": "One of matches, likes, passes, or blocks. Defaults to matches."},
+                "limit": {"type": "integer"},
+            },
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_act_on_app_connection",
+        "description": "Set one product subuser's directed relationship state toward another subuser: like, pass, block, or unblock.",
+        "handler": handle_business_act_on_app_connection,
+        "schema": _schema(
+            "business_act_on_app_connection",
+            "Act on one product app connection.",
+            {
+                "business": _BUSINESS_PROP,
+                "session_token": {"type": "string"},
+                "app_user_id": {"type": "string"},
+                "email": {"type": "string"},
+                "target_app_user_id": {"type": "string"},
+                "connection_action": {"type": "string", "description": "One of like, pass, block, or unblock."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "target_app_user_id", "connection_action", "idempotency_key"],
         ),
     },
     {
@@ -25634,6 +26933,10 @@ TAKYON_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "Publication slug under distribution/reddit-ads/<slug>/; defaults from campaign/ad names.",
                 },
+                "activate": {
+                    "type": "boolean",
+                    "description": "Whether to activate the launch immediately after provider objects are created. Default true; set false only to intentionally stage a paused campaign.",
+                },
                 "ad_account_id": {
                     "type": "string",
                     "description": "Override the default Reddit ad account id, e.g. a2_xxxxx.",
@@ -25652,7 +26955,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 },
                 "campaign": {
                     "type": "object",
-                    "description": "{name, objective, start_time, end_time, invoice_label, funding_instrument_id}. v1 launch stages a non-CBO campaign and always pauses it.",
+                    "description": "{name, objective, start_time, end_time, invoice_label, funding_instrument_id}. Uses the current non-CBO campaign shape; activation is controlled by the top-level activate flag and defaults live launch to active.",
                 },
                 "ad_group": {
                     "type": "object",

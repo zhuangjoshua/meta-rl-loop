@@ -60,19 +60,25 @@ from takyon_cli.config import (
 )
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.core import (
+    handle_business_act_on_app_connection,
     handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
+    handle_business_disable_app_directory_entry,
     handle_business_delete_app_record,
     handle_business_enqueue_job,
+    handle_business_list_app_connections,
+    handle_business_list_app_directory_entries,
     handle_business_meta_ad_bind_manual_launch,
     handle_business_meta_ad_insights_sync,
     handle_business_read_app_account,
+    handle_business_read_app_directory_entry,
     handle_business_read_app_profile,
     handle_business_read_app_record,
     handle_business_record_app_usage,
     handle_business_record_stripe_webhook,
     handle_business_request_app_magic_link,
     handle_business_list_app_records,
+    handle_business_upsert_app_directory_entry,
     handle_business_upsert_app_record,
     handle_business_upsert_app_profile,
     handle_business_verify_app_magic_link,
@@ -1125,6 +1131,9 @@ _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
 _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
 _REVEAL_WINDOW_SECONDS = 30
+_directory_lookup_timestamps: Dict[str, List[float]] = {}
+_DIRECTORY_LOOKUP_MAX_PER_WINDOW = 60
+_DIRECTORY_LOOKUP_WINDOW_SECONDS = 60
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -2053,6 +2062,19 @@ def _takyon_app_session_token(request: Request) -> str:
     return _cookie_value(request.headers.get("cookie", ""), TAKYON_APP_SESSION_COOKIE)
 
 
+def _takyon_app_rate_limit_directory_lookup(*, business: str, session_token: str) -> None:
+    if not session_token:
+        return
+    key = hashlib.sha256(f"{business}:{session_token}".encode("utf-8")).hexdigest()
+    now = time.time()
+    cutoff = now - _DIRECTORY_LOOKUP_WINDOW_SECONDS
+    timestamps = [stamp for stamp in _directory_lookup_timestamps.get(key, []) if stamp > cutoff]
+    if len(timestamps) >= _DIRECTORY_LOOKUP_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many directory requests. Try again shortly.")
+    timestamps.append(now)
+    _directory_lookup_timestamps[key] = timestamps
+
+
 def _takyon_app_origin(request: Request, body: dict[str, Any] | None = None) -> str:
     body_origin = (body or {}).get("origin")
     if isinstance(body_origin, str) and body_origin.strip():
@@ -2278,14 +2300,16 @@ def _takyon_app_broker_generate(
 # embedded slug ("/api/takyon/apps/<slug>/...") — and the runtime resolves
 # them to the host's business. This removes the recurring "rail not wired"
 # 404 when a generated site guesses the wrong API base. See CLAUDE.md: the
-# shared app runtime owns auth/session/account/profile/records/checkout/usage/generate.
+# shared app runtime owns auth/session/account/profile/directory/records/connections/checkout/usage/generate.
 _PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
     "auth/request",
     "auth/verify",
     "session",
     "account",
     "profile",
+    "directory",
     "records",
+    "connections",
     "checkout",
     "usage",
     "generate",
@@ -2309,6 +2333,8 @@ def _normalize_product_rail_route(path: str) -> Optional[str]:
             candidate = tail
             break
     if candidate in _PRODUCT_APP_RAIL_ROUTES:
+        return candidate
+    if candidate == "directory" or candidate.startswith("directory/"):
         return candidate
     if candidate == "records" or candidate.startswith("records/"):
         return candidate
@@ -2355,6 +2381,36 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         }))
         return _takyon_app_json(status, payload)
 
+    if parts and parts[0] == "directory":
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        if parts == ["directory"]:
+            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
+            status, payload = _takyon_app_tool(handle_business_list_app_directory_entries({
+                "business": business,
+                "session_token": token,
+                "limit": request.query_params.get("limit"),
+            }))
+            return _takyon_app_json(status, payload)
+        if parts == ["directory", "me"]:
+            status, payload = _takyon_app_tool(handle_business_read_app_directory_entry({
+                "business": business,
+                "session_token": token,
+            }))
+            return _takyon_app_json(status, payload)
+        if len(parts) == 2:
+            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
+            status, payload = _takyon_app_tool(handle_business_read_app_directory_entry({
+                "business": business,
+                "session_token": token,
+                "app_user_id": parts[1],
+            }))
+            if status != int(HTTPStatus.OK):
+                return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+            return _takyon_app_json(status, payload)
+        return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+
     if parts and parts[0] == "records":
         token = _takyon_app_session_token(request)
         if not token:
@@ -2376,6 +2432,18 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             }))
             return _takyon_app_json(status, payload)
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+
+    if parts == ["connections"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_list_app_connections({
+            "business": business,
+            "session_token": token,
+            "state": request.query_params.get("state"),
+            "limit": request.query_params.get("limit"),
+        }))
+        return _takyon_app_json(status, payload)
 
     if parts == ["checkout"]:
         intent_id = str(
@@ -2483,6 +2551,21 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         }))
         return _takyon_app_json(status, payload)
 
+    if parts == ["directory", "me"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_upsert_app_directory_entry({
+            "business": business,
+            "session_token": token,
+            "display_name": body["display_name"] if "display_name" in body else body.get("displayName"),
+            "headline": body["headline"] if "headline" in body else body.get("headline"),
+            "bio": body["bio"] if "bio" in body else body.get("bio"),
+            "attributes": body["attributes"] if "attributes" in body else None,
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"directory:{business}:{uuid.uuid4().hex}",
+        }))
+        return _takyon_app_json(status, payload)
+
     if parts and parts[0] == "records":
         token = _takyon_app_session_token(request)
         if not token:
@@ -2497,6 +2580,29 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "metadata": body.get("metadata"),
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"record:{business}:{uuid.uuid4().hex}",
         }))
+        return _takyon_app_json(status, payload)
+
+    if parts == ["connections"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        action_value = (
+            str(body.get("action") or body.get("state") or "like")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if action_value not in {"block", "unblock"}:
+            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
+        status, payload = _takyon_app_tool(handle_business_act_on_app_connection({
+            "business": business,
+            "session_token": token,
+            "target_app_user_id": body.get("target_app_user_id") or body.get("targetAppUserId") or body.get("target_id") or body.get("targetId"),
+            "connection_action": body.get("action") or body.get("state"),
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"connection:{business}:{uuid.uuid4().hex}",
+        }))
+        if status != int(HTTPStatus.OK) and str(payload.get("error") or "") == "app connection target not found":
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
         return _takyon_app_json(status, payload)
 
     if parts == ["usage"]:
@@ -2550,6 +2656,16 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
             {"success": False, "error": "owner_token_rejected_on_app_plane"},
         )
     parts = _takyon_app_route_parts(route)
+    if parts == ["directory", "me"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_disable_app_directory_entry({
+            "business": business,
+            "session_token": token,
+            "idempotency_key": f"directory-delete:{business}:{uuid.uuid4().hex}",
+        }))
+        return _takyon_app_json(status, payload)
     if parts and parts[0] == "records" and len(parts) == 3:
         token = _takyon_app_session_token(request)
         if not token:
@@ -2559,7 +2675,7 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
             "session_token": token,
             "record_type": parts[1],
             "record_id": parts[2],
-            "idempotency_key": f"record-delete:{business}:{parts[1]}:{parts[2]}",
+            "idempotency_key": f"record-delete:{business}:{uuid.uuid4().hex}",
         }))
         return _takyon_app_json(status, payload)
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})

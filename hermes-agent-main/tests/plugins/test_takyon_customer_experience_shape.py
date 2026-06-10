@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.error import URLError
 
+import pytest
+
 from plugins.takyon import core as takyon_core
 
 
@@ -48,6 +50,49 @@ def test_merge_customer_experience_metadata_normalizes_worker_contract_fields():
     assert customer["requiredAppTabs"] == ["Planner", "Progress"]
     assert customer["researchSources"] == ["research/strategy.md", "research/market.md"]
     assert "experienceNotes" not in customer
+
+
+def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring_new_rail():
+    metadata = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
+        {
+            "subuser_app": {
+                "app_mode": "standard_saas",
+                "subscription_style": "monthly",
+                "api_mode": "shared_runtime",
+                "rail_state": {
+                    "auth": "live",
+                    "account": "live",
+                },
+            }
+        },
+        runtime_features=["auth", "account", "records"],
+        previous_runtime_features=["auth", "account"],
+        app_mode="standard_saas",
+        subscription_style="monthly",
+        api_mode="shared_runtime",
+    )
+    assert metadata["subuser_app"]["rail_state"] == {
+        "auth": "live",
+        "account": "live",
+        "records": "declared",
+    }
+
+
+def test_product_workflow_rejects_no_sharing_when_directory_or_connections_are_selected():
+    with pytest.raises(takyon_core.TakyonError, match="no_sharing cannot stay true"):
+        takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
+            surface={
+                "runtime_features": ["directory"],
+                "metadata": {
+                    "product_workflow": {
+                        "scope_rules": {
+                            "no_sharing": True,
+                        }
+                    }
+                },
+            },
+            runtime_features=["auth", "account", "profile", "directory"],
+        )
 
 
 def test_materialized_subuser_kit_writes_js_context_only(tmp_path: Path):

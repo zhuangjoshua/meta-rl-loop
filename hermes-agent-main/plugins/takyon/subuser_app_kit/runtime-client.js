@@ -197,6 +197,39 @@ export function createSubuserRuntimeClient(context = {}) {
         body: JSON.stringify(payload),
       });
     },
+    async listDirectory(options = {}) {
+      ensureRail("directory");
+      const params = new URLSearchParams();
+      if (options.limit != null && options.limit !== "") {
+        params.set("limit", String(options.limit));
+      }
+      const suffix = params.toString();
+      return jsonRequest(`${routeUrl("directory")}${suffix ? `?${suffix}` : ""}`, {
+        method: "GET",
+      });
+    },
+    async getDirectoryMe() {
+      ensureRail("directory");
+      return jsonRequest(routeUrl("directory/me"), { method: "GET" });
+    },
+    async getDirectoryEntry(appUserId) {
+      ensureRail("directory");
+      return jsonRequest(
+        routeUrl(`directory/${encodeRoutePart(appUserId)}`),
+        { method: "GET" },
+      );
+    },
+    async updateDirectoryMe(payload = {}) {
+      ensureRail("directory");
+      return jsonRequest(routeUrl("directory/me"), {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async disableDirectoryMe() {
+      ensureRail("directory");
+      return jsonRequest(routeUrl("directory/me"), { method: "DELETE" });
+    },
     async listRecords(options = {}) {
       ensureRail("records");
       const params = new URLSearchParams();
@@ -263,6 +296,26 @@ export function createSubuserRuntimeClient(context = {}) {
     async recordUsage(payload = {}) {
       ensureRail("usage");
       return jsonRequest(routeUrl("usage"), {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async listConnections(options = {}) {
+      ensureRail("connections");
+      const params = new URLSearchParams();
+      const state = String(options.state || "").trim();
+      if (state) params.set("state", state);
+      if (options.limit != null && options.limit !== "") {
+        params.set("limit", String(options.limit));
+      }
+      const suffix = params.toString();
+      return jsonRequest(`${routeUrl("connections")}${suffix ? `?${suffix}` : ""}`, {
+        method: "GET",
+      });
+    },
+    async actOnConnection(payload = {}) {
+      ensureRail("connections");
+      return jsonRequest(routeUrl("connections"), {
         method: "POST",
         body: JSON.stringify(payload),
       });

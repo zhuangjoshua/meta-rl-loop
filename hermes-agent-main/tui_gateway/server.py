@@ -6758,11 +6758,17 @@ _TAKYON_CREATE_BUSINESS_PATTERNS = (
     re.compile(r"\b(?:create|build|make|start|launch|bootstrap|set\s+up)\b.{0,80}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
     re.compile(r"\b(?:new|another)\b.{0,40}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
 )
+_TAKYON_EXISTING_BUSINESS_TARGET_PATTERNS = (
+    re.compile(r"\bfor\s+(?:this|the)\s+(?:business|company|startup|saas|micro\s*saas|app|product)\b", re.I),
+    re.compile(r"\bthis\s+(?:business|company|startup|saas|micro\s*saas|app|product)\b", re.I),
+)
 
 
 def _takyon_prompt_may_create_business(text: str) -> bool:
     compact = " ".join(str(text or "").strip().split())
     if not compact:
+        return False
+    if any(pattern.search(compact) for pattern in _TAKYON_EXISTING_BUSINESS_TARGET_PATTERNS):
         return False
     return any(pattern.search(compact) for pattern in _TAKYON_CREATE_BUSINESS_PATTERNS)
 

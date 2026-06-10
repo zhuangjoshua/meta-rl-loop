@@ -505,3 +505,44 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     assert result["success"] is True
     assert captured["docker_workspace_path"] == workspace
     assert captured["payload"]["cwd"] == str(workspace)
+
+
+def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_home(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    from tools.environments import docker as docker_env
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: "995:987")
+    monkeypatch.setattr(
+        docker_env,
+        "_build_security_args",
+        lambda run_as_host_user=False: [f"--security-opt=test-{str(bool(run_as_host_user)).lower()}"],
+    )
+    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: {"ANTHROPIC_API_KEY": "test-key", **(extra or {})})
+
+    run_cmd, payload, worker_cwd, worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={
+            "business": "latexflow",
+            "workspace": "product/site",
+            "instruction": "Build the product shell.",
+        },
+        workspace_path=workspace,
+        timeout_ms=30_000,
+    )
+
+    assert "-i" in run_cmd
+    assert "--user" in run_cmd
+    user_index = run_cmd.index("--user")
+    assert run_cmd[user_index + 1] == "995:987"
+    assert "--security-opt=test-true" in run_cmd
+    assert payload["instruction"] == "Build the product shell."
+    assert payload["cwd"] == "/workspace"
+    assert payload["root"] == "/workspace"
+    assert worker_cwd == str(repo_root)
+    assert worker_env.get("HOME") != "/tmp"
+    assert "HOME=/tmp" in run_cmd

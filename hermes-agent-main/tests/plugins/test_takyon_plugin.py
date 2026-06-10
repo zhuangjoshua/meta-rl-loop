@@ -2458,45 +2458,6 @@ def test_claude_agent_task_uses_docker_lane_for_product_site_when_terminal_env_i
     assert captured["workspace_path"].endswith("product/site")
 
 
-def test_run_claude_agent_task_in_docker_passes_stdin_into_container(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True)
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir(parents=True)
-
-    captured: dict[str, object] = {}
-
-    def fake_run(command, **kwargs):
-        captured["command"] = list(command)
-        captured["input"] = kwargs.get("input")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-
-    from tools.environments import docker as docker_env
-
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: ["--security-opt=test"])
-    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
-    monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: {"ANTHROPIC_API_KEY": "test-key", **(extra or {})})
-    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
-
-    result = takyon_core._run_claude_agent_task_in_docker(
-        payload={
-            "business": "latexflow",
-            "workspace": "product/site",
-            "instruction": "Build the product shell.",
-        },
-        workspace_path=workspace,
-        timeout_ms=30_000,
-    )
-
-    assert result.returncode == 0
-    assert "-i" in captured["command"]
-    payload = json.loads(str(captured["input"]))
-    assert payload["instruction"] == "Build the product shell."
-    assert payload["cwd"] == "/workspace"
-    assert payload["root"] == "/workspace"
-
-
 def test_surface_md_lists_selected_and_owned_runtime_rails(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -6694,6 +6655,12 @@ def test_business_reddit_ad_launch_defaults_to_activation_when_live(tmp_path, mo
     assert result["paused"] is False
     assert result["value"]["reserved_credits"] == 2999
     assert result["value"]["total_budget_usd"] == 29.99
+
+    repeat = json.loads(handle_business_reddit_ad_launch(_reddit_launch_args()))
+    assert repeat["success"] is True
+    assert repeat["idempotent"] is True
+    assert repeat["status"] == "activated"
+    assert repeat["paused"] is False
 
 
 def test_business_reddit_ad_launch_live_blocks_without_credits(tmp_path, monkeypatch):

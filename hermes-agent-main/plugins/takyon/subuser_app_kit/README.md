@@ -15,7 +15,7 @@ Files:
 - `packs.js` — mode, subscription, and API pack hints for faster composition.
 - `ui-primitives.js` — small blocked/pricing/usage/API helper renderers.
 - `tokens.css` — neutral shared tokens and state styles.
-- Seeded starter source under `src/` — a minimal landing stub at `/`, a gated product shell at `/app`, and an account/subscription page at `/app/profile`.
+- Seeded starter source under `src/` — a landing page at `/`, public support pages at `/pricing`, `/privacy`, and `/terms`, a gated product shell at `/app`, an account/subscription page at `/app/profile`, and supporting metadata routes for Open Graph, Twitter, `robots`, and `sitemap`.
 
 Normal pattern:
 

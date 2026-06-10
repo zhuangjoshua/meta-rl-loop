@@ -1735,12 +1735,17 @@ def test_normalize_product_rail_route_handles_path_variants():
     assert norm("/api/takyon/apps/mathflow/auth/request") == "auth/request"
     assert norm("/api/generated-apps/mathflow/auth/verify") == "auth/verify"
     assert norm("/api/takyon/apps/otherslug/generate") == "generate"
+    assert norm("/api/takyon/apps/otherslug/directory/u_123") == "directory/u_123"
     assert norm("/api/takyon/apps/otherslug/records/draft/abc123") == "records/draft/abc123"
     assert norm("session") == "session"
     assert norm("/account") == "account"
     assert norm("/profile") == "profile"
+    assert norm("/directory") == "directory"
+    assert norm("/directory/me") == "directory/me"
+    assert norm("/directory/u_123") == "directory/u_123"
     assert norm("/records") == "records"
     assert norm("/records/draft/abc123") == "records/draft/abc123"
+    assert norm("/connections") == "connections"
     assert norm("/checkout") == "checkout"
     assert norm("/usage") == "usage"
     # Non-rail paths and static pages must not be claimed.
@@ -2013,6 +2018,7 @@ def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):
     monkeypatch.setattr(web_server, "handle_business_read_app_record", fake_read_handler)
     monkeypatch.setattr(web_server, "handle_business_upsert_app_record", fake_save_handler)
     monkeypatch.setattr(web_server, "handle_business_delete_app_record", fake_delete_handler)
+    monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "delete_nonce_123"})())
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2076,7 +2082,161 @@ def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):
         "session_token": "session_123",
         "record_type": "draft",
         "record_id": "abc123",
-        "idempotency_key": "record-delete:mathflow:draft:abc123",
+        "idempotency_key": "record-delete:mathflow:delete_nonce_123",
+    }]
+
+
+def test_app_directory_and_connections_routes_dispatch_session_scoped_handlers(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    directory_list_calls: list[dict[str, object]] = []
+    directory_read_calls: list[dict[str, object]] = []
+    directory_save_calls: list[dict[str, object]] = []
+    directory_delete_calls: list[dict[str, object]] = []
+    connection_list_calls: list[dict[str, object]] = []
+    connection_act_calls: list[dict[str, object]] = []
+
+    def fake_list_directory(args):
+        directory_list_calls.append(args)
+        return json.dumps({"success": True, "entries": []})
+
+    def fake_read_directory(args):
+        directory_read_calls.append(args)
+        return json.dumps({"success": True, "directory_entry": {"app_user_id": args.get("app_user_id", "me")}})
+
+    def fake_save_directory(args):
+        directory_save_calls.append(args)
+        return json.dumps({"success": True, "directory_entry": {"enabled": True}})
+
+    def fake_disable_directory(args):
+        directory_delete_calls.append(args)
+        return json.dumps({"success": True, "directory_entry": {"enabled": False}, "disabled": True})
+
+    def fake_list_connections(args):
+        connection_list_calls.append(args)
+        return json.dumps({"success": True, "connections": []})
+
+    def fake_act_connection(args):
+        connection_act_calls.append(args)
+        return json.dumps({"success": True, "connection": {"target_app_user_id": args["target_app_user_id"]}})
+
+    monkeypatch.setattr(web_server, "handle_business_list_app_directory_entries", fake_list_directory)
+    monkeypatch.setattr(web_server, "handle_business_read_app_directory_entry", fake_read_directory)
+    monkeypatch.setattr(web_server, "handle_business_upsert_app_directory_entry", fake_save_directory)
+    monkeypatch.setattr(web_server, "handle_business_disable_app_directory_entry", fake_disable_directory)
+    monkeypatch.setattr(web_server, "handle_business_list_app_connections", fake_list_connections)
+    monkeypatch.setattr(web_server, "handle_business_act_on_app_connection", fake_act_connection)
+    monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "dir_conn_nonce_123"})())
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        directory_list_response = client.get(
+            "/api/takyon/apps/mathflow/directory?limit=5",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        directory_me_response = client.get(
+            "/api/takyon/apps/mathflow/directory/me",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        directory_entry_response = client.get(
+            "/api/takyon/apps/mathflow/directory/u_123",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        directory_save_response = client.post(
+            "/api/takyon/apps/mathflow/directory/me",
+            json={"display_name": "Avery", "headline": "Open to meetups"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        directory_delete_response = client.delete(
+            "/api/takyon/apps/mathflow/directory/me",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        connections_list_response = client.get(
+            "/api/takyon/apps/mathflow/connections?state=matches&limit=8",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        connections_act_response = client.post(
+            "/api/takyon/apps/mathflow/connections",
+            json={"target_app_user_id": "u_123", "action": "like"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert directory_list_response.status_code == 200
+    assert directory_me_response.status_code == 200
+    assert directory_entry_response.status_code == 200
+    assert directory_save_response.status_code == 200
+    assert directory_delete_response.status_code == 200
+    assert connections_list_response.status_code == 200
+    assert connections_act_response.status_code == 200
+    assert directory_list_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "limit": "5",
+    }]
+    assert directory_read_calls == [
+        {
+            "business": "mathflow",
+            "session_token": "session_123",
+        },
+        {
+            "business": "mathflow",
+            "session_token": "session_123",
+            "app_user_id": "u_123",
+        },
+    ]
+    assert directory_save_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "display_name": "Avery",
+        "headline": "Open to meetups",
+        "bio": None,
+        "attributes": None,
+        "idempotency_key": "directory:mathflow:dir_conn_nonce_123",
+    }]
+    assert directory_delete_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "idempotency_key": "directory-delete:mathflow:dir_conn_nonce_123",
+    }]
+    assert connection_list_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "state": "matches",
+        "limit": "8",
+    }]
+    assert connection_act_calls == [{
+        "business": "mathflow",
+        "session_token": "session_123",
+        "target_app_user_id": "u_123",
+        "connection_action": "like",
+        "idempotency_key": "connection:mathflow:dir_conn_nonce_123",
     }]
 
 
@@ -2101,6 +2261,58 @@ def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):
 
     assert resp.status_code == 403
     assert resp.json()["error"] == "owner_token_rejected_on_app_plane"
+
+
+def test_app_connections_post_limits_directory_style_actions_and_hides_missing_targets(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    limit_calls: list[dict[str, str]] = []
+    action_calls: list[dict[str, object]] = []
+
+    def fake_rate_limit(*, business: str, session_token: str) -> None:
+        limit_calls.append({"business": business, "session_token": session_token})
+
+    def fake_act_connection(args):
+        action_calls.append(args)
+        if args.get("connection_action") == "like":
+            return json.dumps({"success": False, "error": "app connection target not found"})
+        return json.dumps({"success": True, "connection": {"target_app_user_id": args["target_app_user_id"]}})
+
+    monkeypatch.setattr(web_server, "_takyon_app_rate_limit_directory_lookup", fake_rate_limit)
+    monkeypatch.setattr(web_server, "handle_business_act_on_app_connection", fake_act_connection)
+    monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "conn_limit_nonce_123"})())
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        like_response = client.post(
+            "/api/takyon/apps/mathflow/connections",
+            json={"target_app_user_id": "u_hidden", "action": "like"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        block_response = client.post(
+            "/api/takyon/apps/mathflow/connections",
+            json={"target_app_user_id": "u_hidden", "action": "block"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert like_response.status_code == 404
+    assert like_response.json() == {"success": False, "error": "not found"}
+    assert block_response.status_code == 200
+    assert block_response.json()["success"] is True
+    assert limit_calls == [{"business": "mathflow", "session_token": "session_123"}]
+    assert [call["connection_action"] for call in action_calls] == ["like", "block"]
 
 
 def test_http_path_allowed_for_host_roles():

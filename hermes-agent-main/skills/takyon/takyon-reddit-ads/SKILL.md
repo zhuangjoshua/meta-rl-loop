@@ -43,8 +43,7 @@ metadata:
       - metrics/reddit-ads/<slug>/insights.jsonl
       - metrics/reddit-ads/<slug>/syncs/<idempotency>.json
 
-required_environment_variables:
-  [REDDIT_ADS_CLIENT_ID, REDDIT_ADS_CLIENT_SECRET, REDDIT_ADS_REFRESH_TOKEN]
+required_environment_variables: []
 required_credential_files: []
 ---
 
@@ -161,7 +160,7 @@ The smallest truthful end-to-end Reddit path is:
 - **An existing `post_id`, public creative URLs, or local business creative files that can be staged onto a publicly reachable business publish target** for live image/video/carousel post creation.
 - **If `asset_kind: "image"` and no real image asset exists yet, you must route upstream to `takyon-static-ad-creative-generator` first.** A placeholder service URL, mock asset, or fixture image is not a valid live creative input.
 - **A unique Reddit User-Agent string**. Generic user agents are throttled much harder by Reddit.
-- **Test-mode businesses need none of these** — the tool suppresses to a local receipt.
+- Credential readiness for this skill is owned by `business_reddit_ad_launch mode=preflight`, not by env-only frontmatter gates, because live auth may come from Safebox-backed env values or the saved local auth state file.
 
 ## References
 
@@ -188,9 +187,7 @@ The smallest truthful end-to-end Reddit path is:
   The launch tool itself already handles the normal Reddit object sequence:
   Campaign → Ad Group → optional Post → Ad.
 - **Launch:** call `business_reddit_ad_launch` with `mode: "launch"` and a stable `idempotency_key`.
-  In **test mode** the tool writes a suppressed `receipt.json` and calls Reddit **not at all**.
-  In **live mode** it reserves the credit cap, creates Campaign → Ad Group → optional Post → Ad,
-  and activates them unless you explicitly requested a paused staged launch.
+  It reserves the credit cap, creates Campaign → Ad Group → optional Post → Ad, and activates them unless you explicitly requested a paused staged launch.
 - **Public asset staging receipts:** when local files are used, the tool also writes canonical asset receipts under `product/public-assets/<slug>/receipt.json`.
 - **Control (explicit):** call `business_reddit_ad_control` using the launch slug/receipt. `pause`
   stops delivery, `activate` resumes it inside the same reserved cap, and `set_budget` updates
@@ -208,8 +205,7 @@ The smallest truthful end-to-end Reddit path is:
 3. **Confirm the creative source is actually launchable** — either a real `post_id`, public media URLs, or local business files that the launch tool can stage to a reachable publish target. If `asset_kind: "image"` and no real creative exists yet, stop and route upstream to `takyon-static-ad-creative-generator`; do not fabricate `placehold.co`, mock, fixture, or placeholder image URLs just to get a campaign through. In live mode, if the publish target is not actually reachable, stop on that blocker.
 4. **Draft `plan.json`** under `distribution/reddit-ads/<slug>/` from the template: choose the objective, targeting, ad copy, and either `post_id`, public media URLs, or local staged-file inputs on the `post` block. Omit `ad_group.daily_budget_usd` when the backend should derive the bounded pace from the reserved Reddit credits; only set it explicitly when the operator chose a different pace.
 5. **Launch** — call `business_reddit_ad_launch` `mode: "launch"` with the plan fields and a stable `idempotency_key`.
-   - **Test mode** → expect `status: "suppressed_test_mode"` and a local `receipt.json`; no Reddit objects exist.
-   - **Live mode** → expect `status: "activated"` by default, or `status: "created_paused"` only when you explicitly requested a paused staged launch.
+   - Expect `status: "activated"` by default, or `status: "created_paused"` only when you explicitly requested a paused staged launch.
 6. **Control if needed** — if the operator wants the ad live, call
   `business_reddit_ad_control` with `operation: "activate"` and the same slug. To stop it, use
   `operation: "pause"`. To change pace, use `operation: "set_budget"` with `daily_budget_usd`.
@@ -220,7 +216,7 @@ The smallest truthful end-to-end Reddit path is:
 
 - `distribution/reddit-ads/<slug>/plan.json` — the structured launch input.
 - `distribution/reddit-ads/<slug>/receipt.json` — the tool-written truth of the launch:
-  `status` (`suppressed_test_mode` | `created_paused` | `activated` | `partial_failed`), `paused`, the
+  `status` (`created_paused` | `activated` | `partial_failed` | `blocked_*`), `paused`, the
   Reddit object `ids` (live), the budget, and the funding/pixel/profile defaults used.
 - `product/public-assets/<slug>/receipt.json` — written when local business files were staged into public asset URLs for the launch path.
 - `distribution/reddit-ads/<slug>/actions/<idempotency>.json` — the tool-written truth of each
@@ -249,7 +245,7 @@ The smallest truthful end-to-end Reddit path is:
 - [ ] `business_reddit_ad_launch mode=preflight` returned identity, businesses, ad accounts, profiles, funding instruments, and pixels
 - [ ] `distribution/reddit-ads/<slug>/plan.json` exists and matches the intended launch shape
 - [ ] When `asset_kind=image`, the referenced image is a real external asset or a real business creative bundle under `product/static-ads/<slug>/`, not a placeholder/mock/stub URL
-- [ ] `distribution/reddit-ads/<slug>/receipt.json` exists and truthfully reflects `suppressed_test_mode`, `activated`, `created_paused`, or `partial_failed`
+- [ ] `distribution/reddit-ads/<slug>/receipt.json` exists and truthfully reflects `activated`, `created_paused`, `partial_failed`, or an exact `blocked_*` status
 - [ ] When local files were used, `product/public-assets/<slug>/receipt.json` exists with the staged public URL or the real blocker
 - [ ] Any activate/pause/budget action has a corresponding `distribution/reddit-ads/<slug>/actions/<idempotency>.json`
 - [ ] Metrics sync wrote both `metrics/reddit-ads/<slug>/syncs/<idempotency>.json` and `metrics/reddit-ads/<slug>/insights.jsonl`
