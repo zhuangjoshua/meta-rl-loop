@@ -748,6 +748,7 @@ export interface TakyonBusinessCreativeCreditsResponse {
   budget_capacity_credits?: number;
   unallocated_credits?: number;
   unbucketed_used_credits?: number;
+  action_costs?: Record<string, TakyonBusinessCreativeCreditActionCost>;
   reason?: string;
 }
 
@@ -756,6 +757,11 @@ export interface TakyonBusinessCreativeCreditChannelBudget {
   used_credits?: number;
   reserved_credits?: number;
   remaining_credits?: number;
+}
+
+export interface TakyonBusinessCreativeCreditActionCost {
+  credits?: number;
+  default_bucket?: string | null;
 }
 
 export interface TakyonBusinessCreativeCreditPack {

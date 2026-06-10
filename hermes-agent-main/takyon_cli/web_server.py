@@ -4158,6 +4158,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
         from plugins.takyon.control_api import creative_credit_checkout_config
         from plugins.takyon.core import (
             TakyonStore,
+            _creative_credit_action_costs,
             _creative_credit_budget_snapshot_from_conn,
             _db_backend,
         )
@@ -4207,6 +4208,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "budget_capacity_credits": int(snapshot.get("budget_capacity_credits") or 0),
             "unallocated_credits": int(snapshot.get("unallocated_credits") or 0),
             "unbucketed_used_credits": int(snapshot.get("unbucketed_used_credits") or 0),
+            "action_costs": _creative_credit_action_costs(),
             **creative_credit_checkout_config(),
         }
     except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash

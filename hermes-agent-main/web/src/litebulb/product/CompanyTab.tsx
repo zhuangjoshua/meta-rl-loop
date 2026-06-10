@@ -417,9 +417,22 @@ function ChannelBudget({
   const [buying, setBuying] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [buyError, setBuyError] = useState("");
+  const actionCosts = asRecord(creativeCredits?.action_costs);
   const checkoutPriceCents = readInt(creativeCredits?.price_cents_per_credit);
   const minimumCheckoutCreditsValue = readInt(creativeCredits?.minimum_checkout_credits);
   const minimumCheckoutAmountCents = readInt(creativeCredits?.minimum_checkout_amount_cents);
+  const ugcActionCost = readInt(asRecord(actionCosts.ugc_ad_generate).credits);
+  const staticAdActionCost = readInt(asRecord(actionCosts.static_ad_generate).credits);
+  const xPublishActionCost = readInt(asRecord(actionCosts.x_publish_outreach).credits);
+  const metaLaunchActionCost = readInt(asRecord(actionCosts.meta_ad_launch).credits);
+  const redditLaunchActionCost = readInt(asRecord(actionCosts.reddit_ad_launch).credits);
+  const actionCostHint = [
+    ugcActionCost ? `UGC ${ugcActionCost} on the chosen channel` : "",
+    staticAdActionCost ? `static ads ${staticAdActionCost}` : "",
+    xPublishActionCost ? `X posts ${xPublishActionCost}` : "",
+    metaLaunchActionCost ? `Meta launch ${metaLaunchActionCost}` : "",
+    redditLaunchActionCost ? `Reddit launch ${redditLaunchActionCost}` : "",
+  ].filter(Boolean).join(" · ");
   const defaultBuyCredits = Math.max(100, minimumCheckoutCreditsValue || 1);
   const [buyCreditsInput, setBuyCreditsInput] = useState(String(defaultBuyCredits));
   const syncedBusinessRef = useRef(businessSlug);
@@ -610,6 +623,13 @@ function ChannelBudget({
                 <span className="lb-bud__helper">
                   Minimum: {minimumCheckoutCreditsValue.toLocaleString()} credits
                   {minimumCheckoutAmountCents !== null ? ` (${formatUsdCents(minimumCheckoutAmountCents)})` : ""}.
+                </span>
+              )
+            : null}
+          {creativeCredits?.available && actionCostHint
+            ? (
+                <span className="lb-bud__helper">
+                  UGC and creative generation use these same credits. Costs: {actionCostHint}.
                 </span>
               )
             : null}
