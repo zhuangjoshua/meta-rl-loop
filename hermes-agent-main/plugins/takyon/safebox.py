@@ -698,6 +698,120 @@ def create_creative_credit_checkout(
     }
 
 
+def reconcile_creative_credit_checkout(
+    conn,
+    *,
+    session_id: str,
+    expected_business_slug: str | None = None,
+) -> dict[str, Any]:
+    """Settle one paid creative-credit checkout through Safebox authority."""
+    from . import stripe_util
+
+    stripe_session_id = str(session_id or "").strip()
+    expected_slug = str(expected_business_slug or "").strip()
+    if not stripe_session_id:
+        raise ValueError("session_id is required")
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/creative-credits/reconcile",
+                {
+                    "session_id": stripe_session_id,
+                    "business_slug": expected_slug or None,
+                },
+            )
+        except RemoteSafeboxError as exc:
+            detail = _remote_error_detail(exc)
+            message = str(detail.get("error") or detail.get("detail") or str(exc)).strip() or str(exc)
+            if exc.status_code == 404:
+                raise LookupError(message) from exc
+            if exc.status_code == 409:
+                raise RuntimeError("creative_credit_checkout_unpaid") from exc
+            if exc.status_code == 400:
+                raise ValueError(message) from exc
+            if exc.status_code in {502, 503}:
+                if exc.status_code == 503:
+                    raise stripe_util.StripeError("creative_credit_reconcile_unconfigured") from exc
+                raise stripe_util.StripeError(message) from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+
+    try:
+        session = stripe_util.stripe_request(
+            f"checkout/sessions/{stripe_session_id}",
+            {},
+            method="GET",
+        )
+    except stripe_util.StripeError as exc:
+        message = str(exc)
+        if " failed: 404" in message:
+            raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}") from exc
+        raise
+    if not isinstance(session, dict) or not session:
+        raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}")
+
+    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+    purpose = str(metadata.get("purpose") or "").strip()
+    if purpose not in {"creative_credit_pack", "creative_credit_topup"}:
+        raise ValueError("not a creative credit checkout session")
+    payment_status = str(session.get("payment_status") or "").strip()
+    if payment_status not in {"paid", "no_payment_required"}:
+        raise RuntimeError("creative_credit_checkout_unpaid")
+
+    business_slug = str(
+        metadata.get("business_slug") or session.get("client_reference_id") or ""
+    ).strip()
+    if not business_slug:
+        raise ValueError("creative credit checkout session missing business_slug")
+    if expected_slug and business_slug != expected_slug:
+        raise ValueError("checkout session does not belong to requested business")
+
+    try:
+        credits = int(metadata.get("credits") or 0)
+    except (TypeError, ValueError):
+        credits = 0
+    if credits <= 0:
+        raise ValueError("creative credit checkout session missing credits")
+    try:
+        amount_cents = int(session.get("amount_total") or 0)
+    except (TypeError, ValueError):
+        amount_cents = 0
+    try:
+        price_cents_per_credit = int(metadata.get("price_cents_per_credit") or 0)
+    except (TypeError, ValueError):
+        price_cents_per_credit = 0
+    pack_id = str(metadata.get("pack_id") or "").strip()
+
+    grant_metadata = {
+        "purpose": purpose,
+        "user_id": metadata.get("user_id"),
+        "stripe_checkout_session_id": stripe_session_id,
+        "amount_cents": amount_cents,
+        "price_cents_per_credit": price_cents_per_credit,
+        "reconciled_via": "checkout_session_read",
+    }
+    if pack_id:
+        grant_metadata["pack_id"] = pack_id
+
+    balances = _local_grant_credits(
+        conn,
+        business_slug,
+        credits,
+        f"stripe_checkout_session:{stripe_session_id}",
+        metadata=grant_metadata,
+        stripe_ref=stripe_session_id,
+    )
+    return {
+        "ok": True,
+        "business_slug": business_slug,
+        "credited_credits": credits,
+        "balance_credits": balances.balance_credits,
+        "reserved_credits": balances.reserved_credits,
+        "session_id": stripe_session_id,
+    }
+
+
 def verify_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, Any]:
     """Verify one Stripe billing webhook through Safebox authority and return the event."""
     body = str(raw_body or "")

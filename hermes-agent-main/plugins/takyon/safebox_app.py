@@ -74,6 +74,11 @@ class _CreativeCreditCheckoutBody(BaseModel):
     cancel_url: str
 
 
+class _ReconcileCreativeCreditCheckoutBody(BaseModel):
+    session_id: str
+    business_slug: str | None = None
+
+
 class _ReserveCreativeCreditsBody(BaseModel):
     business_slug: str
     credits: int
@@ -278,6 +283,36 @@ def build_safebox_app() -> FastAPI:
             "amount_cents": charge["amount_cents"],
             "price_cents_per_credit": charge.get("price_cents_per_credit"),
         }
+
+    @app.post("/v1/creative-credits/reconcile")
+    def reconcile_creative_credit_checkout(
+        body: _ReconcileCreativeCreditCheckoutBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import stripe_util
+
+        try:
+            return safebox.reconcile_creative_credit_checkout(
+                None,
+                session_id=body.session_id,
+                expected_business_slug=body.business_slug,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            if str(exc) == "creative_credit_checkout_unpaid":
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except stripe_util.StripeError as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message or "creative_credit_reconcile_unconfigured" in message:
+                raise HTTPException(
+                    status_code=503, detail="creative_credit_reconcile_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {message}") from exc
 
     @app.post("/v1/creative-credits/grant")
     def grant_creative_credits(

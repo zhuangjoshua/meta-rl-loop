@@ -1012,91 +1012,12 @@ def reconcile_creative_credit_checkout_session(
     session_id: str,
     expected_business_slug: str | None = None,
 ) -> dict[str, Any]:
-    """Settle one paid creative-credit checkout session exactly once.
-
-    This is the safe return-path fallback when the dedicated billing webhook is
-    missing or delayed: read the authoritative Stripe checkout session, verify
-    it is a paid creative-credit purchase, then grant credits idempotently on
-    the Stripe checkout session id.
-    """
-
-    stripe_session_id = str(session_id or "").strip()
-    if not stripe_session_id:
-        raise ValueError("session_id is required")
-    expected_slug = str(expected_business_slug or "").strip()
-    try:
-        session = stripe_util.stripe_request(
-            f"checkout/sessions/{stripe_session_id}",
-            {},
-            method="GET",
-        )
-    except stripe_util.StripeError as exc:
-        message = str(exc)
-        if " failed: 404" in message:
-            raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}") from exc
-        raise
-    if not isinstance(session, dict) or not session:
-        raise LookupError(f"unknown_stripe_checkout_session:{stripe_session_id}")
-
-    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
-    purpose = str(metadata.get("purpose") or "").strip()
-    if purpose not in {"creative_credit_pack", "creative_credit_topup"}:
-        raise ValueError("not a creative credit checkout session")
-    payment_status = str(session.get("payment_status") or "").strip()
-    if payment_status not in {"paid", "no_payment_required"}:
-        raise RuntimeError("creative_credit_checkout_unpaid")
-
-    business_slug = str(
-        metadata.get("business_slug") or session.get("client_reference_id") or ""
-    ).strip()
-    if not business_slug:
-        raise ValueError("creative credit checkout session missing business_slug")
-    if expected_slug and business_slug != expected_slug:
-        raise ValueError("checkout session does not belong to requested business")
-
-    try:
-        credits = int(metadata.get("credits") or 0)
-    except (TypeError, ValueError):
-        credits = 0
-    if credits <= 0:
-        raise ValueError("creative credit checkout session missing credits")
-    try:
-        amount_cents = int(session.get("amount_total") or 0)
-    except (TypeError, ValueError):
-        amount_cents = 0
-    try:
-        price_cents_per_credit = int(metadata.get("price_cents_per_credit") or 0)
-    except (TypeError, ValueError):
-        price_cents_per_credit = 0
-    pack_id = str(metadata.get("pack_id") or "").strip()
-
-    grant_metadata = {
-        "purpose": purpose,
-        "user_id": metadata.get("user_id"),
-        "stripe_checkout_session_id": stripe_session_id,
-        "amount_cents": amount_cents,
-        "price_cents_per_credit": price_cents_per_credit,
-        "reconciled_via": "checkout_session_read",
-    }
-    if pack_id:
-        grant_metadata["pack_id"] = pack_id
-
-    balances = safebox.grant_credits(
+    """Settle one paid creative-credit checkout exactly once through Safebox authority."""
+    return safebox.reconcile_creative_credit_checkout(
         conn,
-        business_slug,
-        credits,
-        idempotency_key=f"stripe_checkout_session:{stripe_session_id}",
-        metadata=grant_metadata,
-        stripe_ref=stripe_session_id,
+        session_id=session_id,
+        expected_business_slug=expected_business_slug,
     )
-    return {
-        "ok": True,
-        "business_slug": business_slug,
-        "credited_credits": credits,
-        "balance_credits": balances.balance_credits,
-        "reserved_credits": balances.reserved_credits,
-        "session_id": stripe_session_id,
-    }
 
 
 def _rate_limited_principal(
