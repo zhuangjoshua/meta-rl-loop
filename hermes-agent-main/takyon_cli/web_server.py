@@ -4155,6 +4155,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
         }
     try:
         from plugins.takyon import business_credits
+        from plugins.takyon.control_api import creative_credit_checkout_config
         from plugins.takyon.core import (
             TakyonStore,
             _creative_credit_budget_snapshot_from_conn,
@@ -4206,6 +4207,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "budget_capacity_credits": int(snapshot.get("budget_capacity_credits") or 0),
             "unallocated_credits": int(snapshot.get("unallocated_credits") or 0),
             "unbucketed_used_credits": int(snapshot.get("unbucketed_used_credits") or 0),
+            **creative_credit_checkout_config(),
         }
     except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
         _log.warning("dashboard business creative credits read failed for %s: %s", slug, exc)
@@ -4338,7 +4340,10 @@ async def get_takyon_business_creative_credit_packs(
     if slug not in principal.business_slugs:
         raise HTTPException(status_code=404, detail="not_found")
     try:
-        from plugins.takyon.control_api import configured_creative_credit_packs
+        from plugins.takyon.control_api import (
+            configured_creative_credit_packs,
+            creative_credit_checkout_config,
+        )
         from plugins.takyon.core import _db_backend
 
         if _db_backend() != "postgres":
@@ -4346,6 +4351,7 @@ async def get_takyon_business_creative_credit_packs(
         return {
             "business_slug": slug,
             "packs": configured_creative_credit_packs(),
+            **creative_credit_checkout_config(),
         }
     except HTTPException:
         raise

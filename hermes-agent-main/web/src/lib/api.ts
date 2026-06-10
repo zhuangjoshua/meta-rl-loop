@@ -722,6 +722,10 @@ export interface TakyonBusinessCreativeCreditsResponse {
   business_slug: string;
   balance_credits?: number;
   reserved_credits?: number;
+  supports_custom_credits?: boolean;
+  price_cents_per_credit?: number;
+  minimum_checkout_credits?: number;
+  minimum_checkout_amount_cents?: number;
   channels?: Record<string, TakyonBusinessCreativeCreditChannelBudget>;
   channel_budgets?: Record<string, TakyonBusinessCreativeCreditChannelBudget>;
   total_allocated_credits?: number;
@@ -751,6 +755,10 @@ export interface TakyonBusinessCreativeCreditPack {
 export interface TakyonBusinessCreativeCreditPacksResponse {
   business_slug: string;
   packs: TakyonBusinessCreativeCreditPack[];
+  supports_custom_credits?: boolean;
+  price_cents_per_credit?: number;
+  minimum_checkout_credits?: number;
+  minimum_checkout_amount_cents?: number;
 }
 
 export interface TakyonBusinessFileReadResponse {

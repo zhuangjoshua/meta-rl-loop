@@ -410,7 +410,7 @@ export function Product({
     slug: string,
     allocations: Record<"x" | "meta" | "reddit", number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
-  onBuyCreativeCredits: (slug: string) => Promise<void>;
+  onBuyCreativeCredits: (slug: string, credits: number) => Promise<void>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const [tab, setTab] = useState<TabKey>("company");

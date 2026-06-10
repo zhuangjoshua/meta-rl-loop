@@ -77,6 +77,11 @@ function formatMetric(prefix: string, value: number) {
   return value.toLocaleString();
 }
 
+function formatUsdCents(value: number) {
+  if (!Number.isFinite(value)) return "—";
+  return `$${(value / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function pctDelta(current: number, previous: number) {
   if (!previous) return current ? 100 : 0;
   return ((current - previous) / previous) * 100;
@@ -372,7 +377,7 @@ function ChannelBudget({
     slug: string,
     allocations: Record<ChannelBudgetKey, number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
-  onBuyCreativeCredits: (slug: string) => Promise<void>;
+  onBuyCreativeCredits: (slug: string, credits: number) => Promise<void>;
 }) {
   const overview = asRecord(workspace?.overview);
   const outreach = asRecord(asRecord(asRecord(overview.artifacts).outreach).channels);
@@ -412,13 +417,23 @@ function ChannelBudget({
   const [buying, setBuying] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [buyError, setBuyError] = useState("");
+  const checkoutPriceCents = readInt(creativeCredits?.price_cents_per_credit);
+  const minimumCheckoutCreditsValue = readInt(creativeCredits?.minimum_checkout_credits);
+  const minimumCheckoutAmountCents = readInt(creativeCredits?.minimum_checkout_amount_cents);
+  const defaultBuyCredits = Math.max(100, minimumCheckoutCreditsValue || 1);
+  const [buyCreditsInput, setBuyCreditsInput] = useState(String(defaultBuyCredits));
   const syncedBusinessRef = useRef(businessSlug);
   const hasChanges = CHANNEL_BUDGET_KEYS.some((key) => draftAllocations[key] !== savedAllocations[key]);
+  const buyCreditsValue = readInt(buyCreditsInput) || 0;
+  const hasMinimumCheckout = minimumCheckoutCreditsValue !== null;
+  const canCheckoutChosenAmount = buyCreditsValue > 0 && (!hasMinimumCheckout || buyCreditsValue >= minimumCheckoutCreditsValue);
+  const estimatedCheckoutAmountCents = checkoutPriceCents !== null ? buyCreditsValue * checkoutPriceCents : null;
 
   useEffect(() => {
     if (syncedBusinessRef.current !== businessSlug) {
       syncedBusinessRef.current = businessSlug;
       setDraftAllocations(savedAllocations);
+      setBuyCreditsInput(String(defaultBuyCredits));
       setSaveError("");
       setBuyError("");
       return;
@@ -427,7 +442,7 @@ function ChannelBudget({
       setDraftAllocations(savedAllocations);
       setSaveError("");
     }
-  }, [businessSlug, hasChanges, savedAllocations, saving]);
+  }, [businessSlug, defaultBuyCredits, hasChanges, savedAllocations, saving]);
 
   const budgetCapacity = Math.max(
     readInt(creativeCredits?.budget_capacity_credits) || 0,
@@ -504,17 +519,35 @@ function ChannelBudget({
 
   const buyCredits = useCallback(async () => {
     if (!businessSlug || buying) return;
+    if (buyCreditsValue <= 0) {
+      setBuyError("Enter the number of credits you want to buy.");
+      return;
+    }
+    if (minimumCheckoutCreditsValue !== null && buyCreditsValue < minimumCheckoutCreditsValue) {
+      const minimumText = minimumCheckoutAmountCents !== null
+        ? `${minimumCheckoutCreditsValue.toLocaleString()} credits (${formatUsdCents(minimumCheckoutAmountCents)})`
+        : `${minimumCheckoutCreditsValue.toLocaleString()} credits`;
+      setBuyError(`Minimum checkout is ${minimumText}.`);
+      return;
+    }
     setBuying(true);
     setBuyError("");
     setSaveError("");
     try {
-      await onBuyCreativeCredits(businessSlug);
+      await onBuyCreativeCredits(businessSlug, buyCreditsValue);
     } catch (error) {
       setBuyError(error instanceof Error ? error.message : "Failed to start creative credit checkout.");
     } finally {
       setBuying(false);
     }
-  }, [businessSlug, buying, onBuyCreativeCredits]);
+  }, [
+    businessSlug,
+    buyCreditsValue,
+    buying,
+    minimumCheckoutAmountCents,
+    minimumCheckoutCreditsValue,
+    onBuyCreativeCredits,
+  ]);
 
   return (
     <section className="lb-card lb-bud">
@@ -569,16 +602,48 @@ function ChannelBudget({
           {creativeCredits?.available
             ? `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope${needsCredits ? " · Buy credits to unlock allocation." : ""}`
             : "Creative credits are unavailable right now, so channel budgets cannot be edited."}
+          {creativeCredits?.available && buyCreditsValue > 0 && estimatedCheckoutAmountCents !== null
+            ? <span className="lb-bud__helper">Checkout: {buyCreditsValue.toLocaleString()} credits for {formatUsdCents(estimatedCheckoutAmountCents)}.</span>
+            : null}
+          {creativeCredits?.available && minimumCheckoutCreditsValue !== null
+            ? (
+                <span className="lb-bud__helper">
+                  Minimum: {minimumCheckoutCreditsValue.toLocaleString()} credits
+                  {minimumCheckoutAmountCents !== null ? ` (${formatUsdCents(minimumCheckoutAmountCents)})` : ""}.
+                </span>
+              )
+            : null}
           {feedbackError ? <span className="lb-bud__error">{feedbackError}</span> : null}
         </div>
         <div className="lb-bud__actions">
+          <label className="lb-bud__buyfield">
+            <span>Credits</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={minimumCheckoutCreditsValue || 1}
+              step={1}
+              value={buyCreditsInput}
+              disabled={!canBuy || buying}
+              aria-label="Creative credits to buy"
+              onChange={(event) => {
+                const next = String(event.target.value || "").replace(/[^\d]/g, "");
+                setBuyCreditsInput(next);
+                setBuyError("");
+              }}
+            />
+          </label>
           <button
             type="button"
             className="lb-bud__buy"
-            disabled={!canBuy || buying}
+            disabled={!canBuy || buying || !canCheckoutChosenAmount}
             onClick={() => { void buyCredits(); }}
           >
-            {buying ? "Opening Stripe..." : "Buy credits"}
+            {buying
+              ? "Opening Stripe..."
+              : buyCreditsValue > 0
+                ? `Buy ${buyCreditsValue.toLocaleString()} credits`
+                : "Buy credits"}
           </button>
           <button
             type="button"
@@ -890,7 +955,7 @@ export function CompanyTab({
     slug: string,
     allocations: Record<ChannelBudgetKey, number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
-  onBuyCreativeCredits: (slug: string) => Promise<void>;
+  onBuyCreativeCredits: (slug: string, credits: number) => Promise<void>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
   const liveState = useMemo(() => asRecord(workspace?.live_state), [workspace]);

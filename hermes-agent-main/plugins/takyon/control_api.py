@@ -892,6 +892,16 @@ def configured_creative_credit_packs() -> list[dict[str, Any]]:
     return _creative_credit_packs()
 
 
+def creative_credit_checkout_config() -> dict[str, Any]:
+    """Return the current pricing/minimum metadata for custom creative-credit checkout."""
+    return {
+        "supports_custom_credits": True,
+        "price_cents_per_credit": _creative_credit_price_cents(),
+        "minimum_checkout_credits": _creative_credit_min_checkout_credits(),
+        "minimum_checkout_amount_cents": _creative_credit_min_checkout_amount_cents(),
+    }
+
+
 def _creative_credit_price_cents() -> int:
     """Price one creative credit in cents. Defaults to 1 cent per credit."""
     return _positive_int_env("TAKYON_CREATIVE_CREDIT_PRICE_CENTS", 1)
@@ -1121,6 +1131,7 @@ def build_control_router() -> APIRouter:
             "business_slug": slug,
             "balance_credits": balances.balance_credits,
             "reserved_credits": balances.reserved_credits,
+            **creative_credit_checkout_config(),
         }
 
     @router.get("/businesses/{slug}/creative-credits/packs")
@@ -1134,7 +1145,11 @@ def build_control_router() -> APIRouter:
         row = conn.execute("select 1 from businesses where slug = %s", (slug,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="not_found")
-        return {"business_slug": slug, "packs": configured_creative_credit_packs()}
+        return {
+            "business_slug": slug,
+            "packs": configured_creative_credit_packs(),
+            **creative_credit_checkout_config(),
+        }
 
     @router.post("/businesses/{slug}/creative-credits/checkout")
     def create_creative_credit_checkout(

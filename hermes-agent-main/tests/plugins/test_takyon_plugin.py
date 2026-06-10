@@ -56,6 +56,7 @@ from plugins.takyon.core import (
     handle_business_static_ad_generate,
     handle_business_ugc_ad_generate,
     handle_business_ugc_ad_write,
+    handle_business_read_channel_credit_budgets,
     handle_business_claude_agent_task,
     handle_business_set_work_focus,
     handle_business_set_channel_credit_budgets,
@@ -135,6 +136,7 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
 
     assert toolsets["business_write_file"] == "takyon"
     assert toolsets["business_publish_outreach"] == "takyon"
+    assert toolsets["business_read_channel_credit_budgets"] == "takyon-authority"
     assert toolsets["business_ugc_ad_generate"] == "takyon-authority"
     assert toolsets["business_static_ad_generate"] == "takyon-authority"
     assert toolsets["business_meta_ad_launch"] == "takyon-authority"
@@ -4756,6 +4758,38 @@ def test_business_set_channel_credit_budgets_persists_snapshot(tmp_path, monkeyp
     ).is_file()
 
 
+def test_business_read_channel_credit_budgets_returns_snapshot_and_action_costs(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:frameforge",
+        [{"action": "business.upsert", "business": "frameforge", "name": "Frameforge", "mode": "live"}],
+        "init-frameforge-read-budgets",
+    )
+    _grant_creative_credits(store, "frameforge", 5, "frameforge-budget-grant-read")
+    _set_channel_credit_budgets(
+        "frameforge",
+        {"x": 1, "meta": 3, "reddit": 1},
+        key="frameforge-channel-budgets-read-v1",
+    )
+
+    result = json.loads(
+        handle_business_read_channel_credit_budgets(
+            {
+                "business": "frameforge",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["path"] == "metrics/channel-credit-budgets.json"
+    assert result["value"]["channels"]["x"]["allocated_credits"] == 1
+    assert result["value"]["channels"]["meta"]["allocated_credits"] == 3
+    assert result["value"]["action_costs"]["x_publish_outreach"]["default_bucket"] == "x"
+    assert result["value"]["action_costs"]["meta_ad_launch"]["credits"] >= 1
+
+
 def test_business_ugc_ad_generate_live_requires_channel_budget_context(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -6555,6 +6589,42 @@ def test_business_publish_outreach_live_requires_provider_gate(tmp_path, monkeyp
 
     assert result["success"] is False
     assert "requires missing API/env credential" in result["error"]
+
+
+def test_business_publish_outreach_live_x_blocks_before_enqueue_when_credits_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "live",
+            }
+        ],
+        "init-jobtailor-live-x-preflight",
+    )
+
+    result = json.loads(
+        handle_business_publish_outreach(
+            {
+                "business": "jobtailor",
+                "channel": "x",
+                "provider": "x",
+                "body": "Scope creep keeps eating freelancer margins.",
+                "requires_api": ["x"],
+                "idempotency_key": "jobtailor-x-live-blocked-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert "insufficient_creative_credits" in result["error"]
 
 
 def test_business_x_metrics_sync_live_writes_snapshot(tmp_path, monkeypatch):

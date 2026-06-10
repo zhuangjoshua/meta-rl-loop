@@ -454,28 +454,14 @@ export function useTakyonLitebulb() {
     return payload;
   }, [isVisibleBusiness]);
 
-  const startCreativeCreditCheckout = useCallback(async (slug: string) => {
+  const startCreativeCreditCheckout = useCallback(async (slug: string, credits: number) => {
     const businessSlug = trimText(slug).toLowerCase();
-    if (!businessSlug) return;
+    const creditCount = Number.isFinite(credits) ? Math.max(0, Math.round(credits)) : 0;
+    if (!businessSlug || creditCount <= 0) return;
     const returnPath = window.location.pathname + window.location.search + window.location.hash;
-    let packId = "";
-    try {
-      const catalog = await api.getTakyonBusinessCreativeCreditPacks(businessSlug);
-      const packs = Array.isArray(catalog.packs) ? [...catalog.packs] : [];
-      packs.sort((left, right) => {
-        const leftAmount = Number(left.amount_cents || Number.MAX_SAFE_INTEGER);
-        const rightAmount = Number(right.amount_cents || Number.MAX_SAFE_INTEGER);
-        return leftAmount - rightAmount;
-      });
-      packId = trimText(packs[0]?.id);
-    } catch {
-      packId = "";
-    }
     const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
       businessSlug,
-      packId
-        ? { packId, returnPath }
-        : { credits: 100, returnPath },
+      { credits: creditCount, returnPath },
     );
     const checkoutUrl = trimText(checkout.checkout_url);
     if (!checkoutUrl) {

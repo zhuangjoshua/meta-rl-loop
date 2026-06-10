@@ -1290,6 +1290,7 @@ def _business_bootstrap_instruction(
         "### 3. X post",
         "Load takyon-x (skill_view) and execute its procedure to draft and publish one X post about this business.",
         "Use research findings to make the post truthful and compelling.",
+        "Before any live X publish or paid creative/ad action, call business_read_channel_credit_budgets. If the required bucket cannot cover the action cost, record that exact blocker in research/strategy.md and stop before enqueueing or launching the spendful step.",
         "For broader distribution-thread execution, load takyon-distribution.",
         "",
         "## Constraints",
@@ -1303,6 +1304,7 @@ def _business_bootstrap_instruction(
         "",
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
+        "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
     ]
     return "\n".join(lines)
 

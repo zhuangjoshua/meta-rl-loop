@@ -334,6 +334,10 @@ def test_creative_credit_balance_happy_path(client, pg_conn):
         "business_slug": slug,
         "balance_credits": 12,
         "reserved_credits": 0,
+        "supports_custom_credits": True,
+        "price_cents_per_credit": 1,
+        "minimum_checkout_credits": 50,
+        "minimum_checkout_amount_cents": 50,
     }
 
 
@@ -372,6 +376,10 @@ def test_creative_credit_packs_list_configured_catalog(client, pg_conn, monkeypa
                 "currency": "usd",
             },
         ],
+        "supports_custom_credits": True,
+        "price_cents_per_credit": 1,
+        "minimum_checkout_credits": 50,
+        "minimum_checkout_amount_cents": 50,
     }
 
 
@@ -407,6 +415,10 @@ def test_creative_credit_packs_list_reads_takyon_home_env_when_process_env_missi
                 "currency": "usd",
             }
         ],
+        "supports_custom_credits": True,
+        "price_cents_per_credit": 1,
+        "minimum_checkout_credits": 50,
+        "minimum_checkout_amount_cents": 50,
     }
 
 
