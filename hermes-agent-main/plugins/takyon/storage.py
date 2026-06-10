@@ -14,8 +14,9 @@ This is a pure leaf, shaped like ``jobs``/``wakes`` and seamed like the AI gatew
       - :class:`LocalStorageBackend` — a real local-directory object store. The credential-free default;
         the literal "local disk = scratch" tier and the CI tier. No new dependency, no new credential.
       - :class:`SupabaseS3StorageBackend` — Supabase Storage over its S3-compatible API (lazy ``boto3``).
-        Selected only by an explicit ``TAKYON_STORAGE_BACKEND=supabase_s3`` switch + the ``SUPABASE_S3_*``
-        creds. If selected while unconfigured (creds or ``boto3`` missing) it raises
+        Selected by an explicit ``TAKYON_STORAGE_BACKEND=supabase_s3`` override or, when that override is
+        unset, by a fully provisioned ``SUPABASE_S3_*`` + ``TAKYON_STORAGE_BUCKET`` config. If selected
+        while unconfigured (creds or ``boto3`` missing) it raises
         :class:`StorageUnconfigured` — a `blocked`-with-reason, NEVER a silent fall back to local and
         NEVER a fake "synced" (invariant #8). This backend is live-verified against Supabase Storage;
         production still depends on the real ``SUPABASE_S3_*`` + ``TAKYON_STORAGE_BUCKET`` values being
@@ -52,6 +53,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol, runtime_checkable
 
+from takyon_cli.config import load_env
+
 from . import safebox
 
 # Safety rails (durable hardcodes, like core's MAX_WRITE_CHARS / path containment).
@@ -75,6 +78,15 @@ _SYNC_EXCLUDED_SUFFIXES: frozenset[str] = frozenset({
     ".pyc",
     ".pyo",
 })
+_SUPABASE_STORAGE_CONFIG_KEYS: tuple[str, ...] = (
+    "SUPABASE_S3_ENDPOINT",
+    "SUPABASE_S3_REGION",
+    "TAKYON_STORAGE_BUCKET",
+)
+_SUPABASE_STORAGE_SECRET_KEYS: tuple[str, ...] = (
+    "SUPABASE_S3_ACCESS_KEY_ID",
+    "SUPABASE_S3_SECRET_ACCESS_KEY",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +107,39 @@ class StorageUnconfigured(StorageError):
 
     This is the invariant-#8 block: a live sync STOPS with this reason instead of silently falling
     back to the local store or fabricating a "synced" result."""
+
+
+def _env_backed_config_value(name: str) -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return str(value).strip()
+    return str(load_env().get(name) or "").strip()
+
+
+def _sensitive_config_value(name: str) -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return str(value).strip()
+    try:
+        return str(safebox.read_env_backed_value(name) or "").strip()
+    except safebox.SafeboxAuthorityUnavailable:
+        return ""
+
+
+def _supabase_storage_fully_configured() -> bool:
+    return bool(
+        all(_env_backed_config_value(name) for name in _SUPABASE_STORAGE_CONFIG_KEYS)
+        and all(_sensitive_config_value(name) for name in _SUPABASE_STORAGE_SECRET_KEYS)
+    )
+
+
+def configured_storage_backend_kind() -> str:
+    explicit = str(os.getenv("TAKYON_STORAGE_BACKEND") or "").strip().lower()
+    if explicit:
+        return explicit
+    if _supabase_storage_fully_configured():
+        return "supabase_s3"
+    return "local"
 
 
 def _storage_client_missing_object(exc: Exception) -> bool:
@@ -296,15 +341,15 @@ class LocalStorageBackend:
 class SupabaseS3StorageBackend:
     """Supabase Storage via its S3-compatible API (lazy ``boto3``).
 
-    Constructed ONLY when explicitly selected (``TAKYON_STORAGE_BACKEND=supabase_s3``). If the
-    ``SUPABASE_S3_*`` creds or ``boto3`` are missing it raises :class:`StorageUnconfigured` — the
+    Constructed when explicitly selected (``TAKYON_STORAGE_BACKEND=supabase_s3``) or when the
+    bucket config is otherwise fully provisioned. If the ``SUPABASE_S3_*`` creds or ``boto3`` are
+    missing it raises :class:`StorageUnconfigured` — the
     invariant-#8 block, never a silent fallback. sha256 is stored in object metadata at ``put`` and
     read back in ``list_digests`` so incrementality matches the local backend's digest space.
 
     NOTE: live-verified against Supabase Storage on 2026-05-31 (put→get→list→delete round-trip with
     sha256 integrity, via the operator-provisioned ``SUPABASE_S3_*`` keys on project
-    ``ddftvmjpfghfrdxhavvp``, bucket ``business-workspaces``). Stays inert in the runtime until the
-    operator-gated cutover flips ``TAKYON_STORAGE_BACKEND=supabase_s3``; the per-method
+    ``ddftvmjpfghfrdxhavvp``, bucket ``business-workspaces``). The per-method
     ``# pragma: no cover`` markers remain because the offline test suite still doesn't hit the network.
     """
 
@@ -312,11 +357,11 @@ class SupabaseS3StorageBackend:
     _META_DIGEST = "sha256"
 
     def __init__(self) -> None:
-        endpoint = os.getenv("SUPABASE_S3_ENDPOINT")
-        region = os.getenv("SUPABASE_S3_REGION")
-        access_key = safebox.read_env_backed_value("SUPABASE_S3_ACCESS_KEY_ID")
-        secret_key = safebox.read_env_backed_value("SUPABASE_S3_SECRET_ACCESS_KEY")
-        bucket = os.getenv("TAKYON_STORAGE_BUCKET")
+        endpoint = _env_backed_config_value("SUPABASE_S3_ENDPOINT")
+        region = _env_backed_config_value("SUPABASE_S3_REGION")
+        access_key = _sensitive_config_value("SUPABASE_S3_ACCESS_KEY_ID")
+        secret_key = _sensitive_config_value("SUPABASE_S3_SECRET_ACCESS_KEY")
+        bucket = _env_backed_config_value("TAKYON_STORAGE_BUCKET")
         missing = [
             name
             for name, val in (
@@ -400,10 +445,14 @@ class SupabaseS3StorageBackend:
 
 
 def get_storage_backend(*, root: str | os.PathLike[str] | None = None) -> StorageBackend:
-    """Select the configured backend (the provider-selector seam). ``TAKYON_STORAGE_BACKEND`` chooses:
-    ``local`` (default — credential-free) or ``supabase_s3`` (explicit opt-in; raises
-    :class:`StorageUnconfigured` if not provisioned, never silently downgrades to local)."""
-    kind = (os.getenv("TAKYON_STORAGE_BACKEND") or "local").strip().lower()
+    """Select the configured backend (the provider-selector seam).
+
+    ``TAKYON_STORAGE_BACKEND`` remains the explicit override. When it is unset, a fully provisioned
+    Supabase object-store config becomes the durable default; otherwise the credential-free local
+    backend is used. Any explicit or inferred ``supabase_s3`` selection still raises
+    :class:`StorageUnconfigured` if the live backend is not actually provisioned.
+    """
+    kind = configured_storage_backend_kind()
     if kind == "local":
         return LocalStorageBackend(root)
     if kind == "supabase_s3":

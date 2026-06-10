@@ -11,9 +11,9 @@ Proves the Phase 7 contract:
     move) and **integrity-checked** (a blob whose sha256 ≠ its recorded digest is refused, not landed);
   * ``delete_remote``/``delete_local`` give faithful mirror semantics (a deletion propagates);
   * **path containment** — an object key can never escape the business prefix;
-  * **backend selection is one seam, two impls** — ``local`` is the credential-free default;
-    ``supabase_s3`` is an explicit opt-in that BLOCKS with a reason when unprovisioned (invariant #8),
-    never silently downgrading to local;
+  * **backend selection is one seam, two impls** — ``local`` is the credential-free default unless
+    a full Supabase object-store config is provisioned; ``supabase_s3`` still BLOCKS with a reason
+    when selected unprovisioned (invariant #8), never silently downgrading to local;
   * :func:`with_business_workspace` syncs down→up on a clean run but, by the crash discipline, does NOT
     sync up on an exception, so a crashed run never clobbers the last good remote state.
 
@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -227,14 +229,55 @@ def test_prefix_normalizes_case_rather_than_escaping():
 
 
 def test_default_backend_is_local_and_credential_free(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    for key in (
+        "SUPABASE_S3_ENDPOINT",
+        "SUPABASE_S3_REGION",
+        "SUPABASE_S3_ACCESS_KEY_ID",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "TAKYON_STORAGE_BUCKET",
+    ):
+        monkeypatch.delenv(key, raising=False)
     backend = storage.get_storage_backend(root=tmp_path / "b")
     assert backend.name == "local"
 
 
-def test_live_backend_selected_but_unconfigured_blocks_with_reason(monkeypatch):
+def test_full_supabase_config_becomes_default_backend(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    monkeypatch.setenv("SUPABASE_S3_ENDPOINT", "https://example.supabase.co/storage/v1/s3")
+    monkeypatch.setenv("SUPABASE_S3_REGION", "us-east-2")
+    monkeypatch.setenv("SUPABASE_S3_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("SUPABASE_S3_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("TAKYON_STORAGE_BUCKET", "business-workspaces")
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(client=lambda *args, **kwargs: object()),
+    )
+
+    backend = storage.get_storage_backend()
+    assert backend.name == "supabase_s3"
+
+
+def test_explicit_local_override_beats_full_supabase_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("SUPABASE_S3_ENDPOINT", "https://example.supabase.co/storage/v1/s3")
+    monkeypatch.setenv("SUPABASE_S3_REGION", "us-east-2")
+    monkeypatch.setenv("SUPABASE_S3_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("SUPABASE_S3_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("TAKYON_STORAGE_BUCKET", "business-workspaces")
+
+    backend = storage.get_storage_backend(root=tmp_path / "b")
+    assert backend.name == "local"
+
+
+def test_live_backend_selected_but_unconfigured_blocks_with_reason(monkeypatch, tmp_path):
     # Invariant #8: explicit opt-in to the live backend with no creds -> blocked-with-reason, NEVER a
     # silent fall back to local and NEVER a fake "synced".
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "supabase_s3")
     for k in (
         "SUPABASE_S3_ENDPOINT",
@@ -257,7 +300,13 @@ def test_unknown_backend_kind_is_rejected(monkeypatch):
 
 
 def test_supabase_backend_uses_cache_business_root(monkeypatch, tmp_path):
-    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "supabase_s3")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
+    monkeypatch.setenv("SUPABASE_S3_ENDPOINT", "https://example.supabase.co/storage/v1/s3")
+    monkeypatch.setenv("SUPABASE_S3_REGION", "us-east-2")
+    monkeypatch.setenv("SUPABASE_S3_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("SUPABASE_S3_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("TAKYON_STORAGE_BUCKET", "business-workspaces")
     store = TakyonStore(root=tmp_path)
     assert store._business_root("Acme", sync=False) == (tmp_path / "cache" / "businesses" / "acme")
 

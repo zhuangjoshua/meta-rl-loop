@@ -4209,8 +4209,16 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
     storage.sync_up(storage.LocalStorageBackend(bucket), "acme", seed)
 
     monkeypatch.setenv("TAKYON_HOME", str(home))
-    monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
-    monkeypatch.delenv("TAKYON_STORAGE_LOCAL_DIR", raising=False)
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(bucket))
+    for key in (
+        "SUPABASE_S3_ENDPOINT",
+        "SUPABASE_S3_REGION",
+        "SUPABASE_S3_ACCESS_KEY_ID",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "TAKYON_STORAGE_BUCKET",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
     seen: dict[str, str] = {}
 

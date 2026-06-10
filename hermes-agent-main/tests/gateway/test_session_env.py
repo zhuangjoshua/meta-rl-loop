@@ -13,6 +13,7 @@ from gateway.session_context import (
     _VAR_MAP,
     _UNSET,
 )
+import plugins.takyon.core as takyon_core
 from plugins.takyon.core import TakyonStore
 from plugins.takyon import storage
 
@@ -297,9 +298,18 @@ def test_store_syncs_scratch_writes_outward_with_default_local_backend(monkeypat
     home = tmp_path / "home"
     scratch = tmp_path / "scratch-home"
 
+    monkeypatch.setattr(takyon_core, "load_takyon_env", lambda: [])
     monkeypatch.setenv("TAKYON_HOME", str(home))
     monkeypatch.delenv("TAKYON_STORAGE_BACKEND", raising=False)
     monkeypatch.delenv("TAKYON_STORAGE_LOCAL_DIR", raising=False)
+    for key in (
+        "SUPABASE_S3_ENDPOINT",
+        "SUPABASE_S3_REGION",
+        "SUPABASE_S3_ACCESS_KEY_ID",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "TAKYON_STORAGE_BUCKET",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|session-env-default-local")
 

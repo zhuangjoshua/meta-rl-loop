@@ -10052,7 +10052,9 @@ class TakyonStore:
 
     def _workspace_storage_backend_kind(self) -> str:
         load_takyon_env()
-        return (os.getenv("TAKYON_STORAGE_BACKEND") or "local").strip().lower()
+        from . import storage
+
+        return storage.configured_storage_backend_kind()
 
     def _business_workspace_base(self) -> Path:
         base = self._workspace_root_override or self.root
