@@ -90,6 +90,36 @@ _SUPABASE_STORAGE_SECRET_KEYS: tuple[str, ...] = (
 logger = logging.getLogger(__name__)
 
 
+def _workspace_scratch_parent(
+    scratch_parent: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Choose one shared scratch root visible to the operator services and the Docker broker.
+
+    `/tmp` is namespaced per systemd unit when `PrivateTmp=true`, so a worker-created bind mount under
+    `/tmp/takyon-workspaces/...` is invisible to the broker service that actually owns Docker
+    authority. Default to a tracked path under `TAKYON_HOME` instead, with an explicit override for
+    tests or unusual hosts.
+    """
+    if scratch_parent:
+        parent = Path(scratch_parent).expanduser()
+    else:
+        explicit = str(os.getenv("TAKYON_WORKSPACE_SCRATCH_ROOT") or "").strip()
+        if explicit:
+            parent = Path(explicit).expanduser()
+        else:
+            takyon_home = str(os.getenv("TAKYON_HOME") or "").strip()
+            if takyon_home:
+                parent = Path(takyon_home).expanduser() / "tmp" / "workspaces"
+            else:
+                parent = Path(tempfile.gettempdir()) / "takyon-workspaces"
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    return parent.resolve()
+
+
 class StorageError(Exception):
     """Base for storage-leaf failures."""
 
@@ -606,12 +636,7 @@ def isolated_business_workspace(
     session workspace root override) so business tools never write into the shared host tree during a
     live run. The directory is removed on exit; the durable source of truth is the storage backend.
     """
-    parent = Path(scratch_parent).expanduser() if scratch_parent else Path(tempfile.gettempdir()) / "takyon-workspaces"
-    parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
+    parent = _workspace_scratch_parent(scratch_parent)
     safe_slug = _safe_slug(slug)
     prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
     home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
@@ -649,12 +674,7 @@ def mounted_business_workspace(
     sync-down on enter, let the caller decide if/when to sync-up, always delete the scratch
     home on exit.
     """
-    parent = Path(scratch_parent).expanduser() if scratch_parent else Path(tempfile.gettempdir()) / "takyon-workspaces"
-    parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(parent, 0o700)
-    except OSError:
-        pass
+    parent = _workspace_scratch_parent(scratch_parent)
     safe_slug = _safe_slug(slug)
     prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
     home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()

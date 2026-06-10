@@ -395,6 +395,18 @@ def test_mounted_business_workspace_syncs_down_and_cleans_without_syncing_back(t
     assert after == before
 
 
+def test_mounted_business_workspace_defaults_under_takyon_home(tmp_path, monkeypatch):
+    backend = _backend(tmp_path)
+    seed = tmp_path / "seed"
+    _seed_workspace(seed)
+    storage.sync_up(backend, "biz-x", seed)
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
+
+    with storage.mounted_business_workspace(backend, "biz-x", owner_label="tester") as home:
+        assert home.parent == (tmp_path / ".takyon-home" / "tmp" / "workspaces").resolve()
+        assert (home / "businesses" / "biz-x" / "research" / "strategy.md").exists()
+
+
 def test_sync_excludes_dependency_and_build_caches(tmp_path):
     backend = _backend(tmp_path)
     src = tmp_path / "src"
