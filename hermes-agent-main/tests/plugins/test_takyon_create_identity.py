@@ -51,12 +51,28 @@ def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface(
         business_name="CRM",
     )
 
-    assert "Use the Hermes app kit materialized in the workspace as the implementation base for both / and /app." in prompt
+    assert "Use the Hermes app kit materialized in the workspace as the runtime rail base for /app and /app/profile, while making / business-specific." in prompt
     assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
     assert "Do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows on this first pass." in prompt
     assert "The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like." in prompt
     assert "Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI." in prompt
     assert "The result should be publishable and product-specific on the first pass." in prompt
+
+
+def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_blocker():
+    prompt = _business_bootstrap_instruction(
+        "crm",
+        "construction CRM",
+        "live",
+        business_name="CRM",
+    )
+
+    assert "Inspect the structured result from business_claude_agent_task." in prompt
+    assert "Trust only its exact success/blocker and surface_refresh publish status for product completion." in prompt
+    assert "If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there." in prompt
+    assert "do not continue to X as if the product build completed." in prompt
+    assert "Do not inspect the worker result." not in prompt
+    assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
 
 
 def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):

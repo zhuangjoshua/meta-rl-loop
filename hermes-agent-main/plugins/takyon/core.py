@@ -21619,9 +21619,10 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
         or normalized_workspace.startswith("product/")
         or normalized_workspace in {"site", "website"}
     )
-    refresh_surface = _boolish(args.get("refresh_surface"), default=False)
-    if not _session_business_slug() and not refresh_surface:
-        refresh_surface = workspace_targets_product_surface
+    refresh_surface = _boolish(
+        args.get("refresh_surface"),
+        default=workspace_targets_product_surface,
+    )
     customer_facing = _workspace_needs_customer_ai_copy_contract(workspace_rel)
     timeout_ms = _clamp_int(
         args.get("timeout_ms"),
@@ -21746,16 +21747,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             operator_user_id = str(business_row.get("owner_user_id") or store._active_operator_user_id() or "").strip()
         load_takyon_env()
         _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
-        refresh_surface = _boolish(args.get("refresh_surface"), default=False)
         normalized_workspace = workspace_rel.strip("/").lower()
         workspace_targets_product_surface = (
             normalized_workspace == "product"
             or normalized_workspace.startswith("product/")
             or normalized_workspace in {"site", "website"}
         )
+        refresh_surface = _boolish(
+            args.get("refresh_surface"),
+            default=workspace_targets_product_surface,
+        )
         docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
-        if not worker_session_bound and not refresh_surface:
-            refresh_surface = workspace_targets_product_surface
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         reuse_session_workspace = bool(
             docker_isolated_worker

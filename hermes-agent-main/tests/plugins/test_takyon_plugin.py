@@ -6938,6 +6938,7 @@ def test_defer_claude_agent_task_allows_business_session_canonical_workspace(mon
     assert result["success"] is True
     assert result["summary"] == "done"
     assert store.commits[0]["operations"][0]["payload"]["args"]["workspace"] == "product/site"
+    assert store.commits[0]["operations"][0]["payload"]["args"]["refresh_surface"] is True
 
 
 def test_defer_product_surface_refresh_rejects_session_bound_call(monkeypatch):
@@ -7154,6 +7155,7 @@ def test_operator_tool_task_handler_binds_owner_session_context(monkeypatch):
     }
     assert observed["set_session_vars"] == {
         "user_id": "user-123",
+        "workspace_root": "/tmp/takyon-worker-test-home",
         "business_slug": "acme",
     }
     assert observed["clear_session_vars"] == ["token"]
