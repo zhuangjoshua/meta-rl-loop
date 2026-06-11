@@ -2,6 +2,7 @@
 import path from "node:path";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
+let workerStderr = "";
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -267,7 +268,7 @@ async function main() {
   let text = "";
   let totalCostUsd = null;
   let finalUsage = null;
-  let workerStderr = "";
+  workerStderr = "";
   try {
     await Promise.race([
       (async () => {
