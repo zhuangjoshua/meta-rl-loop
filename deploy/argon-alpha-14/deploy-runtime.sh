@@ -9,6 +9,7 @@ SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
+PRODUCT_ACTIVATION_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-product-activation-broker.service"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -17,6 +18,7 @@ TAKYON_REMOTE_HOME="${TAKYON_REMOTE_HOME:-/opt/takyon/.takyon}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-dashboard.service}"
 TAKYON_REMOTE_WORKER_SERVICE_FILE="${TAKYON_REMOTE_WORKER_SERVICE_FILE:-/etc/systemd/system/takyon-worker.service}"
 TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE="${TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE:-/etc/systemd/system/takyon-docker-broker.service}"
+TAKYON_REMOTE_PRODUCT_ACTIVATION_BROKER_SERVICE_FILE="${TAKYON_REMOTE_PRODUCT_ACTIVATION_BROKER_SERVICE_FILE:-/etc/systemd/system/takyon-product-activation-broker.service}"
 TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_BOOTSTRAP_HOST="${TAKYON_BOOTSTRAP_HOST:-1}"
@@ -50,6 +52,11 @@ fi
 
 if [[ ! -f "$DOCKER_BROKER_SERVICE_FILE" ]]; then
   echo "docker broker service file not found: $DOCKER_BROKER_SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PRODUCT_ACTIVATION_BROKER_SERVICE_FILE" ]]; then
+  echo "product activation broker service file not found: $PRODUCT_ACTIVATION_BROKER_SERVICE_FILE" >&2
   exit 1
 fi
 
@@ -108,6 +115,10 @@ scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$DOCKER_BROKER_SERVICE_FILE" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE"
+
+scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  "$PRODUCT_ACTIVATION_BROKER_SERVICE_FILE" \
+  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_PRODUCT_ACTIVATION_BROKER_SERVICE_FILE"
 
 if ! TARGET_HOST="$TAKYON_VPS_HOST" \
   TARGET_KEY="$TAKYON_VPS_KEY" \
@@ -198,6 +209,9 @@ PY
   systemctl enable takyon-docker-broker.service >/dev/null
   systemctl restart takyon-docker-broker.service
   systemctl is-active --quiet takyon-docker-broker.service
+  systemctl enable takyon-product-activation-broker.service >/dev/null
+  systemctl restart takyon-product-activation-broker.service
+  systemctl is-active --quiet takyon-product-activation-broker.service
   systemctl restart takyon-dashboard.service
   systemctl is-active --quiet takyon-dashboard.service
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then

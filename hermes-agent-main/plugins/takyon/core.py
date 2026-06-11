@@ -9860,6 +9860,19 @@ def _product_service_caddyfile() -> Path:
     return Path(raw).expanduser().resolve() if raw else Path("/etc/caddy/Caddyfile")
 
 
+def _product_activation_surfaces_writable() -> bool:
+    if _product_deploy_dry_run():
+        return True
+    systemd_dir = _product_service_systemd_dir()
+    caddy_dir = _product_service_caddyfile().parent
+    for path in (systemd_dir, caddy_dir):
+        if not path.exists():
+            return False
+        if not os.access(path, os.W_OK):
+            return False
+    return True
+
+
 def _product_deploy_dry_run() -> bool:
     return str(os.getenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "")).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -10637,6 +10650,32 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
             "blocker": (
             "product surface source exists, but no static publish directory with index.html exists; "
             f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
+            ),
+            "deploy_kind": "next_systemd_caddy",
+            "service_name": _product_service_name(slug),
+        }
+    if _is_current_product_activation_node() and not _product_activation_surfaces_writable():
+        from plugins.takyon import product_activation_broker
+
+        if product_activation_broker.broker_enabled():
+            result = product_activation_broker.publish_next_product_service(
+                source_root=source_root,
+                slug=slug,
+                publish_target=publish_target,
+            )
+            if result.get("status") == "published":
+                _prune_product_source_build_artifacts(source_root)
+            return result
+        return {
+            "status": "blocked",
+            "publish_target": publish_target,
+            "public_url": "",
+            "published_at": "",
+            "publish_root": "",
+            "publish_source_path": "",
+            "blocker": (
+                "product activation requires brokered host authority on this node, but "
+                "TAKYON_PRODUCT_ACTIVATION_BROKER_URL is not configured"
             ),
             "deploy_kind": "next_systemd_caddy",
             "service_name": _product_service_name(slug),
