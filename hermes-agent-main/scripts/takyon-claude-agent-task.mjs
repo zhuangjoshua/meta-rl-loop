@@ -267,6 +267,7 @@ async function main() {
   let text = "";
   let totalCostUsd = null;
   let finalUsage = null;
+  let workerStderr = "";
   try {
     await Promise.race([
       (async () => {
@@ -291,6 +292,11 @@ async function main() {
             persistSession: false,
             maxTurns,
             maxBudgetUsd,
+            stderr: (chunk) => {
+              if (typeof chunk !== "string" || !chunk) return;
+              if (workerStderr.length >= 12000) return;
+              workerStderr += chunk.slice(0, 12000 - workerStderr.length);
+            },
             canUseTool: async (toolName, toolInput, options) => {
               if (toolName === "Bash") {
                 if (!allowBash) {
@@ -353,6 +359,7 @@ async function main() {
     total_cost_usd: typeof totalCostUsd === "number" ? totalCostUsd : null,
     actual_cost_cents: typeof totalCostUsd === "number" ? Math.max(0, Math.round(totalCostUsd * 100)) : null,
     usage: finalUsage,
+    worker_stderr: redact(workerStderr).trim() || null,
   }));
 }
 
@@ -366,7 +373,8 @@ main().catch((error) => {
   process.stdout.write(JSON.stringify({
     success: false,
     source: "claude-agent-sdk",
-    error: redact(error?.stack || error?.message || String(error))
+    error: redact(error?.stack || error?.message || String(error)),
+    worker_stderr: redact(workerStderr).trim() || null,
   }));
   process.exitCode = 1;
 });

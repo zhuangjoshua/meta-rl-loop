@@ -6163,7 +6163,12 @@ def _run_claude_agent_task_in_docker(
     workspace_path: Path,
     timeout_ms: int,
 ) -> tuple[list[str], dict[str, Any], str, Mapping[str, str]]:
-    from tools.environments.docker import _build_security_args, _resolve_host_user_spec, find_docker
+    from tools.environments.docker import (
+        _build_security_args,
+        _host_user_identity_mount_args,
+        _resolve_host_user_spec,
+        find_docker,
+    )
 
     docker = find_docker()
     if not docker:
@@ -6201,9 +6206,11 @@ def _run_claude_agent_task_in_docker(
             env_args.extend(["-e", f"{key}={value}"])
 
     user_args: list[str] = []
+    identity_mount_args: list[str] = []
     user_spec = _resolve_host_user_spec()
     if user_spec:
         user_args = ["--user", user_spec]
+        identity_mount_args = _host_user_identity_mount_args(user_spec)
     security_args = _build_security_args(bool(user_args))
     # Force container HOME onto writable tmpfs without mutating the host-side
     # docker CLI environment.
@@ -6221,6 +6228,7 @@ def _run_claude_agent_task_in_docker(
         "/root:rw,exec,size=512m",
         "--tmpfs",
         "/home:rw,exec,size=512m",
+        *identity_mount_args,
         "--mount",
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",

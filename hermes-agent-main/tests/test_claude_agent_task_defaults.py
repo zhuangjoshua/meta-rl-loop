@@ -519,6 +519,16 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: "995:987")
     monkeypatch.setattr(
         docker_env,
+        "_host_user_identity_mount_args",
+        lambda user_spec: [
+            "--mount",
+            f"type=bind,src={tmp_path / 'passwd'},dst=/etc/passwd,readonly",
+            "--mount",
+            f"type=bind,src={tmp_path / 'group'},dst=/etc/group,readonly",
+        ] if user_spec == "995:987" else [],
+    )
+    monkeypatch.setattr(
+        docker_env,
         "_build_security_args",
         lambda run_as_host_user=False: [f"--security-opt=test-{str(bool(run_as_host_user)).lower()}"],
     )
@@ -546,6 +556,8 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     assert worker_cwd == str(repo_root)
     assert worker_env.get("HOME") != "/tmp"
     assert "HOME=/tmp" in run_cmd
+    assert "/etc/passwd,readonly" in " ".join(run_cmd)
+    assert "/etc/group,readonly" in " ".join(run_cmd)
 
 
 def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypatch):
@@ -604,3 +616,55 @@ def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypa
     assert agent_record["result"]["worker_returncode"] == 1
     assert agent_record["result"]["worker_stderr"] == "fatal: missing claude auth"
     assert agent_record["result"]["raw_stdout"] == "plain worker failure output"
+
+
+def test_claude_agent_task_preserves_worker_stderr_from_sdk_stdout(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    store = _FakeStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"])).mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "success": False,
+                    "error": "Error: Claude Code process exited with code 1",
+                    "worker_stderr": "ENOENT: no such file or directory, uv_os_homedir",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-worker-json-stderr",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["worker_returncode"] == 1
+    assert result["worker_stderr"] == "ENOENT: no such file or directory, uv_os_homedir"

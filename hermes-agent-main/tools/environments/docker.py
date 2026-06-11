@@ -7,10 +7,12 @@ persistence via bind mounts.
 
 import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from typing import Optional
 
@@ -200,6 +202,52 @@ def _resolve_host_user_spec() -> Optional[str]:
         return f"{get_uid()}:{get_gid()}"
     except Exception:  # pragma: no cover - defensive
         return None
+
+
+def _write_text_if_changed(path: Path, content: str) -> None:
+    try:
+        if path.read_text(encoding="utf-8") == content:
+            return
+    except OSError:
+        pass
+    path.write_text(content, encoding="utf-8")
+
+
+def _host_user_identity_mount_args(user_spec: str) -> list[str]:
+    """Return bind mounts that give a host uid/gid a resolvable passwd entry."""
+    uid_str, sep, gid_str = str(user_spec or "").partition(":")
+    if not sep or not uid_str.isdigit() or not gid_str.isdigit():
+        return []
+    base = Path(tempfile.gettempdir()) / "takyon-docker-userdb" / f"{uid_str}-{gid_str}"
+    base.mkdir(parents=True, exist_ok=True)
+    passwd_path = base / "passwd"
+    group_path = base / "group"
+    _write_text_if_changed(
+        passwd_path,
+        "\n".join(
+            [
+                "root:x:0:0:root:/root:/bin/sh",
+                f"takyon:x:{uid_str}:{gid_str}:Takyon Host User:/tmp:/bin/sh",
+                "",
+            ]
+        ),
+    )
+    _write_text_if_changed(
+        group_path,
+        "\n".join(
+            [
+                "root:x:0:",
+                f"takyon:x:{gid_str}:",
+                "",
+            ]
+        ),
+    )
+    return [
+        "--mount",
+        f"type=bind,src={passwd_path},dst=/etc/passwd,readonly",
+        "--mount",
+        f"type=bind,src={group_path},dst=/etc/group,readonly",
+    ]
 
 
 _storage_opt_ok: Optional[bool] = None  # cached result across instances
@@ -461,11 +509,15 @@ class DockerEnvironment(BaseEnvironment):
         # owned by that user on the host instead of by root. Skip cleanly on
         # platforms without POSIX uid/gid (e.g. native Windows Docker).
         user_args: list[str] = []
+        identity_mount_args: list[str] = []
         if run_as_host_user:
             user_spec = _resolve_host_user_spec()
             if user_spec is not None:
                 user_args = ["--user", user_spec]
+                identity_mount_args = _host_user_identity_mount_args(user_spec)
                 logger.info("Docker: running container as host user %s", user_spec)
+                if "HOME" not in self._env:
+                    env_args.extend(["-e", "HOME=/tmp"])
             else:
                 logger.warning(
                     "docker_run_as_host_user is enabled but this platform does "
@@ -489,6 +541,7 @@ class DockerEnvironment(BaseEnvironment):
         all_run_args = (
             security_args
             + user_args
+            + identity_mount_args
             + writable_args
             + resource_args
             + volume_args

@@ -424,6 +424,16 @@ def test_run_as_host_user_passes_uid_gid(monkeypatch):
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     monkeypatch.setattr(docker_env.os, "getuid", lambda: 1234, raising=False)
     monkeypatch.setattr(docker_env.os, "getgid", lambda: 5678, raising=False)
+    monkeypatch.setattr(
+        docker_env,
+        "_host_user_identity_mount_args",
+        lambda user_spec: [
+            "--mount",
+            "type=bind,src=/tmp/passwd,dst=/etc/passwd,readonly",
+            "--mount",
+            "type=bind,src=/tmp/group,dst=/etc/group,readonly",
+        ] if user_spec == "1234:5678" else [],
+    )
     calls = _mock_subprocess_run(monkeypatch)
 
     _make_dummy_env(run_as_host_user=True)
@@ -438,6 +448,9 @@ def test_run_as_host_user_passes_uid_gid(monkeypatch):
     assert run_args[idx + 1] == "1234:5678", (
         f"expected --user 1234:5678, got --user {run_args[idx + 1]}"
     )
+    joined = " ".join(run_args)
+    assert "/etc/passwd,readonly" in joined
+    assert "/etc/group,readonly" in joined
 
 
 def test_run_as_host_user_drops_setuid_setgid_caps(monkeypatch):
