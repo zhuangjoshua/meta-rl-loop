@@ -10637,7 +10637,7 @@ def _handoff_next_product_service_to_activation_host(
     return result
 
 
-def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, Any]:
+def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str, source_path: str = "") -> dict[str, Any]:
     metadata, blocker = _product_next_service_metadata(source_root)
     if metadata is None:
         return {
@@ -10662,6 +10662,7 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
                 source_root=source_root,
                 slug=slug,
                 publish_target=publish_target,
+                source_path=source_path or source_root.name,
             )
             if result.get("status") == "published":
                 _prune_product_source_build_artifacts(source_root)
@@ -10751,6 +10752,7 @@ def _publish_product_surface_path(
             source_root=source_root,
             slug=slug,
             publish_target=publish_target,
+            source_path=rel,
         )
         if service_result.get("publish_source_path") == source_root.name:
             service_result["publish_source_path"] = rel
@@ -10762,6 +10764,7 @@ def _publish_product_surface_path(
             source_root=source_root,
             slug=slug,
             publish_target=publish_target,
+            source_path=rel,
         )
         if service_result.get("publish_source_path") == source_root.name:
             service_result["publish_source_path"] = rel
@@ -10774,6 +10777,7 @@ def _publish_product_surface_path(
             source_root=source_root,
             slug=slug,
             publish_target=publish_target,
+            source_path=rel,
         )
         if service_result.get("publish_source_path") == source_root.name:
             service_result["publish_source_path"] = rel

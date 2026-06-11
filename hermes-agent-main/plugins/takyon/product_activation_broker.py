@@ -72,11 +72,11 @@ def broker_request(
     return decoded
 
 
-def publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, Any]:
+def publish_next_product_service(*, source_root: Path, slug: str, publish_target: str, source_path: str) -> dict[str, Any]:
     return broker_request(
         "/v1/publish-next-product-service",
         payload={
-            "source_root": str(source_root),
+            "source_path": str(source_path or "").strip(),
             "slug": str(slug),
             "publish_target": str(publish_target),
         },

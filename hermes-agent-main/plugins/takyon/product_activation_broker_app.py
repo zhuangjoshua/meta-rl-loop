@@ -20,7 +20,7 @@ _SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 
 
 class _PublishBody(BaseModel):
-    source_root: str
+    source_path: str
     slug: str
     publish_target: str
 
@@ -46,16 +46,23 @@ def _takyon_home() -> Path:
     return Path(raw or "~/.takyon").expanduser().resolve()
 
 
-def _validate_source_root(raw: str) -> Path:
-    source_root = Path(str(raw or "").strip()).expanduser().resolve()
+def _resolve_canonical_source_root(*, slug: str, source_path: str) -> Path:
+    try:
+        relative = takyon_core._safe_relpath(source_path or "product/site", field="source_path")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        store = takyon_core.TakyonStore(root=_takyon_home(), system_plane="product_activation_broker")
+        source_root = store._resolve_business_file(
+            slug,
+            relative.as_posix(),
+            require_output_root=True,
+            field="source_path",
+        ).resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"failed to resolve canonical product source: {exc}") from exc
     if not source_root.exists():
         raise HTTPException(status_code=404, detail="product source root not found")
-    allowed_roots = (
-        (_takyon_home() / "businesses").resolve(),
-        (_takyon_home() / "cache" / "businesses").resolve(),
-    )
-    if not any(root == source_root or root in source_root.parents for root in allowed_roots):
-        raise HTTPException(status_code=400, detail="product source root escaped Takyon business roots")
     return source_root
 
 
@@ -72,7 +79,10 @@ def build_product_activation_broker_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict:
         _require_internal_token(authorization)
-        source_root = _validate_source_root(body.source_root)
+        source_root = _resolve_canonical_source_root(
+            slug=str(body.slug or "").strip(),
+            source_path=str(body.source_path or "").strip(),
+        )
         return takyon_core._publish_next_product_service_prepared(
             source_root=source_root,
             slug=str(body.slug or "").strip(),

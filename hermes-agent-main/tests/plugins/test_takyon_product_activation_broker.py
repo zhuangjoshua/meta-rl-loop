@@ -15,7 +15,7 @@ def test_product_activation_broker_fails_closed_without_token(monkeypatch):
     response = client.post(
         "/v1/publish-next-product-service",
         json={
-            "source_root": "/tmp/missing",
+            "source_path": "product/site",
             "slug": "tomato",
             "publish_target": "https://tomato.fourmanifold.com/",
         },
@@ -57,7 +57,7 @@ def test_product_activation_broker_runs_prepared_publish_for_allowed_business_ro
         "/v1/publish-next-product-service",
         headers={"Authorization": "Bearer shared-token"},
         json={
-            "source_root": str(business_root),
+            "source_path": "product/site",
             "slug": "tomato",
             "publish_target": "https://tomato.fourmanifold.com/",
         },

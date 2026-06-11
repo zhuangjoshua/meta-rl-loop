@@ -71,10 +71,11 @@ def test_next_product_publish_uses_local_broker_when_activation_surfaces_are_not
 
     captured: dict[str, object] = {}
 
-    def _fake_publish_next_product_service(*, source_root: Path, slug: str, publish_target: str) -> dict[str, str]:
+    def _fake_publish_next_product_service(*, source_root: Path, slug: str, publish_target: str, source_path: str) -> dict[str, str]:
         captured["source_root"] = source_root
         captured["slug"] = slug
         captured["publish_target"] = publish_target
+        captured["source_path"] = source_path
         return {
             "status": "published",
             "publish_target": publish_target,
@@ -98,3 +99,4 @@ def test_next_product_publish_uses_local_broker_when_activation_surfaces_are_not
     assert captured["source_root"] == site
     assert captured["slug"] == "tomato"
     assert captured["publish_target"] == "https://tomato.fourmanifold.com/"
+    assert captured["source_path"] == "source"
