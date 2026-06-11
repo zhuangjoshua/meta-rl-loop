@@ -27,7 +27,7 @@ Docker rail. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
 if the operator host cannot run the tracked Claude Agent SDK container image.
 Host-level product activation now follows the same least-privilege pattern: the
 dashboard/worker stay on the locked-down `takyon` user, and the narrow root-only
-systemd/Caddy mutations happen through `takyon-product-activation-broker.service`
+systemd/Caddy mutations happen through `takyon-activation-broker.service`
 on `127.0.0.1:8012`.
 
 The tracked dashboard systemd unit lives at:

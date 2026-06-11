@@ -18,8 +18,8 @@ After=docker.service
 Wants=docker.service
 After=takyon-docker-broker.service
 Wants=takyon-docker-broker.service
-After=takyon-product-activation-broker.service
-Wants=takyon-product-activation-broker.service
+After=takyon-activation-broker.service
+Wants=takyon-activation-broker.service
 
 [Service]
 Type=simple
