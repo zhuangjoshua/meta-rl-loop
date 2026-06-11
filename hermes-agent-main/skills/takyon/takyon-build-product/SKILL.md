@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, product, website, app, offer]
-    related_skills: [takyon-market-research, takyon-app-runtime, takyon-distribution, takyon-claude-agent-sdk]
+    related_skills: [takyon-market-research, takyon-app-runtime, takyon-product-workflow, takyon-distribution, takyon-claude-agent-sdk]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_upsert_app_surface_contract, business_claude_agent_task, business_refresh_product_surface]
   takyon:
@@ -73,10 +73,12 @@ Use this skill to create or materially improve the business-owned product surfac
 - Before delegation, read `research/` broadly, especially `research/strategy.md`, then write the chosen customer experience shape onto the same surface contract: `surface_goal`, `conversion_model`, `required_routes`, `required_sections`, `required_app_tabs`, and `research_sources`.
 - When the operator explicitly wants the real in-app product workflow defined, record it on that same surface contract under `product_workflow` rather than spawning a separate MVP markdown file. Keep it MVP-complete: one primary user/workspace model, one primary job, one closed saved-record loop, explicit scope guardrails, real persistence requirements, a bounded complexity target, a first-run strategy, a concrete success moment, acceptance tests, and `not_now` cuts. On an access-shell bootstrap seed, leave `product_workflow` unset instead of inventing workflow.
 - Use `business_create_workspace`, `business_write_file`, and `business_patch_file` for tiny local product-file edits, especially receipts and small source fixes under `product/`.
-- Use `business_claude_agent_task` only when the delegated worker lane is available and the job is meaningfully larger than a direct first-surface build. When visual quality matters, pass `guidance_skills: ["claude-design", "<style-skill>"]`.
+- Use `business_claude_agent_task` only when the delegated worker lane is available and the job is meaningfully larger than a direct first-surface build. When visual quality matters, pass `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` and tell Claude to choose one coherent visual direction from the brief and follow it consistently instead of blending packs.
 - For `product/site/`, delegate one bounded worker call and let that worker own the source/build loop. The worker will receive the prepared shared subuser app kit under `product/site/_takyon/`; build the business-specific UI around that substrate instead of reinventing app-plane rails.
-- If starter source already exists under `product/site/src/`, treat it as the canonical AppKit landing/app/account scaffold, not as disposable scratch UI. Preserve the AppKit rail helper behavior that already implements declared rails correctly (for example the functions exported from `starter-context.js`), use the semantic helpers there for auth/subscription/entitlement/checkout/generate state, and redesign or extend those pages instead of rewriting their behavior unless you are explicitly changing that rail's logic.
-- Default seeded routes are `/`, `/app`, and `/app/profile`. Keep public landing CTA affordances on `/`, keep sign-in/subscribe/account access inside the gated `/app` shell, and keep subscription/account state visible on `/app/profile` unless the surface contract explicitly needs more.
+- Once the access shell exists and the operator wants to build or evolve what the customer actually does after sign-in, route that deeper gated workflow work through `takyon-product-workflow` instead of stretching this skill past the first surface.
+- If starter source already exists under `product/site/src/`, treat it as canonical AppKit scaffolding, not as disposable scratch UI. Preserve the AppKit rail helper behavior that already implements declared rails correctly (for example the functions exported from `starter-context.js`), and use the semantic helpers there for auth/subscription/entitlement/checkout/generate state.
+- Default app-like bootstrap routes are `/`, `/app`, and `/app/profile`. Keep sign-in/subscribe/account access inside the gated `/app` shell, and keep subscription/account state visible on `/app/profile` unless the surface contract explicitly needs more.
+- Treat preset `/privacy` and `/terms` pages as plain support pages rather than default design targets, and do not spend bootstrap/design time on them unless explicitly asked.
 - Product pages that require paid access should stay inside the gated `src/app/app/(product)/` route group so entitlement remains the route-level boundary.
 - When first publish speed matters, prefer the smallest dependency-light source that can verify and publish quickly. Do not default to a heavy framework if a static or minimal access shell is enough for the first surface.
 - Use `business_refresh_product_surface` only when there is real source to publish. Treat its blocker output and receipt as truth.
@@ -98,21 +100,19 @@ Use this skill to create or materially improve the business-owned product surfac
 10. During bootstrap for software businesses, default the first surface mode to `app_shell`, not `landing_page_only`. Only choose landing-only when the operator or current evidence explicitly calls for a validation/offer-page-first surface. When the surface is app-like, record `/app` explicitly in `required_routes` instead of relying on an implied shell, but let that first `/app` stop at sign-in, subscribe, and account access unless the contract explicitly requires more product workflow.
 11. Write or patch `product/surface.md` so it records the truthful current state: source path, routes, runtime_features, customer experience shape, app shape, what works now, what is blocked, and what still depends on app-runtime or provider work. That same contract is what refreshes the prepared `_takyon/` kit and what the worker receives as product-site UI truth.
 12. Decide whether the source work fits inside one CEO turn. For a substantial first site/access-shell publish, default to one delegated `business_claude_agent_task` call under `product/site/` so the worker can finish the source, local build/test, and cleanup inside its isolated lane. If the worker explicitly returns `BLOCKED:` or hits a provider/runtime gate, record the blocker instead of defaulting to CEO source repair in the same turn.
-13. If the source work is design-heavy or outward-facing, choose one shared style skill and include `guidance_skills: ["claude-design", "<style-skill>"]` in the worker call so the Claude Agent SDK worker receives both the distilled design method and one coherent shared design system without changing the canonical ownership path.
+13. If the source work is design-heavy or outward-facing, include `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` in the worker call and tell Claude to choose one coherent visual direction from the brief, then follow that one consistently without blending packs.
 14. If the operator asked for publication and the source is real, call `business_refresh_product_surface` before later auth/customer/outreach follow-on work. If it returns a blocker, write that blocker back into `product/surface.md` and stop the same-turn source loop instead of defaulting to CEO repair passes.
 15. During bootstrap, treat `product/site/` plus a current `product/surface.md` source path as the product completion threshold before letting extra runtime notes become the main visible outcome. Once the first public surface is live, continue the rest of bootstrap in the same turn.
 
-### Shared style skills
+### Shared style packs
 
-Choose exactly one style skill for outward-facing `product/site/` work:
+Pass the shared style packs alongside `claude-design` when the surface is design-heavy, and tell Claude to choose one coherent direction from the brief rather than blending them:
 
-- `claude-design-openai`: calm serious default for AI tools, research, prosumer, and productivity surfaces
+- `claude-design-openai`: calm serious for AI tools, research, prosumer, and productivity surfaces
 - `claude-design-stripe`: premium B2B, commercial, fintech, infra
 - `claude-design-superhuman`: premium productivity, focus, speed
 - `claude-design-vibrant`: fun consumer, creator, colorful prosumer
 - `claude-design-doodle`: whimsical playful consumer, pets, kids, deliberately silly products
-
-Default to `claude-design-openai` unless the product clearly wants a different tone.
 
 ## Output Format
 

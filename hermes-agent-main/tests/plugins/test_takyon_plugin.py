@@ -2728,8 +2728,8 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
     receipt_path = tmp_path / "businesses" / "latexflow" / str(result["surface_refresh"]["receipt_path"])
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["guidance_skills"] == ["claude-design", "claude-design-openai"]
-    assert "claude-design-openai" in str(receipt["guidance_selection_reason"])
+    assert receipt["guidance_skills"] == []
+    assert receipt["guidance_selection_reason"] == ""
 
 
 def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refresh(tmp_path, monkeypatch):

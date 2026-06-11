@@ -178,7 +178,7 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
     monkeypatch.setattr(
         takyon_core,
         "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]"),
+        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
 
@@ -196,8 +196,9 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design", "claude-design-openai"]
-    assert "[Hermes guidance skill: default-product-site]" in instruction
+    assert result["guidance_skills"] == []
+    assert result["guidance_selection_reason"] == ""
+    assert "[Hermes guidance skill: default-product-site]" not in instruction
 
 
 def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
@@ -230,7 +231,7 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
     monkeypatch.setattr(
         takyon_core,
         "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]"),
+        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
 
@@ -263,7 +264,7 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
     assert "58/42" in instruction
 
 
-def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_path, monkeypatch):
+def test_claude_agent_task_does_not_infer_guidance_for_bold_consumer_brief(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
     store = _FakeStore(
@@ -305,7 +306,7 @@ def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_
     monkeypatch.setattr(
         takyon_core,
         "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: inferred-product-site]"),
+        lambda skills: (list(skills), "[Hermes guidance skill: inferred-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
 
@@ -323,27 +324,9 @@ def test_claude_agent_task_chooses_vibrant_guidance_for_bold_consumer_brief(tmp_
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design", "claude-design-vibrant"]
-    assert "claude-design-vibrant" in str(result["guidance_selection_reason"])
-    assert "[Hermes guidance skill: inferred-product-site]" in instruction
-
-
-def test_style_selector_prefers_openai_for_calm_editorial_ai_pet_brief():
-    skill, reason = takyon_core._select_default_product_site_style_skill(
-        surface={
-            "notes": "AI coach for anxious first-time dog owners. Calm, trustworthy, editorial tone.",
-            "customer_experience_shape": {
-                "surface_goal": "Give serious, gentle guidance to worried new pet parents."
-            },
-        },
-        instruction=(
-            "Create a warm, calm, editorial landing page for an AI dog-parent coach. "
-            "Avoid playful gimmicks and keep it trustworthy."
-        ),
-    )
-
-    assert skill == "claude-design-openai"
-    assert "claude-design-openai" in reason
+    assert result["guidance_skills"] == []
+    assert result["guidance_selection_reason"] == ""
+    assert "[Hermes guidance skill: inferred-product-site]" not in instruction
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):

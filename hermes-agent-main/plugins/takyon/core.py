@@ -311,93 +311,6 @@ _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
         "Anti-patterns",
     ),
 }
-_DEFAULT_PRODUCT_SITE_GUIDANCE_SKILLS: tuple[str, ...] = ("claude-design", "claude-design-openai")
-_DEFAULT_PRODUCT_SITE_STYLE_SKILL = "claude-design-openai"
-_PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "claude-design-openai": (
-        "ai",
-        "calm",
-        "editorial",
-        "trustworthy",
-        "gentle",
-        "serious",
-        "prosumer",
-        "research",
-        "analysis",
-        "quiet confidence",
-    ),
-    "claude-design-doodle": (
-        "pet",
-        "pets",
-        "dog",
-        "dogs",
-        "cat",
-        "cats",
-        "kid",
-        "kids",
-        "family-friendly",
-        "whimsical",
-        "doodle",
-        "silly",
-        "cute",
-        "charming",
-    ),
-    "claude-design-stripe": (
-        "fintech",
-        "finance",
-        "payments",
-        "billing",
-        "checkout",
-        "infrastructure",
-        "infra",
-        "developer platform",
-        "b2b",
-        "enterprise",
-        "api",
-        "commercial",
-    ),
-    "claude-design-superhuman": (
-        "productivity",
-        "inbox",
-        "calendar",
-        "focus",
-        "executive",
-        "speed",
-        "high-performance",
-        "performance",
-        "workflow",
-    ),
-    "claude-design-vibrant": (
-        "consumer",
-        "social",
-        "creator",
-        "community",
-        "gen z",
-        "18-35",
-        "18 to 35",
-        "younger",
-        "fun",
-        "playful",
-        "bold",
-        "anti-generic",
-        "energetic",
-        "lively",
-        "colorful",
-        "cooler",
-        "coolness",
-        "fashion",
-        "dating",
-        "wellness",
-        "lifestyle",
-    ),
-}
-_PRODUCT_SITE_STYLE_PRIORITY: tuple[str, ...] = (
-    "claude-design-openai",
-    "claude-design-doodle",
-    "claude-design-stripe",
-    "claude-design-superhuman",
-    "claude-design-vibrant",
-)
 _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -959,59 +872,6 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-def _collect_guidance_signal_text(value: Any, collected: list[str]) -> None:
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            collected.append(text)
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            _collect_guidance_signal_text(item, collected)
-        return
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            _collect_guidance_signal_text(item, collected)
-
-
-def _select_default_product_site_style_skill(
-    *,
-    surface: dict[str, Any] | None = None,
-    instruction: str = "",
-) -> tuple[str, str]:
-    collected: list[str] = []
-    _collect_guidance_signal_text(instruction, collected)
-    if isinstance(surface, dict):
-        _collect_guidance_signal_text(surface, collected)
-    signal_text = " ".join(collected).strip().lower()
-    if not signal_text:
-        return (
-            _DEFAULT_PRODUCT_SITE_STYLE_SKILL,
-            f"defaulted to {_DEFAULT_PRODUCT_SITE_STYLE_SKILL}; no style signal text was available",
-        )
-
-    best_skill = _DEFAULT_PRODUCT_SITE_STYLE_SKILL
-    best_matches: list[str] = []
-    best_score = 0
-    for skill_name in _PRODUCT_SITE_STYLE_PRIORITY:
-        keywords = _PRODUCT_SITE_STYLE_SIGNAL_KEYWORDS.get(skill_name, ())
-        matches = [keyword for keyword in keywords if keyword in signal_text]
-        score = len(matches)
-        if score > best_score:
-            best_skill = skill_name
-            best_matches = matches
-            best_score = score
-    if best_score <= 0:
-        return (
-            _DEFAULT_PRODUCT_SITE_STYLE_SKILL,
-            f"defaulted to {_DEFAULT_PRODUCT_SITE_STYLE_SKILL}; no stronger style signal matched the brief",
-        )
-    return (
-        best_skill,
-        f"selected {best_skill} from style signals: {', '.join(best_matches[:6])}",
-    )
-
-
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
     workspace_raw: str,
@@ -1021,9 +881,6 @@ def _resolve_worker_guidance_skills(
 ) -> tuple[list[str], str]:
     if "guidance_skills" in args:
         return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
-    if _workspace_needs_runtime_ui_contract(workspace_raw):
-        style_skill, reason = _select_default_product_site_style_skill(surface=surface, instruction=instruction)
-        return ["claude-design", style_skill], reason
     return [], ""
 
 
@@ -2103,7 +1960,7 @@ def _subuser_app_starter_metadata_js(
             export const starterSiteDescription = __STARTER_SITE_DESCRIPTION__;
             export const starterOgImageAlt = __STARTER_OG_ALT__;
             export const starterMetadataBase = new URL(String(surfaceContext.publishTarget || "https://example.com/"));
-            export const starterDefaultPublicRoutes = ["/", "/pricing", "/privacy", "/terms"];
+            export const starterDefaultPublicRoutes = ["/", "/privacy", "/terms"];
             export const starterAppRobotsMetadata = {
               robots: {
                 index: false,
@@ -2638,10 +2495,10 @@ def _subuser_app_starter_home_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterHomePage } from "../components/starter-site-page.js";
+            import { redirect } from "next/navigation";
 
             export default function HomePage() {
-              return <StarterHomePage />;
+              redirect("/app");
             }
             """
         ).strip()
@@ -2764,43 +2621,86 @@ def _subuser_app_starter_profile_page_js() -> str:
     )
 
 
-def _subuser_app_starter_pricing_page_js() -> str:
-    return (
-        dedent(
-            """
-            import { StarterPricingPage } from "../../components/starter-site-page.js";
-            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
-
-            export const metadata = starterPageMetadata({
-              title: "Pricing",
-              description: `See pricing and membership details for ${starterSiteName}.`,
-              path: "/pricing",
-            });
-
-            export default function PricingPage() {
-              return <StarterPricingPage />;
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
 def _subuser_app_starter_privacy_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterPrivacyPage } from "../../components/starter-site-page.js";
+            import Link from "next/link";
             import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
 
             export const metadata = starterPageMetadata({
               title: "Privacy",
-              description: `Learn how ${starterSiteName} handles sign-in, billing, and product data.`,
+              description: `Read the privacy policy for ${starterSiteName}.`,
               path: "/privacy",
             });
 
             export default function PrivacyPage() {
-              return <StarterPrivacyPage />;
+              return (
+                <main className="starter-site-shell">
+                  <div className="starter-wrap starter-stack">
+                    <article className="starter-card starter-section-card starter-stack">
+                      <header className="starter-stack">
+                        <p className="starter-eyebrow">Privacy</p>
+                        <h1 className="starter-title-sm">Privacy policy</h1>
+                        <p className="starter-copy">
+                          This page describes what information {starterSiteName} collects, how it is used, and the choices available to you.
+                        </p>
+                      </header>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Information we collect</h2>
+                        <p className="starter-copy">
+                          We collect the email address you sign in with, any profile details you choose to add, your subscription status, and the content you create or save while using the product. We also keep basic operational logs needed to run the service securely.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">How information is used</h2>
+                        <p className="starter-copy">
+                          Information is used to sign you in, keep your account and saved work available, process billing, respond to support and security issues, and improve product quality. It is not sold, and it is not used for cross-site advertising.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Cookies and sessions</h2>
+                        <p className="starter-copy">
+                          {starterSiteName} uses a session cookie to keep you signed in after you verify your email. Signing out ends that session. The product does not depend on third-party advertising cookies.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Payments</h2>
+                        <p className="starter-copy">
+                          Subscription payments are handled by a dedicated payment processor. Full card details are sent directly to that processor and are not stored by {starterSiteName}.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Sharing and vendors</h2>
+                        <p className="starter-copy">
+                          Data may be processed by the infrastructure, payments, and messaging vendors that help run the service, only to the extent needed to operate it.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Retention and your choices</h2>
+                        <p className="starter-copy">
+                          Information is retained while your account is active and only as long as needed for operations, legal obligations, and account history. You can review and update your profile details and subscription from your account page at any time.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Changes to this policy</h2>
+                        <p className="starter-copy">
+                          If this policy changes, the current version will always be published at this address.
+                        </p>
+                      </section>
+                    </article>
+                    <div className="starter-actions starter-actions-compact">
+                      <Link className="starter-button starter-button-secondary" href="/">
+                        Back to home
+                      </Link>
+                      <Link className="starter-button starter-button-secondary" href="/app">
+                        Open app
+                      </Link>
+                    </div>
+                    <p className="starter-note">{starterSiteName}</p>
+                  </div>
+                </main>
+              );
             }
             """
         ).strip()
@@ -2812,17 +2712,82 @@ def _subuser_app_starter_terms_page_js() -> str:
     return (
         dedent(
             """
-            import { StarterTermsPage } from "../../components/starter-site-page.js";
+            import Link from "next/link";
             import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
 
             export const metadata = starterPageMetadata({
               title: "Terms",
-              description: `Review the service terms for ${starterSiteName}.`,
+              description: `Review the terms of service for ${starterSiteName}.`,
               path: "/terms",
             });
 
             export default function TermsPage() {
-              return <StarterTermsPage />;
+              return (
+                <main className="starter-site-shell">
+                  <div className="starter-wrap starter-stack">
+                    <article className="starter-card starter-section-card starter-stack">
+                      <header className="starter-stack">
+                        <p className="starter-eyebrow">Terms</p>
+                        <h1 className="starter-title-sm">Terms of service</h1>
+                        <p className="starter-copy">
+                          These terms govern access to and use of {starterSiteName}. By creating an account or using the service, you agree to them.
+                        </p>
+                      </header>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Your account</h2>
+                        <p className="starter-copy">
+                          Sign-in happens through the email address on your account, so keep access to that inbox secure. You are responsible for activity that occurs through your account.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Subscriptions and billing</h2>
+                        <p className="starter-copy">
+                          Paid access is provided as a subscription that renews automatically each billing period. The price and plan shown at checkout and inside your account are authoritative. You can manage or cancel the subscription from your account page, and your subscription status there reflects your current access.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Acceptable use</h2>
+                        <p className="starter-copy">
+                          Use the service only for lawful purposes. Do not attempt to disrupt the service, probe or bypass its security, access other accounts, or misuse information about other members.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Your content</h2>
+                        <p className="starter-copy">
+                          You keep ownership of the content you create or save in the product. You grant {starterSiteName} permission to store and process that content as needed to operate the service for you.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Availability and changes</h2>
+                        <p className="starter-copy">
+                          The service may evolve over time, and access may be suspended or limited to protect security, comply with law, or address misuse.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Disclaimer</h2>
+                        <p className="starter-copy">
+                          The service may change, pause, or become unavailable from time to time. Any business-specific warranty or liability terms can be added here if needed.
+                        </p>
+                      </section>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Changes to these terms</h2>
+                        <p className="starter-copy">
+                          If these terms change, the current version will always be published at this address, and continued use of the service means you accept the updated terms.
+                        </p>
+                      </section>
+                    </article>
+                    <div className="starter-actions starter-actions-compact">
+                      <Link className="starter-button starter-button-secondary" href="/">
+                        Back to home
+                      </Link>
+                      <Link className="starter-button starter-button-secondary" href="/app">
+                        Open app
+                      </Link>
+                    </div>
+                    <p className="starter-note">{starterSiteName}</p>
+                  </div>
+                </main>
+              );
             }
             """
         ).strip()
@@ -2957,219 +2922,6 @@ def _subuser_app_starter_opengraph_image_js() -> str:
                   </div>
                 ),
                 size,
-              );
-            }
-            """
-        ).strip()
-        + "\n"
-    )
-
-
-def _subuser_app_starter_site_page_js() -> str:
-    return (
-        dedent(
-            """
-            import Link from "next/link";
-
-            import surfaceContext from "../../_takyon/surface-context.js";
-            import { starterSiteDescription, starterSiteName } from "./starter-metadata.js";
-
-            const SITE_LINKS = [
-              { href: "/", label: "Home" },
-              { href: "/pricing", label: "Pricing" },
-              { href: "/privacy", label: "Privacy" },
-              { href: "/terms", label: "Terms" },
-              { href: "/app", label: "App" },
-            ];
-
-            function formatMoney(cents = 0, currency = "usd") {
-              return new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency: String(currency || "usd").toUpperCase(),
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 2,
-              }).format((Number(cents || 0) || 0) / 100);
-            }
-
-            export function starterPrimaryPlan() {
-              const plans = Array.isArray(surfaceContext.plans)
-                ? surfaceContext.plans.filter((plan) => plan && typeof plan === "object")
-                : [];
-              return plans.find((plan) => String(plan.planKey || "").trim() === "monthly") || plans[0] || null;
-            }
-
-            export function starterPlanSummary(plan = null) {
-              if (!plan) return "Plan details appear here once pricing is configured.";
-              const amount = formatMoney(plan.priceCents, plan.currency);
-              const interval = String(plan.billingInterval || "").trim();
-              return interval ? `${amount} / ${interval}` : amount;
-            }
-
-            function SiteNav() {
-              return (
-                <nav className="starter-actions starter-actions-compact" aria-label="Site">
-                  {SITE_LINKS.map((link) => (
-                    <Link key={link.href} className="starter-button starter-button-secondary" href={link.href}>
-                      {link.label}
-                    </Link>
-                  ))}
-                </nav>
-              );
-            }
-
-            export function StarterSiteFrame({
-              eyebrow,
-              title,
-              description,
-              primaryHref = "/app",
-              primaryLabel = "Open app",
-              secondaryHref = "/pricing",
-              secondaryLabel = "Pricing",
-              children = null,
-            }) {
-              return (
-                <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack">
-                    <SiteNav />
-                    <section className="starter-landing-card">
-                      <p className="starter-eyebrow">{eyebrow}</p>
-                      <h1 className="starter-title">{title}</h1>
-                      <p className="starter-copy">{description}</p>
-                      <div className="starter-actions">
-                        <Link className="starter-button starter-button-primary" href={primaryHref}>
-                          {primaryLabel}
-                        </Link>
-                        <Link className="starter-button starter-button-secondary" href={secondaryHref}>
-                          {secondaryLabel}
-                        </Link>
-                      </div>
-                    </section>
-                    {children}
-                    <p className="starter-note">{starterSiteName}</p>
-                  </div>
-                </main>
-              );
-            }
-
-            export function StarterHomePage() {
-              const plan = starterPrimaryPlan();
-              return (
-                <StarterSiteFrame
-                  eyebrow="Private membership"
-                  title={starterSiteName}
-                  description={starterSiteDescription}
-                  primaryHref="/app"
-                  primaryLabel="Open app"
-                  secondaryHref="/pricing"
-                  secondaryLabel="See pricing"
-                >
-                  <section className="starter-card starter-section-card">
-                    <h2 className="starter-title-sm">What members get</h2>
-                    <p className="starter-copy">
-                      Start with a clear public offer, a direct sign-in path, and a private app area for paying members.
-                    </p>
-                  </section>
-                  <section className="starter-card starter-section-card">
-                    <h2 className="starter-title-sm">Current plan</h2>
-                    <p className="starter-copy">{starterPlanSummary(plan)}</p>
-                    <p className="starter-note">
-                      Keep pricing simple, visible, and easy to understand before anyone starts checkout.
-                    </p>
-                  </section>
-                </StarterSiteFrame>
-              );
-            }
-
-            export function StarterPricingPage() {
-              const plan = starterPrimaryPlan();
-              return (
-                <StarterSiteFrame
-                  eyebrow="Pricing"
-                  title={`Simple pricing for ${starterSiteName}.`}
-                  description="Review the current membership plan and what it unlocks."
-                  primaryHref="/app?intent=subscribe"
-                  primaryLabel="Start subscription"
-                  secondaryHref="/"
-                  secondaryLabel="Back to home"
-                >
-                  <section className="starter-card starter-section-card">
-                    <h2 className="starter-title-sm">{plan ? String(plan.planKey || "Membership") : "Membership"}</h2>
-                    <p className="starter-copy">{starterPlanSummary(plan)}</p>
-                    <p className="starter-note">
-                      This plan opens the private app experience, account access, and any included product usage tied to the business.
-                    </p>
-                  </section>
-                </StarterSiteFrame>
-              );
-            }
-
-            export function StarterPrivacyPage() {
-              return (
-                <StarterSiteFrame
-                  eyebrow="Privacy"
-                  title={`Privacy at ${starterSiteName}.`}
-                  description={`Learn how ${starterSiteName} handles sign-in, billing, and product data.`}
-                  primaryHref="/app"
-                  primaryLabel="Open app"
-                  secondaryHref="/"
-                  secondaryLabel="Back to home"
-                >
-                  <div className="starter-stack">
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">Information we collect</h2>
-                      <p className="starter-copy">
-                        We collect the information needed to authenticate members, manage subscriptions, provide support, and operate the product experience.
-                      </p>
-                    </section>
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">How information is used</h2>
-                      <p className="starter-copy">
-                        Information is used to deliver the service, maintain account access, process billing, improve product quality, and respond to support or security issues.
-                      </p>
-                    </section>
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">Vendors and retention</h2>
-                      <p className="starter-copy">
-                        Data may be processed by infrastructure, payments, analytics, and messaging vendors that help run the service. Information is retained only as long as needed for operations, legal obligations, and account history.
-                      </p>
-                    </section>
-                  </div>
-                </StarterSiteFrame>
-              );
-            }
-
-            export function StarterTermsPage() {
-              return (
-                <StarterSiteFrame
-                  eyebrow="Terms"
-                  title={`Terms for ${starterSiteName}.`}
-                  description={`Review the service terms for accessing ${starterSiteName}.`}
-                  primaryHref="/app"
-                  primaryLabel="Open app"
-                  secondaryHref="/"
-                  secondaryLabel="Back to home"
-                >
-                  <div className="starter-stack">
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">Using the service</h2>
-                      <p className="starter-copy">
-                        Members may use the service only for lawful purposes and are responsible for activity that occurs through their account.
-                      </p>
-                    </section>
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">Billing and access</h2>
-                      <p className="starter-copy">
-                        Paid access, renewals, cancellations, and entitlement changes follow the active subscription terms shown during checkout and inside the account area.
-                      </p>
-                    </section>
-                    <section className="starter-card starter-section-card">
-                      <h2 className="starter-title-sm">Availability and changes</h2>
-                      <p className="starter-copy">
-                        The service may evolve over time, and access may be suspended or limited to protect security, comply with law, or address misuse.
-                      </p>
-                    </section>
-                  </div>
-                </StarterSiteFrame>
               );
             }
             """
@@ -5651,7 +5403,6 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         "src/app/globals.css": _subuser_app_starter_globals_css(),
         "src/app/opengraph-image.js": _subuser_app_starter_opengraph_image_js(),
         "src/app/page.js": _subuser_app_starter_home_page_js(),
-        "src/app/pricing/page.js": _subuser_app_starter_pricing_page_js(),
         "src/app/privacy/page.js": _subuser_app_starter_privacy_page_js(),
         "src/app/robots.js": _subuser_app_starter_robots_js(),
         "src/app/sitemap.js": _subuser_app_starter_sitemap_js(),
@@ -5672,7 +5423,6 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         ),
         "src/components/starter-product-home.js": _subuser_app_starter_product_home_js(),
         "src/components/starter-primitives.js": _subuser_app_starter_primitives_js(),
-        "src/components/starter-site-page.js": _subuser_app_starter_site_page_js(),
         "src/components/starter-server.js": _subuser_app_starter_server_js(),
     }
 
@@ -5911,6 +5661,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- Treat the product as paid-only by default. Do not invent a free plan, free tier, trial, waitlist tier, or limited starter offer in customer-facing pricing copy unless the operator explicitly records that change first.")
         lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
         lines.append("- Treat `/app` as the single routed entrypoint. Keep the main entitled product surface in `src/app/app/(product)/root.js`, and keep nested product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
+        lines.append("- Treat `src/app/privacy/page.js` and `src/app/terms/page.js` as preset support pages, not as bootstrap design targets.")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -5935,7 +5686,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        "- AppKit now seeds only a minimal landing stub at `/`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page. Reuse those route intentions and access boundaries by default, but replace their layout, hierarchy, copy, and styling freely when the business calls for it.",
+        "- AppKit starter source includes preset support pages at `/privacy` and `/terms`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page.",
+        "- Treat `src/app/privacy/page.js` and `src/app/terms/page.js` as preset support pages. Do not spend normal bootstrap/design time reading, redesigning, or polishing them unless the operator explicitly asks for legal-page work.",
         "- For a first monthly bootstrap, treat the seeded `/app` route as the truthful membership entrypoint and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
         "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
         f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account rails when the seeded wrappers already cover the route.",
@@ -27247,7 +26999,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus one shared style skill like claude-design-openai or claude-design-doodle for product/site UI work. When omitted for product/site work, defaults to claude-design plus a shared style skill inferred from the brief, falling back to claude-design-openai when no stronger signal exists."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus the shared style packs (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-vibrant, claude-design-doodle) when you want Claude to choose one coherent visual direction from the brief. When omitted, the runtime does not inject design guidance automatically."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-4-6; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},

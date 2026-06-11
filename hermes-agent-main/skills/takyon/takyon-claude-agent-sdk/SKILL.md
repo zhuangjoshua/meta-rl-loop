@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, claude-agent-sdk, worker, bounded-edits]
-    related_skills: [takyon-build-product, takyon-distribution]
+    related_skills: [takyon-build-product, takyon-product-workflow, takyon-distribution]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_claude_agent_task]
     routing:
@@ -50,7 +50,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 - Primary root: `product/` by default, but bounded work may land in any canonical Takyon root
 - Allowed roots: `product/`, `distribution/`, `research/`, `metrics/`
 - Best call points: narrow file work, bounded synthesis, contained source edits
-- Optional guidance lane: pass `guidance_skills: ["claude-design", "claude-design-openai"]` by default for design-heavy `product/site/` work, or swap the second skill for `claude-design-stripe`, `claude-design-superhuman`, `claude-design-vibrant`, or `claude-design-doodle`
+- Optional guidance lane: for design-heavy `product/site/` work, pass `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` and tell Claude to choose one coherent visual direction from the brief instead of blending packs.
 - Publication location: the exact target path named in the delegated task, inside a canonical Takyon root
 - Tool names used by this skill: `business_read_business`, `business_claude_agent_task`, `business_refresh_product_surface`
 - Customer-facing product rule: for `product/site/` work, keep copy capability-first; do not leak stale vendor/model labels into the generated UI
@@ -72,7 +72,7 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 - For a first monthly bootstrap, `/app` may stop at sign-in, subscribe, and account management. Do not invent product tabs, generators, or extra in-app workflow unless the contract explicitly asks for them.
 - Do not ship customer-facing copy that frames the surface as a stub, demo, placeholder, scaffold, or developer preview.
 - Keep paid product routes inside the gated `src/app/app/(product)/` route group unless the task explicitly calls for a route to stay outside the entitlement wall.
-- When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design", "<style-skill>"]` so the worker receives both the shared frontend method and one shared design system.
+- When the task is design-heavy product/UI source work, include `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` and tell Claude to choose one coherent visual direction from the brief so the worker receives the shared frontend method plus the available shared style packs without blending them.
 - For `product/*` workspaces, follow the worker run with `business_refresh_product_surface` when the changed source should be published or refreshed into `product/surface.md`.
 - If the result implies a send, deploy, runtime mutation, or other external effect, switch back to the appropriate Takyon skill or `business_*` tool path after the worker completes.
 - If `business_claude_agent_task` explicitly returns `BLOCKED:`, treat that as the end of the delegated source pass. Return control to the owning skill to record the blocker or choose a later follow-up, not to default to same-turn CEO source repair.
@@ -81,24 +81,22 @@ Use this skill when a focused file-editing worker is actually helpful for one bu
 
 1. Call `business_read_business` and decide whether this task really needs a worker. If normal Takyon tools are enough, do not delegate.
 2. Choose one narrow workspace inside `product/`, `distribution/`, `research/`, or `metrics/`. Name the exact target files or directory in the instruction.
-3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design", "<style-skill>"]`. Do not restate low-level app-plane auth/billing/API semantics when the prepared `_takyon/` kit and surface contract already cover them. If the surface is app-like, make sure the contract explicitly requires `/, /app` and that the source really ships `/app`. Preserve the seeded auth/paywall/account helpers and route boundaries, but treat the seeded page layouts as disposable bootstrap scaffolding rather than the target design.
+3. Call `business_claude_agent_task` with a bounded instruction that says what to change, what to leave alone, and what proof or output is expected. For design-heavy `product/site/` source work, pass `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` and tell Claude to choose one coherent visual direction from the brief and follow it consistently. Do not restate low-level app-plane auth/billing/API semantics when the prepared `_takyon/` kit and surface contract already cover them. If the surface is app-like, make sure the contract explicitly requires `/, /app` and that the source really ships `/app`. Preserve the seeded auth/paywall/account helpers and route boundaries, but treat the seeded page layouts as disposable bootstrap scaffolding rather than the target design.
 4. Review the changed files. Keep only durable changes that stay inside the requested business scope and canonical roots.
 5. If the worker changed `product/site/` or another product source path that should be published, call `business_refresh_product_surface`.
 6. If the worker output implies a real publish, send, checkout, auth, or billing effect, route that next step back through the appropriate Takyon skill and `business_*` tool instead of pretending the worker already did it.
 7. For customer-facing product copy, default to capability language. Only mention model families when the operator explicitly wants that positioning, and never leak stale names like `GPT-4o-mini` into a Claude-backed product surface.
 8. If the worker lane is blocked by missing provider/runtime access or exits without usable source, hand control back to the owning skill to record the blocker or choose a later follow-up. Do not default to same-turn CEO source repair for `product/site/`.
 
-### Shared style skills
+### Shared style packs
 
-Choose exactly one style skill when pairing with `claude-design`:
+Pass the shared style packs alongside `claude-design`, then tell Claude to choose one coherent direction from the brief rather than blending them:
 
-- `claude-design-openai`: calm serious default for AI tools, prosumer software, research/productivity
+- `claude-design-openai`: calm serious for AI tools, prosumer software, research/productivity
 - `claude-design-stripe`: premium commercial, infra, fintech, polished B2B
 - `claude-design-superhuman`: premium productivity and speed-focused software
 - `claude-design-vibrant`: fun colorful consumer or lively prosumer
 - `claude-design-doodle`: whimsical playful consumer, pet, kid, or intentionally silly products
-
-Default to `claude-design-openai` when no stronger style signal exists.
 
 ## Output Format
 
