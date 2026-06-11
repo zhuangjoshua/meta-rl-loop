@@ -39,7 +39,7 @@ function normalizeRelative(value) {
 
 function sandboxedBashCommand(command) {
   const script = String(command || "");
-  return `env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home bash -lc ${JSON.stringify(script)}`;
+  return `/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;
 }
 
 function rewriteWorkspacePrefixedPaths(input, workspace) {

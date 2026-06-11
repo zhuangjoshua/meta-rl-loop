@@ -738,3 +738,9 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
     operations = store.commits[-1]["operations"]
     agent_record = next(op for op in operations if op.get("action") == "agent.record")
     assert agent_record["result"]["turn_cap_retries"] == [{"from": 20, "to": 60}]
+
+
+def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp /bin/bash -lc" in text
