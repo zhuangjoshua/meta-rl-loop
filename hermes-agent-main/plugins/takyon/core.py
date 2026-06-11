@@ -2251,6 +2251,40 @@ def _subuser_app_starter_globals_css() -> str:
               font-size: 0.95rem;
             }
 
+            .starter-footer {
+              margin-top: 1.5rem;
+              padding: 1rem 0 0;
+              border-top: 1px solid var(--starter-border);
+            }
+
+            .starter-footer-row {
+              display: flex;
+              flex-wrap: wrap;
+              align-items: center;
+              justify-content: space-between;
+              gap: 0.75rem;
+            }
+
+            .starter-footer-links {
+              display: flex;
+              flex-wrap: wrap;
+              gap: 0.75rem;
+              color: var(--starter-muted);
+              font-size: 0.95rem;
+            }
+
+            .starter-footer-links a {
+              color: inherit;
+            }
+
+            .starter-footer-links a:hover {
+              color: var(--starter-ink);
+            }
+
+            .starter-support-page {
+              max-width: 760px;
+            }
+
             .starter-button {
               display: inline-flex;
               align-items: center;
@@ -2533,6 +2567,15 @@ def _subuser_app_starter_app_layout_js() -> str:
                   <main className="starter-app-main">
                     <div className="starter-wrap">{children}</div>
                   </main>
+                  <footer className="starter-footer">
+                    <div className="starter-wrap starter-footer-row">
+                      <span className="starter-note">© {starterBusinessName}</span>
+                      <nav className="starter-footer-links" aria-label="Support">
+                        <Link href="/privacy">Privacy</Link>
+                        <Link href="/terms">Terms</Link>
+                      </nav>
+                    </div>
+                  </footer>
                 </div>
               );
             }
@@ -2637,8 +2680,8 @@ def _subuser_app_starter_privacy_page_js() -> str:
             export default function PrivacyPage() {
               return (
                 <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack">
-                    <article className="starter-card starter-section-card starter-stack">
+                  <div className="starter-wrap starter-stack starter-support-page">
+                    <article className="starter-stack">
                       <header className="starter-stack">
                         <p className="starter-eyebrow">Privacy</p>
                         <h1 className="starter-title-sm">Privacy policy</h1>
@@ -2689,15 +2732,16 @@ def _subuser_app_starter_privacy_page_js() -> str:
                         </p>
                       </section>
                     </article>
-                    <div className="starter-actions starter-actions-compact">
-                      <Link className="starter-button starter-button-secondary" href="/">
-                        Back to home
-                      </Link>
-                      <Link className="starter-button starter-button-secondary" href="/app">
-                        Open app
-                      </Link>
-                    </div>
-                    <p className="starter-note">{starterSiteName}</p>
+                    <footer className="starter-footer">
+                      <div className="starter-footer-row">
+                        <p className="starter-note">© {starterSiteName}</p>
+                        <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/privacy">Privacy</Link>
+                          <Link href="/terms">Terms</Link>
+                          <Link href="/app">App</Link>
+                        </nav>
+                      </div>
+                    </footer>
                   </div>
                 </main>
               );
@@ -2724,8 +2768,8 @@ def _subuser_app_starter_terms_page_js() -> str:
             export default function TermsPage() {
               return (
                 <main className="starter-site-shell">
-                  <div className="starter-wrap starter-stack">
-                    <article className="starter-card starter-section-card starter-stack">
+                  <div className="starter-wrap starter-stack starter-support-page">
+                    <article className="starter-stack">
                       <header className="starter-stack">
                         <p className="starter-eyebrow">Terms</p>
                         <h1 className="starter-title-sm">Terms of service</h1>
@@ -2776,15 +2820,16 @@ def _subuser_app_starter_terms_page_js() -> str:
                         </p>
                       </section>
                     </article>
-                    <div className="starter-actions starter-actions-compact">
-                      <Link className="starter-button starter-button-secondary" href="/">
-                        Back to home
-                      </Link>
-                      <Link className="starter-button starter-button-secondary" href="/app">
-                        Open app
-                      </Link>
-                    </div>
-                    <p className="starter-note">{starterSiteName}</p>
+                    <footer className="starter-footer">
+                      <div className="starter-footer-row">
+                        <p className="starter-note">© {starterSiteName}</p>
+                        <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/privacy">Privacy</Link>
+                          <Link href="/terms">Terms</Link>
+                          <Link href="/app">App</Link>
+                        </nav>
+                      </div>
+                    </footer>
                   </div>
                 </main>
               );
@@ -4918,6 +4963,15 @@ def _subuser_app_starter_pages_js() -> str:
                     </div>
                   </header>
                   <div className="starter-wrap">{children}</div>
+                  <footer className="starter-footer">
+                    <div className="starter-wrap starter-footer-row">
+                      <span className="starter-note">© {starterBusinessName}</span>
+                      <nav className="starter-footer-links" aria-label="Support">
+                        <Link href="/privacy">Privacy</Link>
+                        <Link href="/terms">Terms</Link>
+                      </nav>
+                    </div>
+                  </footer>
                 </div>
               );
             }

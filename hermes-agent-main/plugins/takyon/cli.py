@@ -1252,6 +1252,7 @@ def _business_bootstrap_instruction(
         "- First customize `/` so `src/app/page.js` is a truthful branded landing page.",
         "- Second make `/app` a thin sign-in/subscription access gate on the existing Hermes/Takyon auth + checkout rails.",
         "- Third make `/app/profile` the truthful account/subscription page on the existing account + profile rails.",
+        "- Do not spend bootstrap time editing the preset `/privacy` and `/terms` support pages unless explicitly asked.",
         "- Leave `src/app/app/(product)/` deferred unless a small route guard or placeholder is required for correctness.",
         "- Stop once `/`, `/app`, and `/app/profile` are truthful and publishable; do not spend first-pass time inventing the real product workflow.",
         "",

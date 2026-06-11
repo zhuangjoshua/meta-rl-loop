@@ -240,7 +240,9 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert '"/pricing"' not in home_page
     assert not (workspace_root / "src" / "app" / "pricing" / "page.js").exists()
     assert "Privacy policy" in privacy_page
-    assert "Back to home" in privacy_page
+    assert "Back to home" not in privacy_page
+    assert "starter-card starter-section-card" not in privacy_page
+    assert 'href="/terms"' in privacy_page
     assert "StarterPrivacyPage" not in privacy_page
     assert 'path: "/privacy"' in privacy_page
     assert "export const metadata = starterRootMetadata;" in root_layout
@@ -248,13 +250,17 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "openGraph:" in starter_metadata
     assert "twitter:" in starter_metadata
     assert "export const metadata = starterAppRobotsMetadata;" in app_layout
+    assert 'href="/privacy"' in app_layout
+    assert 'href="/terms"' in app_layout
     assert "loadServerAppState" in app_page
     assert "StarterAccessPage initialAppState={initialAppState}" in app_page
     assert 'if (initialAppState?.access?.state !== "ready")' in product_layout
     assert 'redirect("/app")' in product_layout
     assert "starterSitemapEntries" in sitemap_page
     assert "Terms of service" in terms_page
-    assert "Back to home" in terms_page
+    assert "Back to home" not in terms_page
+    assert "starter-card starter-section-card" not in terms_page
+    assert 'href="/privacy"' in terms_page
     assert "StarterTermsPage" not in terms_page
     assert 'path: "/terms"' in terms_page
     assert "starterRobotsConfig" in robots_page
