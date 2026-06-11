@@ -8764,6 +8764,34 @@ def _worker_local_repair_instruction(base_instruction: str, *, blocker: str, att
     )
 
 
+def _claude_agent_hit_turn_cap(error_text: str) -> bool:
+    clean = str(error_text or "").strip().lower()
+    return "reached maximum number of turns" in clean
+
+
+def _worker_turn_cap_retry_instruction(
+    base_instruction: str,
+    *,
+    prior_max_turns: int,
+    next_max_turns: int,
+    attempt_number: int,
+) -> str:
+    return "\n\n".join(
+        [
+            base_instruction.rstrip(),
+            dedent(
+                f"""
+                Hermes automatic continuation retry ({attempt_number} of 2):
+                - The previous worker attempt hit the Claude SDK turn cap at {int(prior_max_turns)} turns before finishing.
+                - Continue from the current workspace state instead of restarting from scratch.
+                - Focus only on the smallest remaining work needed to complete the task, then stop.
+                - The next attempt has a higher turn budget ({int(next_max_turns)} turns); do not spend it re-reading or redoing work that already exists.
+                """
+            ).strip(),
+        ]
+    )
+
+
 def _javascript_package_manager_name(root: Path, package_data: dict[str, Any]) -> str:
     package_manager = str(package_data.get("packageManager") or "").strip().lower()
     if package_manager:
@@ -25623,7 +25651,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         pretend_findings: list[dict[str, Any]] = []
         surface_refresh: dict[str, Any] | None = None
         worker_attempts = 0
+        active_max_turns = max_turns
         local_repair_retries: list[str] = []
+        turn_cap_retries: list[dict[str, int]] = []
         agent_record: dict[str, Any] | None = None
         with workspace_context as mounted_home:
             active_store = store
@@ -25721,6 +25751,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 worker_attempts += 1
                 attempt_payload = {
                     **payload_base,
+                    "maxTurns": active_max_turns,
                     "instruction": active_worker_instruction,
                 }
                 started_line = (
@@ -25886,6 +25917,39 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             attempt_number=worker_attempts + 1,
                         )
                         continue
+                should_retry_turn_cap = (
+                    not sdk_result.get("success")
+                    and customer_facing_product_workspace
+                    and len(turn_cap_retries) < 1
+                    and _claude_agent_hit_turn_cap(sdk_result.get("error") or "")
+                )
+                if should_retry_turn_cap:
+                    next_max_turns: int | None = None
+                    if active_max_turns < 60:
+                        next_max_turns = 60
+                    elif active_max_turns < 90:
+                        next_max_turns = 90
+                    if next_max_turns and next_max_turns > active_max_turns:
+                        turn_cap_retries.append({"from": int(active_max_turns), "to": int(next_max_turns)})
+                        retry_note = (
+                            f"Claude worker hit the turn cap at {active_max_turns} turns; "
+                            f"retrying once with {next_max_turns} turns."
+                        )
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="output",
+                            detail=retry_note,
+                            line=retry_note,
+                        )
+                        active_worker_instruction = _worker_turn_cap_retry_instruction(
+                            worker_instruction,
+                            prior_max_turns=active_max_turns,
+                            next_max_turns=next_max_turns,
+                            attempt_number=worker_attempts + 1,
+                        )
+                        active_max_turns = next_max_turns
+                        continue
                 break
             status = "completed" if sdk_result.get("success") else "failed"
             if sdk_result.get("blocked"):
@@ -25926,6 +25990,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "raw_stdout": sdk_result.get("raw_stdout"),
                         "worker_attempts": worker_attempts,
                         "local_repair_retries": local_repair_retries,
+                        "turn_cap_retries": turn_cap_retries,
                         "pretend_product_findings": pretend_findings,
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
                         "surface_refresh": surface_refresh,
@@ -25962,6 +26027,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "surface_refresh": surface_refresh,
             "worker_attempts": worker_attempts,
             "local_repair_retries": local_repair_retries,
+            "turn_cap_retries": turn_cap_retries,
             "summary": sdk_result.get("summary") or "",
             "actual_cost_cents": worker_actual_cents,
             "error": sdk_result.get("error"),

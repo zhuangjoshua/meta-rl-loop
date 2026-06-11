@@ -668,3 +668,73 @@ def test_claude_agent_task_preserves_worker_stderr_from_sdk_stdout(tmp_path, mon
     assert result["success"] is False
     assert result["worker_returncode"] == 1
     assert result["worker_stderr"] == "ENOENT: no such file or directory, uv_os_homedir"
+
+
+def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    class _CapturingStore(_FakeStore):
+        def __init__(self, root: Path):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _CapturingStore(tmp_path)
+    captured_payloads: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured_payloads.append(dict(payload))
+        Path(str(payload["cwd"])).mkdir(parents=True, exist_ok=True)
+        if len(captured_payloads) == 1:
+            return types.SimpleNamespace(
+                returncode=1,
+                stdout=json.dumps(
+                    {
+                        "success": False,
+                        "error": "Error: Claude Code returned an error result: Reached maximum number of turns (20)",
+                    }
+                ),
+                stderr="",
+            )
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Run npm install and npm run build.",
+                "idempotency_key": "workspace-product-turn-cap-retry",
+                "install": False,
+                "max_turns": 20,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert [payload["maxTurns"] for payload in captured_payloads] == [20, 60]
+    assert result["worker_attempts"] == 2
+    assert result["turn_cap_retries"] == [{"from": 20, "to": 60}]
+    operations = store.commits[-1]["operations"]
+    agent_record = next(op for op in operations if op.get("action") == "agent.record")
+    assert agent_record["result"]["turn_cap_retries"] == [{"from": 20, "to": 60}]
