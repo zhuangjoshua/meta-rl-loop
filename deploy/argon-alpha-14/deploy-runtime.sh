@@ -152,7 +152,6 @@ wait_for_remote_runtime_idle() {
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon.runtime_app import resolve_database_url
 import psycopg
-from datetime import timedelta
 
 load_takyon_env()
 with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
@@ -162,7 +161,7 @@ with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=
             SELECT COUNT(*)
             FROM business_work_requests
             WHERE status IN ('queued', 'running')
-              AND updated_at >= (NOW() - %s::interval)
+              AND NULLIF(updated_at, '')::timestamptz >= (NOW() - %s::interval)
             \"\"\",
             (f\"$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\",),
         )
