@@ -77,6 +77,7 @@ def publish_next_product_service(*, source_root: Path, slug: str, publish_target
         "/v1/publish-next-product-service",
         payload={
             "source_path": str(source_path or "").strip(),
+            "source_root": str(source_root or "").strip(),
             "slug": str(slug),
             "publish_target": str(publish_target),
         },

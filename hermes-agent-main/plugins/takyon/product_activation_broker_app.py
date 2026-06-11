@@ -21,6 +21,7 @@ _SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 
 class _PublishBody(BaseModel):
     source_path: str
+    source_root: str = ""
     slug: str
     publish_target: str
 
@@ -46,7 +47,7 @@ def _takyon_home() -> Path:
     return Path(raw or "~/.takyon").expanduser().resolve()
 
 
-def _resolve_canonical_source_root(*, slug: str, source_path: str) -> Path:
+def _canonical_source_root(*, slug: str, source_path: str) -> Path:
     try:
         relative = takyon_core._safe_relpath(source_path or "product/site", field="source_path")
     except Exception as exc:
@@ -66,6 +67,35 @@ def _resolve_canonical_source_root(*, slug: str, source_path: str) -> Path:
     return source_root
 
 
+def _resolve_publish_source_root(*, slug: str, source_path: str, source_root: str = "") -> Path:
+    canonical_root = _canonical_source_root(slug=slug, source_path=source_path)
+    explicit = str(source_root or "").strip()
+    if not explicit:
+        return canonical_root
+
+    try:
+        relative = takyon_core._safe_relpath(source_path or "product/site", field="source_path")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    resolved = Path(explicit).expanduser().resolve()
+    if resolved == canonical_root:
+        return resolved
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="product source root not found")
+
+    scratch_root = Path(takyon_core.get_takyon_home()).resolve() / "tmp" / "workspaces"
+    expected_suffix = (Path("businesses") / takyon_core._slugify(slug) / relative).parts
+    if (
+        scratch_root in (resolved, *resolved.parents)
+        and len(resolved.parts) >= len(expected_suffix)
+        and tuple(resolved.parts[-len(expected_suffix):]) == expected_suffix
+    ):
+        return resolved
+
+    raise HTTPException(status_code=400, detail="product source root is outside the allowed Takyon business paths")
+
+
 def build_product_activation_broker_app() -> FastAPI:
     app = FastAPI(title="Takyon Product Activation Broker")
 
@@ -79,9 +109,10 @@ def build_product_activation_broker_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict:
         _require_internal_token(authorization)
-        source_root = _resolve_canonical_source_root(
+        source_root = _resolve_publish_source_root(
             slug=str(body.slug or "").strip(),
             source_path=str(body.source_path or "").strip(),
+            source_root=str(body.source_root or "").strip(),
         )
         return takyon_core._publish_next_product_service_prepared(
             source_root=source_root,
