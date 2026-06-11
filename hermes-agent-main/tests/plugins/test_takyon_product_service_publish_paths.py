@@ -308,3 +308,61 @@ def test_refresh_warns_when_custom_app_page_needs_manual_product_root_render(tmp
     assert not legacy_route.exists()
     assert (site / "src" / "app" / "app" / "(product)" / "root.js").exists()
     assert any("root.js" in warning for warning in verification["warnings"])
+
+
+def test_refresh_uses_isolated_js_runtime_env_for_install_build_and_typecheck(tmp_path: Path, monkeypatch):
+    business_root = tmp_path / "businesses" / "scopesync"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "scopesync-site",
+                "private": True,
+                "scripts": {
+                    "build": "next build",
+                    "typecheck": "tsc --noEmit",
+                    "start": "next start",
+                },
+                "dependencies": {"next": "^15.0.0", "react": "^19.0.0", "react-dom": "^19.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon"))
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run_surface_command(command, **kwargs):
+        calls.append({"command": command, "env": dict(kwargs.get("env") or {})})
+        return {"command": command, "status": "passed"}
+
+    monkeypatch.setattr(takyon_core, "_run_surface_command", fake_run_surface_command)
+
+    verification = takyon_core._refresh_product_surface_path(business_root, "product/site", install=True)
+
+    assert verification["status"] == "passed"
+    assert len(calls) == 3
+    runtime_homes = {str(item["env"].get("HOME") or "") for item in calls}
+    npm_caches = {str(item["env"].get("NPM_CONFIG_CACHE") or "") for item in calls}
+    xdg_caches = {str(item["env"].get("XDG_CACHE_HOME") or "") for item in calls}
+    assert len(runtime_homes) == 1
+    assert len(npm_caches) == 1
+    assert len(xdg_caches) == 1
+    runtime_home = Path(next(iter(runtime_homes)))
+    npm_cache = Path(next(iter(npm_caches)))
+    xdg_cache = Path(next(iter(xdg_caches)))
+    assert runtime_home.is_dir()
+    assert npm_cache.is_dir()
+    assert xdg_cache.is_dir()
+    assert runtime_home.as_posix().startswith((tmp_path / ".takyon" / "tmp" / "surface-js").as_posix())
+    assert npm_cache.as_posix().startswith((tmp_path / ".takyon" / "tmp" / "surface-js").as_posix())
+    assert xdg_cache.as_posix().startswith((tmp_path / ".takyon" / "tmp" / "surface-js").as_posix())
+    assert not npm_cache.as_posix().startswith("/opt/takyon/.npm")
+    install_env = calls[0]["env"]
+    assert install_env.get("NODE_ENV") == "development"
+    assert install_env.get("NPM_CONFIG_PRODUCTION") == "false"

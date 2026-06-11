@@ -8831,8 +8831,33 @@ def _javascript_install_command(manager: dict[str, Any]) -> list[str]:
     return [*base, "install"]
 
 
-def _javascript_install_env() -> dict[str, str]:
-    env = _runtime_env({"NODE_ENV": "development", "NPM_CONFIG_PRODUCTION": "false"})
+def _javascript_surface_runtime_env(root: Path) -> dict[str, str]:
+    source_root = root.resolve()
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    token = str(source_root)
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    runtime_root = takyon_home / "tmp" / "surface-js" / digest
+    home_dir = runtime_root / "home"
+    cache_dir = runtime_root / "cache"
+    npm_cache_dir = runtime_root / "npm-cache"
+    corepack_home = runtime_root / "corepack"
+    for path in (home_dir, cache_dir, npm_cache_dir, corepack_home):
+        path.mkdir(parents=True, exist_ok=True)
+    return _runtime_env(
+        {
+            "HOME": str(home_dir),
+            "XDG_CACHE_HOME": str(cache_dir),
+            "NPM_CONFIG_CACHE": str(npm_cache_dir),
+            "npm_config_cache": str(npm_cache_dir),
+            "COREPACK_HOME": str(corepack_home),
+        }
+    )
+
+
+def _javascript_install_env(root: Path) -> dict[str, str]:
+    env = _javascript_surface_runtime_env(root)
+    env["NODE_ENV"] = "development"
+    env["NPM_CONFIG_PRODUCTION"] = "false"
     env.pop("npm_config_production", None)
     return env
 
@@ -8985,7 +9010,7 @@ def _refresh_product_surface_path(
                 _javascript_install_command(package_manager),
                 cwd=root,
                 timeout_seconds=timeout_seconds,
-                env=_javascript_install_env(),
+                env=_javascript_install_env(root),
             )
             result["checks"].append(install_check)
             if install_check["status"] != "passed":
@@ -9004,7 +9029,12 @@ def _refresh_product_surface_path(
             "missing_capabilities": [package_manager_name, "node"],
         })
         return result
-    build_check = _run_surface_command(build_command, cwd=root, timeout_seconds=timeout_seconds)
+    build_check = _run_surface_command(
+        build_command,
+        cwd=root,
+        timeout_seconds=timeout_seconds,
+        env=_javascript_surface_runtime_env(root),
+    )
     result["checks"].append(build_check)
     if build_check["status"] != "passed":
         result.update({"status": "failed", "error": "product build failed"})
@@ -9018,7 +9048,12 @@ def _refresh_product_surface_path(
                 "missing_capabilities": [package_manager_name, "node"],
             })
             return result
-        typecheck = _run_surface_command(typecheck_command, cwd=root, timeout_seconds=timeout_seconds)
+        typecheck = _run_surface_command(
+            typecheck_command,
+            cwd=root,
+            timeout_seconds=timeout_seconds,
+            env=_javascript_surface_runtime_env(root),
+        )
         result["checks"].append(typecheck)
         if typecheck["status"] != "passed":
             result.update({"status": "failed", "error": "product typecheck failed"})
