@@ -29,6 +29,7 @@ TAKYON_SMOKE_CONNECT_TIMEOUT="${TAKYON_SMOKE_CONNECT_TIMEOUT:-5}"
 TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
 TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS="${TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS:-900}"
 TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
+TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS="${TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS:-1800}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 
@@ -151,11 +152,20 @@ wait_for_remote_runtime_idle() {
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon.runtime_app import resolve_database_url
 import psycopg
+from datetime import timedelta
 
 load_takyon_env()
 with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
     with conn.cursor() as cur:
-        cur.execute(\"SELECT COUNT(*) FROM business_work_requests WHERE status IN ('queued', 'running')\")
+        cur.execute(
+            \"\"\"
+            SELECT COUNT(*)
+            FROM business_work_requests
+            WHERE status IN ('queued', 'running')
+              AND updated_at >= (NOW() - %s::interval)
+            \"\"\",
+            (f\"$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\",),
+        )
         work_requests = int(cur.fetchone()[0] or 0)
         cur.execute(\"SELECT COUNT(*) FROM jobs WHERE status = 'running'\")
         worker_jobs = int(cur.fetchone()[0] or 0)
