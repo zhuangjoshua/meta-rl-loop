@@ -1961,7 +1961,7 @@ def _subuser_app_starter_metadata_js(
             export const starterSiteDescription = __STARTER_SITE_DESCRIPTION__;
             export const starterOgImageAlt = __STARTER_OG_ALT__;
             export const starterMetadataBase = new URL(String(surfaceContext.publishTarget || "https://example.com/"));
-            export const starterDefaultPublicRoutes = ["/", "/privacy", "/terms"];
+            export const starterDefaultPublicRoutes = ["/", "/privacy", "/terms", "/faq", "/articles"];
             export const starterAppRobotsMetadata = {
               robots: {
                 index: false,
@@ -2572,6 +2572,8 @@ def _subuser_app_starter_app_layout_js() -> str:
                     <div className="starter-wrap starter-footer-row">
                       <span className="starter-note">© {starterBusinessName}</span>
                       <nav className="starter-footer-links" aria-label="Support">
+                        <Link href="/faq">FAQ</Link>
+                        <Link href="/articles">Articles</Link>
                         <Link href="/privacy">Privacy</Link>
                         <Link href="/terms">Terms</Link>
                       </nav>
@@ -2737,6 +2739,8 @@ def _subuser_app_starter_privacy_page_js() -> str:
                       <div className="starter-footer-row">
                         <p className="starter-note">© {starterSiteName}</p>
                         <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/faq">FAQ</Link>
+                          <Link href="/articles">Articles</Link>
                           <Link href="/privacy">Privacy</Link>
                           <Link href="/terms">Terms</Link>
                           <Link href="/app">App</Link>
@@ -2825,6 +2829,112 @@ def _subuser_app_starter_terms_page_js() -> str:
                       <div className="starter-footer-row">
                         <p className="starter-note">© {starterSiteName}</p>
                         <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/faq">FAQ</Link>
+                          <Link href="/articles">Articles</Link>
+                          <Link href="/privacy">Privacy</Link>
+                          <Link href="/terms">Terms</Link>
+                          <Link href="/app">App</Link>
+                        </nav>
+                      </div>
+                    </footer>
+                  </div>
+                </main>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_faq_page_js() -> str:
+    return (
+        dedent(
+            """
+            import Link from "next/link";
+            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
+
+            export const metadata = starterPageMetadata({
+              title: "FAQ",
+              description: `Read frequently asked questions for ${starterSiteName}.`,
+              path: "/faq",
+            });
+
+            export default function FaqPage() {
+              return (
+                <main className="starter-site-shell">
+                  <div className="starter-wrap starter-stack starter-support-page">
+                    <article className="starter-stack">
+                      <header className="starter-stack">
+                        <p className="starter-eyebrow">FAQ</p>
+                        <h1 className="starter-title-sm">Frequently asked questions</h1>
+                        <p className="starter-copy">
+                          This page can hold common customer questions for {starterSiteName}.
+                        </p>
+                      </header>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Current status</h2>
+                        <p className="starter-copy">No public FAQ entries are published yet.</p>
+                      </section>
+                    </article>
+                    <footer className="starter-footer">
+                      <div className="starter-footer-row">
+                        <p className="starter-note">© {starterSiteName}</p>
+                        <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/faq">FAQ</Link>
+                          <Link href="/articles">Articles</Link>
+                          <Link href="/privacy">Privacy</Link>
+                          <Link href="/terms">Terms</Link>
+                          <Link href="/app">App</Link>
+                        </nav>
+                      </div>
+                    </footer>
+                  </div>
+                </main>
+              );
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _subuser_app_starter_articles_page_js() -> str:
+    return (
+        dedent(
+            """
+            import Link from "next/link";
+            import { starterPageMetadata, starterSiteName } from "../../components/starter-metadata.js";
+
+            export const metadata = starterPageMetadata({
+              title: "Articles",
+              description: `Browse published articles from ${starterSiteName}.`,
+              path: "/articles",
+            });
+
+            export default function ArticlesPage() {
+              return (
+                <main className="starter-site-shell">
+                  <div className="starter-wrap starter-stack starter-support-page">
+                    <article className="starter-stack">
+                      <header className="starter-stack">
+                        <p className="starter-eyebrow">Articles</p>
+                        <h1 className="starter-title-sm">Articles</h1>
+                        <p className="starter-copy">
+                          This page can hold published articles from {starterSiteName}.
+                        </p>
+                      </header>
+                      <section className="starter-stack">
+                        <h2 className="starter-title-sm">Current status</h2>
+                        <p className="starter-copy">No public articles are published yet.</p>
+                      </section>
+                    </article>
+                    <footer className="starter-footer">
+                      <div className="starter-footer-row">
+                        <p className="starter-note">© {starterSiteName}</p>
+                        <nav className="starter-footer-links" aria-label="Support">
+                          <Link href="/faq">FAQ</Link>
+                          <Link href="/articles">Articles</Link>
                           <Link href="/privacy">Privacy</Link>
                           <Link href="/terms">Terms</Link>
                           <Link href="/app">App</Link>
@@ -4968,6 +5078,8 @@ def _subuser_app_starter_pages_js() -> str:
                     <div className="starter-wrap starter-footer-row">
                       <span className="starter-note">© {starterBusinessName}</span>
                       <nav className="starter-footer-links" aria-label="Support">
+                        <Link href="/faq">FAQ</Link>
+                        <Link href="/articles">Articles</Link>
                         <Link href="/privacy">Privacy</Link>
                         <Link href="/terms">Terms</Link>
                       </nav>
@@ -5458,9 +5570,11 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
         "src/app/globals.css": _subuser_app_starter_globals_css(),
         "src/app/opengraph-image.js": _subuser_app_starter_opengraph_image_js(),
         "src/app/page.js": _subuser_app_starter_home_page_js(),
+        "src/app/faq/page.js": _subuser_app_starter_faq_page_js(),
         "src/app/privacy/page.js": _subuser_app_starter_privacy_page_js(),
         "src/app/robots.js": _subuser_app_starter_robots_js(),
         "src/app/sitemap.js": _subuser_app_starter_sitemap_js(),
+        "src/app/articles/page.js": _subuser_app_starter_articles_page_js(),
         "src/app/terms/page.js": _subuser_app_starter_terms_page_js(),
         "src/app/twitter-image.js": _subuser_app_starter_twitter_image_js(),
         "src/app/app/layout.js": _subuser_app_starter_app_layout_js(),
@@ -5716,7 +5830,7 @@ def _subuser_app_worker_contract_block(
         lines.append("- Treat the product as paid-only by default. Do not invent a free plan, free tier, trial, waitlist tier, or limited starter offer in customer-facing pricing copy unless the operator explicitly records that change first.")
         lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
         lines.append("- Treat `/app` as the single routed entrypoint. Keep the main entitled product surface in `src/app/app/(product)/root.js`, and keep nested product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
-        lines.append("- Treat `src/app/privacy/page.js` and `src/app/terms/page.js` as preset support pages, not as bootstrap design targets.")
+        lines.append("- Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages, not as bootstrap design targets.")
 
     if "usage" in runtime_features:
         lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
@@ -5741,8 +5855,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        "- AppKit starter source includes preset support pages at `/privacy` and `/terms`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page.",
-        "- Treat `src/app/privacy/page.js` and `src/app/terms/page.js` as preset support pages. Do not spend normal bootstrap/design time reading, redesigning, or polishing them unless the operator explicitly asks for legal-page work.",
+        "- AppKit starter source includes preset support pages at `/privacy`, `/terms`, `/faq`, and `/articles`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page.",
+        "- Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages. Do not spend normal bootstrap/design time reading, redesigning, or polishing them unless the operator explicitly asks for support-page work.",
         "- For a first monthly bootstrap, treat the seeded `/app` route as the truthful membership entrypoint and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
         "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
         f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account rails when the seeded wrappers already cover the route.",
@@ -14179,7 +14293,7 @@ class TakyonStore:
                 product_workflow=_surface_product_workflow_shape({"metadata": metadata}),
             )
             seeded_bootstrap_monthly_plan = False
-            if bootstrap_access_seed and surface_requires_app_shell and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+            if surface_requires_app_shell and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
                 existing_monthly_plan = self._row_to_dict(
                     conn.execute(
                         "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",

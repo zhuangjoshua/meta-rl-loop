@@ -148,6 +148,8 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert (workspace_root / "package.json").exists()
     assert (workspace_root / "next.config.js").exists()
     assert (workspace_root / "src" / "app" / "layout.js").exists()
+    assert (workspace_root / "src" / "app" / "articles" / "page.js").exists()
+    assert (workspace_root / "src" / "app" / "faq" / "page.js").exists()
     assert (workspace_root / "src" / "app" / "globals.css").exists()
     assert (workspace_root / "src" / "app" / "opengraph-image.js").exists()
     assert (workspace_root / "src" / "app" / "privacy" / "page.js").exists()
@@ -219,9 +221,11 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "starterPageMetadata" in starter_metadata
     assert "starterPublicRoutes()" in starter_metadata
     assert 'card: "summary_large_image"' in starter_metadata
-    assert 'starterDefaultPublicRoutes = ["/", "/privacy", "/terms"]' in starter_metadata
+    assert 'starterDefaultPublicRoutes = ["/", "/privacy", "/terms", "/faq", "/articles"]' in starter_metadata
     assert 'normalized === "/app"' in starter_metadata
     assert 'starterAbsoluteUrl("/sitemap.xml")' in starter_metadata
+    articles_page = (workspace_root / "src" / "app" / "articles" / "page.js").read_text()
+    faq_page = (workspace_root / "src" / "app" / "faq" / "page.js").read_text()
     home_page = (workspace_root / "src" / "app" / "page.js").read_text()
     privacy_page = (workspace_root / "src" / "app" / "privacy" / "page.js").read_text()
     root_layout = (workspace_root / "src" / "app" / "layout.js").read_text()
@@ -242,14 +246,28 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "Privacy policy" in privacy_page
     assert "Back to home" not in privacy_page
     assert "starter-card starter-section-card" not in privacy_page
+    assert 'href="/faq"' in privacy_page
+    assert 'href="/articles"' in privacy_page
     assert 'href="/terms"' in privacy_page
     assert "StarterPrivacyPage" not in privacy_page
     assert 'path: "/privacy"' in privacy_page
+    assert "Articles" in articles_page
+    assert "No public articles are published yet." in articles_page
+    assert 'href="/faq"' in articles_page
+    assert 'href="/privacy"' in articles_page
+    assert 'path: "/articles"' in articles_page
+    assert "Frequently asked questions" in faq_page
+    assert "No public FAQ entries are published yet." in faq_page
+    assert 'href="/articles"' in faq_page
+    assert 'href="/terms"' in faq_page
+    assert 'path: "/faq"' in faq_page
     assert "export const metadata = starterRootMetadata;" in root_layout
     assert "metadataBase: starterMetadataBase" in starter_metadata
     assert "openGraph:" in starter_metadata
     assert "twitter:" in starter_metadata
     assert "export const metadata = starterAppRobotsMetadata;" in app_layout
+    assert 'href="/faq"' in app_layout
+    assert 'href="/articles"' in app_layout
     assert 'href="/privacy"' in app_layout
     assert 'href="/terms"' in app_layout
     assert "loadServerAppState" in app_page
@@ -260,6 +278,8 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert "Terms of service" in terms_page
     assert "Back to home" not in terms_page
     assert "starter-card starter-section-card" not in terms_page
+    assert 'href="/faq"' in terms_page
+    assert 'href="/articles"' in terms_page
     assert 'href="/privacy"' in terms_page
     assert "StarterTermsPage" not in terms_page
     assert 'path: "/terms"' in terms_page
@@ -299,7 +319,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "starterAppState(...)" in block
     assert "starterLoadViewer()" in block
     assert "starterLoadAppState()" in block
-    assert "preset support pages at `/privacy` and `/terms`" in block
+    assert "preset support pages at `/privacy`, `/terms`, `/faq`, and `/articles`" in block
     assert "Do not spend normal bootstrap/design time reading, redesigning, or polishing them" in block
     assert "Keep customer-facing copy free of developer framing." in block
 
@@ -328,7 +348,7 @@ def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
     assert "signed-up/account-holder" in block
     assert "subscribed/unsubscribed" in block
     assert "src/app/app/(product)/" in block
-    assert "Treat `src/app/privacy/page.js` and `src/app/terms/page.js` as preset support pages" in block
+    assert "Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages" in block
     assert "first monthly bootstrap" in block
     assert "Do not ship customer-facing copy" in block
 

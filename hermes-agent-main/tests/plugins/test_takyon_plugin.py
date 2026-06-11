@@ -1610,6 +1610,88 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     }
 
 
+def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer", "budget": {"amount": 25}}],
+        "init-existing-source-shape",
+    )
+
+    site = tmp_path / "businesses" / "longer" / "product" / "site" / "src" / "app" / "app" / "(product)"
+    site.mkdir(parents=True)
+    (site / "root.js").write_text("export default function ProductRoot() { return null; }\n", encoding="utf-8")
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "longer",
+                "source_path": "product/site",
+                "app_mode": "ai_tool",
+                "subscription_style": "monthly",
+                "runtime_features": ["generate"],
+                "product_workflow": {
+                    "primary_user": "subscriber",
+                    "workspace_model": "single private account",
+                    "primary_job": "follow a private coaching workflow",
+                    "core_loop": {
+                        "input": "user enters data",
+                        "action": "app generates guidance",
+                        "result": "user receives a saved routine",
+                        "save_record": True,
+                        "return_to_record_later": True,
+                    },
+                    "scope_rules": {
+                        "no_teams": True,
+                        "no_roles": True,
+                        "no_invites": True,
+                        "no_sharing": True,
+                        "no_public_pages": True,
+                        "no_admin_console": True,
+                    },
+                    "persistence_rules": {
+                        "requires_server_state": True,
+                        "persistence_rail": "records",
+                        "survives_sign_out": True,
+                        "truthful_empty_state": True,
+                        "reopenable_history": True,
+                        "no_local_only_state": True,
+                    },
+                    "product_budget": {
+                        "screens": {"max": 4},
+                        "entity_types": {"max": 3},
+                        "backend_actions": {"max": 4},
+                        "ai_flows": {"max": 2},
+                    },
+                    "first_run": {
+                        "strategy": "ask a few intake questions",
+                        "empty_state_required": True,
+                        "pending_state_required": True,
+                        "error_state_required": True,
+                    },
+                    "success_moment": "first routine saved",
+                    "acceptance_tests": ["user can save a routine"],
+                    "not_now": ["community features"],
+                },
+                "idempotency_key": "existing-source-shape",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:longer", query="summary", include=["app"])["app"]
+    assert len(app["plans"]) == 1
+    plan = app["plans"][0]
+    assert plan["plan_key"] == "monthly"
+    assert plan["source"] == "takyon_starter"
+    assert plan["metadata"]["takyon_seed"] == {
+        "kind": "monthly_access_shell",
+        "price_status": "unset",
+    }
+
+
 def test_surface_upsert_rejects_source_path_change_after_anchor(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)

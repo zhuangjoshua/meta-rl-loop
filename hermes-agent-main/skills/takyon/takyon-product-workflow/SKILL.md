@@ -82,6 +82,8 @@ Use this skill to define and implement the real in-app product workflow after si
 - When the gated UI work is substantial, delegate one bounded `business_claude_agent_task` call on `product/site/`.
 - For design-heavy gated workflow work, pass `guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"]` and tell Claude to choose one coherent visual direction from the brief and follow it consistently without blending packs.
 - Preserve the seeded auth/paywall/account helpers and route boundaries. Build the workflow on top of the prepared `_takyon/` substrate instead of reimplementing app-plane rails.
+- Edit only `src/app/app/(product)/**` unless the operator explicitly requests another route.
+- Do not modify `src/app/page.js`, `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, `src/app/articles/page.js`, `src/app/app/page.js`, or `src/app/app/profile/page.js` unless explicitly requested.
 - When the source changes should be visible or published, follow the worker pass with `business_refresh_product_surface`.
 
 ## Procedure
@@ -99,8 +101,8 @@ Use this skill to define and implement the real in-app product workflow after si
    - concrete acceptance tests
    - `not_now` cuts
 5. If the workflow requires declared runtime rails such as `records`, `generate`, `usage`, `directory`, or `connections`, make sure those are truthful on the same surface contract before delegating UI work.
-6. Delegate one bounded `business_claude_agent_task` call on `product/site/` with instructions scoped to the gated workflow. For design-heavy work, pass the full design-pack set with `claude-design` and tell Claude to choose one coherent visual direction from the brief, then follow it consistently.
-7. Review the changed source. Keep the workflow inside `src/app/app/(product)/` unless the operator explicitly wants another route touched.
+6. Delegate one bounded `business_claude_agent_task` call on `product/site/` with instructions scoped to the gated workflow. Tell the worker to edit only `src/app/app/(product)/**` unless the operator explicitly requests another route. For design-heavy work, pass the full design-pack set with `claude-design` and tell Claude to choose one coherent visual direction from the brief, then follow it consistently.
+7. Review the changed source. Reject the pass if it modifies `src/app/page.js`, `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, `src/app/articles/page.js`, `src/app/app/page.js`, or `src/app/app/profile/page.js` without an explicit operator request.
 8. If the workflow source should be visible or published, call `business_refresh_product_surface` and treat its blocker output as truth.
 9. Before claiming success, re-read the updated `product/surface.md` and the touched gated source files so the report reflects the exact durable state.
 
@@ -137,6 +139,7 @@ Use this skill to define and implement the real in-app product workflow after si
 3. Keep the real product workflow business-scoped and gated.
 4. Route shared backend rail changes through `takyon-app-runtime`.
 5. For design-heavy gated workflow work, let Claude choose one coherent visual direction from the provided style packs; do not hardcode a single style pack choice in this skill.
+6. Do not let this skill reskin the landing page, support pages, access gate, or account page unless the operator explicitly requests that broader scope.
 
 ## Troubleshooting
 

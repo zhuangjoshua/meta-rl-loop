@@ -53,6 +53,7 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
 
 const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
 const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
+const HIDDEN_DOCUMENT_SUFFIXES = new Set([".js", ".jsx", ".ts", ".tsx"]);
 const CHANNEL_BUDGET_KEYS: ChannelBudgetKey[] = ["x", "meta", "reddit"];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -689,7 +690,11 @@ function Documents({
   const [preview, setPreview] = useState<DocumentPreviewState | null>(null);
   const fileCacheRef = useRef<Map<string, TakyonBusinessFileReadResponse>>(new Map());
   const pendingReadsRef = useRef<Map<string, Promise<TakyonBusinessFileReadResponse>>>(new Map());
-  const visible = deliverables.slice(0, 6);
+  const operatorVisibleDeliverables = useMemo(
+    () => deliverables.filter((output) => !HIDDEN_DOCUMENT_SUFFIXES.has(outputSuffix(asText(output.path)))),
+    [deliverables],
+  );
+  const visible = operatorVisibleDeliverables.slice(0, 6);
 
   const loadDocument = useCallback((path: string) => {
     const cached = fileCacheRef.current.get(path);
@@ -776,7 +781,7 @@ function Documents({
   return (
     <>
       <section className="lb-card lb-docs">
-        <div className="lb-h">Documents<span className="lb-h__c">{deliverables.length} generated</span></div>
+        <div className="lb-h">Documents<span className="lb-h__c">{operatorVisibleDeliverables.length} generated</span></div>
         <div className="lb-docs__grid">
           {visible.map((output, index) => (
             <button
