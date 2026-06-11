@@ -653,6 +653,48 @@ def test_claude_agent_task_preserves_worker_stderr_from_sdk_stdout(tmp_path, mon
     assert result["worker_stderr"] == "ENOENT: no such file or directory, uv_os_homedir"
 
 
+def test_claude_agent_task_formats_signal_terminated_worker_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    store = _FakeStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"])).mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(returncode=-15, stdout="", stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-worker-sigterm",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["worker_returncode"] == -15
+    assert result["error"] == "Claude worker was interrupted by SIGTERM before completion"
+
+
 def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 

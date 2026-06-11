@@ -27,6 +27,8 @@ TAKYON_SMOKE_HOST="${TAKYON_SMOKE_HOST:-https://app.fourmanifold.com/}"
 TAKYON_SMOKE_HOST_HEADER="${TAKYON_SMOKE_HOST_HEADER:-}"
 TAKYON_SMOKE_CONNECT_TIMEOUT="${TAKYON_SMOKE_CONNECT_TIMEOUT:-5}"
 TAKYON_SMOKE_MAX_TIME="${TAKYON_SMOKE_MAX_TIME:-10}"
+TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS="${TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS:-900}"
+TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
 
@@ -131,6 +133,50 @@ if ! TARGET_HOST="$TAKYON_VPS_HOST" \
   fi
   echo "warning: xurl auth seed failed; continuing deploy" >&2
 fi
+
+wait_for_remote_runtime_idle() {
+  if ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null"; then
+    return 0
+  fi
+
+  local deadline=$((SECONDS + TAKYON_DEPLOY_DRAIN_TIMEOUT_SECONDS))
+  while true; do
+    local counts
+    counts="$(
+      ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+        "set -euo pipefail
+        env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+          '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from plugins.takyon.core import load_takyon_env
+from plugins.takyon.runtime_app import resolve_database_url
+import psycopg
+
+load_takyon_env()
+with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
+    with conn.cursor() as cur:
+        cur.execute(\"SELECT COUNT(*) FROM business_work_requests WHERE status IN ('queued', 'running')\")
+        work_requests = int(cur.fetchone()[0] or 0)
+        cur.execute(\"SELECT COUNT(*) FROM jobs WHERE status = 'running'\")
+        worker_jobs = int(cur.fetchone()[0] or 0)
+print(f\"{work_requests} {worker_jobs}\")
+PY"
+    )"
+    local queued_or_running_work_requests="${counts%% *}"
+    local running_worker_jobs="${counts##* }"
+    if [[ "$queued_or_running_work_requests" == "0" && "$running_worker_jobs" == "0" ]]; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "deploy drain timed out with ${queued_or_running_work_requests} active work request(s) and ${running_worker_jobs} running worker job(s)" >&2
+      return 1
+    fi
+    echo "waiting for operator runtime to go idle: ${queued_or_running_work_requests} active work request(s), ${running_worker_jobs} running worker job(s)" >&2
+    sleep "$TAKYON_DEPLOY_DRAIN_POLL_SECONDS"
+  done
+}
+
+wait_for_remote_runtime_idle
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \

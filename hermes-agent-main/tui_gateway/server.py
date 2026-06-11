@@ -2362,7 +2362,12 @@ def _run_isolated_gateway_turn(
                     ),
                 }
             stderr = "\n".join(stderr_tail[-8:]).strip()
-            detail = stderr or f"isolated turn exited with code {rc}"
+            if stderr:
+                detail = stderr
+            else:
+                from plugins.takyon.core import _format_process_exit_detail
+
+                detail = _format_process_exit_detail(rc, process_label="isolated turn")
             raise RuntimeError(detail)
         return final
     finally:
@@ -6184,6 +6189,7 @@ def _takyon_business_home_snapshot(
     from plugins.takyon.core import (
         _product_surface_operational_facts,
         _read_product_surface_receipt,
+        _summarize_operator_work_item,
     )
 
     with store._connect() as conn:
@@ -6274,6 +6280,15 @@ def _takyon_business_home_snapshot(
             reverse=True,
         )
         latest_jobs = latest_jobs[:8]
+        latest_job_views: list[dict[str, Any]] = []
+        for item in latest_jobs:
+            summary = _summarize_operator_work_item(item)
+            view = dict(item)
+            view["status"] = summary.get("status") or item.get("status") or "idle"
+            view["detail"] = summary.get("detail") or item.get("detail") or ""
+            view["error"] = summary.get("error") or ""
+            latest_job_views.append(view)
+        latest_jobs = latest_job_views
         if latest_jobs:
             latest_job = latest_jobs[0]
 
@@ -6375,8 +6390,7 @@ def _takyon_business_home_snapshot(
         local_research_outputs = []
     latest_job_label = job_label(as_text(latest_job.get("kind")))
     latest_job_status = trace_status(as_text(latest_job.get("status")))
-    latest_job_payload = latest_job.get("payload") if isinstance(latest_job.get("payload"), dict) else {}
-    latest_job_detail = as_text(latest_job_payload.get("detail")) or headline(
+    latest_job_detail = as_text(latest_job.get("detail")) or headline(
         as_text(latest_job.get("kind")),
         as_text(latest_job.get("status")),
     )
@@ -6477,7 +6491,7 @@ def _takyon_business_home_snapshot(
                 "kind": as_text(job.get("kind")),
                 "status": as_text(job.get("status")),
                 "label": job_label(as_text(job.get("kind"))),
-                "detail": headline(as_text(job.get("kind")), as_text(job.get("status"))),
+                "detail": as_text(job.get("detail")) or headline(as_text(job.get("kind")), as_text(job.get("status"))),
                 "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
                 "created_at": as_text(job.get("created_at")),
             }
@@ -6552,7 +6566,7 @@ def _takyon_business_home_snapshot(
                 "source": as_text(job.get("source") or "job"),
                 "label": job_label(as_text(job.get("kind"))),
                 "status": trace_status(as_text(job.get("status"))),
-                "detail": latest_job_detail if job is latest_job else headline(as_text(job.get("kind")), as_text(job.get("status"))),
+                "detail": latest_job_detail if job is latest_job else (as_text(job.get("detail")) or headline(as_text(job.get("kind")), as_text(job.get("status")))),
                 "tone": tone(as_text(job.get("status"))),
                 "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
             }
@@ -8104,11 +8118,26 @@ _TAKYON_TEXT_OUTPUT_SUFFIXES = {
     ".yml",
     ".yaml",
 }
+_TAKYON_HIDDEN_OUTPUT_SUFFIXES = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+}
 _TAKYON_MAX_MEDIA_BYTES = 64 * 1024 * 1024
 _TAKYON_MAX_FILE_READ_BYTES = 512 * 1024
 _TAKYON_MAX_SITE_PREVIEW_BYTES = 8 * 1024 * 1024
 _TAKYON_INLINE_OUTPUT_PREVIEW_BYTES = 24 * 1024
 _TAKYON_INLINE_OUTPUT_PREVIEW_LIMIT = 8
+
+
+def _takyon_hide_operator_output(path: Any) -> bool:
+    rel = str(path or "").strip()
+    if not rel:
+        return False
+    # Raw source modules remain available through explicit file reads, but they
+    # should not be promoted as operator-facing deliverables/documents.
+    return Path(rel).suffix.lower() in _TAKYON_HIDDEN_OUTPUT_SUFFIXES
 
 
 def _takyon_site_asset_data_url(index_path: Path, raw_url: str, *, site_root: Path | None = None) -> str | None:
@@ -8204,6 +8233,12 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
                 continue
             if path.suffix.lower() not in allowed_suffixes:
                 continue
+            try:
+                rel = str(path.relative_to(root))
+            except Exception:
+                continue
+            if _takyon_hide_operator_output(rel):
+                continue
             candidates.add(path)
 
     outputs: list[dict[str, Any]] = []
@@ -8283,6 +8318,8 @@ def _takyon_workspace_deliverables_payload(
 
     def normalize(output: dict[str, Any]) -> dict[str, Any] | None:
         path = as_text(output.get("path"))
+        if _takyon_hide_operator_output(path):
+            return None
         title = as_text(output.get("title")) or (Path(path).name if path else "Output")
         source = as_text(output.get("source")).lower()
         detail = as_text(output.get("detail"))

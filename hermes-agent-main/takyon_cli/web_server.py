@@ -130,6 +130,14 @@ _TAKYON_DIRECT_FILE_READ_BYTES = 512 * 1024
 _TAKYON_DIRECT_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_DIRECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TAKYON_DIRECT_MEDIA_SUFFIXES = _TAKYON_DIRECT_VIDEO_SUFFIXES | _TAKYON_DIRECT_IMAGE_SUFFIXES
+_TAKYON_DIRECT_HIDDEN_OUTPUT_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+
+
+def _takyon_hide_direct_operator_output(path: Any) -> bool:
+    rel = str(path or "").strip()
+    if not rel:
+        return False
+    return Path(rel).suffix.lower() in _TAKYON_DIRECT_HIDDEN_OUTPUT_SUFFIXES
 
 
 def _valid_session_token(value: str) -> bool:
@@ -234,6 +242,12 @@ def _takyon_direct_historical_outputs(store: Any, slug: str, *, limit: int = 40)
             if not path.is_file():
                 continue
             if path.suffix.lower() not in allowed_suffixes:
+                continue
+            try:
+                rel = str(path.relative_to(root))
+            except Exception:
+                continue
+            if _takyon_hide_direct_operator_output(rel):
                 continue
             candidates.add(path)
 
@@ -3379,7 +3393,7 @@ def _takyon_blank_outreach_channels() -> dict[str, Any]:
 
 
 def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[str, Any]:
-    from plugins.takyon.core import TakyonStore
+    from plugins.takyon.core import TakyonStore, _summarize_operator_work_item
 
     slug = str(business or "").strip().lower()
     store = TakyonStore(operator_user_id=operator_user_id)
@@ -3421,6 +3435,15 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
         reverse=True,
     )
     latest_jobs = latest_jobs[:8]
+    latest_job_views: list[dict[str, Any]] = []
+    for item in latest_jobs:
+        summary = _summarize_operator_work_item(item)
+        view = dict(item)
+        view["status"] = summary.get("status") or item.get("status") or "idle"
+        view["detail"] = summary.get("detail") or item.get("detail") or ""
+        view["error"] = summary.get("error") or ""
+        latest_job_views.append(view)
+    latest_jobs = latest_job_views
 
     product_blocker = str(surface.get("publish_blocker") or "").strip()
     current_action = {
@@ -3444,15 +3467,7 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
             "source": str(preferred.get("source") or "job").strip(),
             "label": _takyon_job_label(preferred.get("kind")),
             "status": preferred_status,
-            "detail": str(
-                (
-                    preferred.get("payload")
-                    if isinstance(preferred.get("payload"), dict)
-                    else {}
-                ).get("detail")
-                or preferred.get("detail")
-                or ""
-            ).strip(),
+            "detail": str(preferred.get("detail") or "").strip(),
             "blocker": product_blocker,
         }
     elif product_blocker:
@@ -3470,15 +3485,7 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
             "source": str(item.get("source") or "job").strip(),
             "label": _takyon_job_label(item.get("kind")),
             "status": _takyon_job_status(item.get("status")),
-            "detail": str(
-                (
-                    item.get("payload")
-                    if isinstance(item.get("payload"), dict)
-                    else {}
-                ).get("detail")
-                or item.get("detail")
-                or ""
-            ).strip(),
+            "detail": str(item.get("detail") or "").strip(),
             "tone": _takyon_status_tone(item.get("status")),
             "updated_at": str(item.get("updated_at") or item.get("created_at") or "").strip(),
         }
@@ -3593,16 +3600,9 @@ def _takyon_business_home_payload(operator_user_id: str, business: str) -> dict[
                     "updated_at": str(item.get("updated_at") or "").strip(),
                     "created_at": str(item.get("created_at") or "").strip(),
                     "label": _takyon_job_label(item.get("kind")),
-                    "detail": str(
-                        (
-                            item.get("payload")
-                            if isinstance(item.get("payload"), dict)
-                            else {}
-                        ).get("detail")
-                        or item.get("detail")
-                        or ""
-                    ).strip(),
+                    "detail": str(item.get("detail") or "").strip(),
                     "tone": _takyon_status_tone(item.get("status")),
+                    "error": str(item.get("error") or "").strip(),
                 }
                 for item in latest_jobs
             ],

@@ -6316,6 +6316,27 @@ def test_historical_outputs_payload_includes_research_files(tmp_path):
     assert "brain/notes.txt" in paths
 
 
+def test_historical_outputs_payload_hides_source_modules_from_operator_outputs(tmp_path):
+    business_root = tmp_path / "demo"
+    (business_root / "product" / "site" / "_takyon").mkdir(parents=True)
+    (business_root / "product" / "site" / "src" / "components").mkdir(parents=True)
+    (business_root / "product" / "site" / "index.html").write_text("<html>demo</html>\n", encoding="utf-8")
+    (business_root / "product" / "site" / "_takyon" / "surface-context.js").write_text("export default {};\n", encoding="utf-8")
+    (business_root / "product" / "site" / "src" / "components" / "starter-site-page.js").write_text("export function Starter() {}\n", encoding="utf-8")
+
+    class _Store:
+        def _business_root(self, slug):
+            assert slug == "demo"
+            return business_root
+
+    outputs = server._takyon_historical_outputs_payload(_Store(), "demo", limit=20)
+    paths = {item["path"] for item in outputs}
+
+    assert "product/site/index.html" in paths
+    assert "product/site/_takyon/surface-context.js" not in paths
+    assert "product/site/src/components/starter-site-page.js" not in paths
+
+
 def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tmp_path):
     business_root = tmp_path / "businesses" / "demo"
     site_root = business_root / "product" / "site"
@@ -6552,3 +6573,111 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
     assert snapshot["overview"]["conversations"]["unresolved_messages"] == 1
     assert any(task["status"] == "running" and task["label"] == "CEO bootstrap" for task in snapshot["overview"]["tasks"])
     assert any(task["status"] == "blocked" and task["label"] == "Product publish blocker" for task in snapshot["overview"]["tasks"])
+
+
+def test_business_home_snapshot_surfaces_nested_worker_failure_detail(tmp_path):
+    class _SnapshotStore:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE app_users (business_slug TEXT, id TEXT);
+                CREATE TABLE app_entitlements (business_slug TEXT, app_user_id TEXT, status TEXT, tier TEXT, plan_key TEXT);
+                CREATE TABLE app_plan_policies (business_slug TEXT, plan_key TEXT, billing_interval TEXT, price_cents INTEGER);
+                CREATE TABLE app_revenue_events (business_slug TEXT, amount_paid_cents INTEGER);
+                CREATE TABLE app_checkout_intents (business_slug TEXT, id TEXT);
+                CREATE TABLE app_usage_events (business_slug TEXT, actual_cost_microusd INTEGER, estimated_cost_microusd INTEGER, created_at TEXT);
+                CREATE TABLE work_requests (
+                  id TEXT,
+                  business_slug TEXT,
+                  kind TEXT,
+                  status TEXT,
+                  payload_json TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
+                CREATE TABLE jobs (
+                  id TEXT,
+                  business_slug TEXT,
+                  kind TEXT,
+                  status TEXT,
+                  payload_json TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                );
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+            self.conn.execute("INSERT INTO app_users (business_slug, id) VALUES (?, ?)", ("demo", "user-1"))
+            self.conn.execute(
+                """
+                INSERT INTO work_requests (id, business_slug, kind, status, payload_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "job-1",
+                    "demo",
+                    "claude.agent_task",
+                    "failed",
+                    json.dumps(
+                        {
+                            "result": {
+                                "error": "node exited -15",
+                                "worker_returncode": -15,
+                            }
+                        }
+                    ),
+                    "2026-06-11T17:17:43Z",
+                    "2026-06-11T17:17:56Z",
+                ),
+            )
+            self.conn.commit()
+
+        @contextmanager
+        def _connect(self):
+            yield self.conn
+
+        def _enforce_operator_business_access(self, conn, slug):
+            return None
+
+        def _ensure_business(self, conn, slug):
+            return {"name": "Demo", "goal": "Ship a planner", "mode": "live"}
+
+        def _ensure_app_budget(self, conn, slug):
+            return {
+                "status": "active",
+                "hard_limit_microusd": 5_000_000,
+                "current_period_start": "2026-06-01T00:00:00Z",
+            }
+
+        def _app_surface_contract(self, conn, slug):
+            return {"status": "ready", "source_path": "product/site"}
+
+        def _work_requests_table(self):
+            return "work_requests"
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            if "payload_json" in data:
+                data["payload"] = json.loads(data.pop("payload_json") or "{}")
+            return data
+
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+        def read(self, *, scope, query, **_kwargs):
+            return {}
+
+    snapshot = server._takyon_business_home_snapshot(_SnapshotStore(), "demo")
+
+    assert snapshot["overview"]["current_action"]["status"] == "blocked"
+    assert snapshot["overview"]["current_action"]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert snapshot["overview"]["jobs"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert snapshot["overview"]["tasks"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"

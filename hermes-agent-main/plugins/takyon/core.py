@@ -12,6 +12,7 @@ import mimetypes
 import os
 import platform
 import re
+import signal
 import shlex
 import shutil
 import socket
@@ -25178,6 +25179,93 @@ _WORKER_DEFERRAL_POLL_SECONDS = 3.0
 _WORKER_PICKUP_TIMEOUT_SECONDS = 30.0
 
 
+def _format_process_exit_detail(returncode: Any, *, process_label: str = "process") -> str:
+    label = str(process_label or "process").strip() or "process"
+    try:
+        code = int(returncode)
+    except Exception:
+        return f"{label} exited before completion"
+    if code < 0:
+        signal_number = abs(code)
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except Exception:
+            signal_name = f"signal {signal_number}"
+        return f"{label} was interrupted by {signal_name} before completion"
+    return f"{label} exited with code {code}"
+
+
+def _summarize_operator_work_item(item: Mapping[str, Any] | None) -> dict[str, Any]:
+    row = item if isinstance(item, Mapping) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    if not payload and "payload_json" in row:
+        payload = _json_loads(row.get("payload_json"), {})
+        payload = payload if isinstance(payload, dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    surface_refresh = result.get("surface_refresh") if isinstance(result.get("surface_refresh"), dict) else {}
+    kind = str(row.get("kind") or payload.get("kind") or "").strip().lower()
+    process_label = "Claude worker" if "claude" in kind else "worker process"
+    worker_returncode = result.get("worker_returncode")
+    process_exit_detail = ""
+    try:
+        if int(worker_returncode) < 0:
+            process_exit_detail = _format_process_exit_detail(worker_returncode, process_label=process_label)
+    except Exception:
+        process_exit_detail = ""
+
+    error_text = str(result.get("error") or "").strip()
+    if process_exit_detail and error_text in {
+        "",
+        f"node exited {worker_returncode}",
+        f"process exited {worker_returncode}",
+    }:
+        error_text = process_exit_detail
+
+    detail = (
+        str(payload.get("detail") or "").strip()
+        or str(row.get("detail") or "").strip()
+        or str(result.get("blocker") or "").strip()
+        or str(surface_refresh.get("blocker") or "").strip()
+        or error_text
+        or str(result.get("worker_stderr") or "").strip()
+        or str(result.get("raw_stdout") or "").strip()
+        or str(result.get("summary") or "").strip()
+        or str(payload.get("summary") or "").strip()
+    )
+
+    row_status = str(row.get("status") or "").strip()
+    payload_status = str(payload.get("status") or "").strip()
+    result_status = str(result.get("status") or "").strip()
+    refresh_status = str(surface_refresh.get("status") or "").strip()
+
+    def _looks_failed(value: str) -> bool:
+        return bool(re.search(r"blocked|fail|error|cancel", str(value or ""), re.I))
+
+    if any(_looks_failed(value) for value in (row_status, payload_status, result_status, refresh_status)):
+        status = next(
+            (
+                value
+                for value in (row_status, payload_status, result_status, refresh_status)
+                if _looks_failed(value)
+            ),
+            "failed",
+        )
+    elif result.get("blocked") or surface_refresh.get("blocker"):
+        status = "blocked"
+    elif result.get("success") is False:
+        status = "failed"
+    else:
+        status = row_status or payload_status or result_status or refresh_status or "idle"
+
+    return {
+        "payload": payload,
+        "result": result,
+        "status": status,
+        "detail": detail,
+        "error": error_text,
+    }
+
+
 def _operator_tasks_via_worker_enabled() -> bool:
     return _env_truthy("TAKYON_OPERATOR_TASKS_VIA_WORKER") and not _env_truthy("TAKYON_WORKER_PROCESS")
 
@@ -25692,8 +25780,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     sdk_result["worker_returncode"] = proc.returncode
                     if stderr:
                         sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
+                    default_error = _format_process_exit_detail(
+                        proc.returncode,
+                        process_label="Claude worker",
+                    )
                     sdk_result["error"] = _truncate_text(
-                        stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or f"node exited {proc.returncode}",
+                        stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or default_error,
                         8000,
                     )
                 if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):

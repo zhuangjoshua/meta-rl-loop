@@ -1010,6 +1010,30 @@ def test_business_workspace_endpoint_reads_owned_workspace_directly(
     assert deliverable["preview_content"] == "# Alpha\n"
 
 
+def test_direct_historical_outputs_hide_source_modules_from_operator_workspace(tmp_path):
+    import takyon_cli.web_server as web_server
+
+    business_root = tmp_path / "demo"
+    (business_root / "product" / "site" / "_takyon").mkdir(parents=True)
+    (business_root / "product" / "site" / "src" / "components").mkdir(parents=True)
+    (business_root / "product" / "site" / "index.html").write_text("<html>demo</html>\n", encoding="utf-8")
+    (business_root / "product" / "site" / "_takyon" / "surface-context.js").write_text("export default {};\n", encoding="utf-8")
+    (business_root / "product" / "site" / "src" / "components" / "starter-site-page.js").write_text("export function Starter() {}\n", encoding="utf-8")
+
+    class _Store:
+        def _business_root(self, slug, sync=False):
+            assert slug == "demo"
+            assert sync is False
+            return business_root
+
+    outputs = web_server._takyon_direct_historical_outputs(_Store(), "demo", limit=20)
+    paths = {item["path"] for item in outputs}
+
+    assert "product/site/index.html" in paths
+    assert "product/site/_takyon/surface-context.js" not in paths
+    assert "product/site/src/components/starter-site-page.js" not in paths
+
+
 def test_business_traction_endpoint_reads_owned_business_directly(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -1585,6 +1609,85 @@ def test_business_home_payload_reads_reddit_campaign_state(tmp_path, monkeypatch
     assert channels["reddit"]["campaigns"][0]["open_url"] == "https://reddit.com/r/test/comments/abc123/demo"
     assert channels["reddit"]["campaigns"][0]["latest_metrics"]["impressions"] == 80
     assert channels["reddit"]["campaigns"][0]["latest_action"]["operation"] == "activate"
+
+
+def test_business_home_payload_surfaces_nested_worker_failure_detail(monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    class _FakeRows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            if "FROM fake_requests" in query:
+                return _FakeRows(
+                    [
+                        {
+                            "id": "req-1",
+                            "business_slug": "alpha",
+                            "kind": "claude.agent_task",
+                            "status": "failed",
+                            "payload_json": json.dumps(
+                                {
+                                    "result": {
+                                        "error": "node exited -15",
+                                        "worker_returncode": -15,
+                                    }
+                                }
+                            ),
+                            "created_at": "2026-06-11T17:17:43Z",
+                            "updated_at": "2026-06-11T17:17:56Z",
+                        }
+                    ]
+                )
+            if "FROM jobs" in query:
+                return _FakeRows([])
+            raise AssertionError(f"Unexpected query: {query}")
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None, *args, **kwargs):
+            self.operator_user_id = operator_user_id
+
+        def _connect(self):
+            return _FakeConn()
+
+        def _enforce_operator_business_access(self, conn, slug):
+            return None
+
+        def _ensure_business(self, conn, slug):
+            return {"slug": slug, "name": "Alpha", "goal": "Launch", "mode": "live"}
+
+        def _app_surface_contract(self, conn, slug):
+            return {}
+
+        def _work_requests_table(self):
+            return "fake_requests"
+
+        def _row_to_dict(self, row):
+            return dict(row)
+
+        def _business_root(self, slug, sync=False):
+            return Path("/tmp")
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+
+    payload = web_server._takyon_business_home_payload("user-123", "alpha")
+
+    assert payload["overview"]["current_action"]["status"] == "blocked"
+    assert payload["overview"]["current_action"]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert payload["overview"]["tasks"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+    assert payload["overview"]["jobs"][0]["error"] == "Claude worker was interrupted by SIGTERM before completion"
 
 
 def test_outreach_start_endpoint_enqueues_channel_request(tmp_path, monkeypatch):
