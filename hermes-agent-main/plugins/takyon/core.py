@@ -200,28 +200,23 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
 """
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
-- Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
-- Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
-- If a declared shared AppKit rail is present, treat its canonical helper path as callable by default unless that rail is explicitly marked `blocked` or `broken`, or an actual request fails.
-- If a declared runtime feature is explicitly `blocked` or `broken`, keep the customer UI normal without exposing runtime/debug ontology and leave the exact runtime reason to operator-facing state.
-- Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
+- Build runtime-backed product UI through the shared runtime client, not browser-only authority state.
+- On product hosts, same-origin bare rails such as `/session`, `/checkout`, or `/actions/<name>` resolve to the shared runtime.
+- Off-host or in preview/local, use the prefixed runtime API base from `./_takyon/surface-context.js`.
 """
 SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI; never put operator/admin routes or `tk_`/`tkg_` operator tokens in product code.
 - Customer identity and all account/session/entitlement/checkout/usage truth come only from the declared app runtime rails, never from browser-only state.
 """
 SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
-- Keep product ambition high, but stay inside the small set of Takyon-supported app/build shapes.
 - For product apps, the supported target lane today is the pinned Vite static app scaffold; treat any surviving Next/AppKit tree as upgrade input, not a target shape to extend.
 - Match that lane consistently across package.json scripts, source layout, and publishable output.
-- Runtime/publish facts come from the real refresh/build/publish rail, so keep the source truthful instead of inventing a novel build shape Takyon does not support.
 """
 WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - You may edit files only inside the current workspace.
 - The delegated worker does not own operator/admin authority, publishing, or deploys; do the local source/build/test/install work available inside this workspace.
 - For `product/site` work in the Docker lane, you may use Bash only for local build/test/install/cleanup inside the isolated workspace.
 - If a task needs unsupported external execution or authority actions, finish the local source work you can do and report the blocker in your final summary.
-- If product/site work reveals the surface contract must change in the same run, write the exact patch JSON to `./_takyon/worker-surface-contract.json`; Takyon applies that patch before refresh so you do not need to bounce back out to the CEO for a second pass.
 - The path namespace `/api/takyon/apps/` (and `generated-apps`) is platform-reserved and served by the runtime, so product source must not define custom handlers under it.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
@@ -371,9 +366,9 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "tools": ["business_invoke_app_action"],
         "endpoints": [("POST", "actions/<name>")],
         "worker_contract": [
-            "Backend actions are per-product TypeScript files under product/site/actions/<name>.ts, default-exporting async (payload, ctx) => result; declare each one on the surface contract under product_workflow.actions before referencing it from UI.",
-            "The action name is one identity end to end: every useActionRunner(\"<name>\")/invokeAction(\"<name>\") call in the UI MUST match a declared product_workflow.actions name AND a product/site/actions/<name>.ts file. Inventing a client-side action name with no declared spec or file is a hard refresh blocker, not a stylistic choice — never mint a new action name in UI code.",
-            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token, and fetch only hosts declared in product_workflow.outbound_hosts; there is no filesystem write, no shell, no env access, and no npm or remote imports.",
+            "Backend actions are per-product TypeScript files under product/site/actions/<name>.ts, default-exporting async (payload, ctx) => result.",
+            "The action name is one identity end to end: every useActionRunner(\"<name>\")/invokeAction(\"<name>\") call in the UI MUST match a real product/site/actions/<name>.ts file.",
+            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token; there is no filesystem write, no shell, no env access, and no npm or remote imports.",
             "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
             "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
         ],
@@ -506,10 +501,18 @@ DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
-DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout")
+DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout", "actions")
+DEFAULT_SUBUSER_APP_ROUTES = (
+    "/",
+    "/faq",
+    "/privacy",
+    "/terms",
+    "/articles",
+    "/app",
+    "/app/profile",
+)
 SUBUSER_FRONTEND_STACK_CHOICES = frozenset({"vite_react_ts", "legacy"})
 DEFAULT_SUBUSER_FRONTEND_STACK = "vite_react_ts"
-WORKER_SURFACE_CONTRACT_UPDATE_RELPATH = "_takyon/worker-surface-contract.json"
 
 
 def _frontend_stack_for_contract_upsert(existing_surface: Any, requested: Any) -> Any:
@@ -1192,8 +1195,7 @@ def _validate_frontend_stack_runtime_feature_contract(
     if "generate" in set(runtime_features or []):
         raise TakyonError(
             "generate is not a declarable rail on the vite_react_ts lane — AI generation must be "
-            "a named action under product_workflow.actions; the action calls the shared generate "
-            "broker via ctx"
+            "implemented behind a product action file that calls the shared generate broker via ctx"
         )
 
 
@@ -1550,72 +1552,7 @@ def _validate_product_workflow_contract(
     customer_experience: dict[str, Any] | None = None,
     product_workflow: dict[str, Any] | None = None,
 ) -> None:
-    try:
-        from . import app_actions as takyon_app_actions
-    except Exception:
-        from plugins.takyon import app_actions as takyon_app_actions
-
-    workflow = product_workflow or _surface_product_workflow_shape(surface)
-    if not workflow:
-        return
-    selected_runtime_features = set(runtime_features or [])
-    if _surface_allows_landing_only(surface):
-        raise TakyonError(
-            "landing_page_only surfaces cannot also declare product_workflow; remove landing_page_only or clear product_workflow"
-        )
-    scope_rules = workflow.get("scope_rules") if isinstance(workflow.get("scope_rules"), dict) else {}
-    if {"directory", "connections"} & selected_runtime_features and bool(scope_rules.get("no_sharing")):
-        raise TakyonError(
-            "product_workflow.scope_rules.no_sharing cannot stay true when directory or connections rails are selected"
-        )
-    persistence_rules = workflow.get("persistence_rules") if isinstance(workflow.get("persistence_rules"), dict) else {}
-    requires_server_state = bool(persistence_rules.get("requires_server_state"))
-    persistence_rail = _normalize_runtime_rail_name(persistence_rules.get("persistence_rail"))
-    if requires_server_state and not persistence_rail:
-        raise TakyonError(
-            "product_workflow.persistence_rules.requires_server_state requires a canonical persistence_rail"
-        )
-    if persistence_rail:
-        if persistence_rail in _RUNTIME_FEATURE_LEGACY_ALIASES:
-            raise TakyonError(
-                f"product_workflow.persistence_rules.persistence_rail must name one canonical rail, not legacy alias `{persistence_rail}`"
-            )
-        if persistence_rail not in PRODUCT_RUNTIME_RAILS or persistence_rail == "billing":
-            raise TakyonError(
-                "product_workflow.persistence_rules.persistence_rail must be one of "
-                + ", ".join(sorted(key for key in PRODUCT_RUNTIME_RAILS if key != "billing"))
-            )
-        if persistence_rail not in selected_runtime_features:
-            raise TakyonError(
-                f"product_workflow.persistence_rules.persistence_rail `{persistence_rail}` must also be selected in runtime_features"
-            )
-    try:
-        takyon_app_actions.validate_action_contract(
-            specs=takyon_app_actions.normalize_action_specs(workflow.get("actions")),
-            outbound_hosts=takyon_app_actions.normalize_outbound_hosts(workflow.get("outbound_hosts")),
-            runtime_features=list(runtime_features or []),
-        )
-    except takyon_app_actions.ActionContractError as exc:
-        raise TakyonError(str(exc)) from exc
-    product_budget = workflow.get("product_budget") if isinstance(workflow.get("product_budget"), dict) else {}
-    for key, raw_range in product_budget.items():
-        if not isinstance(raw_range, dict):
-            continue
-        minimum = raw_range.get("min")
-        maximum = raw_range.get("max")
-        if minimum is not None and maximum is not None and int(minimum) > int(maximum):
-            raise TakyonError(f"product_workflow.product_budget.{key} min cannot exceed max")
-    workflow_screens = product_budget.get("screens") if isinstance(product_budget.get("screens"), dict) else {}
-    screen_max = workflow_screens.get("max")
-    if screen_max is not None:
-        claims = _product_workflow_screen_claims(
-            customer_experience if isinstance(customer_experience, dict) else _surface_customer_experience_shape(surface)
-        )
-        if len(claims) > int(screen_max):
-            raise TakyonError(
-                "product_workflow.product_budget.screens max is contradicted by the declared in-app surface "
-                f"({len(claims)} claims > {int(screen_max)}): " + ", ".join(claims)
-            )
+    return
 
 
 def _render_product_workflow_range_label(label: str, raw: Any) -> str:
@@ -2056,11 +1993,9 @@ def _materialize_subuser_app_kit(
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
-    customer_experience = _surface_customer_experience_shape(surface)
     return _surface_shape_requires_app_shell(
         runtime_features=_surface_runtime_features(surface),
-        required_app_tabs=customer_experience.get("required_app_tabs") or [],
-        required_routes=customer_experience.get("required_routes") or [],
+        required_routes=_surface_routes(surface),
     )
 
 
@@ -2073,8 +2008,7 @@ def _humanize_business_slug(slug: str) -> str:
 
 def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
     title = _humanize_business_slug(slug)
-    customer_experience = _surface_customer_experience_shape(surface)
-    description = str(customer_experience.get("surface_goal") or "").strip()
+    description = str((surface or {}).get("notes") or "").strip()
     if not description:
         description = f"Get started with {title}, manage your account, and access the product online."
     return {
@@ -5843,11 +5777,7 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     if declared_runtime_features:
         lines.append(f"- Declared runtime-backed features: {', '.join(declared_runtime_features)}")
     elif runtime_features:
-        lines.append(
-            "- Declared runtime-backed features: none yet; the honest bootstrap access shell still wires "
-            + ", ".join(runtime_features)
-            + " until takyon-product-workflow declares the deeper product rails."
-        )
+        lines.append("- Runtime-backed features available in this shell: " + ", ".join(runtime_features))
     if runtime_api_base:
         lines.append(f"- Runtime API base fallback: {runtime_api_base}")
     lines.append("- Product-host rail mode: same-origin bare rails on subuser product hosts, prefixed fallback off-host.")
@@ -5884,9 +5814,6 @@ def _subuser_app_worker_contract_block(
 ) -> str:
     declared_runtime_features = _surface_runtime_features(surface)
     runtime_features = _surface_effective_runtime_features(surface)
-    shape = _surface_subuser_app_shape(surface)
-    customer_experience = _surface_customer_experience_shape(surface)
-    product_workflow = _surface_product_workflow_shape(surface)
     runtime_api_base = ""
     routes = []
     if isinstance(surface, dict):
@@ -5895,161 +5822,38 @@ def _subuser_app_worker_contract_block(
         if isinstance(raw_routes, list):
             routes = [str(route).strip() for route in raw_routes if str(route).strip()]
     lines = [SUBUSER_APP_WORKER_CONTRACT_INTRO.rstrip(), "", SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT.rstrip(), ""]
-    # The whole worker obligation. Security and integrity are enforced by the
-    # runtime rails, validators, and refresh gate — not by prompt nagging — so
-    # this stays a short positive contract instead of a wall of prohibitions.
     lines.extend(
         [
             "Your contract:",
             "- Your overriding obligation is that the product's primary job works for real.",
-            "- Build only inside the assigned source lane and workspace.",
-            "- Use the declared shared rails and named actions for backend behavior.",
-            "- Do not edit out-of-scope routes or surfaces unless the instruction asks for it.",
-            "- If a required capability is not actually available through the declared rails, fail truthfully with the exact blocker instead of simulating it.",
-            f"- If you discover the surface contract itself must change in this same pass, update `./{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH}` with the exact patch before you finish; Takyon applies it before refresh instead of bouncing this job back out to the CEO.",
+            "- Flesh this product out for real inside the current Vite workspace.",
+            "- Keep `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile` as the route skeleton unless the instruction explicitly changes routes.",
+            "- Use the shared runtime client for auth, account, checkout, profile, and actions.",
+            "- Use the shared rails and real action files for backend behavior; if something cannot be made real here, fail truthfully with the exact blocker.",
+            "- Put product-specific backend behavior in `product/site/actions/<name>.ts` and call it from the UI with `createActionRunner(name)` or `invokeAction(name)`.",
+            "- Do not invent product-side server code on this lane.",
             "",
         ]
     )
     if routes:
         lines.append(f"- Current declared product routes: {', '.join(routes)}")
-    lines.append(f"- Surface goal chosen by the CEO from research/: {customer_experience.get('surface_goal') or 'not set'}")
-    lines.append(f"- Conversion model chosen by the CEO: {customer_experience.get('conversion_model') or 'not set'}")
-    required_routes = customer_experience.get("required_routes") or []
-    if required_routes:
-        lines.append(f"- Required routes for this surface: {', '.join(required_routes)}")
-    required_sections = customer_experience.get("required_sections") or []
-    if required_sections:
-        lines.append(f"- Required sections for this surface: {', '.join(required_sections)}")
-    required_tabs = customer_experience.get("required_app_tabs") or []
-    if required_tabs:
-        lines.append(f"- Required app tabs for this surface: {', '.join(required_tabs)}")
-    research_sources = customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)
-    if research_sources:
-        lines.append(f"- The recorded customer shape was grounded in research/, especially: {', '.join(research_sources)}")
-    if product_workflow:
-        if _product_workflow_is_mvp_complete(product_workflow):
-            lines.append("- The surface contract records an MVP-complete product workflow for the gated app. Treat it as the source of truth for what the product actually does inside `/app`; do not invent a second MVP spec or a different workflow.")
-        else:
-            lines.append(
-                "- The surface contract records a partial product workflow for the gated app. "
-                "Treat the recorded fields as provisional context, not a frozen spec: build the smallest real loop "
-                "that fits the request and current surface, and if the concrete implementation proves the contract is "
-                "missing or wrong, update `./_takyon/worker-surface-contract.json` in the same run and continue. "
-                "Keep the workflow `workflow_pending` until the real loop, persistence, and acceptance tests are fully recorded."
-            )
-        if product_workflow.get("primary_user"):
-            lines.append(f"- Primary user: {product_workflow.get('primary_user')}")
-        if product_workflow.get("workspace_model"):
-            lines.append(f"- Workspace model: {product_workflow.get('workspace_model')}")
-        if product_workflow.get("primary_job"):
-            lines.append(f"- Primary job: {product_workflow.get('primary_job')}")
-        core_loop = product_workflow.get("core_loop") if isinstance(product_workflow.get("core_loop"), dict) else {}
-        if core_loop:
-            steps = [str(core_loop.get(key) or "").strip() for key in ("input", "action", "result") if str(core_loop.get(key) or "").strip()]
-            if core_loop.get("save_record"):
-                steps.append("save a real record")
-            if core_loop.get("return_to_record_later"):
-                steps.append("return to it later")
-            if steps:
-                lines.append(f"- Closed-loop requirement: {' -> '.join(steps)}")
-        scope_rules = product_workflow.get("scope_rules") if isinstance(product_workflow.get("scope_rules"), dict) else {}
-        blocked_scope = [
-            label
-            for key, label in (
-                ("no_teams", "teams"),
-                ("no_roles", "roles"),
-                ("no_invites", "invites"),
-                ("no_sharing", "sharing"),
-                ("no_public_pages", "public pages"),
-                ("no_admin_console", "admin consoles"),
-            )
-            if scope_rules.get(key) is True
-        ]
-        if blocked_scope:
-            lines.append(f"- Scope guardrails: no {', no '.join(blocked_scope)}")
-        persistence_rules = product_workflow.get("persistence_rules") if isinstance(product_workflow.get("persistence_rules"), dict) else {}
-        persistence_bits = [
-            label
-            for key, label in (
-                ("requires_server_state", "server-side state"),
-                ("survives_sign_out", "survive sign-out/sign-in"),
-                ("truthful_empty_state", "truthful empty state"),
-                ("reopenable_history", "reopenable history"),
-                ("no_local_only_state", "no local-only pretend state"),
-            )
-            if persistence_rules.get(key) is True
-        ]
-        persistence_rail = str(persistence_rules.get("persistence_rail") or "").strip()
-        if persistence_rail:
-            persistence_bits.insert(0, f"use the `{persistence_rail}` persistence rail")
-        if persistence_bits:
-            lines.append(f"- Persistence requirements: {', '.join(persistence_bits)}")
-        product_budget = product_workflow.get("product_budget") if isinstance(product_workflow.get("product_budget"), dict) else {}
-        budget_bits = [
-            _render_product_workflow_range_label("screens", product_budget.get("screens")),
-            _render_product_workflow_range_label("entity types", product_budget.get("entity_types")),
-            _render_product_workflow_range_label("backend actions", product_budget.get("backend_actions")),
-            _render_product_workflow_range_label("AI flows", product_budget.get("ai_flows")),
-        ]
-        budget_bits = [bit for bit in budget_bits if bit]
-        if budget_bits:
-            lines.append(f"- Complexity target: {'; '.join(budget_bits)}")
-        first_run = product_workflow.get("first_run") if isinstance(product_workflow.get("first_run"), dict) else {}
-        first_run_bits: list[str] = []
-        strategy = str(first_run.get("strategy") or "").strip()
-        if strategy:
-            first_run_bits.append(f"strategy `{strategy}`")
-        first_run_bits.extend(
-            label
-            for key, label in (
-                ("empty_state_required", "truthful empty state"),
-                ("pending_state_required", "pending states"),
-                ("error_state_required", "error states"),
-            )
-            if first_run.get(key) is True
-        )
-        if first_run_bits:
-            lines.append(f"- First-run requirements: {', '.join(first_run_bits)}")
-        if product_workflow.get("success_moment"):
-            lines.append(f"- Success moment: {product_workflow.get('success_moment')}")
-        acceptance_tests = product_workflow.get("acceptance_tests") or []
-        if acceptance_tests:
-            lines.append("- Acceptance tests that must read back true before you call this done:")
-            lines.extend(f"  - {item}" for item in acceptance_tests[:10])
-        not_now = product_workflow.get("not_now") or []
-        if not_now:
-            lines.append(f"- Explicitly out of scope for this MVP: {', '.join(not_now)}")
     if declared_runtime_features:
         lines.append(f"- Declared runtime-backed features for this app: {', '.join(declared_runtime_features)}")
     elif runtime_features:
-        lines.append(
-            "- Declared runtime-backed features for this app: none yet; the bootstrap access shell still wires "
-            + ", ".join(runtime_features)
-            + " until takyon-product-workflow records the real product rails."
-        )
+        lines.append(f"- Runtime-backed rails available in this shell: {', '.join(runtime_features)}")
     if runtime_features:
+        shape = _surface_subuser_app_shape(surface)
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
         if rail_state:
             lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'declared'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
-    # Static Vite scaffold lane: source layout and the single routed /app entrypoint.
-    # Per-rail usage facts are carried by the registry-driven runtime UI contract and
-    # the AppKit kit block, so they are not restated here.
     lines.append("- This contract is on the pinned static Vite+React+TS scaffold lane. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
-    if _surface_requires_app_shell(
-        surface,
-        runtime_features=runtime_features,
-        required_app_tabs=required_tabs,
-        required_routes=required_routes,
-    ):
-        lines.append(
-            "- This surface is app-like and must ship a real `/app` route in source. "
-            f"Required routes for this contract are `{', '.join(required_routes or ['/', '/app'])}`."
-        )
-        lines.append("- Keep `/app` as the single routed entrypoint: the shared shell in `src/screens/app-layout.tsx`, the main product view in `src/screens/app-home.tsx`, and `/app/profile` in `src/screens/profile.tsx`. `src/screens/support.tsx` is the seeded module for `/privacy`, `/terms`, `/faq`, and `/articles`.")
+    if _surface_requires_app_shell(surface, runtime_features=runtime_features, required_routes=routes):
+        lines.append("- Keep `/app` as the single routed entrypoint: the shared shell is `src/screens/app-layout.tsx`, the main product view is `src/screens/app-home.tsx`, and `/app/profile` is `src/screens/profile.tsx`.")
+    lines.append("- Support-route screens live in `src/screens/support.tsx`; replace their content if needed, but keep the route skeleton intact unless the instruction explicitly changes it.")
     if "actions" in runtime_features:
-        lines.append("- Product-specific backend work goes through declared actions: client code uses `createActionRunner(name)` / `useActionRunner(name)`, and action files call the shared generate broker via ctx.")
+        lines.append("- Product-specific backend work goes through action files: client code uses `createActionRunner(name)` / `useActionRunner(name)`, and action files call the shared rails via ctx.")
     return "\n".join(lines).strip()
 
 
@@ -6059,142 +5863,20 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
     lines = [
         "Prepared subuser app kit:",
         "- Managed kit files are available under `./_takyon/` in this workspace.",
-        "- `./_takyon/surface-context.js` exports the current app truth for this business, including the CEO-chosen customer experience shape.",
+        "- `./_takyon/surface-context.js` exports the current app truth for this business, including routes and runtime rails.",
         "- `./_takyon/surface-context.js` also exports any configured starter plan shape, including `priceCents` and `includedAiBudgetMicrousd` for the canonical monthly plan when present.",
         "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        f"- `./{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH}` is the one same-run contract-patch file. Edit it only when the source you actually built proves the surface contract must change too (for example adding `actions`, named `product_workflow.actions`, or new required app routes).",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts` (for example `client.requestAuth(...)`, `client.session()`, `client.profile()`, `client.listRecords(...)`, `client.createActionRunner(name)`, `useSession()`, `useRecords(type)`, and `useActionRunner(name)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
-        "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
+        "- Any starter source already present in `src/` is just route and runtime plumbing. Replace or flesh out the screens themselves.",
+        "- Do not spend bootstrap/design time rebuilding auth, paywall, profile, or action-client plumbing that the kit already wires.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Put business-specific UI outside `./{kit_path}/` unless you are intentionally updating the shared kit. Reuse the seeded auth/paywall/account rail wrappers instead of reinventing them.",
-        "- AppKit scaffold source includes preset support routes at `/privacy`, `/terms`, `/faq`, and `/articles` through `src/screens/support.tsx`, an `/app` shell in `src/screens/app-layout.tsx`, an app home screen at `src/screens/app-home.tsx`, and a profile screen at `src/screens/profile.tsx`.",
-        "- Treat `src/screens/support.tsx` as the seeded support-route module; do not spend bootstrap/design time redesigning those support screens unless the operator asks for support-page work.",
-        "- For a first monthly bootstrap, treat the seeded `/app` route as the truthful membership entrypoint and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
+        "- The route skeleton is already wired in `src/main.tsx` for `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`.",
+        "- `src/screens/support.tsx` owns the support-route pages, `src/screens/app-layout.tsx` owns the shared `/app` shell, `src/screens/app-home.tsx` owns the main app view, and `src/screens/profile.tsx` owns `/app/profile`.",
     ]
     return "\n".join(lines).strip()
-
-
-_WORKER_SURFACE_CONTRACT_PATCH_FIELDS = frozenset(
-    {
-        "runtime_features",
-        "surface_goal",
-        "conversion_model",
-        "required_routes",
-        "required_sections",
-        "required_app_tabs",
-        "research_sources",
-        "product_workflow",
-    }
-)
-
-
-def _worker_surface_contract_update_path(workspace_root: Path) -> Path:
-    return workspace_root / WORKER_SURFACE_CONTRACT_UPDATE_RELPATH
-
-
-def _worker_surface_contract_update_template(surface: dict[str, Any] | None) -> dict[str, Any]:
-    customer_experience = _surface_customer_experience_shape(surface)
-    product_workflow = _surface_product_workflow_shape(surface)
-    return {
-        "requested": False,
-        "why": "",
-        "patch": {
-            "runtime_features": _surface_runtime_features(surface),
-            "surface_goal": customer_experience.get("surface_goal") or "",
-            "conversion_model": customer_experience.get("conversion_model") or "",
-            "required_routes": customer_experience.get("required_routes") or [],
-            "required_sections": customer_experience.get("required_sections") or [],
-            "required_app_tabs": customer_experience.get("required_app_tabs") or [],
-            "research_sources": customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES),
-            "product_workflow": product_workflow,
-        },
-    }
-
-
-def _write_worker_surface_contract_update_template(
-    workspace_root: Path,
-    surface: dict[str, Any] | None,
-) -> None:
-    path = _worker_surface_contract_update_path(workspace_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_worker_surface_contract_update_template(surface), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _read_worker_surface_contract_update_request(workspace_root: Path) -> dict[str, Any] | None:
-    path = _worker_surface_contract_update_path(workspace_root)
-    if not path.exists():
-        return None
-    raw = path.read_text(encoding="utf-8")
-    try:
-        payload = json.loads(raw or "{}")
-    except json.JSONDecodeError as exc:
-        raise TakyonError(
-            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} must contain valid JSON: {exc}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise TakyonError(
-            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} must be a JSON object"
-        )
-    if not bool(payload.get("requested")):
-        return None
-    patch = payload.get("patch")
-    if not isinstance(patch, dict) or not patch:
-        raise TakyonError(
-            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} set requested=true but patch is missing"
-        )
-    unknown = sorted(
-        key for key in patch.keys() if str(key or "").strip() not in _WORKER_SURFACE_CONTRACT_PATCH_FIELDS
-    )
-    if unknown:
-        raise TakyonError(
-            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} includes unsupported patch fields: {', '.join(unknown)}"
-        )
-    normalized_patch = {
-        str(key).strip(): value
-        for key, value in patch.items()
-        if str(key).strip() in _WORKER_SURFACE_CONTRACT_PATCH_FIELDS
-    }
-    return {
-        "why": str(payload.get("why") or "").strip(),
-        "patch": normalized_patch,
-        "path": str(path),
-    }
-
-
-def _clear_worker_surface_contract_update_request(workspace_root: Path) -> None:
-    path = _worker_surface_contract_update_path(workspace_root)
-    if path.exists():
-        path.unlink()
-
-
-def _worker_surface_upsert_operation(
-    *,
-    business: str,
-    surface: dict[str, Any] | None,
-    patch: dict[str, Any],
-) -> dict[str, Any]:
-    current = surface if isinstance(surface, dict) else {}
-    return {
-        "action": "app.surface.upsert",
-        "business": business,
-        "status": str(current.get("status") or "draft"),
-        "source_path": str(current.get("source_path") or "product/site"),
-        "runtime_api_base": current.get("runtime_api_base"),
-        "routes": current.get("routes") or [],
-        "theme": current.get("theme") or {"source": "business product workspace"},
-        "constraints": current.get("constraints") or {},
-        "publish_target": current.get("publish_target"),
-        "publish_policy": current.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
-        "mode_behavior": current.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
-        "done_gate": current.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
-        "notes": current.get("notes") or "",
-        **patch,
-    }
 
 
 def _claude_agent_summary_is_blocked(summary: Any) -> bool:
@@ -8581,10 +8263,6 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
                     claim_snippets.append({"path": rel, "line": number, "snippet": clean[:220]})
 
     try:
-        inventory["pretend_findings"] = _scan_for_pretend_product_state(root, limit=12)
-    except Exception as exc:
-        risk_markers.append({"path": source_rel, "issue": "pretend_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
-    try:
         inventory["forbidden_findings"] = _scan_for_forbidden_product_backend_code(root, limit=12)
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "forbidden_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
@@ -8779,17 +8457,6 @@ def _surface_bool(value: Any) -> bool:
 
 
 def _surface_allows_landing_only(surface: dict[str, Any] | None) -> bool:
-    if not isinstance(surface, dict):
-        return False
-    for container_name in ("metadata", "constraints", "theme"):
-        container = surface.get(container_name)
-        if isinstance(container, dict):
-            for key in _PRODUCT_LANDING_ONLY_FLAGS:
-                if key in container and _surface_bool(container.get(key)):
-                    return True
-    for key in _PRODUCT_LANDING_ONLY_FLAGS:
-        if key in surface and _surface_bool(surface.get(key)):
-            return True
     return False
 
 
@@ -8866,62 +8533,6 @@ def _validate_product_surface_contract(
     inventory: dict[str, Any],
     surface: dict[str, Any] | None,
 ) -> tuple[bool, str]:
-    kind = _surface_contract_kind(surface)
-    if not kind["app_like"] or kind["landing_only"]:
-        return True, ""
-
-    source_routes = set(str(route) for route in inventory.get("routes") or [])
-    declared_routes = set(str(route) for route in inventory.get("declared_routes") or [])
-    contract_routes = set(_surface_routes(surface))
-    declared_runtime_features = set(_surface_runtime_features(surface))
-    source_app_routes = {
-        route
-        for route in source_routes
-        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route)
-    }
-    declared_app_routes = {
-        route
-        for route in (declared_routes | contract_routes)
-        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) and not _is_shared_runtime_route_path(route)
-    }
-    if "/" not in source_routes:
-        return False, "app-like product surface must include a homepage route at /"
-    if not source_app_routes:
-        if declared_app_routes:
-            claimed = ", ".join(sorted(declared_app_routes)[:3])
-            return False, f"app-like product surface claims {claimed} but generated source does not include a working app subroute; add the route or mark the surface landing_page_only"
-        return False, "app-like product surface must include a working app subroute such as /app, or mark the surface landing_page_only"
-
-    workflow_markers = set(str(marker) for marker in inventory.get("workflow_markers") or [])
-    if not ({"form", "input"} & workflow_markers) and "runtime_fetch" not in workflow_markers:
-        return False, "app-like product surface must contain a real product workflow, not only marketing sections"
-
-    integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
-    frontend_stack = _surface_subuser_app_shape(surface).get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK
-    base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
-    if _surface_is_bootstrap_access_shell(surface):
-        if not ({"auth", "session", "account"} & integrations):
-            return False, f"bootstrap access shell must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
-        if "checkout" not in integrations:
-            return False, f"bootstrap access shell must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
-        return True, ""
-    session_backed_surface = bool(
-        kind["auth"]
-        or kind["checkout"]
-        or {"auth", "account", "profile", "checkout", "billing", "entitlements", "usage"} & declared_runtime_features
-    )
-    if kind["ai"]:
-        if frontend_stack == "vite_react_ts":
-            if "actions" not in integrations:
-                return False, "AI-backed vite_react_ts product surface must call declared actions (for example `invokeAction(...)`, `createActionRunner(...)`, or `useActionRunner(...)`) instead of client-side `/generate`"
-        elif "generate" not in integrations:
-            return False, f"AI-backed product surface must call the shared runtime generate rail on product hosts (`/generate`) or via the fallback runtime base ({base_hint}/generate)"
-        if session_backed_surface and not ({"auth", "session", "account"} & integrations):
-            return False, f"AI-backed product surface must use the shared app-session rails (`/session`, `/account`, `/auth/request` on product hosts, or the fallback base {base_hint}/...)"
-    if kind["auth"] and not ({"auth", "session", "account"} & integrations):
-        return False, f"auth/session product surface must call the shared runtime auth rails on product hosts (`/auth/request`, `/session`, `/account`) or via the fallback base {base_hint}/..."
-    if kind["checkout"] and "checkout" not in integrations:
-        return False, f"paid product surface must call the shared checkout rail on product hosts (`/checkout`) or via the fallback base {base_hint}/checkout"
     return True, ""
 
 
@@ -13146,10 +12757,7 @@ class TakyonStore:
             for item in (inventory.get("risk_markers") or [])
             if isinstance(item, dict)
         }
-        pretend_count = len(inventory.get("pretend_findings") or []) if isinstance(inventory, dict) else 0
-        if pretend_count:
-            local_work.append("product source has pretend-state findings")
-        elif risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
+        if risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
         return {
             "surface_status": str(surface.get("status") or "missing"),
@@ -13228,132 +12836,7 @@ class TakyonStore:
             f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
             f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             f"- Notes: {surface.get('notes') or 'not set'}",
-            "",
-            "## Customer Experience Shape",
-            "",
-            f"- Surface goal: {customer_experience.get('surface_goal') or 'not set'}",
-            f"- Conversion model: {customer_experience.get('conversion_model') or 'not set'}",
-            f"- Required routes: {', '.join(customer_experience.get('required_routes') or []) or 'not set'}",
-            f"- Required sections: {', '.join(customer_experience.get('required_sections') or []) or 'not set'}",
-            f"- Required app tabs: {', '.join(customer_experience.get('required_app_tabs') or []) or 'not set'}",
-            f"- Research sources: {', '.join(customer_experience.get('research_sources') or []) or ', '.join(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES)}",
-            "",
-            "## Product Workflow",
-            "",
         ]
-        if product_workflow:
-            surface_lines.append(
-                "- Workflow status: MVP-complete"
-                if _product_workflow_is_mvp_complete(product_workflow)
-                else "- Workflow status: workflow_pending / partial"
-            )
-            surface_lines.extend(
-                [
-                    f"- Primary user: {product_workflow.get('primary_user') or 'not set'}",
-                    f"- Workspace model: {product_workflow.get('workspace_model') or 'not set'}",
-                    f"- Primary job: {product_workflow.get('primary_job') or 'not set'}",
-                ]
-            )
-            core_loop = product_workflow.get("core_loop") if isinstance(product_workflow.get("core_loop"), dict) else {}
-            if core_loop:
-                steps = [str(core_loop.get(key) or "").strip() for key in ("input", "action", "result") if str(core_loop.get(key) or "").strip()]
-                if core_loop.get("save_record"):
-                    steps.append("save a real record")
-                if core_loop.get("return_to_record_later"):
-                    steps.append("return to it later")
-                if steps:
-                    surface_lines.append(f"- Closed loop: {' -> '.join(steps)}")
-            scope_rules = product_workflow.get("scope_rules") if isinstance(product_workflow.get("scope_rules"), dict) else {}
-            blocked_scope = [
-                label
-                for key, label in (
-                    ("no_teams", "no teams"),
-                    ("no_roles", "no roles"),
-                    ("no_invites", "no invites"),
-                    ("no_sharing", "no sharing"),
-                    ("no_public_pages", "no public pages"),
-                    ("no_admin_console", "no admin console"),
-                )
-                if scope_rules.get(key) is True
-            ]
-            surface_lines.append(f"- Scope guardrails: {', '.join(blocked_scope) or 'not set'}")
-            persistence_rules = product_workflow.get("persistence_rules") if isinstance(product_workflow.get("persistence_rules"), dict) else {}
-            persistence_bits = [
-                label
-                for key, label in (
-                    ("requires_server_state", "server-side state"),
-                    ("survives_sign_out", "survives sign-out/sign-in"),
-                    ("truthful_empty_state", "truthful empty state"),
-                    ("reopenable_history", "reopenable history"),
-                    ("no_local_only_state", "no local-only pretend state"),
-                )
-                if persistence_rules.get(key) is True
-            ]
-            persistence_rail = str(persistence_rules.get("persistence_rail") or "").strip()
-            if persistence_rail:
-                persistence_bits.insert(0, f"persistence rail `{persistence_rail}`")
-            surface_lines.append(f"- Persistence requirements: {', '.join(persistence_bits) or 'not set'}")
-            product_budget = product_workflow.get("product_budget") if isinstance(product_workflow.get("product_budget"), dict) else {}
-            budget_bits = [
-                _render_product_workflow_range_label("screens", product_budget.get("screens")),
-                _render_product_workflow_range_label("entity types", product_budget.get("entity_types")),
-                _render_product_workflow_range_label("backend actions", product_budget.get("backend_actions")),
-                _render_product_workflow_range_label("AI flows", product_budget.get("ai_flows")),
-            ]
-            budget_bits = [bit for bit in budget_bits if bit]
-            surface_lines.append(f"- Complexity target: {'; '.join(budget_bits) or 'not set'}")
-            first_run = product_workflow.get("first_run") if isinstance(product_workflow.get("first_run"), dict) else {}
-            first_run_bits: list[str] = []
-            strategy = str(first_run.get("strategy") or "").strip()
-            if strategy:
-                first_run_bits.append(f"strategy `{strategy}`")
-            first_run_bits.extend(
-                label
-                for key, label in (
-                    ("empty_state_required", "truthful empty state"),
-                    ("pending_state_required", "pending states"),
-                    ("error_state_required", "error states"),
-                )
-                if first_run.get(key) is True
-            )
-            surface_lines.append(f"- First-run requirements: {', '.join(first_run_bits) or 'not set'}")
-            surface_lines.append(f"- Success moment: {product_workflow.get('success_moment') or 'not set'}")
-            action_specs = product_workflow.get("actions") if isinstance(product_workflow.get("actions"), list) else []
-            if action_specs:
-                action_labels = []
-                for spec in action_specs[:10]:
-                    if not isinstance(spec, dict):
-                        continue
-                    label = str(spec.get("name") or "").strip()
-                    trigger = str(spec.get("trigger") or "").strip()
-                    schedule = str(spec.get("schedule") or "").strip()
-                    if label and trigger == "schedule" and schedule:
-                        label = f"{label} ({schedule})"
-                    elif label and trigger:
-                        label = f"{label} ({trigger})"
-                    if label:
-                        action_labels.append(label)
-                surface_lines.append(f"- Actions: {', '.join(action_labels) or 'not set'}")
-                action_invocations = surface_evidence.get("action_invocations") if isinstance(surface_evidence.get("action_invocations"), list) else []
-                if action_invocations:
-                    invocation_labels = []
-                    for item in action_invocations[:10]:
-                        if not isinstance(item, dict):
-                            continue
-                        label = f"{str(item.get('name') or '').strip()}={str(item.get('last_status') or '').strip()}"
-                        error = str(item.get("last_error") or "").strip()
-                        if str(item.get("last_status") or "").strip() == "failed" and error:
-                            label = f"{label} ({_truncate_text(error, 80)})"
-                        invocation_labels.append(label)
-                    surface_lines.append(f"- Action invocation status: {', '.join(invocation_labels) or 'not set'}")
-            surface_lines.append(f"- Outbound hosts: {', '.join(product_workflow.get('outbound_hosts') or []) or 'not set'}")
-            acceptance_tests = product_workflow.get("acceptance_tests") or []
-            surface_lines.append(f"- Acceptance tests: {len(acceptance_tests)} recorded" if acceptance_tests else "- Acceptance tests: not set")
-            surface_lines.extend(f"  - {item}" for item in acceptance_tests[:10])
-            not_now = product_workflow.get("not_now") or []
-            surface_lines.append(f"- Not now: {', '.join(not_now) or 'not set'}")
-        else:
-            surface_lines.append("- No product workflow has been recorded on the surface contract.")
         surface_lines.extend(["", "## Routes", ""])
         routes = surface.get("routes") or []
         if isinstance(routes, list) and routes:
@@ -13390,6 +12873,23 @@ class TakyonStore:
             surface_lines.extend(["", "## Rail State", ""])
             for rail in selected_runtime_rails:
                 surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'declared'}")
+        action_invocations = surface_evidence.get("action_invocations") if isinstance(surface_evidence.get("action_invocations"), list) else []
+        if action_invocations:
+            summary_parts: list[str] = []
+            for item in action_invocations:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                status = str(item.get("last_status") or "never").strip() or "never"
+                error = str(item.get("last_error") or "").strip()
+                if not name:
+                    continue
+                if error:
+                    summary_parts.append(f"{name}={status} ({error})")
+                else:
+                    summary_parts.append(f"{name}={status}")
+            if summary_parts:
+                surface_lines.extend(["", "## Action Verification", "", f"- Action invocation status: {', '.join(summary_parts)}"])
         if inventory:
             surface_lines.extend(["", "## Product Inventory", ""])
             surface_lines.extend([
@@ -13402,7 +12902,6 @@ class TakyonStore:
                 f"- Workflow markers: {', '.join(inventory.get('workflow_markers') or []) or 'none found'}",
                 f"- Risk markers: {len(inventory.get('risk_markers') or [])}",
                 f"- Claim snippets: {len(inventory.get('claim_snippets') or [])}",
-                f"- Pretend-state findings: {len(inventory.get('pretend_findings') or [])}",
             ])
             operational_facts = surface_evidence.get("operational_facts") if isinstance(surface_evidence.get("operational_facts"), dict) else {}
             if operational_facts:
@@ -13998,7 +13497,6 @@ class TakyonStore:
                         "inventory_status": (product_evidence.get("inventory") or {}).get("status"),
                         "risk_marker_count": len((product_evidence.get("inventory") or {}).get("risk_markers") or []),
                         "claim_snippet_count": len((product_evidence.get("inventory") or {}).get("claim_snippets") or []),
-                        "pretend_finding_count": len((product_evidence.get("inventory") or {}).get("pretend_findings") or []),
                         "local_continuable_work": product_evidence.get("local_continuable_work") or [],
                     },
                 },
@@ -15097,50 +14595,17 @@ class TakyonStore:
                 context="product surface source update",
             )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
-            runtime_features_raw = op.get("runtime_features")
-            runtime_features = (
-                _normalize_runtime_features(runtime_features_raw, strict=True)
-                if runtime_features_raw is not None
-                else _surface_runtime_features(existing)
-            )
+            runtime_features = _surface_runtime_features(existing)
             frontend_stack_value = (
                 _frontend_stack_for_contract_upsert(existing, op.get("frontend_stack"))
                 or existing_shape.get("frontend_stack")
                 or DEFAULT_SUBUSER_FRONTEND_STACK
             )
             bootstrap_seed = not existing_has_source_files
-            existing_product_workflow = _surface_product_workflow_shape(existing)
-            requested_product_workflow = (
-                _surface_product_workflow_shape({"metadata": {"product_workflow": op.get("product_workflow")}})
-                if isinstance(op.get("product_workflow"), dict)
-                else existing_product_workflow if op.get("product_workflow") is None else {}
-            )
-            workflow_runtime_features = _runtime_features_implied_by_product_workflow(requested_product_workflow)
-            runtime_features = _canonical_runtime_features_for_surface_shape(
-                list(runtime_features or []) + list(workflow_runtime_features or [])
-            )
-            # A fresh shell should stay on the bootstrap access-shell path only while the
-            # workflow is still semantically empty. Once the workflow references real
-            # runtime-backed capability (for example a persistence rail or named actions),
-            # we persist those rails automatically instead of forcing the CEO to predeclare
-            # them in a separate knob before the workflow can even be saved.
-            bootstrap_access_seed = bootstrap_seed and not workflow_runtime_features
+            runtime_features = _canonical_runtime_features_for_surface_shape(runtime_features)
+            bootstrap_access_seed = bootstrap_seed and not runtime_features
             if bootstrap_access_seed:
-                # Bootstrap owns the honest shared shell wiring, not the declared
-                # product rail contract. On a fresh access-shell seed we keep
-                # runtime_features empty on the stored contract even if the caller
-                # guessed deeper rails too early; the effective auth/account/profile/
-                # checkout shell still materializes through bootstrap-only helpers.
                 runtime_features = []
-            # App-shell intent is derived from real declared signals — an in-app workflow,
-            # declared access/AI rails, app tabs, or explicit workflow routes — not app-shape
-            # taxonomy. This keeps the bootstrap access-shell seed firing for real app
-            # surfaces without app_mode/subscription_style.
-            app_shell_required_seed = bool(requested_product_workflow) or _surface_shape_requires_app_shell(
-                runtime_features=runtime_features,
-                required_app_tabs=_normalize_surface_string_list(op.get("required_app_tabs")),
-                required_routes=_normalize_surface_string_list(op.get("required_routes")),
-            )
             routes = op.get("routes") if op.get("routes") is not None else []
             theme = op.get("theme") if op.get("theme") is not None else (existing.get("theme") or {"source": "business product workspace"})
             constraints = op.get("constraints") if op.get("constraints") is not None else {}
@@ -15155,6 +14620,14 @@ class TakyonStore:
                 "no_hardcoded_product_ui": True,
                 "backend_runtime_only": True,
             }
+            route_paths = _surface_routes({"routes": routes}) if isinstance(routes, list) else []
+            required_route_paths = _normalize_surface_string_list(op.get("required_routes")) or route_paths
+            if bootstrap_seed and not required_route_paths:
+                required_route_paths = list(DEFAULT_SUBUSER_APP_ROUTES)
+            app_shell_required_seed = _surface_shape_requires_app_shell(
+                runtime_features=runtime_features,
+                required_routes=required_route_paths,
+            )
             publish_target = _product_publish_target(slug, op.get("publish_target"))
             publish_policy = str(op.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
             mode_behavior = str(op.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR).strip() or _DEFAULT_PRODUCT_MODE_BEHAVIOR
@@ -15170,69 +14643,24 @@ class TakyonStore:
                 rail_state=op.get("rail_state"),
                 frontend_stack=frontend_stack_value,
             )
-            metadata = _merge_customer_experience_metadata(
-                metadata,
-                surface_goal=op.get("surface_goal"),
-                conversion_model=op.get("conversion_model"),
-                required_routes=op.get("required_routes"),
-                required_sections=op.get("required_sections"),
-                required_app_tabs=op.get("required_app_tabs"),
-                research_sources=op.get("research_sources"),
-            )
-            metadata = _merge_product_workflow_metadata(
-                metadata,
-                product_workflow=op.get("product_workflow"),
-            )
-            customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
-            product_workflow = _surface_product_workflow_shape({"metadata": metadata})
+            metadata.pop("customer_experience", None)
+            metadata.pop("product_workflow", None)
             _validate_frontend_stack_runtime_feature_contract(
                 frontend_stack=frontend_stack_value,
                 runtime_features=runtime_features,
             )
-            _validate_product_workflow_contract(
-                surface={"metadata": metadata, "constraints": constraints},
+            surface_requires_app_shell = _surface_shape_requires_app_shell(
                 runtime_features=runtime_features,
-                customer_experience=customer_experience,
-                product_workflow=product_workflow,
-            )
-            surface_preview = {
-                "metadata": metadata,
-                "constraints": constraints,
-                "runtime_features": runtime_features,
-            }
-            surface_requires_app_shell = _surface_requires_app_shell(
-                surface_preview,
-                runtime_features=runtime_features,
-                required_app_tabs=customer_experience.get("required_app_tabs") or [],
-                required_routes=customer_experience.get("required_routes") or [],
+                required_routes=required_route_paths,
             )
             if surface_requires_app_shell:
                 source_path = "product/site"
             if bootstrap_access_seed and surface_requires_app_shell:
-                customer_experience_metadata = (
-                    metadata.get("customer_experience") if isinstance(metadata.get("customer_experience"), dict) else {}
-                )
-                customer_experience_metadata = dict(customer_experience_metadata)
-                customer_experience_metadata["required_routes"] = ["/", "/app"]
-                customer_experience_metadata.pop("required_app_tabs", None)
-                canonical_conversion_model = _canonical_bootstrap_conversion_model(
-                    customer_experience_metadata.get("conversion_model"),
-                    bootstrap_seed=bootstrap_seed,
-                    app_shell_required=surface_requires_app_shell,
-                )
-                if canonical_conversion_model:
-                    customer_experience_metadata["conversion_model"] = canonical_conversion_model
-                else:
-                    customer_experience_metadata.pop("conversion_model", None)
-                metadata["customer_experience"] = customer_experience_metadata
-                customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
-                routes = [{"path": route} for route in (customer_experience.get("required_routes") or ["/", "/app"])]
-            _validate_product_workflow_contract(
-                surface={"metadata": metadata, "constraints": constraints},
-                runtime_features=runtime_features,
-                customer_experience=customer_experience,
-                product_workflow=_surface_product_workflow_shape({"metadata": metadata}),
-            )
+                required_route_paths = required_route_paths or list(DEFAULT_SUBUSER_APP_ROUTES)
+                if not routes:
+                    routes = [{"path": route} for route in required_route_paths]
+            elif not routes and required_route_paths:
+                routes = [{"path": route} for route in required_route_paths]
             seeded_bootstrap_monthly_plan = False
             if surface_requires_app_shell:
                 existing_monthly_plan = self._row_to_dict(
@@ -15303,22 +14731,6 @@ class TakyonStore:
                             ),
                         )
                     seeded_bootstrap_monthly_plan = True
-            if _surface_allows_landing_only(surface_preview) and surface_requires_app_shell:
-                raise TakyonError(
-                    "app-like product surfaces must ship a real /app route and cannot be landing_page_only under the current runtime contract"
-                )
-            customer_experience_metadata = (
-                metadata.get("customer_experience") if isinstance(metadata.get("customer_experience"), dict) else {}
-            )
-            metadata["customer_experience"] = {
-                **customer_experience_metadata,
-                "required_routes": customer_experience.get("required_routes") or [],
-            }
-            if not routes:
-                routes = [
-                    {"path": route}
-                    for route in (customer_experience.get("required_routes") or [])
-                ]
             notes = _canonical_bootstrap_surface_notes(
                 op.get("notes") if op.get("notes") is not None else existing.get("notes"),
                 bootstrap_seed=bootstrap_seed,
@@ -17732,15 +17144,8 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "status": args.get("status") or "draft",
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
-        "runtime_features": args.get("runtime_features"),
         "rail_state": args.get("rail_state"),
-        "surface_goal": args.get("surface_goal"),
-        "conversion_model": args.get("conversion_model"),
         "required_routes": args.get("required_routes"),
-        "required_sections": args.get("required_sections"),
-        "required_app_tabs": args.get("required_app_tabs"),
-        "research_sources": args.get("research_sources"),
-        "product_workflow": args.get("product_workflow"),
         "routes": args.get("routes") or [],
         "theme": args.get("theme") or {"source": "business product workspace"},
         "constraints": args.get("constraints") or {},
@@ -17788,16 +17193,6 @@ def _finalize_product_surface_refresh(
                 **refresh,
                 "status": "blocked",
                 "error": surface_error,
-            }
-    if refresh.get("status") == "passed":
-        # A build that compiles but still ships the scaffold placeholder theme is an unfinished
-        # product. Block publish and feed the one local-repair retry instead of shipping it.
-        theme_blocker = _scaffold_theme_unfinished_blocker(refresh)
-        if theme_blocker:
-            refresh = {
-                **refresh,
-                "status": "blocked",
-                "error": theme_blocker,
             }
     # Run the action-consistency blocker UNCONDITIONALLY: an earlier build/surface blocker
     # must not mask a real action-contract inconsistency (declared-spec/UI-call/file drift).
@@ -19982,8 +19377,6 @@ def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
             raise TakyonError("idempotency_key is required")
         with store._connect() as conn:
             surface = store._app_surface_contract(conn, business)
-            if "actions" not in _surface_runtime_features(surface):
-                raise TakyonError("runtime_features does not include actions for this business")
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 with store._leaf_conn(conn) as leaf:
@@ -27347,13 +26740,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             maximum=900,
         )
         sdk_result: dict[str, Any] = {}
-        pretend_findings: list[dict[str, Any]] = []
         surface_refresh: dict[str, Any] | None = None
-        surface_contract_update: dict[str, Any] | None = None
         worker_attempts = 0
-        surface_contract_retries: list[dict[str, Any]] = []
         active_max_turns = max_turns
-        local_repair_retries: list[str] = []
         turn_cap_retries: list[dict[str, int]] = []
         agent_record: dict[str, Any] | None = None
         with workspace_context as mounted_home:
@@ -27464,15 +26853,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
             publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
             active_worker_instruction = worker_instruction
-            max_local_repair_retries = 1 if refresh_surface and _workspace_needs_runtime_ui_contract(workspace_rel) else 0
-            max_surface_contract_retries = 2 if _workspace_needs_runtime_ui_contract(workspace_rel) else 0
             while True:
                 worker_attempts += 1
-                if _workspace_needs_runtime_ui_contract(workspace_rel):
-                    _write_worker_surface_contract_update_template(
-                        workspace_path,
-                        surface_for_worker,
-                    )
                 attempt_payload = {
                     **payload_base,
                     "maxTurns": active_max_turns,
@@ -27552,91 +26934,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             "Claude Agent SDK output blocked because source files were written under a "
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
-                if sdk_result.get("success") and _workspace_needs_runtime_ui_contract(workspace_rel):
-                    try:
-                        contract_update_request = _read_worker_surface_contract_update_request(
-                            workspace_path
-                        )
-                    finally:
-                        _clear_worker_surface_contract_update_request(workspace_path)
-                    if contract_update_request:
-                        surface_update_result = active_store.commit(
-                            scope=f"business:{business}",
-                            operations=[
-                                _worker_surface_upsert_operation(
-                                    business=business,
-                                    surface=surface_for_worker,
-                                    patch=contract_update_request["patch"],
-                                )
-                            ],
-                            idempotency_key=f"{idempotency_key}:worker-surface-contract:{worker_attempts}",
-                            reason=contract_update_request.get("why")
-                            or "worker-requested product surface contract update",
-                            actor=args.get("actor") or "agent",
-                        )
-                        summary = active_store.read(
-                            scope=f"business:{business}",
-                            query="summary",
-                            include=["app"],
-                        )
-                        app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
-                        plans_configured = (
-                            _app_summary_has_configured_plans(app)
-                            if _workspace_needs_runtime_ui_contract(workspace_rel)
-                            else False
-                        )
-                        surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
-                        if not isinstance(surface_for_worker, dict):
-                            surface_for_worker = {}
-                        _materialize_subuser_app_kit(
-                            workspace_path,
-                            slug=business,
-                            surface=surface_for_worker,
-                            plans=app.get("plans") if isinstance(app, dict) else None,
-                        )
-                        worker_instruction = build_worker_instruction(surface_for_worker)
-                        surface_contract_update = {
-                            "requested": True,
-                            "why": contract_update_request.get("why") or "",
-                            "patch": contract_update_request["patch"],
-                            "result": surface_update_result,
-                        }
-                        if len(surface_contract_retries) < max_surface_contract_retries:
-                            patch_fields = sorted(contract_update_request["patch"].keys())
-                            retry_reason = str(contract_update_request.get("why") or "").strip()
-                            surface_contract_retries.append(
-                                {
-                                    "why": retry_reason,
-                                    "patch_fields": patch_fields,
-                                }
-                            )
-                            retry_note = _truncate_text(
-                                retry_reason or f"updated {', '.join(patch_fields)}",
-                                280,
-                            )
-                            _record_claude_agent_runtime_event(
-                                business=business,
-                                workspace_rel=workspace_rel,
-                                status="output",
-                                detail=f"Continuing same-run worker after contract update: {retry_note}",
-                                line=f"Continuing same-run worker after contract update: {retry_note}",
-                            )
-                            active_worker_instruction = _worker_surface_contract_retry_instruction(
-                                worker_instruction,
-                                why=retry_reason,
-                                patch_fields=patch_fields,
-                                attempt_number=worker_attempts + 1,
-                            )
-                            continue
-                pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
-                if pretend_findings:
-                    sdk_result["success"] = False
-                    sdk_result["pretend_product_findings"] = pretend_findings
-                    sdk_result["error"] = (
-                        "Claude Agent SDK output blocked by Hermes no-pretend contract: "
-                        "product source contains fake/demo auth, account, checkout, or integration state. "
-                        "Use real Hermes runtime calls or leave the unavailable feature out of the customer UI."
-                    )
                 if sdk_result.get("success"):
                     summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
                     if summary_text:
@@ -27723,30 +27020,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "guidance_selection_reason": guidance_selection_reason,
                     }
                     active_store._sync_business_workspace_remote(business)
-                should_retry_local_repair = (
-                    sdk_result.get("success")
-                    and surface_refresh is not None
-                    and len(local_repair_retries) < max_local_repair_retries
-                    and _surface_refresh_supports_local_repair_retry(surface_refresh)
-                )
-                if should_retry_local_repair:
-                    blocker = str(surface_refresh.get("blocker") or _surface_refresh_exact_blocker(surface_refresh)).strip()
-                    if blocker:
-                        local_repair_retries.append(blocker)
-                        retry_note = _truncate_text(blocker, 280)
-                        _record_claude_agent_runtime_event(
-                            business=business,
-                            workspace_rel=workspace_rel,
-                            status="output",
-                            detail=f"Retrying local product repair once: {retry_note}",
-                            line=f"Retrying local product repair once: {retry_note}",
-                        )
-                        active_worker_instruction = _worker_local_repair_instruction(
-                            worker_instruction,
-                            blocker=blocker,
-                            attempt_number=worker_attempts + 1,
-                        )
-                        continue
                 should_retry_turn_cap = (
                     not sdk_result.get("success")
                     and customer_facing_product_workspace
@@ -27819,12 +27092,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "worker_stderr": sdk_result.get("worker_stderr"),
                         "raw_stdout": sdk_result.get("raw_stdout"),
                         "worker_attempts": worker_attempts,
-                        "surface_contract_retries": surface_contract_retries,
-                        "local_repair_retries": local_repair_retries,
                         "turn_cap_retries": turn_cap_retries,
-                        "pretend_product_findings": pretend_findings,
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
-                        "surface_contract_update": surface_contract_update,
                         "surface_refresh": surface_refresh,
                     },
                 }
@@ -27858,8 +27127,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "agent_record": agent_record,
             "surface_refresh": surface_refresh,
             "worker_attempts": worker_attempts,
-            "surface_contract_retries": surface_contract_retries,
-            "local_repair_retries": local_repair_retries,
             "turn_cap_retries": turn_cap_retries,
             "summary": sdk_result.get("summary") or "",
             "actual_cost_cents": worker_actual_cents,
@@ -27867,8 +27134,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "worker_returncode": sdk_result.get("worker_returncode"),
             "worker_stderr": sdk_result.get("worker_stderr"),
             "raw_stdout": sdk_result.get("raw_stdout"),
-            "pretend_product_findings": pretend_findings,
-            "surface_contract_update": surface_contract_update,
         }
         if status != "completed":
             error_text = str(
@@ -28098,7 +27363,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_app_surface_contract",
-        "description": "Record the business-owned product surface contract: source/routes, customer experience shape, plus publish target, policy, and done gate.",
+        "description": "Record the business-owned product surface contract: source/routes, theme, publish target, policy, and done gate.",
         "handler": handle_business_upsert_app_surface_contract,
         "schema": _schema(
             "business_upsert_app_surface_contract",
@@ -28108,15 +27373,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "status": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime rails this product builds toward, such as auth, account, profile, directory, records, connections, checkout, entitlements, usage, or actions. This is the one shared-rail contract; keep it minimal on a first bootstrap seed (the honest access shell wires auth/account/checkout on its own) and declare the deeper product rails — especially `actions` — during the post-sign-in workflow pass owned by takyon-product-workflow, not at bootstrap. Legacy `billing` is accepted as an alias and normalizes to account + checkout; AI products use named actions instead of declaring generate directly."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
-                "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
-                "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path and avoid inventing free-tier or trial language unless the operator explicitly changes the contract."},
-                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},
-                "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
-                "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
-                "research_sources": {"type": "array", "items": {"type": "string"}, "description": "Research files that grounded the CEO's customer-shape decision. Default and canonical first source is research/strategy.md, but the whole research/ tree may contribute."},
-                "product_workflow": {"type": "object", "description": "Canonical in-app workflow doctrine for this product. Record the primary user/job, closed-loop product behavior, scope guardrails, persistence requirements, complexity target, first-run requirements, success moment, acceptance tests, and explicit not-now cuts here instead of inventing a separate MVP markdown spec. Leave the workflow `workflow_pending` until those fields describe one scoped-but-real loop instead of placeholder doctrine. Top-level product_workflow sections replace wholesale when re-sent; pass {} to clear the block."},
+                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Customer-facing routes this product should ship. The default Vite shell routes are `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},

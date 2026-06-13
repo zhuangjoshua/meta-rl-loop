@@ -72,8 +72,8 @@ def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring
     }
 
 
-def test_product_workflow_rejects_no_sharing_when_directory_or_connections_are_selected():
-    with pytest.raises(takyon_core.TakyonError, match="no_sharing cannot stay true"):
+def test_product_workflow_validator_is_noop_for_legacy_scope_rules():
+    assert (
         takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
             surface={
                 "runtime_features": ["directory"],
@@ -87,6 +87,8 @@ def test_product_workflow_rejects_no_sharing_when_directory_or_connections_are_s
             },
             runtime_features=["auth", "account", "profile", "directory"],
         )
+        is None
+    )
 
 
 def test_materialized_subuser_kit_writes_js_context_only(tmp_path: Path):
@@ -184,7 +186,7 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "useRecords(type)" in block
     assert "useActionRunner(name)" in block
     assert "src/lib/takyon.ts" in block and "src/lib/hooks.ts" in block
-    assert "do not spend bootstrap/design time" in block
+    assert "do not spend bootstrap/design time" in block.lower()
 
 
 def test_appkit_contract_block_uses_vite_scaffold_surface_when_frontend_stack_is_pinned():
@@ -227,14 +229,13 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
 
     # The minimized worker contract is a short positive obligation, not a fear wall.
     assert "Your overriding obligation is that the product's primary job works for real." in block
-    assert "Use the declared shared rails and named actions for backend behavior." in block
+    assert "Use the shared rails and real action files for backend behavior" in block
     assert "fail truthfully with the exact blocker" in block
     # Factual contract context is still injected.
     assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in block
     assert "src/screens/" in block
-    assert "must ship a real `/app` route" in block
-    assert "src/screens/support.tsx` is the seeded module" in block
-    assert "Product-specific backend work goes through declared actions" in block
+    assert "Support-route screens live in `src/screens/support.tsx`" in block
+    assert "Product-specific backend work goes through action files" in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block
     assert "Subscription style:" not in block
@@ -342,13 +343,14 @@ def test_surface_shape_defaults_frontend_stack_to_vite():
 
 
 def test_bootstrap_default_runtime_features_stay_pinned():
-    # The bootstrap access shell must stay auth/account/profile/checkout so removing
-    # the app-shape taxonomy never silently widens or narrows the seeded shell.
+    # The bootstrap access shell must stay pinned to the shared auth/account/profile/
+    # checkout/actions shell so removing the old taxonomy never silently changes it.
     assert takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES == (
         "auth",
         "account",
         "profile",
         "checkout",
+        "actions",
     )
 
 
@@ -368,6 +370,7 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "account",
         "profile",
         "checkout",
+        "actions",
     ]
 
     payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
@@ -379,13 +382,11 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "account",
         "profile",
         "checkout",
+        "actions",
     ]
 
     block = takyon_core._runtime_ui_contract_block(surface)  # type: ignore[attr-defined]
-    assert (
-        "Declared runtime-backed features: none yet; the honest bootstrap access shell still wires "
-        "auth, account, profile, checkout"
-    ) in block
+    assert "Runtime-backed features available in this shell: auth, account, profile, checkout, actions" in block
 
 
 def test_product_workflow_actions_survive_shape_normalization():
@@ -403,7 +404,7 @@ def test_product_workflow_actions_survive_shape_normalization():
     assert workflow["actions"] == [{"name": "sync-data", "trigger": "http"}]
 
 
-def test_partial_product_workflow_stays_pending_and_cannot_claim_mvp_complete():
+def test_partial_product_workflow_no_longer_drives_worker_doctrine():
     workflow = {
         "primary_job": "Help the user save a plan.",
         "core_loop": {
@@ -429,15 +430,15 @@ def test_partial_product_workflow_stays_pending_and_cannot_claim_mvp_complete():
         surface,
         plans_configured=False,
     )
-    assert "partial product workflow" in block
-    assert "workflow `workflow_pending`" in block
+    assert "partial product workflow" not in block
+    assert "workflow `workflow_pending`" not in block
     assert "MVP-complete product workflow for the gated app." not in block
 
-    takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
+    assert takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
         surface=surface,
         runtime_features=["auth", "account", "records"],
         product_workflow=workflow,
-    )
+    ) is None
 
 
 def test_app_shell_signal_derived_from_rails_not_taxonomy():
@@ -467,13 +468,13 @@ def test_app_shell_signal_derived_from_rails_not_taxonomy():
 
 def test_bootstrap_access_shell_seed_forces_canonical_shell_for_real_app_surfaces():
     # On a fresh seed of a real app surface, the access shell normalizes to the pinned
-    # auth/account/profile/checkout set — without any app_mode/subscription_style input.
+    # auth/account/profile/checkout/actions set — without any app-shape taxonomy.
     forced = takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
         ["actions"],
         bootstrap_seed=True,
         app_shell_required=True,
     )
-    assert forced == ["auth", "account", "profile", "checkout"]
+    assert forced == ["auth", "account", "profile", "checkout", "actions"]
 
     # Not a fresh seed → declared rails are left untouched.
     assert takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]

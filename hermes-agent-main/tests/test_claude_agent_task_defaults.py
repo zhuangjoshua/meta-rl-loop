@@ -846,7 +846,7 @@ def test_claude_agent_task_script_honors_explicit_claude_executable_env():
     assert "pathToClaudeCodeExecutable" in text
 
 
-def test_claude_agent_task_applies_same_run_surface_contract_patch_before_refresh_and_retry(tmp_path, monkeypatch):
+def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_once(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured_payloads: list[dict[str, object]] = []
     refresh_calls: list[dict[str, object]] = []
@@ -959,48 +959,14 @@ def test_claude_agent_task_applies_same_run_surface_contract_patch_before_refres
     )
 
     assert result["success"] is True
-    assert result["worker_attempts"] == 2
-    assert result["surface_contract_retries"] == [
-        {
-            "why": "The build needed a real action rail and named action.",
-            "patch_fields": ["product_workflow", "runtime_features"],
-        }
-    ]
-    assert result["surface_contract_update"]["requested"] is True
-    assert result["surface_contract_update"]["why"] == "The build needed a real action rail and named action."
-    assert result["surface_contract_update"]["patch"] == {
-        "runtime_features": ["auth", "account", "actions", "checkout"],
-        "product_workflow": {
-            "actions": [{"name": "plan-workflow", "trigger": "http"}],
-            "outbound_hosts": ["api.example.com"],
-        },
-    }
-    assert result["surface_contract_update"]["result"]["success"] is True
-    upsert_result = result["surface_contract_update"]["result"]["results"][0]
-    assert upsert_result["action"] == "app.surface.upsert"
-    assert upsert_result["runtime_features"] == ["auth", "account", "actions", "checkout"]
-    assert upsert_result["product_workflow"] == {
-        "actions": [{"name": "plan-workflow", "trigger": "http"}],
-        "outbound_hosts": ["api.example.com"],
-    }
+    assert result["worker_attempts"] == 1
+    assert "surface_contract_retries" not in result
+    assert "surface_contract_update" not in result
     assert len(refresh_calls) == 1
-    assert refresh_calls[0]["runtime_features"] == ["auth", "account", "actions", "checkout"]
-    assert len(captured_payloads) == 2
+    assert refresh_calls[0]["runtime_features"] == ["auth", "account", "checkout"]
+    assert len(captured_payloads) == 1
     assert "Declared runtime-backed features for this app: auth, account, checkout" in str(captured_payloads[0]["instruction"])
-    assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in str(captured_payloads[1]["instruction"])
-    assert "Hermes same-run contract continuation (2 of 3):" in str(captured_payloads[1]["instruction"])
-    assert "Product-specific backend work goes through declared actions" in str(captured_payloads[1]["instruction"])
     operations = store.commits[-1]["operations"]
     agent_record = next(op for op in operations if op.get("action") == "agent.record")
-    assert agent_record["result"]["surface_contract_retries"] == [
-        {
-            "why": "The build needed a real action rail and named action.",
-            "patch_fields": ["product_workflow", "runtime_features"],
-        }
-    ]
-    assert agent_record["result"]["surface_contract_update"]["patch"]["runtime_features"] == [
-        "auth",
-        "account",
-        "actions",
-        "checkout",
-    ]
+    assert "surface_contract_retries" not in agent_record["result"]
+    assert "surface_contract_update" not in agent_record["result"]

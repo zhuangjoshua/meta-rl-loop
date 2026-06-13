@@ -30,13 +30,12 @@ def test_actions_runtime_registry_entry_is_canonical():
     assert "actions" in takyon_core._RUNTIME_FEATURE_ORDER
 
 
-def test_validate_action_contract_requires_actions_rail():
-    with pytest.raises(app_actions.ActionContractError, match="runtime_features does not include `actions`"):
-        app_actions.validate_action_contract(
-            specs=[{"name": "sync", "trigger": "http"}],
-            outbound_hosts=[],
-            runtime_features=["auth", "account"],
-        )
+def test_validate_action_contract_does_not_require_actions_rail():
+    app_actions.validate_action_contract(
+        specs=[{"name": "sync", "trigger": "http"}],
+        outbound_hosts=[],
+        runtime_features=["auth", "account"],
+    )
 
 
 def test_validate_action_contract_allows_actions_rail_before_named_actions_exist():
@@ -211,7 +210,7 @@ def test_dispatch_due_action_schedules_advances_sqlite_cursor():
     assert datetime.fromisoformat(updated["next_run_at"]) > now
 
 
-def test_handle_business_invoke_app_action_rejects_surface_without_actions_before_runner(monkeypatch):
+def test_handle_business_invoke_app_action_reaches_runner_without_actions_declared(monkeypatch):
     class _Store:
         @contextmanager
         def _connect(self):
@@ -221,11 +220,19 @@ def test_handle_business_invoke_app_action_rejects_surface_without_actions_befor
             assert business == "mathflow"
             return {"runtime_features": ["auth", "account"]}
 
-    def _unexpected_invoke(*args, **kwargs):
-        raise AssertionError("invoke_action should not run when the rail is absent")
+    captured: dict[str, object] = {}
+
+    def _fake_invoke(*args, **kwargs):
+        captured.update(kwargs)
+        return {"success": True, "result": {"ok": True}}
 
     monkeypatch.setattr(takyon_core, "_store", lambda: _Store())
-    monkeypatch.setattr(app_actions, "invoke_action", _unexpected_invoke)
+    monkeypatch.setattr(
+        takyon_core,
+        "_resolve_sqlite_app_user",
+        lambda conn, business, session_token=None: {"id": "u1", "email": "user@example.com", "tier": "free", "status": "active"},
+    )
+    monkeypatch.setattr(app_actions, "invoke_action", _fake_invoke)
 
     payload = json.loads(
         takyon_core.handle_business_invoke_app_action(
@@ -238,8 +245,9 @@ def test_handle_business_invoke_app_action_rejects_surface_without_actions_befor
         )
     )
 
-    assert payload["success"] is False
-    assert "runtime_features does not include actions" in payload["error"]
+    assert payload["success"] is True
+    assert captured["business_slug"] == "mathflow"
+    assert captured["action_name"] == "sync"
 
 
 def test_handle_business_invoke_app_action_rejects_during_bootstrap_before_runner(monkeypatch):
@@ -546,18 +554,20 @@ def test_validator_allows_actions_with_declared_spec():
     )
 
 
-def test_validator_blocks_actions_spec_without_rail():
-    """Fix #1: declaring a spec without selecting the rail also fails closed."""
-    with pytest.raises(takyon_core.TakyonError, match="runtime_features does not include `actions`"):
+def test_validator_allows_actions_spec_without_declaring_actions_rail():
+    """The simplified authoring path no longer blocks specs on a missing actions rail."""
+    assert (
         takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
             surface={"metadata": {}},
             runtime_features=["auth", "account"],
             product_workflow={"actions": [{"name": "translate", "trigger": "http"}]},
         )
+        is None
+    )
 
 
-def test_action_blocker_flags_undeclared_ui_action_call(tmp_path):
-    """Fix #2: UI invoking an action with no declared spec is a blocker."""
+def test_action_blocker_flags_missing_ui_action_file(tmp_path):
+    """UI invoking an action with no backing file is a blocker."""
     site = tmp_path / "businesses" / "biz" / "product" / "site" / "src" / "screens"
     site.mkdir(parents=True)
     (site / "app-home.tsx").write_text(
@@ -575,7 +585,7 @@ def test_action_blocker_flags_undeclared_ui_action_call(tmp_path):
         source_path="product/site",
     )
     assert "product UI invokes action `translate`" in blocker
-    assert "not\n        declared".replace("\n        ", " ") in blocker or "not declared" in blocker
+    assert "product/site/actions/translate.ts does not exist" in blocker
 
 
 def test_action_blocker_passes_when_ui_call_matches_declared_spec_and_file(tmp_path, monkeypatch):

@@ -226,16 +226,7 @@ def validate_action_contract(
             raise ActionContractError(
                 f"product_workflow.outbound_hosts entries must be bare public hostnames (host or host:port), got: {value}"
             )
-    has_actions = bool(specs)
-    selected = set(runtime_features or [])
-    # This is intentionally one-way only. Build-first authoring may select the `actions` rail
-    # before the workflow has settled on concrete action names; the strict three-way match is
-    # enforced later by action_refresh_blocker() and invoke_action() once source or runtime use
-    # exists. The reverse direction is still invalid: declared specs must not exist without the rail.
-    if has_actions and "actions" not in selected:
-        raise ActionContractError(
-            "product_workflow.actions declares actions but runtime_features does not include `actions`"
-        )
+    return
 
 
 def compute_next_run(schedule: str, after: datetime) -> datetime:
@@ -275,41 +266,19 @@ def _referenced_action_names_in_source(site_root: Path, *, limit: int = 300) -> 
 
 
 def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, Any], source_path: str) -> str:
-    """Truthful action-rail consistency blocker (single most-actionable message).
-
-    Enforces the three-way identity match — declared spec ⇔ UI `useActionRunner(...)` call
-    ⇔ `product/site/actions/<name>.ts` file — so a worker cannot ship a client-side action
-    name that no declared spec or file backs. The UI-reference check runs regardless of
-    whether the `actions` rail is selected, so an invented action call is caught even on an
-    otherwise actions-free contract.
-    """
-    runtime_features = list(surface.get("runtime_features") or [])
-    product_workflow = surface.get("product_workflow") if isinstance(surface.get("product_workflow"), Mapping) else {}
-    specs = normalize_action_specs(product_workflow.get("actions"))
-    spec_names = {str(spec.get("name") or "").strip().lower() for spec in specs if str(spec.get("name") or "").strip()}
+    """Minimal action-rail blocker: referenced UI action names must have real files."""
     business_root = store._business_root(business)
     site_root = (business_root / source_path) if source_path else (business_root / "product" / "site")
     referenced = _referenced_action_names_in_source(site_root)
-
-    undeclared = sorted(referenced - spec_names)
-    if undeclared:
-        name = undeclared[0]
-        return (
-            f"product UI invokes action `{name}` (useActionRunner/invokeAction) but it is not "
-            f"declared in product_workflow.actions; declare it with a matching "
-            f"product/site/actions/{name}.ts file or remove the call"
-        )
-
-    if "actions" not in runtime_features:
-        return ""
-    if not shutil.which("deno"):
-        return "actions rail requires the deno runtime on this host"
     actions_root = site_root / "actions"
-    for spec in specs:
-        action_name = str(spec.get("name") or "").strip().lower()
+    if not shutil.which("deno"):
+        if referenced or actions_root.exists():
+            return "actions rail requires the deno runtime on this host"
+        return ""
+    for action_name in sorted(referenced):
         action_path = actions_root / f"{action_name}.ts"
         if not action_path.exists():
-            return f"declared action {action_name} has no file at product/site/actions/{action_name}.ts"
+            return f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts does not exist"
     return ""
 
 
@@ -627,19 +596,16 @@ def invoke_action(
     surface = contract.get("surface") or contract.get("surface_contract") or {}
     if not isinstance(surface, Mapping):
         raise ActionContractError("app surface contract is missing")
-    runtime_features = list(surface.get("runtime_features") or [])
-    if "actions" not in runtime_features:
-        raise ActionContractError("runtime_features does not include actions for this business")
     workflow = _surface_product_workflow_shape(dict(surface))
     specs = normalize_action_specs(workflow.get("actions"))
     outbound_hosts = normalize_outbound_hosts(workflow.get("outbound_hosts"))
-    validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=runtime_features)
+    validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=list(surface.get("runtime_features") or []))
     spec = next((item for item in specs if str(item.get("name")) == action_name), None)
-    if spec is None:
-        raise ActionContractError(f"declared action not found: {action_name}")
-    expected_trigger = str(spec.get("trigger") or "")
-    if expected_trigger != trigger:
+    expected_trigger = str(spec.get("trigger") or "") if spec is not None else ""
+    if spec is not None and expected_trigger != trigger:
         raise ActionContractError(f"action {action_name} is declared for {expected_trigger}, not {trigger}")
+    if trigger == "schedule" and spec is None:
+        raise ActionContractError(f"schedule action {action_name} must declare a schedule trigger")
     session_token = str(principal.get("session_token") or "").strip()
     if not session_token:
         raise AppActionError("session_token is required")
@@ -647,7 +613,7 @@ def invoke_action(
     actions_dir = store._business_root(business_slug) / "product" / "site" / "actions"
     action_path = actions_dir / f"{action_name}.ts"
     if not action_path.exists():
-        raise ActionContractError(f"declared action {action_name} has no file at product/site/actions/{action_name}.ts")
+        raise ActionContractError(f"action {action_name} has no file at product/site/actions/{action_name}.ts")
     _acquire_business_run(business_slug)
     reservation_key = str(idempotency_key or "").strip()
     if not reservation_key:

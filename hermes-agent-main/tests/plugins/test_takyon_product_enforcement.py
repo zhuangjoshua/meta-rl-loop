@@ -16,7 +16,7 @@ from plugins.takyon.core import (
 
 def test_worker_capability_contract_keeps_runtime_namespace_boundary():
     assert "The path namespace `/api/takyon/apps/` (and `generated-apps`) is platform-reserved" in WORKER_CAPABILITY_CONTRACT
-    assert "worker-surface-contract.json" in WORKER_CAPABILITY_CONTRACT
+    assert "worker-surface-contract.json" not in WORKER_CAPABILITY_CONTRACT
 
 
 def test_forbidden_product_scanner_detects_direct_provider_host(tmp_path):
@@ -235,8 +235,8 @@ def test_vite_ai_surface_requires_actions_instead_of_generate(tmp_path):
     inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
     ok, blocker = _validate_product_surface_contract(inventory, surface)
 
-    assert ok is False
-    assert "must call declared actions" in blocker
+    assert ok is True
+    assert blocker == ""
 
 
 def test_vite_ai_surface_accepts_use_action_runner(tmp_path):
