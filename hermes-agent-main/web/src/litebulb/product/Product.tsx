@@ -30,6 +30,7 @@ const Icon = {
   monitor: <S d="M2 3.5h12v8H2zM6 14h4M8 11.5V14" />,
   phone: <S d="M5 1.5h6v13H5zM7 12.5h2" />,
   send: <S d="M14 8L2 2.5l2.2 5.5L2 13.5z" />,
+  stop: <S d="M5 5h6v6H5z" fill="currentColor" />,
   refresh: <S d="M13 7a5 5 0 10-.6 3.4M13 4v3h-3" />,
   external: <S d="M9 3h4v4M13 3l-6 6M11 9v3.5H3.5V5H7" />,
   collapse: <S d="M9.5 4l-4 4 4 4" w={13} />,
@@ -38,32 +39,6 @@ const Icon = {
 
 function siteHost(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "") + ".app";
-}
-
-function liveStateProgress(
-  workspace: TakyonBusinessWorkspaceResponse | null,
-): { text: string; live: boolean } | null {
-  const liveProgress = (statusValue: unknown, ...parts: unknown[]) => {
-    const status = String(statusValue || "").trim().toLowerCase();
-    if (!status || ["done", "completed", "success", "failed", "error", "blocked", "cancelled", "idle"].includes(status)) {
-      return null;
-    }
-    const detail = parts
-      .map((part) => String(part || "").trim())
-      .find(Boolean);
-    return {
-      text: detail || (["queued", "scheduled", "pending"].includes(status) ? "Queued CEO bootstrap job." : "Working…"),
-      live: true,
-    };
-  };
-
-  const state = workspace?.live_state;
-  if (state && typeof state === "object") {
-    const payload = state as Record<string, unknown>;
-    const progress = liveProgress(payload.status, payload.detail);
-    if (progress) return progress;
-  }
-  return null;
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
@@ -189,19 +164,23 @@ function AgentChat({
   messages,
   progress,
   tab,
+  canStop,
   sending,
   onTab,
   onClose,
   onSend,
+  onStop,
 }: {
   business: LitebulbBusiness;
   messages: ChatMessage[];
   progress: { text: string; live: boolean } | null;
   tab: TabKey;
+  canStop: boolean;
   sending: boolean;
   onTab: (tab: TabKey) => void;
   onClose: () => void;
   onSend: (text: string) => void;
+  onStop: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -280,6 +259,15 @@ function AgentChat({
           placeholder="Change anything…"
           rows={2}
         />
+        <button
+          className="lb-chat__stop"
+          disabled={!canStop}
+          onClick={onStop}
+          aria-label="Stop"
+          type="button"
+        >
+          {Icon.stop}
+        </button>
         <button className="lb-chat__send" disabled={sending} onClick={submit} aria-label="Send">{Icon.send}</button>
       </div>
     </aside>
@@ -390,6 +378,7 @@ export function Product({
   onLogout,
   onOpenSettings,
   onSendPrompt,
+  onStopPrompt,
   onSaveChannelCreditBudgets,
   onBuyCreativeCredits,
   onTractionRangeChange,
@@ -408,6 +397,7 @@ export function Product({
   onLogout: () => void;
   onOpenSettings: (section: SettingsSection) => void;
   onSendPrompt: (text: string) => void;
+  onStopPrompt: () => void;
   onSaveChannelCreditBudgets: (
     slug: string,
     allocations: Record<"x" | "meta" | "reddit", number>,
@@ -420,7 +410,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  const effectiveProgress = chatProgress ?? liveStateProgress(workspace);
+  const effectiveProgress = chatProgress;
 
   useEffect(() => {
     setTab("company");
@@ -444,10 +434,12 @@ export function Product({
             messages={chatMessages}
             progress={effectiveProgress}
             tab={tab}
+            canStop={sending || Boolean(effectiveProgress?.live)}
             sending={sending}
             onTab={setTab}
             onClose={() => setChatOpen(false)}
             onSend={onSendPrompt}
+            onStop={onStopPrompt}
           />
         </div>
 

@@ -110,7 +110,7 @@ def test_litebulb_reuses_stored_session_before_creating_a_new_one():
     assert 'writeStoredLitebulbSession(' in source
     assert 'clearStoredPendingTurn(sessionBusinessRef.current);' in source
     assert 'clearStoredLitebulbSession(businessSlug);' in source
-    assert 'await gateway.request("session.interrupt", {' in source
+    assert 'await ensureGateway().request("session.interrupt", {' in source
 
 
 def test_create_flow_uses_global_scope_session_and_recovers_missing_session():
@@ -125,6 +125,15 @@ def test_create_flow_uses_global_scope_session_and_recovers_missing_session():
     assert 'sessionBusinessRef.current = "";' in source
     assert 'sessionId = await ensureSession("");' in source
     assert 'if (attempt < 3 && isBusyError(error)) {' in source
+
+
+def test_litebulb_clears_bootstrap_transcript_when_authoritative_history_resets():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert "const mappedHistory = mapHistoryMessages(history);" in source
+    assert "if (!pending && !pendingTurnMissing && mappedHistory.length === 0) {" in source
+    assert "chatMessagesRef.current = [];" in source
+    assert "return [];" in source
 
 
 def test_same_business_fast_path_still_marks_the_business_visible():

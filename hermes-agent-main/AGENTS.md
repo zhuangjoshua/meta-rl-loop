@@ -74,6 +74,16 @@ Slash commands are narrow shell controls only: scope navigation, local status/in
 
 ## Development Environment
 
+## Parent Workspace Local Dev Rail
+
+When this runtime is being worked from the parent workspace at `/Users/Zygote/Downloads/takyon`, the canonical persistent local Takyon dev root is `~/.takyon-fourmanifold-local-dev/` outside the repo. Do not treat repo-owned `.takyon-*` or `.tmp-*` directories as the normal persistent dev environment.
+
+Use the parent workspace launcher `scripts/takyon-local-dev.sh` for that rail so local operator-home and Safebox setup do not drift into multiple ad hoc bootstrap paths.
+
+Mirror the production topology on that local rail as closely as practical: keep a separate local operator runtime home, keep secrets behind a local Safebox authority instead of random shell-only env exports, and use the normal Takyon shell/CEO/business-tool path. Local-only exceptions are limited to the public DNS/auth surfaces the operator already called out.
+
+Anything under that outside-repo local dev root, plus disposable repo-local `.takyon-*` and `.tmp-*` scratch homes, is operator-local state. Never stage, commit, push, deploy, or rsync it, even under broad requests such as "push everything" or "commit all local changes", unless the operator explicitly promotes a specific file into tracked repo state.
+
 ```bash
 # Prefer .venv; fall back to venv if that's what your checkout has.
 source .venv/bin/activate   # or: source venv/bin/activate

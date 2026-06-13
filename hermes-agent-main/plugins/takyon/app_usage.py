@@ -77,6 +77,28 @@ class AppBudgetExceeded(AppUsageError):
         )
 
 
+class AppUserBudgetExceeded(AppUsageError):
+    """A reserve would push one sub-user past their current monthly plan-funded AI budget."""
+
+    def __init__(
+        self,
+        *,
+        app_user_id: str,
+        user_monthly_limit_microusd: int,
+        committed_microusd: int,
+        requested_microusd: int,
+    ) -> None:
+        self.app_user_id = app_user_id
+        self.user_monthly_limit_microusd = user_monthly_limit_microusd
+        self.committed_microusd = committed_microusd
+        self.requested_microusd = requested_microusd
+        self.remaining_microusd = max(0, user_monthly_limit_microusd - committed_microusd)
+        super().__init__(
+            f"app user usage would exceed monthly plan cap: need {requested_microusd}, "
+            f"committed {committed_microusd} of {user_monthly_limit_microusd}"
+        )
+
+
 class UnknownReservation(AppUsageError):
     """settle/release referenced a reservation_key that was never reserved in this business."""
 
@@ -214,6 +236,21 @@ def _committed_microusd(conn, business_slug: str, period_start) -> int:
     return int(row[0])
 
 
+def _app_user_committed_microusd(conn, business_slug: str, app_user_id: str, period_start) -> int:
+    """Committed spend for one sub-user within the period: held estimates of `reserved` rows plus
+    recorded actuals of `completed` rows. Caller must already hold the business budget row lock so
+    the aggregate is read from a stable view."""
+    row = conn.execute(
+        "select coalesce(sum(case "
+        " when status = 'reserved' then estimated_cost_microusd "
+        " when status = 'completed' then actual_cost_microusd "
+        " else 0 end), 0) "
+        "from app_usage_events where business_slug = %s and app_user_id = %s and created_at >= %s",
+        (business_slug, app_user_id, period_start),
+    ).fetchone()
+    return int(row[0])
+
+
 # ── budget catalog ───────────────────────────────────────────────────────────────
 
 
@@ -290,6 +327,7 @@ def reserve_usage(
     estimated_cost_microusd: int,
     reservation_key: str,
     app_user_id: str | None = None,
+    user_monthly_limit_microusd: int | None = None,
     app_user_tier: str | None = None,
     purpose: str = "product_usage",
     route: str = "app",
@@ -305,9 +343,13 @@ def reserve_usage(
     release."""
     if estimated_cost_microusd < 0:
         raise ValueError("estimated_cost_microusd must be >= 0")
+    if user_monthly_limit_microusd is not None and user_monthly_limit_microusd < 0:
+        raise ValueError("user_monthly_limit_microusd must be >= 0")
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
+    if user_monthly_limit_microusd is not None and app_user_id is None:
+        raise ValueError("app_user_id is required when user_monthly_limit_microusd is set")
     with conn.transaction():
         budget = _ensure_budget_locked(conn, business_slug)
         if budget.status != "active":
@@ -321,6 +363,17 @@ def reserve_usage(
             return _event_from_row(existing)
         if app_user_id is not None:
             _require_app_user(conn, business_slug, app_user_id)
+        if app_user_id is not None and user_monthly_limit_microusd is not None:
+            user_committed = _app_user_committed_microusd(
+                conn, business_slug, app_user_id, budget.current_period_start
+            )
+            if user_committed + estimated_cost_microusd > user_monthly_limit_microusd:
+                raise AppUserBudgetExceeded(
+                    app_user_id=app_user_id,
+                    user_monthly_limit_microusd=user_monthly_limit_microusd,
+                    committed_microusd=user_committed,
+                    requested_microusd=estimated_cost_microusd,
+                )
         committed = _committed_microusd(conn, business_slug, budget.current_period_start)
         if committed + estimated_cost_microusd > budget.hard_limit_microusd:
             raise AppBudgetExceeded(
@@ -453,6 +506,7 @@ def record_completed_usage(
     reservation_key: str,
     estimated_cost_microusd: int | None = None,
     app_user_id: str | None = None,
+    user_monthly_limit_microusd: int | None = None,
     app_user_tier: str | None = None,
     purpose: str = "product_usage",
     route: str = "app",
@@ -472,9 +526,13 @@ def record_completed_usage(
         raise ValueError("actual_cost_microusd must be >= 0")
     if estimated_cost_microusd is not None and estimated_cost_microusd < 0:
         raise ValueError("estimated_cost_microusd must be >= 0")
+    if user_monthly_limit_microusd is not None and user_monthly_limit_microusd < 0:
+        raise ValueError("user_monthly_limit_microusd must be >= 0")
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
+    if user_monthly_limit_microusd is not None and app_user_id is None:
+        raise ValueError("app_user_id is required when user_monthly_limit_microusd is set")
     estimate = actual_cost_microusd if estimated_cost_microusd is None else estimated_cost_microusd
     gate_amount = max(estimate, actual_cost_microusd)
     with conn.transaction():
@@ -490,6 +548,17 @@ def record_completed_usage(
             return _event_from_row(existing)
         if app_user_id is not None:
             _require_app_user(conn, business_slug, app_user_id)
+        if app_user_id is not None and user_monthly_limit_microusd is not None:
+            user_committed = _app_user_committed_microusd(
+                conn, business_slug, app_user_id, budget.current_period_start
+            )
+            if user_committed + gate_amount > user_monthly_limit_microusd:
+                raise AppUserBudgetExceeded(
+                    app_user_id=app_user_id,
+                    user_monthly_limit_microusd=user_monthly_limit_microusd,
+                    committed_microusd=user_committed,
+                    requested_microusd=gate_amount,
+                )
         committed = _committed_microusd(conn, business_slug, budget.current_period_start)
         if committed + gate_amount > budget.hard_limit_microusd:
             raise AppBudgetExceeded(

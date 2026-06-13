@@ -16,8 +16,8 @@ Builds on `app_identity` (the sub-user spine). Two concerns, both scoped by `bus
 
 Postgres port of the SQLite trunk's app_plan_policies / app_entitlements (core.py:3036-3140);
 the SQLite product path is the predecessor, retired in Phase 8. The dead `stripe_payment_link_*`
-columns are dropped (written, never read); `included_action_quota` / `allow_overage` are KEPT
-(they are read — plans.md mirror + plan-validation warnings).
+columns are dropped (written, never read). `included_action_quota` remains as plan metadata; the
+old subsidy/overage plan switch is removed because plan-funded monthly budget is now authoritative.
 
 House style (matches billing.py / custody.py / policy.py / app_identity.py): pure leaf, takes a
 psycopg connection, imports no psycopg, opens its own `conn.transaction()` per mutating op, and
@@ -93,7 +93,6 @@ class PlanPolicy:
     billing_interval: str
     included_ai_budget_microusd: int
     included_action_quota: int
-    allow_overage: bool
     stripe_product_id: str | None
     stripe_price_id: str | None
     source: str
@@ -122,8 +121,8 @@ class Entitlement:
 
 _PLAN_COLUMNS = (
     "id, business_slug, plan_key, tier, price_cents, currency, billing_interval, "
-    "included_ai_budget_microusd, included_action_quota, allow_overage, "
-    "stripe_product_id, stripe_price_id, source, notes, metadata"
+    "included_ai_budget_microusd, included_action_quota, stripe_product_id, "
+    "stripe_price_id, source, notes, metadata"
 )
 _ENT_COLUMNS = (
     "id, business_slug, app_user_id, tier, status, source, "
@@ -163,9 +162,7 @@ def _contains_unlimited(value) -> bool:
     return False
 
 
-def plan_validation_warnings(
-    plan_key: str, tier: str, quota: int, allow_overage: bool, metadata: dict
-) -> list[str]:
+def plan_validation_warnings(plan_key: str, tier: str, quota: int, metadata: dict) -> list[str]:
     """Operator-facing advisory warnings about a plan's coherence. Pure (no DB). Ported from
     core.py:1978 so the upsert can fold them into stored metadata, exactly as the SQLite path
     did — they are advisory only and gate nothing."""
@@ -182,10 +179,9 @@ def plan_validation_warnings(
             "plan_key and entitlement tier differ; this can be valid for billing variants "
             "but should be intentional"
         )
-    if _contains_unlimited(metadata) and quota > 0 and not allow_overage:
+    if _contains_unlimited(metadata) and quota > 0:
         warnings.append(
-            "metadata suggests an unlimited entitlement but included_action_quota is finite "
-            "and overage is disabled"
+            "metadata suggests an unlimited entitlement but included_action_quota is finite"
         )
     return warnings
 
@@ -201,12 +197,11 @@ def _plan_from_row(row) -> PlanPolicy:
         billing_interval=str(row[6]),
         included_ai_budget_microusd=int(row[7]),
         included_action_quota=int(row[8]),
-        allow_overage=bool(row[9]),
-        stripe_product_id=None if row[10] is None else str(row[10]),
-        stripe_price_id=None if row[11] is None else str(row[11]),
-        source=str(row[12]),
-        notes=str(row[13]),
-        metadata=row[14] if isinstance(row[14], dict) else {},
+        stripe_product_id=None if row[9] is None else str(row[9]),
+        stripe_price_id=None if row[10] is None else str(row[10]),
+        source=str(row[11]),
+        notes=str(row[12]),
+        metadata=row[13] if isinstance(row[13], dict) else {},
     )
 
 
@@ -239,9 +234,8 @@ def upsert_plan_policy(
     price_cents: int = 0,
     currency: str = "usd",
     billing_interval: str = "month",
-    included_ai_budget_microusd: int = 0,
+    included_ai_budget_microusd: int | None = None,
     included_action_quota: int = 0,
-    allow_overage: bool = False,
     stripe_product_id: str | None = None,
     stripe_price_id: str | None = None,
     source: str = "takyon",
@@ -260,7 +254,15 @@ def upsert_plan_policy(
     interval = _normalize_billing_interval(billing_interval)
     if interval not in _VALID_BILLING_INTERVALS:
         raise InvalidPlan("billing_interval must be one of: month, year, one_time")
-    budget = int(float(included_ai_budget_microusd or 0))
+    existing = None
+    if included_ai_budget_microusd in {None, ""}:
+        existing = get_plan_policy(conn, business_slug, key)
+    budget_source = (
+        existing.included_ai_budget_microusd
+        if existing is not None and included_ai_budget_microusd in {None, ""}
+        else included_ai_budget_microusd
+    )
+    budget = int(float(budget_source or 0))
     if budget < 0:
         raise InvalidPlan("included_ai_budget_microusd must be non-negative")
     if interval == "month" and str(tier_value or "free").lower() != "free":
@@ -270,9 +272,8 @@ def upsert_plan_policy(
     quota = int(included_action_quota if included_action_quota is not None else 0)
     if quota < 0:
         raise InvalidPlan("included_action_quota must be non-negative")
-    overage = bool(allow_overage)
     meta = dict(metadata or {})
-    warnings = plan_validation_warnings(key, tier_value, quota, overage, meta)
+    warnings = plan_validation_warnings(key, tier_value, quota, meta)
     if warnings:
         prior = meta.get("takyon_plan_validation")
         prior = prior if isinstance(prior, dict) else {}
@@ -290,9 +291,9 @@ def upsert_plan_policy(
         row = conn.execute(
             "insert into app_plan_policies "
             "(business_slug, plan_key, tier, price_cents, currency, billing_interval, "
-            " included_ai_budget_microusd, included_action_quota, allow_overage, "
-            " stripe_product_id, stripe_price_id, source, notes, metadata) "
-            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+            " included_ai_budget_microusd, included_action_quota, stripe_product_id, "
+            " stripe_price_id, source, notes, metadata) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
             "on conflict (business_slug, plan_key) do update set "
             " tier = excluded.tier, "
             " price_cents = excluded.price_cents, "
@@ -300,7 +301,6 @@ def upsert_plan_policy(
             " billing_interval = excluded.billing_interval, "
             " included_ai_budget_microusd = excluded.included_ai_budget_microusd, "
             " included_action_quota = excluded.included_action_quota, "
-            " allow_overage = excluded.allow_overage, "
             " stripe_product_id = coalesce(excluded.stripe_product_id, app_plan_policies.stripe_product_id), "
             " stripe_price_id = coalesce(excluded.stripe_price_id, app_plan_policies.stripe_price_id), "
             " source = excluded.source, "
@@ -317,7 +317,6 @@ def upsert_plan_policy(
                 interval,
                 budget,
                 quota,
-                overage,
                 stripe_product_id,
                 stripe_price_id,
                 str(source or "takyon"),

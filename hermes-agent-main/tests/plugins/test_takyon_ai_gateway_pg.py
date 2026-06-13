@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from psycopg.conninfo import make_conninfo  # noqa: E402
 
 from plugins.takyon.ai_gateway import get_provider_caller  # noqa: E402
-from plugins.takyon import app_entitlements, app_funding, app_identity  # noqa: E402
+from plugins.takyon import app_entitlements, app_identity  # noqa: E402
 from plugins.takyon.app_gateway_keys import mint_gateway_key  # noqa: E402
 from plugins.takyon.app_usage import (  # noqa: E402
     get_usage_summary,
@@ -70,22 +70,14 @@ def _provision_session_user(
     email: str = "cust@example.com",
     tier: str = "free",
     included_ai_budget_microusd: int = 50_000,
-    allow_overage: bool = False,
-    subsidy_cap_microusd: int | None = None,
-    grant_subsidy_microusd: int = 50_000,
 ) -> tuple[app_identity.AppUser, str]:
     plan_key = f"{tier}-plan"
-    metadata = {}
-    if subsidy_cap_microusd is not None:
-        metadata["subsidy_cap_microusd"] = subsidy_cap_microusd
     app_entitlements.upsert_plan_policy(
         conn,
         business_slug,
         plan_key,
         tier=tier,
         included_ai_budget_microusd=included_ai_budget_microusd,
-        allow_overage=allow_overage,
-        metadata=metadata,
     )
     link, raw_magic = app_identity.create_magic_link(conn, business_slug, email)
     session_user, session_token = app_identity.verify_magic_link(conn, business_slug, raw_magic)
@@ -99,13 +91,6 @@ def _provision_session_user(
         plan_key=plan_key,
         metadata={"non_billing": True},
     )
-    if grant_subsidy_microusd > 0:
-        app_funding.grant_business_subsidy(
-            conn,
-            business_slug,
-            grant_subsidy_microusd,
-            f"subsidy:{business_slug}:{email}",
-        )
     user = app_identity.get_app_user(conn, business_slug, app_user_id=session_user.app_user_id)
     assert user is not None
     return user, session_token
@@ -236,7 +221,7 @@ def test_gateway_provider_key_never_in_response(gateway_client, pg_conn):
 def test_gateway_blocks_when_provider_unconfigured(gateway_client, pg_conn):
     # Invariant #8: a valid key but no provider configured → 503 blocked, and NOTHING reserved.
     slug, raw = _provision_business(pg_conn)
-    _user, session_token = _provision_session_user(pg_conn, slug, grant_subsidy_microusd=0)
+    _user, session_token = _provision_session_user(pg_conn, slug)
     client = gateway_client(_none_caller)
 
     resp = client.post(
@@ -277,6 +262,30 @@ def test_gateway_budget_exceeded_is_402(gateway_client, pg_conn):
     assert detail["remaining_microusd"] == 0
 
     # Reserve refused before inserting, and the provider was never called.
+    assert list_usage_events(pg_conn, slug) == []
+
+
+def test_gateway_user_monthly_budget_exceeded_is_402(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    user, session_token = _provision_session_user(
+        pg_conn,
+        slug,
+        tier="paid",
+        included_ai_budget_microusd=1,
+    )
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
+    assert resp.status_code == 402
+    detail = resp.json()["detail"]
+    assert detail["error"] == "app_user_budget_exceeded"
+    assert detail["app_user_id"] == user.id
+    assert detail["user_monthly_limit_microusd"] == 1
+    assert detail["remaining_microusd"] == 1
     assert list_usage_events(pg_conn, slug) == []
 
 

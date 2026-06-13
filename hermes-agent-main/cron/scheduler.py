@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -1818,8 +1819,9 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
     try:
         due_jobs = get_due_jobs()
+        action_runs = _run_due_action_schedules_inline(verbose=verbose)
 
-        if verbose and not due_jobs:
+        if verbose and not due_jobs and not action_runs:
             logger.info("%s - No jobs due", _takyon_now().strftime('%H:%M:%S'))
             return 0
 
@@ -1950,7 +1952,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         except Exception as _e:
             logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
 
-        return sum(_results)
+        return sum(_results) + action_runs
     finally:
         if fcntl:
             try:
@@ -1963,6 +1965,43 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             except (OSError, IOError):
                 pass
         lock_fd.close()
+
+
+def _run_due_action_schedules_inline(*, verbose: bool) -> int:
+    try:
+        from plugins.takyon import app_actions as takyon_app_actions
+        from plugins.takyon.core import _PGConn, _store
+    except Exception:
+        return 0
+
+    store = _store()
+    try:
+        with store._connect() as conn:
+            if isinstance(conn, _PGConn):
+                return 0
+    except Exception:
+        return 0
+
+    executed = 0
+
+    def _enqueue(item: dict[str, str]) -> None:
+        nonlocal executed
+        takyon_app_actions.execute_scheduled_action(
+            store,
+            business_slug=str(item.get("business_slug") or ""),
+            action_name=str(item.get("action_name") or ""),
+            window_key=str(item.get("window_key") or ""),
+        )
+        executed += 1
+
+    count = takyon_app_actions.dispatch_due_action_schedules(
+        store,
+        datetime.now(timezone.utc),
+        _enqueue,
+    )
+    if verbose and count:
+        logger.info("Ran %d due app action schedule(s)", count)
+    return executed
 
 
 if __name__ == "__main__":

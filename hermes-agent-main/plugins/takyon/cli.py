@@ -28,7 +28,6 @@ _TAKYON_SKILL_ALIASES = {
     "distribution": "takyon-distribution",
     "business-pulse": "takyon-business-metrics",
     "business-metrics": "takyon-business-metrics",
-    "claude-agent-sdk": "takyon-claude-agent-sdk",
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
 _DEFAULT_BOOTSTRAP_MAX_TURNS = 30

@@ -15,6 +15,10 @@ Deploys should install:
 - `deploy/takyon-subuser/Caddyfile`
 - `deploy/takyon-subuser/bootstrap-host.sh` on first boot
 
+The tracked runtime contract for this host now includes a pinned system-wide
+`deno` install plus `systemd-run`, because product-host action invokes execute
+here on the shared app/runtime plane.
+
 The current runtime still serves shared product hosts from
 `$TAKYON_HOME/product-sites`, so first boot and deploys must sync the existing
 `product-sites` tree from the operator source host until that surface moves to

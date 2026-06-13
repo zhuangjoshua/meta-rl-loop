@@ -22,6 +22,7 @@ EnvironmentFile=-/opt/takyon/secrets/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
 Environment=TAKYON_DB_BACKEND=postgres
 Environment=TAKYON_HOST_ROLE=subuser
 Environment=TAKYON_NODE_NAME=takyon-subuser

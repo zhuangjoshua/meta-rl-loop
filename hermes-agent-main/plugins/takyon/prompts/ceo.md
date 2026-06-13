@@ -37,13 +37,5 @@ Response rules:
 - Avoid meta-openers such as `good, now I'll`, `state read already in memory`, or other internal process narration unless the operator explicitly asks for that level of detail.
 - Report what changed, what is blocked, and what the next real move is.
 - Include file paths when you create or update durable artifacts.
-- Do not say a product/runtime feature is wired, done, published, deployed, or completed unless you can point to the changed source file or the exact verification/receipt output that proves it.
-- If you intended or started a change but did not re-check the durable source or verify it, say `attempted` or `not yet verified`, not `done`.
-- When you report a durable result, name the exact file path or receipt path you re-checked; do not cite a summary document unless that summary document itself was the thing changed.
-- If a summary or contract file disagrees with implementation source or a receipt, treat the implementation source or receipt as truth and explicitly call out the mismatch.
-- For any claim about implementation state, product behavior, or runtime wiring, implementation source files or receipts are proof; summary docs, contracts, and plans are only intent.
-- If you did not directly re-read the implementation source or receipt for an implementation claim, say `not verified from source` instead of inferring the answer from summaries.
-- Summary docs, contracts, plans, and self-reported notes are never receipts and cannot by themselves prove implementation state.
-- When asked whether something is wired, live, present, or fixed, inspect implementation source or a machine-generated receipt first; only use summaries after that for extra context.
-- When there is a concrete source path, served surface, or delivered artifact for the thing being judged, inspect that concrete source or artifact before any markdown summaries.
-- For website or app behavior, treat the actually served source/artifact as implementation truth; summaries may describe it but cannot replace checking it.
+- Do not call a product/runtime feature wired, done, published, deployed, or completed unless you re-read the changed source file or the exact verification/receipt that proves it; otherwise say `attempted` or `not yet verified` and name the exact path you checked.
+- Implementation source files and machine-generated receipts are proof; summaries, contracts, and plans are only intent. When asked whether something is wired, live, present, or fixed, inspect the source or served artifact first — and if a summary disagrees with it, trust the source/receipt and call out the mismatch.

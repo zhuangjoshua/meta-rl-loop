@@ -32,6 +32,7 @@ TAKYON_DEPLOY_DRAIN_POLL_SECONDS="${TAKYON_DEPLOY_DRAIN_POLL_SECONDS:-5}"
 TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS="${TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS:-1800}"
 TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 TAKYON_REQUIRE_XURL_AUTH="${TAKYON_REQUIRE_XURL_AUTH:-0}"
+TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -82,6 +83,7 @@ if [[ "$TAKYON_BOOTSTRAP_HOST" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
   TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
   TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+  TAKYON_DENO_VERSION="$TAKYON_DENO_VERSION" \
   TAKYON_CLAUDE_AGENT_DOCKER_IMAGE="$TAKYON_CLAUDE_AGENT_DOCKER_IMAGE" \
     "$BOOTSTRAP_SCRIPT"
 fi
@@ -201,6 +203,9 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   systemctl is-active --quiet docker
   docker version >/dev/null
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
+  command -v deno >/dev/null 2>&1
+  test \"\$(deno --version | awk 'NR==1 {print \$2}')\" = '$TAKYON_DENO_VERSION'
+  command -v systemd-run >/dev/null 2>&1
   # The tracked units run as the dedicated non-root 'takyon' user. Docker authority now lives in
   # takyon-docker-broker.service only, so the user must NOT remain in the docker group.
   if ! id -u takyon >/dev/null 2>&1; then

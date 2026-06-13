@@ -38,6 +38,11 @@ SKILLS_DIR = TAKYON_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
 
 
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
@@ -158,6 +163,62 @@ def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
     return SKILLS_DIR / rel
 
 
+def _find_skill_dest_by_name(skills_dir: Path, skill_name: str) -> Path | None:
+    """Locate an on-disk skill directory by frontmatter name (or folder fallback)."""
+    if not skills_dir.exists():
+        return None
+    for skill_md in skills_dir.rglob("SKILL.md"):
+        path_str = str(skill_md)
+        if "/.git/" in path_str or "/.github/" in path_str or "/.hub/" in path_str:
+            continue
+        if _read_skill_name(skill_md, skill_md.parent.name) == skill_name:
+            return skill_md.parent
+    return None
+
+
+def _copy_skill_tree(
+    skill_name: str,
+    skill_src: Path,
+    dest: Path,
+    bundled_hash: str,
+    manifest: Dict[str, str],
+    copied: List[str],
+    updated: List[str],
+    quiet: bool,
+    action_label: str = "updated",
+) -> bool:
+    """Copy or replace a skill directory from bundled source into the user dir."""
+    try:
+        if dest.exists():
+            backup = dest.with_suffix(".bak")
+            shutil.rmtree(backup, ignore_errors=True)
+            shutil.move(str(dest), str(backup))
+            try:
+                shutil.copytree(skill_src, dest)
+                shutil.rmtree(backup, ignore_errors=True)
+            except (OSError, IOError):
+                if backup.exists() and not dest.exists():
+                    shutil.move(str(backup), str(dest))
+                raise
+            updated.append(skill_name)
+            manifest[skill_name] = bundled_hash
+            if not quiet:
+                print(f"  ↑ {skill_name} ({action_label})")
+            return True
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(skill_src, dest)
+        copied.append(skill_name)
+        manifest[skill_name] = bundled_hash
+        if not quiet:
+            print(f"  + {skill_name}")
+        return True
+    except (OSError, IOError) as e:
+        if not quiet:
+            print(f"  ! Failed to sync {skill_name}: {e}")
+        return False
+
+
 def _dir_hash(directory: Path) -> str:
     """Compute a hash of all file contents in a directory for change detection."""
     hasher = hashlib.md5()
@@ -191,6 +252,7 @@ def sync_skills(quiet: bool = False) -> dict:
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
+    force_restore = _env_flag("TAKYON_FORCE_RESTORE_BUNDLED_SKILLS")
 
     copied = []
     updated = []
@@ -205,6 +267,24 @@ def sync_skills(quiet: bool = False) -> dict:
             # ── New skill — never offered before ──
             try:
                 if dest.exists():
+                    if force_restore:
+                        user_hash = _dir_hash(dest)
+                        if user_hash == bundled_hash:
+                            manifest[skill_name] = bundled_hash
+                            skipped += 1
+                        else:
+                            _copy_skill_tree(
+                                skill_name,
+                                skill_src,
+                                dest,
+                                bundled_hash,
+                                manifest,
+                                copied,
+                                updated,
+                                quiet,
+                                action_label="restored",
+                            )
+                        continue
                     # User already has a skill with the same name — don't overwrite.
                     # Only baseline in the manifest when the on-disk copy is
                     # byte-identical to bundled (e.g. a reset that re-syncs, or
@@ -225,12 +305,16 @@ def sync_skills(quiet: bool = False) -> dict:
                             f"to replace it with the bundled version."
                         )
                 else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_src, dest)
-                    copied.append(skill_name)
-                    manifest[skill_name] = bundled_hash
-                    if not quiet:
-                        print(f"  + {skill_name}")
+                    _copy_skill_tree(
+                        skill_name,
+                        skill_src,
+                        dest,
+                        bundled_hash,
+                        manifest,
+                        copied,
+                        updated,
+                        quiet,
+                    )
             except (OSError, IOError) as e:
                 if not quiet:
                     print(f"  ! Failed to copy {skill_name}: {e}")
@@ -240,6 +324,23 @@ def sync_skills(quiet: bool = False) -> dict:
             # ── Existing skill — in manifest AND on disk ──
             origin_hash = manifest.get(skill_name, "")
             user_hash = _dir_hash(dest)
+
+            if force_restore:
+                if user_hash == bundled_hash and origin_hash == bundled_hash:
+                    skipped += 1
+                else:
+                    _copy_skill_tree(
+                        skill_name,
+                        skill_src,
+                        dest,
+                        bundled_hash,
+                        manifest,
+                        copied,
+                        updated,
+                        quiet,
+                        action_label="restored",
+                    )
+                continue
 
             if not origin_hash:
                 # v1 migration: no origin hash recorded. Set baseline from
@@ -286,11 +387,31 @@ def sync_skills(quiet: bool = False) -> dict:
 
         else:
             # ── In manifest but not on disk — user deleted it ──
-            skipped += 1
+            if force_restore:
+                _copy_skill_tree(
+                    skill_name,
+                    skill_src,
+                    dest,
+                    bundled_hash,
+                    manifest,
+                    copied,
+                    updated,
+                    quiet,
+                )
+            else:
+                skipped += 1
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
     for name in cleaned:
+        if force_restore:
+            stale_dest = _find_skill_dest_by_name(SKILLS_DIR, name)
+            if stale_dest and stale_dest.exists():
+                try:
+                    shutil.rmtree(stale_dest)
+                except (OSError, IOError) as e:
+                    if not quiet:
+                        print(f"  ! Failed to remove stale skill {name}: {e}")
         del manifest[name]
 
     # Also copy DESCRIPTION.md files for categories (if not already present)

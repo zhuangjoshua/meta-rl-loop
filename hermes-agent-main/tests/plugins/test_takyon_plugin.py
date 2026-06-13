@@ -49,8 +49,10 @@ from plugins.takyon.core import (
     handle_business_reddit_ad_control,
     handle_business_reddit_ad_insights_sync,
     handle_business_reddit_ad_launch,
+    handle_business_reddit_publish_outreach,
     handle_business_publish_test_outreach,
     handle_business_x_publish_outreach,
+    handle_business_x_search,
     handle_business_x_metrics_sync,
     handle_business_read_app_account,
     handle_business_read_app_record,
@@ -151,7 +153,9 @@ def test_plugin_registers_authority_tools_on_separate_toolset():
     assert toolsets["business_meta_ad_bind_manual_launch"] == "takyon-authority"
     assert toolsets["business_meta_ad_control"] == "takyon-authority"
     assert toolsets["business_meta_ad_insights_sync"] == "takyon-authority"
+    assert toolsets["business_x_search"] == "takyon-authority"
     assert toolsets["business_x_metrics_sync"] == "takyon-authority"
+    assert toolsets["business_reddit_publish_outreach"] == "takyon"
     assert toolsets["business_reddit_ad_launch"] == "takyon-authority"
     assert toolsets["business_reddit_ad_control"] == "takyon-authority"
     assert toolsets["business_reddit_ad_insights_sync"] == "takyon-authority"
@@ -171,11 +175,11 @@ def test_bundled_takyon_skills_exist():
         "takyon-app-runtime",
         "takyon-build-product",
         "takyon-business-metrics",
-        "takyon-claude-agent-sdk",
         "takyon-conversation-followup",
         "takyon-distribution",
         "takyon-market-research",
         "takyon-meta-ads",
+        "takyon-reddit",
         "takyon-reddit-ads",
         "takyon-x",
     }
@@ -1489,7 +1493,6 @@ def test_claude_agent_task_injects_customer_facing_ai_copy_contract_for_product_
     assert "Claude Opus 4.7, Claude Sonnet 4.6, and Claude Haiku 4.5" in instruction
     assert "Do not describe Claude-backed behavior with GPT names" in instruction
     assert "Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app." in instruction
-    assert "If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`." in instruction
     assert "This surface is app-like and must ship a real `/app` route in source." in instruction
 
 
@@ -1510,35 +1513,19 @@ def test_app_like_surface_defaults_required_routes_to_root_and_app():
     assert shape["required_app_tabs"] == ["Translate", "History"]
 
 
-def test_surface_subuser_app_shape_defaults_subscription_style_to_monthly():
-    surface = {
-        "runtime_features": ["generate"],
-        "metadata": {
-            "subuser_app": {"app_mode": "ai_tool"},
-        },
-    }
+def test_generate_rail_canonicalizes_auth_account_dependency():
+    # `generate` still implies auth/account; the app_mode/subscription_style/api_mode
+    # driven auto-includes were deleted with the app-shape taxonomy (§22/§23).
+    runtime_features = _canonical_runtime_features_for_surface_shape(["generate"])
 
-    shape = _surface_subuser_app_shape(surface)
-
-    assert shape["subscription_style"] == "monthly"
-
-
-def test_monthly_ai_tool_shape_canonicalizes_required_runtime_features():
-    runtime_features = _canonical_runtime_features_for_surface_shape(
-        ["generate"],
-        app_mode="ai_tool",
-        subscription_style="free_only",
-        api_mode="none",
-    )
-
-    assert runtime_features == ["auth", "account", "checkout", "generate"]
+    assert runtime_features == ["auth", "account", "generate"]
 
 
 def test_landing_only_surface_does_not_force_app_route():
     surface = {
         "landing_page_only": True,
         "metadata": {
-            "subuser_app": {"app_mode": "ai_tool"},
+            "subuser_app": {},
             "customer_experience": {
                 "required_routes": ["/"],
                 "required_app_tabs": ["Translate"],
@@ -1566,8 +1553,6 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
             {
                 "business": "latexflow",
                 "source_path": "product/app",
-                "app_mode": "ai_tool",
-                "subscription_style": "monthly",
                 "runtime_features": ["generate"],
                 "conversion_model": "self-serve signup -> free tier (5 docs) -> $9/mo paid plan",
                 "required_routes": ["/", "/editor", "/documents", "/pricing", "/app"],
@@ -1587,8 +1572,54 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert shape["conversion_model"] == "monthly subscription"
     assert shape["required_routes"] == ["/", "/app"]
     assert shape["required_app_tabs"] == []
+
+
+def test_bootstrap_ai_shell_keeps_ai_identity_without_requiring_actions_spec_yet(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-bootstrap-ai-shell",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["actions"],
+                "surface_goal": "Convert any plain English equation description into compilable LaTeX.",
+                "product_workflow": {
+                    "primary_user": "Student, researcher, or engineer who knows math but not LaTeX",
+                    "primary_job": "Get compilable LaTeX from a plain English equation description",
+                    "success_moment": "User pastes the output into Overleaf and it compiles.",
+                },
+                "idempotency_key": "bootstrap-ai-shell-no-actions-spec",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    surface = app["surface_contract"]
+    workflow = _surface_product_workflow_shape(surface)
+
+    # Bootstrap no longer persists shell rails onto the contract. The stored contract
+    # stays empty until workflow declares the real rails, while the effective runtime
+    # shell still exposes the pinned bootstrap set.
+    assert _surface_runtime_features(surface) == []
+    assert takyon_core._surface_effective_runtime_features(surface) == [  # type: ignore[attr-defined]
+        "auth",
+        "account",
+        "profile",
+        "checkout",
+    ]
+    assert _surface_is_bootstrap_access_shell(surface) is True
+    assert workflow["primary_job"] == "Get compilable LaTeX from a plain English equation description"
     assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
-    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
+    assert surface["runtime_features"] == []
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
     assert len(app["plans"]) == 1
     plan = app["plans"][0]
@@ -1599,7 +1630,6 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     assert plan["billing_interval"] == "month"
     assert plan["included_ai_budget_microusd"] == 5_000_000
     assert plan["included_action_quota"] == 0
-    assert plan["allow_overage"] is False
     assert plan["stripe_product_id"] is None
     assert plan["stripe_price_id"] is None
     assert plan["source"] == "takyon_starter"
@@ -1608,6 +1638,48 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
         "kind": "monthly_access_shell",
         "price_status": "unset",
     }
+
+
+def test_existing_source_can_select_actions_before_named_actions_exist(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:longer",
+        [{"action": "business.upsert", "business": "longer", "name": "Longer", "budget": {"amount": 25}}],
+        "init-existing-source-actions-shell",
+    )
+
+    site = tmp_path / "businesses" / "longer" / "product" / "site" / "src" / "screens"
+    site.mkdir(parents=True)
+    (site / "app-home.tsx").write_text(
+        "export default function AppHome() { return <main>Longer</main>; }\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "longer",
+                "source_path": "product/site",
+                "runtime_features": ["auth", "account", "actions"],
+                "product_workflow": {
+                    "primary_user": "subscriber",
+                    "primary_job": "complete the product workflow",
+                    "success_moment": "the user reaches a real saved outcome",
+                },
+                "idempotency_key": "existing-source-actions-no-specs",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    app = store.read(scope="business:longer", query="summary", include=["app"])["app"]
+    surface = app["surface_contract"]
+    workflow = _surface_product_workflow_shape(surface)
+
+    assert _surface_runtime_features(surface) == ["auth", "account", "actions"]
+    assert "actions" not in workflow
 
 
 def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp_path, monkeypatch):
@@ -1629,8 +1701,6 @@ def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp
             {
                 "business": "longer",
                 "source_path": "product/site",
-                "app_mode": "ai_tool",
-                "subscription_style": "monthly",
                 "runtime_features": ["generate"],
                 "product_workflow": {
                     "primary_user": "subscriber",
@@ -1998,6 +2068,34 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     assert "Runtime features: auth, account, checkout, generate" in surface_md
 
 
+def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-vite-generate-reject",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "runtime_features": ["generate"],
+                "product_workflow": {
+                    "primary_job": "Convert English descriptions into LaTeX.",
+                },
+                "idempotency_key": "vite-ai-generate-reject",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "generate is not a declarable rail on the vite_react_ts lane" in result["error"]
+
+
 def test_app_surface_contract_records_product_workflow_in_contract_render_and_context(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -2063,7 +2161,6 @@ def test_app_surface_contract_records_product_workflow_in_contract_render_and_co
                 "business": "latexflow",
                 "source_path": "product/site",
                 "runtime_features": ["records", "generate"],
-                "app_mode": "ai_tool",
                 "product_workflow": product_workflow,
                 "idempotency_key": "surface-product-workflow",
             }
@@ -2194,7 +2291,7 @@ def test_app_records_rail_persists_lists_reads_and_deletes_records(tmp_path, mon
     assert listed_after_delete["count"] == 0
 
 
-def test_app_surface_contract_rejects_unselected_product_workflow_persistence_rail(tmp_path, monkeypatch):
+def test_app_surface_contract_derives_runtime_features_from_product_workflow_persistence_rail(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2209,7 +2306,6 @@ def test_app_surface_contract_rejects_unselected_product_workflow_persistence_ra
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["generate"],
                 "product_workflow": {
                     "primary_job": "Turn notes into a saved update.",
                     "persistence_rules": {
@@ -2217,13 +2313,14 @@ def test_app_surface_contract_rejects_unselected_product_workflow_persistence_ra
                         "persistence_rail": "records",
                     },
                 },
-                "idempotency_key": "surface-product-workflow-missing-records",
+                "idempotency_key": "surface-product-workflow-derive-records",
             }
         )
     )
 
-    assert result["success"] is False
-    assert "persistence_rail `records` must also be selected in runtime_features" in result["error"]
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["runtime_features"] == ["records"]
 
 
 def test_app_surface_contract_rejects_landing_only_product_workflow_contradiction(tmp_path, monkeypatch):
@@ -2490,14 +2587,16 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Reachable runtime endpoints: POST /generate on product hosts or POST /api/takyon/apps/latexflow/generate off-host" in instruction
     assert "Treat POST /generate on product hosts or POST <runtime_api_base>/generate off-host as the public product contract for AI generation" in instruction
     assert "product code should not call providers or internal authority endpoints directly" in instruction
-    assert "`tk_` top-level operator tokens never belong in product code" in instruction
-    assert "`tkg_` is the app/business AI mediation boundary, not a customer login or session token" in instruction
+    assert "never put operator/admin routes or `tk_`/`tkg_` operator tokens in product code" in instruction
+    assert "Customer identity and all account/session/entitlement/checkout/usage truth come only from the declared app runtime rails" in instruction
     assert "Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail." in instruction
-    assert "Frontend-local, non-authoritative behavior may look live when it runs entirely in the browser" in instruction
-    assert "`account` is the canonical paid-state read rail." in instruction
-    assert "No app plans are configured yet. Do not render pricing cards" in instruction
-    assert "This is a paid monthly app surface. Customer-facing pricing language must stay paid-only" in instruction
-    assert "Do not write or imply `Free`, `Start free`, `Try free`, `free tier`, `trial`, `freemium`, `starter plan`, or `$0/month` copy" in instruction
+    # The minimized worker contract carries the positive obligation; the §25.4 fear and
+    # free-tier prose is gone — integrity now lives in the rails, validators, and refresh gate.
+    assert "Your overriding obligation is that the product's primary job works for real." in instruction
+    assert "Use the declared shared rails and named actions for backend behavior." in instruction
+    assert "do not fake browser-only sessions" not in instruction
+    assert "Do not use localStorage" not in instruction
+    assert "Do not write or imply `Free`" not in instruction
 
 
 def test_claude_agent_task_uses_docker_lane_for_product_site_when_terminal_env_is_docker(tmp_path, monkeypatch):
@@ -2883,8 +2982,6 @@ def test_claude_agent_task_retries_once_on_local_surface_refresh_blocker(tmp_pat
                 "action": "app.surface.upsert",
                 "business": "latexflow",
                 "source_path": "product/site",
-                "app_mode": "standard_saas",
-                "subscription_style": "monthly",
                 "runtime_features": ["auth", "checkout"],
                 "required_routes": ["/", "/app"],
             }
@@ -3828,6 +3925,55 @@ def test_monthly_plan_upsert_rejects_included_ai_budget_above_price(tmp_path, mo
             }
         ],
         "budgetcap-plan",
+    )["results"][0]
+
+    assert result["success"] is False
+    assert "included_ai_budget_microusd must be between 0 and the monthly plan price" in result["error"]
+
+
+def test_monthly_plan_price_drop_requires_existing_budget_to_fit_new_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:budgetsync",
+        [{"action": "business.upsert", "business": "budgetsync", "name": "Budgetsync", "mode": "test"}],
+        "init-budgetsync",
+    )
+    seed = _commit(
+        store,
+        "business:budgetsync",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "budgetsync",
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 1900,
+                "currency": "usd",
+                "billing_interval": "month",
+                "included_ai_budget_microusd": 5_000_000,
+            }
+        ],
+        "budgetsync-seed-plan",
+    )["results"][0]
+    assert seed["success"] is True
+
+    result = _commit(
+        store,
+        "business:budgetsync",
+        [
+            {
+                "action": "app.plan.upsert",
+                "business": "budgetsync",
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 300,
+                "currency": "usd",
+                "billing_interval": "month",
+            }
+        ],
+        "budgetsync-price-drop",
     )["results"][0]
 
     assert result["success"] is False
@@ -5204,6 +5350,7 @@ def test_business_read_channel_credit_budgets_returns_snapshot_and_action_costs(
     assert result["value"]["channels"]["x"]["allocated_credits"] == 1
     assert result["value"]["channels"]["meta"]["allocated_credits"] == 3
     assert result["value"]["action_costs"]["x_publish_outreach"]["default_bucket"] == "x"
+    assert result["value"]["action_costs"]["reddit_publish_outreach"]["default_bucket"] == "reddit"
     assert result["value"]["action_costs"]["meta_ad_launch"]["credits"] >= 1
 
 
@@ -7310,6 +7457,115 @@ def test_business_x_publish_outreach_sets_x_defaults_in_test_mode(tmp_path, monk
     assert receipt_payload["provider"] == "x"
 
 
+def test_business_x_publish_outreach_test_mode_records_media_paths_without_provider_calls(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "test",
+            }
+        ],
+        "init-jobtailor-x-media",
+    )
+    image_one = tmp_path / "businesses" / "jobtailor" / "product" / "ads" / "hero.png"
+    image_two = tmp_path / "businesses" / "jobtailor" / "product" / "ads" / "chart.png"
+    image_one.parent.mkdir(parents=True, exist_ok=True)
+    image_one.write_bytes(b"png-one")
+    image_two.write_bytes(b"png-two")
+
+    monkeypatch.setattr(
+        takyon_core.composio_distribution,
+        "twitter_execute_tool",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("provider call should not run in test mode")),
+    )
+    monkeypatch.setattr(
+        takyon_core.composio_distribution,
+        "upload_file_descriptor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upload should not run in test mode")),
+    )
+
+    result = json.loads(
+        handle_business_x_publish_outreach(
+            {
+                "business": "jobtailor",
+                "body": "Scope creep keeps eating freelancer margins.",
+                "media_paths": ["product/ads/hero.png", "product/ads/chart.png"],
+                "idempotency_key": "jobtailor-x-local-publish-media",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["metadata"]["media_paths"] == [
+        "product/ads/hero.png",
+        "product/ads/chart.png",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("media_paths", "expected"),
+    [
+        (["../outside.png"], "must stay within the business workspace"),
+        (["product/ads/missing.png"], "media file not found"),
+        (
+            [
+                "product/ads/1.png",
+                "product/ads/2.png",
+                "product/ads/3.png",
+                "product/ads/4.png",
+                "product/ads/5.png",
+            ],
+            "at most 4 images",
+        ),
+        (["product/ads/hero.png", "product/ads/clip.mp4"], "cannot mix images and video"),
+    ],
+)
+def test_business_x_publish_outreach_rejects_invalid_media_paths(tmp_path, monkeypatch, media_paths, expected):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "test",
+            }
+        ],
+        "init-jobtailor-x-invalid-media",
+    )
+    media_root = tmp_path / "businesses" / "jobtailor" / "product" / "ads"
+    media_root.mkdir(parents=True, exist_ok=True)
+    for name in ("1.png", "2.png", "3.png", "4.png", "5.png", "hero.png"):
+        (media_root / name).write_bytes(b"png")
+    (media_root / "clip.mp4").write_bytes(b"mp4")
+
+    result = json.loads(
+        handle_business_x_publish_outreach(
+            {
+                "business": "jobtailor",
+                "body": "Scope creep keeps eating freelancer margins.",
+                "media_paths": media_paths,
+                "idempotency_key": "jobtailor-x-invalid-media",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert expected in result["error"]
+
+
 def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -7452,6 +7708,141 @@ def test_business_x_publish_outreach_live_x_blocks_before_enqueue_when_credits_a
     assert result["blocked"] is True
     assert result["status"] == "blocked_insufficient_creative_credits"
     assert "insufficient_creative_credits" in result["error"]
+
+
+def test_business_reddit_publish_outreach_sets_reddit_defaults_in_test_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "test",
+            }
+        ],
+        "init-jobtailor-reddit",
+    )
+
+    result = json.loads(
+        handle_business_reddit_publish_outreach(
+            {
+                "business": "jobtailor",
+                "subreddit": "freelance",
+                "title": "How freelancers stop scope creep",
+                "body": "Short checklist that keeps projects from ballooning.",
+                "idempotency_key": "jobtailor-reddit-local-publish",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    publish = result["results"][0]
+    receipt = tmp_path / "businesses" / "jobtailor" / publish["receipt"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["channel"] == "reddit"
+    assert receipt_payload["provider"] == "reddit"
+    assert receipt_payload["metadata"]["subreddit"] == "freelance"
+
+
+def test_business_reddit_publish_outreach_live_blocks_before_enqueue_when_credits_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "live",
+            }
+        ],
+        "init-jobtailor-live-reddit-preflight",
+    )
+
+    result = json.loads(
+        handle_business_reddit_publish_outreach(
+            {
+                "business": "jobtailor",
+                "subreddit": "freelance",
+                "title": "How freelancers stop scope creep",
+                "body": "Short checklist that keeps projects from ballooning.",
+                "idempotency_key": "jobtailor-reddit-live-blocked-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert "insufficient_creative_credits" in result["error"]
+
+
+def test_business_x_search_live_writes_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:clipbook",
+        [
+            {
+                "action": "business.upsert",
+                "business": "clipbook",
+                "name": "Clipbook",
+                "mode": "live",
+            }
+        ],
+        "init-clipbook-x-search",
+    )
+    monkeypatch.setattr(
+        takyon_core.composio_distribution,
+        "twitter_execute_tool",
+        lambda *args, **kwargs: {
+            "data": {
+                "data": [
+                    {"id": "1", "text": "search result one", "author_id": "a1"},
+                    {"id": "2", "text": "search result two", "author_id": "a2"},
+                ],
+                "meta": {"result_count": 2, "newest_id": "2", "oldest_id": "1"},
+            }
+        },
+    )
+
+    result = json.loads(
+        handle_business_x_search(
+            {
+                "business": "clipbook",
+                "query": "launch copy",
+                "max_results": 12,
+                "idempotency_key": "clipbook-x-search-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["result_count"] == 2
+    assert result["newest_id"] == "2"
+    snapshot_abs = tmp_path / "businesses" / "clipbook" / result["snapshot_path"]
+    assert snapshot_abs.is_file()
+    snapshot_payload = json.loads(snapshot_abs.read_text(encoding="utf-8"))
+    assert snapshot_payload["query"] == "launch copy"
+    assert snapshot_payload["requested_max_results"] == 12
+    assert snapshot_payload["meta"]["result_count"] == 2
+    assert snapshot_payload["tweets"][0]["id"] == "1"
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT event_type, payload_json FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT 1",
+            ("clipbook",),
+        ).fetchone()
+    assert row["event_type"] == "x.search"
+    payload = json.loads(row["payload_json"])
+    assert payload["snapshot_path"] == result["snapshot_path"]
 
 
 def test_business_x_metrics_sync_live_writes_snapshot(tmp_path, monkeypatch):

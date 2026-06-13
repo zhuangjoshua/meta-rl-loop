@@ -453,6 +453,47 @@ def test_run_as_host_user_passes_uid_gid(monkeypatch):
     assert "/etc/group,readonly" in joined
 
 
+def test_host_user_identity_mount_args_prefers_override_root(monkeypatch, tmp_path):
+    """An explicit userdb root should control where passwd/group files land."""
+    root = tmp_path / "docker-userdb-root"
+    monkeypatch.setenv("TAKYON_DOCKER_USERDB_ROOT", str(root))
+
+    args = docker_env._host_user_identity_mount_args("1234:5678")
+
+    expected_base = root / "1234-5678"
+    assert expected_base.joinpath("passwd").exists()
+    assert expected_base.joinpath("group").exists()
+    assert args == [
+        "--mount",
+        f"type=bind,src={expected_base / 'passwd'},dst=/etc/passwd,readonly",
+        "--mount",
+        f"type=bind,src={expected_base / 'group'},dst=/etc/group,readonly",
+    ]
+
+
+def test_host_user_identity_mount_args_defaults_to_takyon_root(monkeypatch, tmp_path):
+    """Without an override, keep userdb files under the stable Takyon root."""
+    monkeypatch.delenv("TAKYON_DOCKER_USERDB_ROOT", raising=False)
+    fake_root = tmp_path / "takyon-root"
+    monkeypatch.setitem(
+        sys.modules,
+        "takyon_constants",
+        types.SimpleNamespace(get_default_takyon_root=lambda: fake_root),
+    )
+
+    args = docker_env._host_user_identity_mount_args("1234:5678")
+
+    expected_base = fake_root / "cache" / "docker-userdb" / "1234-5678"
+    assert expected_base.joinpath("passwd").exists()
+    assert expected_base.joinpath("group").exists()
+    assert args == [
+        "--mount",
+        f"type=bind,src={expected_base / 'passwd'},dst=/etc/passwd,readonly",
+        "--mount",
+        f"type=bind,src={expected_base / 'group'},dst=/etc/group,readonly",
+    ]
+
+
 def test_run_as_host_user_drops_setuid_setgid_caps(monkeypatch):
     """When --user is passed, the container never needs gosu, so SETUID/SETGID
     caps are omitted for a tighter security posture."""

@@ -47,6 +47,7 @@ pnpm-debug.log*
 
 # Local runtime state, caches, and machine-specific folders.
 **/.takyon/
+**/.takyon-*/
 **/.argon-hermes-home/
 **/.vercel/
 **/.direnv/
@@ -56,6 +57,7 @@ pnpm-debug.log*
 **/wandb/
 **/testlogs/
 **/tmp/
+**/.tmp-*/
 **/.cache/
 **/temp_vision_images/
 .embedded-git-backups/

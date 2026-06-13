@@ -1750,6 +1750,19 @@ DEFAULT_CONFIG = {
         "retries": 2,
     },
 
+    "plugins": {
+        "takyon": {
+            "app_actions": {
+                "rails_base_url": "",
+                "invoke_price_microusd": 2_000,
+                "http_timeout_seconds": 60,
+                "schedule_timeout_seconds": 120,
+                "cpu_quota_percent": 50,
+                "memory_max_mb": 256,
+            },
+        },
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 23,
 }

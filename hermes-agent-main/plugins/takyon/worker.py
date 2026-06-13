@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import jobs, safebox, wakes
+from . import composio_distribution, jobs, safebox, wakes
 from .jobs import Job, JobOutcome, JobRunResult
 
 _log = logging.getLogger("takyon.worker")
@@ -172,8 +172,18 @@ def _try_run_xurl_json_command(command: list[str], *, home: Path, timeout: int =
         return {}
 
 
+def _x_tool_data(payload: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    current: Any = payload if isinstance(payload, Mapping) else {}
+    for _ in range(4):
+        if isinstance(current, Mapping) and isinstance(current.get("data"), Mapping):
+            current = current.get("data")
+            continue
+        break
+    return current if isinstance(current, Mapping) else {}
+
+
 def _extract_x_post_id(payload: Mapping[str, Any] | None) -> str:
-    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload if isinstance(payload, Mapping) else {}
+    data = _x_tool_data(payload)
     for key in ("id", "rest_id", "post_id", "tweet_id"):
         value = str(data.get(key) or "").strip() if isinstance(data, Mapping) else ""
         if value:
@@ -181,10 +191,19 @@ def _extract_x_post_id(payload: Mapping[str, Any] | None) -> str:
     return ""
 
 
+def _extract_x_media_id(payload: Mapping[str, Any] | None) -> str:
+    data = _x_tool_data(payload)
+    nested_media = data.get("media") if isinstance(data.get("media"), Mapping) else {}
+    for source in (data, nested_media):
+        for key in ("media_id_string", "media_id", "id"):
+            value = str(source.get(key) or "").strip() if isinstance(source, Mapping) else ""
+            if value:
+                return value
+    return ""
+
+
 def _extract_x_username(payload: Mapping[str, Any] | None) -> str:
-    if not isinstance(payload, Mapping):
-        return ""
-    data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+    data = _x_tool_data(payload)
     for key in ("username", "screen_name", "handle"):
         value = str((data or {}).get(key) or "").strip().lstrip("@")
         if value:
@@ -330,6 +349,7 @@ def _record_x_publish_result(
     post_id: str,
     post_url: str,
     provider_response: Mapping[str, Any] | None,
+    media: list[dict[str, Any]] | None = None,
     credits_charged: int = 0,
     budget_bucket: str = "",
     channel_budget: Mapping[str, Any] | None = None,
@@ -369,6 +389,8 @@ def _record_x_publish_result(
         "metadata": dict(metadata),
         "provider_response": dict(provider_response or {}),
     }
+    if media:
+        receipt_payload["media"] = [dict(item) for item in media]
 
     operations: list[dict[str, Any]] = [
         {
@@ -412,6 +434,156 @@ def _record_x_publish_result(
         operations=operations,
         idempotency_key=f"x-publish-artifact:{job_id}:{post_id}",
         reason="worker recorded live X publish receipt",
+        actor="worker",
+    )
+    return {"artifact": artifact_rel, "receipt": receipt_rel}
+
+
+def _extract_reddit_publish_ref(payload: Mapping[str, Any] | None) -> dict[str, str]:
+    def _mapping(value: Any) -> Mapping[str, Any]:
+        return value if isinstance(value, Mapping) else {}
+
+    current: Any = payload if isinstance(payload, Mapping) else {}
+    for _ in range(4):
+        if isinstance(current, Mapping) and current.get("data") is not None:
+            next_value = current.get("data")
+            if next_value is current:
+                break
+            current = next_value
+            continue
+        break
+    data = _mapping(current)
+    json_payload = _mapping(data.get("json"))
+    json_data = _mapping(json_payload.get("data"))
+
+    post_id = ""
+    for source in (data, json_data):
+        for key in ("name", "id"):
+            value = str(source.get(key) or "").strip() if isinstance(source, Mapping) else ""
+            if value:
+                post_id = value
+                break
+        if post_id:
+            break
+
+    post_url = ""
+    for source in (data, json_data):
+        for key in ("url", "permalink"):
+            value = str(source.get(key) or "").strip() if isinstance(source, Mapping) else ""
+            if value:
+                post_url = value
+                break
+        if post_url:
+            break
+    if post_url.startswith("/"):
+        post_url = f"https://www.reddit.com{post_url}"
+    return {
+        "post_id": post_id,
+        "post_url": post_url,
+    }
+
+
+def _record_reddit_publish_result(
+    slug: str,
+    *,
+    job_id: str,
+    payload: Mapping[str, Any],
+    post_id: str,
+    post_url: str,
+    provider_response: Mapping[str, Any] | None,
+    credits_charged: int = 0,
+    budget_bucket: str = "",
+    channel_budget: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    from .core import TakyonStore
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_post_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(post_id or "").strip()).strip("-")
+    stem = safe_post_id or str(job_id)
+    artifact_rel = f"distribution/local-published/reddit/{timestamp}-{stem}.md"
+    receipt_rel = f"metrics/receipts/outreach/{timestamp}-reddit-{stem}.json"
+    body = str(payload.get("body") or "").strip()
+    subject = str(payload.get("subject") or payload.get("title") or "").strip()
+    subreddit = str(payload.get("subreddit") or "").strip()
+    post_kind = str(payload.get("post_kind") or "").strip()
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    published_at = _utc_now_iso()
+    title = _publish_artifact_title(subject, body or subject or subreddit or "Reddit")
+    thread_external_id = str(payload.get("thread_external_id") or post_id).strip() or post_id
+    artifact_lines = [f"# {title}"]
+    if subreddit:
+        artifact_lines.extend(["", f"Subreddit: r/{subreddit}"])
+    if body:
+        artifact_lines.extend(["", body])
+    if post_url:
+        artifact_lines.extend(["", f"Published: {post_url}"])
+    receipt_payload = {
+        "provider": "reddit",
+        "channel": str(payload.get("channel") or "reddit"),
+        "target": payload.get("target"),
+        "recipient": payload.get("recipient"),
+        "subject": subject,
+        "body": body,
+        "url": str(payload.get("url") or "").strip(),
+        "subreddit": subreddit,
+        "post_kind": post_kind,
+        "destination_url": payload.get("destination_url"),
+        "destination_label": payload.get("destination_label"),
+        "thread_external_id": thread_external_id,
+        "post_id": post_id,
+        "post_url": post_url,
+        "credits_charged": max(0, int(credits_charged or 0)),
+        "budget_bucket": str(budget_bucket or payload.get("channel") or "reddit").strip() or "reddit",
+        "channel_budget": dict(channel_budget or {}),
+        "published_at": published_at,
+        "sent": True,
+        "external_side_effects": "sent",
+        "artifact_path": artifact_rel,
+        "metadata": dict(metadata),
+        "provider_response": dict(provider_response or {}),
+    }
+    operations: list[dict[str, Any]] = [
+        {
+            "action": "artifact.write",
+            "business": slug,
+            "path": artifact_rel,
+            "content": "\n".join(artifact_lines).rstrip() + "\n",
+        },
+        {
+            "action": "artifact.write",
+            "business": slug,
+            "path": receipt_rel,
+            "content": json.dumps(receipt_payload, indent=2, sort_keys=True) + "\n",
+        },
+        {
+            "action": "conversation.thread.upsert",
+            "business": slug,
+            "source": "reddit",
+            "external_id": thread_external_id,
+            "title": title,
+            "url": post_url,
+            "status": "active",
+        },
+        {
+            "action": "conversation.message.record",
+            "business": slug,
+            "source": "reddit",
+            "external_id": post_id,
+            "thread_external_id": thread_external_id,
+            "thread_title": title,
+            "direction": "outbound",
+            "author_label": "business",
+            "body": body or subject,
+            "status": "responded",
+            "received_at": published_at,
+        },
+    ]
+    store = TakyonStore()
+    store.commit(
+        scope=f"business:{slug}",
+        operations=operations,
+        idempotency_key=f"reddit-publish-artifact:{job_id}:{post_id}",
+        reason="worker recorded live Reddit publish receipt",
         actor="worker",
     )
     return {"artifact": artifact_rel, "receipt": receipt_rel}
@@ -996,7 +1168,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         _business_workspace_execution_context,
         _ceo_bootstrap_turn_config,
     )
-    from .core import TakyonStore
+    from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
     store = TakyonStore()
@@ -1050,16 +1222,18 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),
                 business_slug=slug,
+                task_kind="ceo_bootstrap",
             )
-            final_response, cost_usd, cost_status = _run_ceo_turn(
-                slug=slug,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                toolsets=toolsets,
-                max_turns=max_turns,
-                inactivity_limit=inactivity_limit,
-                progress=progress,
-            )
+            with _bound_operator_task_context(task_kind="ceo_bootstrap"):
+                final_response, cost_usd, cost_status = _run_ceo_turn(
+                    slug=slug,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    toolsets=toolsets,
+                    max_turns=max_turns,
+                    inactivity_limit=inactivity_limit,
+                    progress=progress,
+                )
     except Exception as exc:
         _record_runtime_event(
             slug,
@@ -1175,7 +1349,6 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
 
     work_request_id = str(payload.get("work_request_id") or "").strip()
     reply_to = str(payload.get("thread_external_id") or "").strip()
-    home = _xurl_home()
     reservation_key = f"x-publish:{job.id}"
     reservation: dict[str, Any] | None = None
     credit_result: dict[str, Any] | None = None
@@ -1230,27 +1403,49 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     post_id = ""
     thread_posts: list[dict[str, Any]] = []
     try:
-        xurl, _auth_path = _ensure_local_xurl_auth()
-        app_name, username = _xurl_identity_flags(home=home)
-        auth_mode = _xurl_auth_mode(home=home)
         segments = _split_x_thread_segments(body)
         if not segments:
             raise RuntimeError("x publish job is missing a body")
         provider_response: dict[str, Any] = {}
+        media_ids: list[str] = []
+        media_records: list[dict[str, Any]] = []
+        for raw_rel in payload.get("media_paths") or []:
+            rel = takyon_core._safe_relpath(str(raw_rel or ""), field="media_paths").as_posix()
+            abs_path = takyon_core._store()._resolve_business_file(slug, rel)
+            if not abs_path.is_file():
+                raise RuntimeError(f"media file not found: {rel}")
+            descriptor = composio_distribution.upload_file_descriptor(
+                toolkit_slug="twitter",
+                tool_slug="TWITTER_UPLOAD_MEDIA",
+                file_path=abs_path,
+                timeout=180.0,
+            )
+            response = composio_distribution.twitter_execute_tool(
+                "TWITTER_UPLOAD_MEDIA",
+                arguments={
+                    # [composio-schema] Confirm TWITTER_UPLOAD_MEDIA uses the media file argument name "media".
+                    "media": descriptor,
+                },
+                timeout=180.0,
+            )
+            media_id = _extract_x_media_id(response)
+            if not media_id:
+                raise RuntimeError(f"X media upload returned no media id for {rel}")
+            media_ids.append(media_id)
+            media_records.append({"path": rel, "media_id": media_id})
         current_reply_to = reply_to
         for index, segment in enumerate(segments):
-            command = [xurl]
-            if app_name:
-                command.extend(["--app", app_name])
+            arguments: dict[str, Any] = {"text": segment}
             if current_reply_to:
-                command.extend(["reply", current_reply_to, segment])
-            else:
-                command.extend(["post", segment])
-            if auth_mode:
-                command.extend(["--auth", auth_mode])
-            if username:
-                command.extend(["-u", username])
-            response = _run_xurl_json_command(command, home=home, timeout=90)
+                arguments["reply_in_reply_to_tweet_id"] = current_reply_to
+            if index == 0 and media_ids:
+                # [composio-schema] Confirm TWITTER_CREATION_OF_A_POST uses the flattened media_media_ids argument.
+                arguments["media_media_ids"] = list(media_ids)
+            response = composio_distribution.twitter_execute_tool(
+                "TWITTER_CREATION_OF_A_POST",
+                arguments=arguments,
+                timeout=120.0,
+            )
             current_post_id = _extract_x_post_id(response) or (post_id if post_id else str(job.id))
             if not post_id:
                 post_id = current_post_id
@@ -1261,12 +1456,15 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                     "post_id": current_post_id,
                     "body": segment,
                     "reply_to": current_reply_to,
+                    "media": list(media_records) if index == 0 and media_records else [],
                     "provider_response": dict(response),
                 }
             )
             current_reply_to = current_post_id
         if len(thread_posts) > 1:
             provider_response["thread_posts"] = thread_posts
+        elif media_records:
+            provider_response["media"] = media_records
         credit_result = takyon_core._commit_creative_credits(
             reservation_key,
             action="x_publish_outreach",
@@ -1283,15 +1481,11 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             },
         )
         finalized = True
-        whoami_command = [xurl]
-        if app_name:
-            whoami_command.extend(["--app", app_name])
-        whoami_command.append("whoami")
-        if auth_mode:
-            whoami_command.extend(["--auth", auth_mode])
-        if username:
-            whoami_command.extend(["-u", username])
-        whoami = _try_run_xurl_json_command(whoami_command, home=home, timeout=20)
+        whoami = composio_distribution.twitter_execute_tool(
+            "TWITTER_USER_LOOKUP_ME",
+            arguments={"user_fields": ["username"]},
+            timeout=30.0,
+        )
         username = _extract_x_username(whoami)
         post_url = (
             f"https://x.com/{username}/status/{post_id}"
@@ -1305,6 +1499,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             post_id=post_id,
             post_url=post_url,
             provider_response=provider_response,
+            media=media_records,
             credits_charged=int(
                 (credit_result or {}).get("actual_credits")
                 or (reservation or {}).get("requested_credits")
@@ -1342,7 +1537,6 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                     "channel_budget": (credit_result or {}).get("channel_budget", {}),
                 },
             )
-        _persist_xurl_shared_auth_best_effort(home)
         return JobRunResult(
             result={
                 "business_slug": slug,
@@ -1439,6 +1633,271 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         raise
 
 
+def reddit_publish_outreach_handler(job: Job) -> JobRunResult:
+    from . import business_credits as takyon_business_credits
+    from . import core as takyon_core
+
+    payload = job.payload or {}
+    slug = job.business_slug
+    body = str(payload.get("body") or "").strip()
+    title = str(payload.get("title") or payload.get("subject") or "").strip()
+    post_kind = str(payload.get("post_kind") or "").strip() or "self"
+    subreddit = str(payload.get("subreddit") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    thread_external_id = str(payload.get("thread_external_id") or "").strip()
+    if not thread_external_id and not subreddit:
+        raise RuntimeError("reddit publish job is missing a subreddit or thread_external_id")
+
+    work_request_id = str(payload.get("work_request_id") or "").strip()
+    reservation_key = f"reddit-publish:{job.id}"
+    reservation: dict[str, Any] | None = None
+    credit_result: dict[str, Any] | None = None
+    finalized = False
+    if work_request_id:
+        _update_work_request(
+            slug,
+            work_request_id,
+            status="running",
+            payload_updates={"worker_job_id": str(job.id)},
+        )
+
+    try:
+        reservation = takyon_core._reserve_creative_credits(
+            slug,
+            action="reddit_publish_outreach",
+            reservation_key=reservation_key,
+            budget_bucket="reddit",
+            metadata={
+                "business": slug,
+                "action": "reddit_publish_outreach",
+                "job_id": str(job.id),
+                "work_request_id": work_request_id or None,
+                "channel": "reddit",
+                "provider": "reddit",
+                "thread_external_id": thread_external_id or None,
+                "subreddit": subreddit or None,
+            },
+        )
+    except takyon_business_credits.InsufficientCreativeCredits as exc:
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={"worker_error": str(exc), "budget_bucket": "reddit"},
+            )
+        raise RuntimeError(str(exc)) from exc
+    except takyon_core.CreativeCreditBudgetExceeded as exc:
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={
+                    "worker_error": str(exc),
+                    "budget_bucket": exc.bucket,
+                    "channel_budget": exc.channel_budget,
+                },
+            )
+        raise RuntimeError(str(exc)) from exc
+
+    provider_response: dict[str, Any] = {}
+    post_id = ""
+    post_url = ""
+    try:
+        if thread_external_id:
+            provider_response = composio_distribution.reddit_execute_tool(
+                "REDDIT_POST_REDDIT_COMMENT",
+                arguments={
+                    # [composio-schema] Confirm REDDIT_POST_REDDIT_COMMENT uses thing_id and text.
+                    "thing_id": thread_external_id,
+                    "text": body,
+                },
+                timeout=120.0,
+            )
+        else:
+            arguments: dict[str, Any] = {
+                "subreddit": subreddit,
+                "title": title,
+                # [composio-schema] Confirm REDDIT_CREATE_REDDIT_POST uses kind with values self/link.
+                "kind": "self" if post_kind == "self" else "link",
+            }
+            if post_kind == "self":
+                # [composio-schema] Confirm REDDIT_CREATE_REDDIT_POST uses text for self-post bodies.
+                arguments["text"] = body
+            else:
+                arguments["url"] = url
+            provider_response = composio_distribution.reddit_execute_tool(
+                "REDDIT_CREATE_REDDIT_POST",
+                arguments=arguments,
+                timeout=120.0,
+            )
+        publish_ref = _extract_reddit_publish_ref(provider_response)
+        post_id = str(publish_ref.get("post_id") or "").strip()
+        post_url = str(publish_ref.get("post_url") or "").strip()
+        if not post_id:
+            raise RuntimeError("Reddit publish returned no post id")
+
+        credit_result = takyon_core._commit_creative_credits(
+            reservation_key,
+            action="reddit_publish_outreach",
+            budget_bucket="reddit",
+            metadata={
+                "business": slug,
+                "action": "reddit_publish_outreach",
+                "job_id": str(job.id),
+                "work_request_id": work_request_id or None,
+                "channel": "reddit",
+                "provider": "reddit",
+                "post_id": post_id,
+                "subreddit": subreddit or None,
+                "post_kind": post_kind,
+            },
+        )
+        finalized = True
+        artifacts = _record_reddit_publish_result(
+            slug,
+            job_id=str(job.id),
+            payload=payload,
+            post_id=post_id,
+            post_url=post_url,
+            provider_response=provider_response,
+            credits_charged=int(
+                (credit_result or {}).get("actual_credits")
+                or (reservation or {}).get("requested_credits")
+                or 0
+            ),
+            budget_bucket=str(
+                (credit_result or {}).get("budget_bucket")
+                or (reservation or {}).get("budget_bucket")
+                or "reddit"
+            ).strip()
+            or "reddit",
+            channel_budget=(credit_result or {}).get("channel_budget"),
+        )
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="completed",
+                payload_updates={
+                    "artifact_path": artifacts["artifact"],
+                    "receipt_path": artifacts["receipt"],
+                    "post_id": post_id,
+                    "post_url": post_url,
+                    "credits_charged": int(
+                        (credit_result or {}).get("actual_credits")
+                        or (reservation or {}).get("requested_credits")
+                        or 0
+                    ),
+                    "budget_bucket": str(
+                        (credit_result or {}).get("budget_bucket")
+                        or (reservation or {}).get("budget_bucket")
+                        or "reddit"
+                    ).strip()
+                    or "reddit",
+                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
+                },
+            )
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "provider": "reddit",
+                "post_id": post_id,
+                "post_url": post_url,
+                "artifact_path": artifacts["artifact"],
+                "receipt_path": artifacts["receipt"],
+                "credits_charged": int(
+                    (credit_result or {}).get("actual_credits")
+                    or (reservation or {}).get("requested_credits")
+                    or 0
+                ),
+                "balance_credits": (credit_result or {}).get("balance_credits"),
+                "reserved_credits": (credit_result or {}).get("reserved_credits"),
+                "budget_bucket": str(
+                    (credit_result or {}).get("budget_bucket")
+                    or (reservation or {}).get("budget_bucket")
+                    or "reddit"
+                ).strip()
+                or "reddit",
+                "channel_budget": (credit_result or {}).get("channel_budget", {}),
+            },
+            actual_cost_cents=0,
+        )
+    except Exception as exc:
+        finalization_error: Exception | None = None
+        if reservation is not None and not finalized:
+            try:
+                if post_id:
+                    credit_result = takyon_core._commit_creative_credits(
+                        reservation_key,
+                        action="reddit_publish_outreach",
+                        budget_bucket="reddit",
+                        metadata={
+                            "business": slug,
+                            "action": "reddit_publish_outreach",
+                            "status": "partial_failed",
+                            "job_id": str(job.id),
+                            "work_request_id": work_request_id or None,
+                            "channel": "reddit",
+                            "provider": "reddit",
+                            "post_id": post_id,
+                            "post_url": post_url or None,
+                            "subreddit": subreddit or None,
+                            "post_kind": post_kind,
+                            "error": str(exc),
+                        },
+                    )
+                else:
+                    credit_result = takyon_core._release_creative_credits(
+                        reservation_key,
+                        action="reddit_publish_outreach",
+                        budget_bucket="reddit",
+                        metadata={
+                            "business": slug,
+                            "action": "reddit_publish_outreach",
+                            "status": "failed",
+                            "job_id": str(job.id),
+                            "work_request_id": work_request_id or None,
+                            "channel": "reddit",
+                            "provider": "reddit",
+                            "subreddit": subreddit or None,
+                            "post_kind": post_kind,
+                            "error": str(exc),
+                        },
+                    )
+                finalized = True
+            except Exception as release_exc:
+                finalization_error = release_exc
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="failed",
+                payload_updates={
+                    "worker_error": str(exc),
+                    "post_id": post_id or None,
+                    "credits_charged": int(
+                        (credit_result or {}).get("actual_credits")
+                        or ((reservation or {}).get("requested_credits") if post_id else 0)
+                        or 0
+                    ),
+                    "budget_bucket": str(
+                        (credit_result or {}).get("budget_bucket")
+                        or (reservation or {}).get("budget_bucket")
+                        or "reddit"
+                    ).strip()
+                    or "reddit",
+                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
+                },
+            )
+        if finalization_error is not None:
+            raise RuntimeError(
+                f"{exc} (credit finalization also failed: {finalization_error})"
+            ) from exc
+        raise
+
+
 def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobRunResult:
     """Execute one worker-deferred operator tool run (core._run_operator_task_on_worker enqueued it)
     by calling the EXISTING tool function — no copied logic, the inline path and the worker path are
@@ -1465,7 +1924,7 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
         from gateway.session_context import clear_session_vars, set_session_vars
 
         from .cli import _business_workspace_execution_context
-        from .core import _bound_operator_task_run
+        from .core import _bound_operator_task_context
 
         with _business_workspace_execution_context(
             slug,
@@ -1476,8 +1935,9 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),
                 business_slug=slug,
+                task_kind=tool_name,
             )
-            with _bound_operator_task_run(work_request_id):
+            with _bound_operator_task_context(run_id=work_request_id, task_kind=tool_name):
                 raw = handler_fn(dict(args))
         result = _parse_jsonish_output(str(raw or ""))
         if not isinstance(result, dict) or not result:
@@ -1523,13 +1983,35 @@ def product_surface_refresh_handler(job: Job) -> JobRunResult:
     )
 
 
+def product_action_handler(job: Job) -> JobRunResult:
+    from . import app_actions as takyon_app_actions
+    from .core import _store
+
+    payload = job.payload if isinstance(job.payload, Mapping) else {}
+    action_name = str(payload.get("action") or "").strip().lower()
+    if not action_name:
+        raise RuntimeError("product_action job missing action")
+    window_key = str(payload.get("window_key") or job.idempotency_key or "").strip()
+    if not window_key:
+        raise RuntimeError("product_action job missing window key")
+    result = takyon_app_actions.execute_scheduled_action(
+        _store(),
+        business_slug=job.business_slug,
+        action_name=action_name,
+        window_key=window_key,
+    )
+    return JobRunResult(result=result, actual_cost_cents=0)
+
+
 # The kind→handler registry the drain consults. New job kinds register here.
 HANDLERS: dict[str, jobs.Handler] = {
     "ceo_bootstrap": ceo_bootstrap_handler,
     "ceo_wake": ceo_wake_handler,
     "x.publish_outreach": x_publish_outreach_handler,
+    "reddit.publish_outreach": reddit_publish_outreach_handler,
     "claude.agent_task": claude_agent_task_handler,
     "product.surface_refresh": product_surface_refresh_handler,
+    "product_action": product_action_handler,
 }
 
 
@@ -1555,7 +2037,7 @@ def drain_tick(
     counts = {"dispatched": 0, "requeued": 0, "drained": 0, "completed": 0, "blocked": 0, "failed": 0}
 
     if dispatch:
-        counts["dispatched"] = wakes.dispatch_due_wakes(conn)
+        counts["dispatched"] = wakes.dispatch_due_wakes(conn) + _dispatch_due_action_jobs(conn)
     counts["requeued"] = jobs.requeue_stale(conn, older_than_seconds=_STALE_SECONDS, worker_id=worker_id)
 
     while stop is None or not stop.is_set():
@@ -1585,6 +2067,27 @@ def drain_tick(
             break
 
     return counts
+
+
+def _dispatch_due_action_jobs(conn) -> int:
+    from . import app_actions as takyon_app_actions
+    from .core import _store
+
+    now = datetime.now(timezone.utc)
+
+    def _enqueue(item: Mapping[str, Any]) -> None:
+        jobs.enqueue(
+            conn,
+            str(item.get("business_slug") or ""),
+            "product_action",
+            idempotency_key=str(item.get("window_key") or ""),
+            payload={
+                "action": str(item.get("action_name") or ""),
+                "window_key": str(item.get("window_key") or ""),
+            },
+        )
+
+    return takyon_app_actions.dispatch_due_action_schedules(_store(), now, _enqueue)
 
 
 def run_worker_loop(

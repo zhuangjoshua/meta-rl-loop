@@ -810,9 +810,7 @@ def test_business_delete_reports_all_current_business_owned_postgres_tables(pg_s
     candidate_keys = set(preview["database"]["candidates"])
     assert fk_tables <= candidate_keys
     assert {
-        "app_business_subsidy_accounts",
         "app_execution_policies",
-        "app_funding_entries",
         "app_gateway_keys",
         "app_user_profiles",
         "business_creative_credit_accounts",

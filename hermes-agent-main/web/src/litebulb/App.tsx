@@ -71,6 +71,7 @@ function Router() {
     resetBuildState,
     openBusiness,
     sendPrompt,
+    stopPrompt,
     createBusiness,
     saveChannelCreditBudgets,
     startCreativeCreditCheckout,
@@ -207,6 +208,7 @@ function Router() {
         onLogout={auth.logout}
         onOpenSettings={openSettings}
         onSendPrompt={sendPrompt}
+        onStopPrompt={stopPrompt}
         onSaveChannelCreditBudgets={saveChannelCreditBudgets}
         onBuyCreativeCredits={startCreativeCreditCheckout}
         onTractionRangeChange={setTractionRange}

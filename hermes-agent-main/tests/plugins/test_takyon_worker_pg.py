@@ -195,6 +195,10 @@ def test_handlers_registry_maps_x_publish_outreach():
     assert worker.HANDLERS["x.publish_outreach"] is worker.x_publish_outreach_handler
 
 
+def test_handlers_registry_maps_reddit_publish_outreach():
+    assert worker.HANDLERS["reddit.publish_outreach"] is worker.reddit_publish_outreach_handler
+
+
 def test_bootstrap_final_surface_refresh_skips_redundant_republish(monkeypatch):
     called = {"count": 0}
 
@@ -572,13 +576,10 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
 
 
 def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_path):
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"calls": []}
     statuses: list[tuple[str, str, dict[str, Any]]] = []
     recorded: dict[str, Any] = {}
 
-    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
-    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
-    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
     monkeypatch.setattr(
         core,
         "_reserve_creative_credits",
@@ -605,14 +606,15 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
     )
 
-    def _fake_run(command, *, home, timeout):
-        captured["command"] = command
-        captured["home"] = str(home)
-        captured["timeout"] = timeout
-        return {"data": {"id": "tweet-123"}}
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        captured["calls"].append({"tool_slug": tool_slug, "arguments": dict(arguments or {}), "timeout": timeout})
+        if tool_slug == "TWITTER_CREATION_OF_A_POST":
+            return {"data": {"id": "tweet-123"}}
+        if tool_slug == "TWITTER_USER_LOOKUP_ME":
+            return {"data": {"username": "sharedacct"}}
+        raise AssertionError(f"unexpected tool {tool_slug}")
 
-    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
-    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
     monkeypatch.setattr(
         worker,
         "_record_x_publish_result",
@@ -625,7 +627,6 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
             (work_request_id, status, dict(payload_updates or {}))
         ),
     )
-    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
 
     job = SimpleNamespace(
         id="job-123",
@@ -640,17 +641,9 @@ def test_x_publish_outreach_handler_posts_and_records_receipt(monkeypatch, tmp_p
     )
     result = worker.x_publish_outreach_handler(job)
 
-    assert captured["command"] == [
-        "/usr/local/bin/xurl",
-        "--app",
-        "takyon-shared",
-        "post",
-        "Ship it",
-        "--auth",
-        "oauth2",
-        "-u",
-        "vaalapp",
-    ]
+    assert captured["calls"][0]["tool_slug"] == "TWITTER_CREATION_OF_A_POST"
+    assert captured["calls"][0]["arguments"] == {"text": "Ship it"}
+    assert captured["calls"][1]["tool_slug"] == "TWITTER_USER_LOOKUP_ME"
     assert result.actual_cost_cents == 0
     assert result.result["post_id"] == "tweet-123"
     assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-123"
@@ -666,9 +659,6 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
     statuses: list[tuple[str, str, dict[str, Any]]] = []
     release_calls: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
-    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
-    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
     monkeypatch.setattr(
         core,
         "_reserve_creative_credits",
@@ -693,7 +683,11 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
             "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 1},
         },
     )
-    monkeypatch.setattr(worker, "_run_xurl_json_command", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")))
+    monkeypatch.setattr(
+        worker.composio_distribution,
+        "twitter_execute_tool",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("auth failed")),
+    )
     monkeypatch.setattr(
         worker,
         "_update_work_request",
@@ -717,12 +711,9 @@ def test_x_publish_outreach_handler_marks_failed_work_request(monkeypatch, tmp_p
 
 
 def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_path):
-    commands: list[list[str]] = []
+    calls: list[dict[str, Any]] = []
     captured_result: dict[str, Any] = {}
 
-    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
-    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("takyon-shared", "vaalapp"))
-    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth2")
     monkeypatch.setattr(
         core,
         "_reserve_creative_credits",
@@ -753,15 +744,15 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
         (
             {"data": {"id": "tweet-1"}},
             {"data": {"id": "tweet-2"}},
+            {"data": {"username": "sharedacct"}},
         )
     )
 
-    def _fake_run(command, *, home, timeout):
-        commands.append(list(command))
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        calls.append({"tool_slug": tool_slug, "arguments": dict(arguments or {}), "timeout": timeout})
         return next(responses)
 
-    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
-    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
 
     def _fake_record(slug, **kwargs):
         captured_result["payload"] = kwargs
@@ -776,7 +767,6 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
         _fake_record,
     )
     monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
-    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
 
     body = "A" * 200 + "\n\n" + "B" * 160
     result = worker.x_publish_outreach_handler(
@@ -787,24 +777,34 @@ def test_x_publish_outreach_handler_threads_overlength_body(monkeypatch, tmp_pat
         )
     )
 
-    assert len(commands) == 2
-    assert commands[0][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "post"]
-    assert commands[0][-4:] == ["--auth", "oauth2", "-u", "vaalapp"]
-    assert commands[1][:4] == ["/usr/local/bin/xurl", "--app", "takyon-shared", "reply"]
-    assert commands[1][4] == "tweet-1"
-    assert commands[1][-4:] == ["--auth", "oauth2", "-u", "vaalapp"]
+    assert [call["tool_slug"] for call in calls] == [
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_USER_LOOKUP_ME",
+    ]
+    assert calls[0]["arguments"]["text"] == "A" * 200
+    assert calls[1]["arguments"]["reply_in_reply_to_tweet_id"] == "tweet-1"
     thread_posts = captured_result["payload"]["provider_response"]["thread_posts"]
     assert [item["post_id"] for item in thread_posts] == ["tweet-1", "tweet-2"]
     assert result.result["post_id"] == "tweet-1"
     assert result.result["post_url"] == "https://x.com/sharedacct/status/tweet-1"
 
 
-def test_x_publish_outreach_handler_uses_oauth1_without_username(monkeypatch, tmp_path):
-    captured: dict[str, Any] = {}
+def test_x_publish_outreach_handler_uploads_media_once_and_attaches_to_first_post(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {"uploads": [], "calls": []}
+    recorded: dict[str, Any] = {}
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    seed = tmp_path / "seed"
+    media_path = seed / "product" / "ads" / "hero.png"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"png")
+    storage.sync_up(backend, "acme", seed)
 
-    monkeypatch.setattr(worker, "_ensure_local_xurl_auth", lambda: ("/usr/local/bin/xurl", tmp_path / ".xurl"))
-    monkeypatch.setattr(worker, "_xurl_identity_flags", lambda **_kwargs: ("default", ""))
-    monkeypatch.setattr(worker, "_xurl_auth_mode", lambda **_kwargs: "oauth1")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
+    monkeypatch.setattr(core, "_store", lambda: core.TakyonStore(tmp_path, operator_user_id=""))
+
     monkeypatch.setattr(
         core,
         "_reserve_creative_credits",
@@ -830,38 +830,192 @@ def test_x_publish_outreach_handler_uses_oauth1_without_username(monkeypatch, tm
         "_release_creative_credits",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
     )
-    def _fake_run(command, *, home, timeout):
-        captured["command"] = list(command)
-        return {"data": {"id": "tweet-123"}}
 
-    monkeypatch.setattr(worker, "_run_xurl_json_command", _fake_run)
-    monkeypatch.setattr(worker, "_try_run_xurl_json_command", lambda *args, **kwargs: {"data": {"username": "sharedacct"}})
+    monkeypatch.setattr(
+        worker.composio_distribution,
+        "upload_file_descriptor",
+        lambda *, toolkit_slug, tool_slug, file_path, timeout=0.0: captured["uploads"].append(
+            {
+                "toolkit_slug": toolkit_slug,
+                "tool_slug": tool_slug,
+                "file_path": str(file_path),
+                "timeout": timeout,
+            }
+        ) or {"name": "hero.png", "mimetype": "image/png", "s3key": "s3://hero"},
+    )
+
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        captured["calls"].append({"tool_slug": tool_slug, "arguments": dict(arguments or {})})
+        if tool_slug == "TWITTER_UPLOAD_MEDIA":
+            return {"data": {"media_id_string": "media-1"}}
+        if tool_slug == "TWITTER_CREATION_OF_A_POST":
+            return {"data": {"id": "tweet-123"}}
+        if tool_slug == "TWITTER_USER_LOOKUP_ME":
+            return {"data": {"username": "sharedacct"}}
+        raise AssertionError(f"unexpected tool {tool_slug}")
+
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
     monkeypatch.setattr(
         worker,
         "_record_x_publish_result",
-        lambda slug, **kwargs: {"artifact": "distribution/local-published/x/proof.md", "receipt": "metrics/receipts/outreach/proof.json"},
+        lambda slug, **kwargs: recorded.update(kwargs) or {
+            "artifact": "distribution/local-published/x/proof.md",
+            "receipt": "metrics/receipts/outreach/proof.json",
+        },
     )
     monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
-    monkeypatch.setattr(worker, "_persist_xurl_shared_auth_best_effort", lambda home: None)
 
     result = worker.x_publish_outreach_handler(
         SimpleNamespace(
-            id="job-oauth1",
+            id="job-media",
             business_slug="acme",
-            payload={"body": "Ship it", "provider": "x"},
+            payload={"body": "Ship it", "provider": "x", "media_paths": ["product/ads/hero.png"]},
         )
     )
 
-    assert captured["command"] == [
-        "/usr/local/bin/xurl",
-        "--app",
-        "default",
-        "post",
-        "Ship it",
-        "--auth",
-        "oauth1",
-    ]
+    assert captured["uploads"][0]["tool_slug"] == "TWITTER_UPLOAD_MEDIA"
+    assert captured["calls"][0]["tool_slug"] == "TWITTER_UPLOAD_MEDIA"
+    assert captured["calls"][1]["tool_slug"] == "TWITTER_CREATION_OF_A_POST"
+    assert captured["calls"][1]["arguments"]["media_media_ids"] == ["media-1"]
+    assert recorded["media"] == [{"path": "product/ads/hero.png", "media_id": "media-1"}]
     assert result.result["post_id"] == "tweet-123"
+
+
+def test_x_publish_outreach_handler_releases_credits_when_media_upload_fails(monkeypatch, tmp_path):
+    release_calls: list[dict[str, Any]] = []
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    seed = tmp_path / "seed"
+    media_path = seed / "product" / "ads" / "hero.png"
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"png")
+    storage.sync_up(backend, "acme", seed)
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
+    monkeypatch.setattr(core, "_store", lambda: core.TakyonStore(tmp_path, operator_user_id=""))
+
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("commit should not run when upload fails")),
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: release_calls.append(dict(kwargs)) or {
+            "balance_credits": 10,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 1},
+        },
+    )
+
+    monkeypatch.setattr(
+        worker.composio_distribution,
+        "upload_file_descriptor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+    monkeypatch.setattr(
+        worker.composio_distribution,
+        "twitter_execute_tool",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("post call should not run when upload fails")),
+    )
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        worker.x_publish_outreach_handler(
+            SimpleNamespace(
+                id="job-media-fail",
+                business_slug="acme",
+                payload={"body": "Ship it", "provider": "x", "media_paths": ["product/ads/hero.png"]},
+            )
+        )
+
+    assert release_calls
+
+
+def test_reddit_publish_outreach_handler_posts_and_records_receipt(monkeypatch):
+    statuses: list[tuple[str, str, dict[str, Any]]] = []
+    recorded: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "reddit",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: {
+            "actual_credits": 1,
+            "balance_credits": 9,
+            "reserved_credits": 0,
+            "budget_bucket": "reddit",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 1, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
+    )
+    monkeypatch.setattr(
+        worker.composio_distribution,
+        "reddit_execute_tool",
+        lambda tool_slug, *, arguments=None, timeout=0.0, **_kwargs: {
+            "data": {"json": {"data": {"name": "t3_post123", "permalink": "/r/freelance/comments/post123/title/"}}}
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_record_reddit_publish_result",
+        lambda slug, **kwargs: recorded.update(kwargs) or {
+            "artifact": "distribution/local-published/reddit/proof.md",
+            "receipt": "metrics/receipts/outreach/reddit-proof.json",
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_update_work_request",
+        lambda slug, work_request_id, *, status, payload_updates=None: statuses.append(
+            (work_request_id, status, dict(payload_updates or {}))
+        ),
+    )
+
+    result = worker.reddit_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-reddit",
+            business_slug="acme",
+            payload={
+                "title": "How freelancers stop scope creep",
+                "body": "Short checklist that keeps projects from ballooning.",
+                "subreddit": "freelance",
+                "post_kind": "self",
+                "provider": "reddit",
+                "work_request_id": "wr-reddit",
+            },
+        )
+    )
+
+    assert result.result["post_id"] == "t3_post123"
+    assert result.result["post_url"] == "https://www.reddit.com/r/freelance/comments/post123/title/"
+    assert statuses[0][1] == "running"
+    assert statuses[-1][1] == "completed"
+    assert recorded["credits_charged"] == 1
 
 
 def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):

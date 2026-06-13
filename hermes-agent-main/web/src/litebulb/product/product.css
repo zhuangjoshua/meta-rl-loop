@@ -171,8 +171,12 @@
 @keyframes lb-typing { 0%, 60%, 100% { opacity: 0.3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
 .lb-chat__input { flex: none; display: flex; gap: 8px; padding: var(--cds-space-3) var(--cds-space-4); border-top: 1px solid var(--cds-color-border-divider); align-items: center; }
 .lb-chat__input .Input { flex: 1; min-height: 44px; }
+.lb-chat__stop,
 .lb-chat__send { flex: none; width: 40px; height: 44px; border-radius: var(--cds-radius-md); background: var(--cds-color-brand-primary); color: #fff; border: 1px solid var(--cds-color-brand-primary-hover); display: grid; place-items: center; cursor: pointer; box-shadow: var(--cds-shadow-sm); }
+.lb-chat__stop { background: var(--cds-color-surface-card); color: var(--cds-color-text-default); border-color: var(--cds-color-border-strong); }
+.lb-chat__stop:hover:not(:disabled) { background: var(--cds-color-surface-sunken); }
 .lb-chat__send:hover { background: var(--cds-color-brand-primary-hover); }
+.lb-chat__stop:disabled,
 .lb-chat__send:disabled { opacity: 0.55; cursor: default; }
 
 /* the live preview fills the canvas — the browser frame IS the focus */

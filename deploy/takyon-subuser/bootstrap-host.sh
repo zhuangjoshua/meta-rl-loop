@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
+ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 
 SOURCE_HOST="${TAKYON_SOURCE_HOST:-root@137.184.75.57}"
 SOURCE_KEY="${TAKYON_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -16,6 +17,7 @@ REMOTE_SECRETS="${TAKYON_REMOTE_SECRETS:-$REMOTE_ROOT/secrets}"
 REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-subuser.service}"
 REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-subuser.service}"
 REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
+TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 source_ssh=(-i "$SOURCE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 target_ssh=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
@@ -39,6 +41,15 @@ if [[ ! -f "$TARGET_KEY" ]]; then
   echo "target key not found: $TARGET_KEY" >&2
   exit 1
 fi
+
+if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
+  echo "deno bootstrap helper not found: $ENSURE_DENO_SCRIPT" >&2
+  exit 1
+fi
+
+ssh "${target_ssh[@]}" "$TARGET_HOST" \
+  "env TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' TAKYON_REQUIRE_SYSTEMD_RUN=1 bash -s" \
+  < "$ENSURE_DENO_SCRIPT"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive

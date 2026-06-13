@@ -86,7 +86,6 @@ skills/takyon/takyon-distribution/
 skills/takyon/takyon-x/
 skills/takyon/takyon-conversation-followup/
 skills/takyon/takyon-business-metrics/
-skills/takyon/takyon-claude-agent-sdk/
 ```
 
 Each skill is discovered the Hermes way: `SKILL.md` frontmatter supplies name/description/platform metadata, Hermes builds a compact skills index, and the model loads a skill with `skill_view(...)` when it matches.

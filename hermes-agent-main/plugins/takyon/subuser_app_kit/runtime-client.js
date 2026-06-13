@@ -110,6 +110,40 @@ function defaultCheckoutUrl(kind, location) {
   return current.toString();
 }
 
+function randomKeySuffix() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID().replaceAll("-", "");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+}
+
+function classifyActionError(error, { checkoutCallable = false, location } = {}) {
+  const status = Number(error && error.status) || 0;
+  const message = String((error && error.message) || "action failed");
+  let kind = "action_error";
+  if (error && error.rail) {
+    kind = "unavailable";
+  } else if (status === 402) {
+    kind = "budget";
+  } else if (status === 429) {
+    kind = message.includes("action_already_running") ? "already_running" : "rate_limited";
+  } else if (status === 404) {
+    kind = "unavailable";
+  } else if (/deadline|timed?[ _-]?out/i.test(message)) {
+    kind = "timeout";
+  } else if (!status) {
+    kind = "network";
+  }
+  const classified = new Error(message);
+  classified.kind = kind;
+  if (status) classified.status = status;
+  classified.cause = error;
+  if (kind === "budget" && checkoutCallable && location) {
+    classified.checkoutUrl = defaultCheckoutUrl("upgrade", location);
+  }
+  return classified;
+}
+
 export function createSubuserRuntimeClient(context = {}) {
   const runtimeFeatures = normalizeArray(context.runtimeFeatures);
   const railState = normalizeRailState(context.railState);
@@ -232,8 +266,22 @@ export function createSubuserRuntimeClient(context = {}) {
     },
     async listRecords(options = {}) {
       ensureRail("records");
-      const params = new URLSearchParams();
       const recordType = String(options.record_type || options.type || "").trim();
+      // records-v2: a bounded server-side query when filters/sort/cursor are present;
+      // otherwise the plain newest-first GET list.
+      if (options.filters || options.sort || options.cursor) {
+        return jsonRequest(routeUrl("records/query"), {
+          method: "POST",
+          body: JSON.stringify({
+            record_type: recordType || undefined,
+            filters: options.filters || [],
+            sort: options.sort || undefined,
+            cursor: options.cursor || undefined,
+            limit: options.limit != null && options.limit !== "" ? options.limit : undefined,
+          }),
+        });
+      }
+      const params = new URLSearchParams();
       if (recordType) params.set("type", recordType);
       if (options.limit != null && options.limit !== "") {
         params.set("limit", String(options.limit));
@@ -300,6 +348,38 @@ export function createSubuserRuntimeClient(context = {}) {
         body: JSON.stringify(payload),
       });
     },
+    async uploadMedia(file) {
+      ensureRail("media");
+      if (!file) {
+        throw new Error("a file is required");
+      }
+      const form = new FormData();
+      form.append("file", file);
+      // Do NOT set Content-Type — the browser sets the multipart boundary itself.
+      const response = await fetch(routeUrl("media"), {
+        method: "POST",
+        credentials: "same-origin",
+        body: form,
+      });
+      const payload = await response
+        .json()
+        .catch(() => ({ success: false, error: `non_json_response:${response.status}` }));
+      if (!response.ok) {
+        const error = new Error(String(payload.error || `media_upload_failed:${response.status}`));
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+      }
+      return payload;
+    },
+    mediaUrl(id) {
+      ensureRail("media");
+      return routeUrl(`media/${encodeRoutePart(id)}`);
+    },
+    async deleteMedia(id) {
+      ensureRail("media");
+      return jsonRequest(routeUrl(`media/${encodeRoutePart(id)}`), { method: "DELETE" });
+    },
     async listConnections(options = {}) {
       ensureRail("connections");
       const params = new URLSearchParams();
@@ -326,6 +406,73 @@ export function createSubuserRuntimeClient(context = {}) {
         method: "POST",
         body: JSON.stringify(payload),
       });
+    },
+    async invokeAction(name, payload = {}, options = {}) {
+      ensureRail("actions");
+      const actionName = String(name || "").trim();
+      if (!actionName) {
+        throw new Error("action name is required");
+      }
+      return jsonRequest(routeUrl(`actions/${encodeRoutePart(actionName)}`), {
+        method: "POST",
+        body: JSON.stringify({
+          payload,
+          idempotency_key:
+            options.idempotency_key ||
+            options.idempotencyKey ||
+            undefined,
+        }),
+      });
+    },
+    createActionRunner(name) {
+      const actionName = String(name || "").trim();
+      if (!actionName) {
+        throw new Error("action name is required");
+      }
+      let pending = false;
+      let replayKey = "";
+      return {
+        action: actionName,
+        state() {
+          return pending ? "pending" : "idle";
+        },
+        async run(payload = {}, options = {}) {
+          if (pending) {
+            const busy = new Error(`action ${actionName} is already running`);
+            busy.kind = "already_running";
+            throw busy;
+          }
+          pending = true;
+          const idempotencyKey =
+            options.idempotency_key ||
+            options.idempotencyKey ||
+            replayKey ||
+            `action:${actionName}:${randomKeySuffix()}`;
+          try {
+            ensureRail("actions");
+            const result = await jsonRequest(
+              routeUrl(`actions/${encodeRoutePart(actionName)}`),
+              {
+                method: "POST",
+                body: JSON.stringify({ payload, idempotency_key: idempotencyKey }),
+              },
+            );
+            replayKey = "";
+            return result;
+          } catch (error) {
+            const classified = classifyActionError(error, {
+              checkoutCallable: ALLOW_CALL_STATES.has(railStateFor("checkout")),
+              location,
+            });
+            // Replay the same key only when the request may never have reached the
+            // runtime; reusing it after a server outcome would double-charge.
+            replayKey = classified.kind === "network" ? idempotencyKey : "";
+            throw classified;
+          } finally {
+            pending = false;
+          }
+        },
+      };
     },
     usageFromAccount(accountPayload = {}) {
       return accountPayload && isObject(accountPayload.usage_this_period)

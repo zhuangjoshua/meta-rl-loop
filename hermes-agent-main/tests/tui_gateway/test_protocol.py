@@ -758,6 +758,123 @@ def test_takyon_dashboard_create_requires_durable_business_before_streaming(serv
     assert server._sessions[sid]["running"] is False
 
 
+def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "",
+        "takyon_operator_user_id": "user-1",
+        "agent_ready": threading.Event(),
+        "history_lock": threading.Lock(),
+        "history": [{"role": "assistant", "content": "bootstrap transcript"}],
+        "history_version": 7,
+        "session_key": "sess-1",
+    }
+    captured: dict[str, object] = {}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+        def commit(self, *args, **kwargs):
+            return None
+
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+        assert name == "Latexflow"
+        assert goal == "Overleaf competitor"
+        assert slug_hint == "latexflow"
+        assert operator_user_id == "user-1"
+        return "Latexflow", "latexflow"
+
+    def fake_run_takyon_command(*_args, **_kwargs):
+        return {"success": True, "business": "latexflow", "mode": "live"}
+
+    def fake_bootstrap_turn(*_args, **_kwargs):
+        return {
+            "user_prompt": "Bootstrap business:latexflow now.",
+            "ephemeral_system_prompt": "",
+            "enabled_toolsets": ["takyon", "web", "skills"],
+            "disabled_toolsets": [],
+            "load_soul_identity": False,
+            "skip_memory": True,
+            "skip_context_files": True,
+            "max_turns": 20,
+        }
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    fake_cli._ceo_bootstrap_turn_config = fake_bootstrap_turn
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
+    monkeypatch.setattr(
+        server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "latexflow", "name": "Latexflow", "mode": "live"}},
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "latexflow",
+            "current": {"slug": "latexflow", "name": "Latexflow", "mode": "live"},
+            "overview": {"goal": "Overleaf competitor"},
+            "outputs": [],
+            "deliverables": [],
+            "background_run": None,
+            "live_state": {},
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_businesses_for_session",
+        lambda *_args, **_kwargs: [{"slug": "latexflow", "name": "Latexflow"}],
+    )
+    fake_worker = types.ModuleType("plugins.takyon.worker")
+    fake_worker._refresh_business_surface_after_bootstrap = lambda *_args, **_kwargs: {
+        "publish": {"status": "published"}
+    }
+    monkeypatch.setitem(sys.modules, "plugins.takyon.worker", fake_worker)
+
+    class FakeDb:
+        def replace_messages(self, session_id, messages):
+            captured["session_id"] = session_id
+            captured["messages"] = list(messages)
+
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDb())
+    monkeypatch.setattr(
+        server,
+        "_start_streaming_session_turn",
+        lambda *_args, **kwargs: captured.__setitem__(
+            "post_complete_callback", kwargs.get("post_complete_callback")
+        ),
+    )
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-stream-reset-1",
+        {
+            "session_id": sid,
+            "business": "latexflow",
+            "business_name": "Latexflow",
+            "goal": "Overleaf competitor",
+            "mode": "live",
+        },
+    )
+
+    assert response["result"]["streaming"] is True
+    callback = captured["post_complete_callback"]
+    assert callable(callback)
+
+    warning = callback()
+
+    assert warning == ""
+    assert server._sessions[sid]["history"] == []
+    assert server._sessions[sid]["history_version"] == 8
+    assert captured["session_id"] == "sess-1"
+    assert captured["messages"] == []
+
+
 def test_takyon_dashboard_workspace_uses_explicit_business_slug(server, monkeypatch):
     sid = "takyon-session"
     server._sessions[sid] = {"takyon_current_business": "other-biz"}

@@ -58,6 +58,7 @@ _SESSION_KEY: ContextVar = ContextVar("TAKYON_SESSION_KEY", default=_UNSET)
 _SESSION_ID: ContextVar = ContextVar("TAKYON_SESSION_ID", default=_UNSET)
 _SESSION_WORKSPACE_ROOT: ContextVar = ContextVar("TAKYON_SESSION_WORKSPACE_ROOT", default=_UNSET)
 _SESSION_BUSINESS_SLUG: ContextVar = ContextVar("TAKYON_SESSION_BUSINESS_SLUG", default=_UNSET)
+_SESSION_TASK_KIND: ContextVar = ContextVar("TAKYON_SESSION_TASK_KIND", default=_UNSET)
 # ID of the message that triggered the current turn. Used as a reply anchor
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
@@ -80,6 +81,7 @@ _VAR_MAP = {
     "TAKYON_SESSION_ID": _SESSION_ID,
     "TAKYON_SESSION_WORKSPACE_ROOT": _SESSION_WORKSPACE_ROOT,
     "TAKYON_SESSION_BUSINESS_SLUG": _SESSION_BUSINESS_SLUG,
+    "TAKYON_SESSION_TASK_KIND": _SESSION_TASK_KIND,
     "TAKYON_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "TAKYON_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "TAKYON_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
@@ -97,6 +99,7 @@ def set_session_vars(
     session_key: str = "",
     workspace_root: str = "",
     business_slug: str = "",
+    task_kind: str = "",
     message_id: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
@@ -117,6 +120,7 @@ def set_session_vars(
         _SESSION_KEY.set(session_key),
         _SESSION_WORKSPACE_ROOT.set(workspace_root),
         _SESSION_BUSINESS_SLUG.set(business_slug),
+        _SESSION_TASK_KIND.set(task_kind),
         _SESSION_MESSAGE_ID.set(message_id),
     ]
     return tokens
@@ -143,6 +147,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_KEY,
         _SESSION_WORKSPACE_ROOT,
         _SESSION_BUSINESS_SLUG,
+        _SESSION_TASK_KIND,
         _SESSION_MESSAGE_ID,
     ):
         var.set("")

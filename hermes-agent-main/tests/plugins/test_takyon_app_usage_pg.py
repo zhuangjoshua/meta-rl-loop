@@ -32,6 +32,7 @@ from plugins.takyon import app_identity, app_usage  # noqa: E402
 from plugins.takyon.app_usage import (  # noqa: E402
     AppBudgetExceeded,
     AppBudgetInactive,
+    AppUserBudgetExceeded,
     AppUserNotFound,
     UnknownReservation,
 )
@@ -275,6 +276,35 @@ def test_reserve_with_unknown_app_user_raises(pg_conn):
         )
 
 
+def test_reserve_enforces_per_user_monthly_budget(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=10_000)
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=600,
+        reservation_key="u1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    with pytest.raises(AppUserBudgetExceeded) as excinfo:
+        app_usage.reserve_usage(
+            pg_conn,
+            slug,
+            estimated_cost_microusd=500,
+            reservation_key="r2",
+            app_user_id=user_id,
+            user_monthly_limit_microusd=1_000,
+        )
+    exc = excinfo.value
+    assert exc.app_user_id == user_id
+    assert exc.user_monthly_limit_microusd == 1_000
+    assert exc.committed_microusd == 600
+    assert exc.requested_microusd == 500
+    assert exc.remaining_microusd == 400
+
+
 def test_reserve_validates_inputs(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)
@@ -336,6 +366,30 @@ def test_record_completed_usage_gate_uses_max_of_estimate_and_actual(pg_conn):
     with pytest.raises(AppBudgetExceeded):
         app_usage.record_completed_usage(
             pg_conn, slug, actual_cost_microusd=300, estimated_cost_microusd=500, reservation_key="u2"
+        )
+
+
+def test_record_completed_usage_enforces_per_user_monthly_budget(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=10_000)
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=700,
+        reservation_key="u1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    with pytest.raises(AppUserBudgetExceeded):
+        app_usage.record_completed_usage(
+            pg_conn,
+            slug,
+            actual_cost_microusd=200,
+            estimated_cost_microusd=400,
+            reservation_key="u2",
+            app_user_id=user_id,
+            user_monthly_limit_microusd=1_000,
         )
 
 

@@ -98,6 +98,24 @@ Fast path for ordinary code/docs/UI changes:
 4. If the workflow passes, report the run id and any direct smoke checks. Do not also do manual VPS/Vercel deploys.
 5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run. Use manual SSH/rsync only for emergency rollback or when the operator explicitly asks.
 
+## Local Dev Rail
+
+When the operator wants a persistent local Takyon dev environment, use one stable local-only root outside the repo, not a repo-owned `TAKYON_HOME` clone and not ad hoc workspace scratch by default. The canonical local dev root is `~/.takyon-fourmanifold-local-dev/` unless the operator explicitly chooses a different outside-repo path.
+
+Use `scripts/takyon-local-dev.sh` as the default bootstrap/launch entrypoint for that rail so the local operator home and local Safebox authority stay on one canonical path.
+
+Mirror the production shape as closely as practical on that local rail:
+
+- keep a separate local operator runtime home and local Safebox authority instead of collapsing secrets back into random shell exports
+- use the normal `./takyon` shell/CEO/business-tool path for operator work
+- allow local-only exceptions only for public DNS/auth surfaces the operator already called out, such as `slug.fourmanifold.com` and production Auth0 login
+
+Local dev state under that outside-repo root is operator-local and must never be staged, committed, pushed, deployed, rsynced to a VPS, or described as repo-owned state, even under broad requests such as "push everything locally", "commit all changes", or "sync the whole workspace". Treat that rule as stronger than generic bulk-stage/push instructions unless the operator explicitly names a specific local file and says to promote it into tracked repo state.
+
+Do not use workspace-root `.takyon-*` or `.tmp-*` homes as the normal persistent dev environment. If a one-off isolated repro needs a workspace-local scratch home, keep it disposable, never promote it to the canonical local rail, and never stage or push it.
+
+Do not point the local dev rail at production Postgres or production Safebox "just to make it work". If a local run truly needs an explicit DSN or authority override, keep it local-only, explicit, and temporary.
+
 ## User Terms
 
 Do not conflate Takyon users with product subusers.
@@ -261,7 +279,7 @@ When the CEO is working, the shell must leave a visible operator lane. Do not us
 
 For operator experience, test through the real shell path. Direct commands such as `./takyon create ...` are useful unit/smoke checks, but they do not exercise the interactive shell parser, slash command handling, scoped CEO routing, shell history, visible progress, input-lane behavior, or operator follow-up flow.
 
-For isolated E2E tests, use a temporary workspace-local `TAKYON_HOME`, copy only the config needed to run the model, and launch `./takyon shell`. Run `/create` and follow-up inspection commands from inside the shell. Do not test by writing directly into Postgres control-plane tables or by bypassing the shell when the bug is about shell UX, progress, slash commands, scope, or operator conversation.
+For ordinary local operator E2E, prefer the stable outside-repo local dev rail above. Use a temporary workspace-local `TAKYON_HOME` only for one-off isolated repros, keep it disposable, and never stage or push it. In both cases, launch `./takyon shell` and run `/create` plus follow-up inspection commands from inside the shell. Do not test by writing directly into Postgres control-plane tables or by bypassing the shell when the bug is about shell UX, progress, slash commands, scope, or operator conversation.
 
 Use `/status`, `/pulse`, `/files`, `/read`, `/cron list`, and `/cron tick` inside the shell to verify state, receipts, product surface, pulse, filesystem visibility, and scheduled wake behavior. Keep test businesses in test mode unless the operator explicitly wants live side effects.
 

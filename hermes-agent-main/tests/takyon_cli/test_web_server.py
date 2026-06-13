@@ -1915,6 +1915,8 @@ def test_normalize_product_rail_route_handles_path_variants():
     assert norm("/connections") == "connections"
     assert norm("/checkout") == "checkout"
     assert norm("/usage") == "usage"
+    assert norm("/actions/send-email") == "actions/send-email"
+    assert norm("/api/takyon/apps/otherslug/actions/send-email") == "actions/send-email"
     # Non-rail paths and static pages must not be claimed.
     assert norm("/") is None
     assert norm("/pricing") is None
@@ -2480,6 +2482,87 @@ def test_app_connections_post_limits_directory_style_actions_and_hides_missing_t
     assert block_response.json()["success"] is True
     assert limit_calls == [{"business": "mathflow", "session_token": "session_123"}]
     assert [call["connection_action"] for call in action_calls] == ["like", "block"]
+
+
+def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[dict[str, object]] = []
+
+    def fake_invoke_action(args):
+        calls.append(args)
+        return json.dumps({"success": True, "action": args["action"], "result": {"ok": True}})
+
+    monkeypatch.setattr(web_server, "handle_business_invoke_app_action", fake_invoke_action)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/actions/send-email",
+            json={"payload": {"subject": "Hello"}, "idempotencyKey": "idem_123"},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "send-email"
+    assert calls == [{
+        "business": "mathflow",
+        "action": "send-email",
+        "session_token": "session_123",
+        "payload": {"subject": "Hello"},
+        "idempotency_key": "idem_123",
+        "bound_origin": "http://mathflow.fourmanifold.com",
+    }]
+
+
+def test_app_actions_route_maps_missing_rail_and_budget_errors(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    def fake_invoke_action(args):
+        if args["action"] == "hidden":
+            return json.dumps({"success": False, "error": "runtime_features does not include actions for this business"})
+        return json.dumps({"success": False, "error": "app usage would exceed budget cap 5000 microusd"})
+
+    monkeypatch.setattr(web_server, "handle_business_invoke_app_action", fake_invoke_action)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        missing = client.post(
+            "/api/takyon/apps/mathflow/actions/hidden",
+            json={"payload": {}},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        budget = client.post(
+            "/api/takyon/apps/mathflow/actions/budgeted",
+            json={"payload": {}},
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert missing.status_code == 404
+    assert missing.json() == {"success": False, "error": "not found"}
+    assert budget.status_code == 402
+    assert "budget cap" in budget.json()["error"]
 
 
 def test_http_path_allowed_for_host_roles():
@@ -5236,3 +5319,137 @@ class TestPtyWebSocket:
             ):
                 pass
         assert exc.value.code == 4400
+
+
+def test_email_send_route_requires_session(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    client = TestClient(web_server.app)
+    response = client.post(
+        "/api/takyon/apps/mathflow/email/send",
+        json={"app_user_id": "u1", "subject": "hi", "text": "body"},
+        headers={"Host": "mathflow.fourmanifold.com"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"success": False, "error": "missing app session"}
+
+
+def test_email_send_route_dispatches_and_maps_statuses(monkeypatch):
+    import json as _json
+
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls = []
+    responses = iter([
+        {"success": True, "provider_message_id": "m1", "suppressed": True},
+        {"success": False, "error": "email sends are service-side only; customer sessions cannot send product email"},
+        {"success": False, "error": "app email budget exceeded"},
+        {"success": False, "error": "daily send cap reached: 200/200"},
+        {"success": False, "error": "runtime_features does not include email for this business"},
+    ])
+
+    def fake_handler(args):
+        calls.append(args)
+        return _json.dumps(next(responses))
+
+    monkeypatch.setattr(web_server, "handle_business_send_app_email", fake_handler)
+    client = TestClient(web_server.app)
+
+    def post():
+        return client.post(
+            "/api/takyon/apps/mathflow/email/send",
+            json={"app_user_id": "u1", "subject": "hi", "text": "body", "purpose": "new_match_notice"},
+            headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok123"},
+        )
+
+    ok = post()
+    assert ok.status_code == 200 and ok.json()["provider_message_id"] == "m1"
+    assert calls[0]["session_token"] == "tok123"
+    assert calls[0]["idempotency_key"].startswith("email:mathflow:")
+
+    assert post().status_code == 403
+    assert post().status_code == 402
+    assert post().status_code == 429
+    not_found = post()
+    assert not_found.status_code == 404
+    assert not_found.json() == {"success": False, "error": "not found"}
+
+
+def test_records_query_route_dispatches_filters(monkeypatch):
+    import json as _json
+    from starlette.testclient import TestClient
+    import takyon_cli.web_server as web_server
+
+    captured = {}
+
+    def fake_handler(args):
+        captured.update(args)
+        return _json.dumps({"success": True, "records": [], "next_cursor": ""})
+
+    monkeypatch.setattr(web_server, "handle_business_list_app_records", fake_handler)
+    client = TestClient(web_server.app)
+    resp = client.post(
+        "/api/takyon/apps/mathflow/records/query",
+        json={"filters": [{"field": "data.age", "op": "gte", "value": 25}], "sort": [{"field": "created_at", "dir": "desc"}], "limit": 10},
+        headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok"},
+    )
+    assert resp.status_code == 200
+    assert captured["session_token"] == "tok"
+    assert captured["filters"] == [{"field": "data.age", "op": "gte", "value": 25}]
+    assert captured["sort"] == [{"field": "created_at", "dir": "desc"}]
+
+
+def test_records_query_route_requires_session():
+    from starlette.testclient import TestClient
+    import takyon_cli.web_server as web_server
+
+    client = TestClient(web_server.app)
+    resp = client.post(
+        "/api/takyon/apps/mathflow/records/query",
+        json={"filters": []},
+        headers={"Host": "mathflow.fourmanifold.com"},
+    )
+    assert resp.status_code == 401
+    assert resp.json() == {"success": False, "error": "missing app session"}
+
+
+def test_media_upload_route_dispatches_multipart(monkeypatch):
+    import json as _json
+    from starlette.testclient import TestClient
+    import takyon_cli.web_server as web_server
+
+    captured = {}
+
+    def fake_handler(args):
+        captured.update(args)
+        return _json.dumps({"success": True, "media_id": "m1", "url": "media/m1", "mime": "image/png", "size_bytes": 3})
+
+    monkeypatch.setattr(web_server, "handle_business_upload_app_media", fake_handler)
+    client = TestClient(web_server.app)
+    resp = client.post(
+        "/api/takyon/apps/mathflow/media",
+        files={"file": ("pic.png", b"abc", "image/png")},
+        headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["media_id"] == "m1"
+    assert captured["session_token"] == "tok"
+    assert captured["mime"] == "image/png"
+    assert captured["content"] == b"abc"
+
+
+def test_media_upload_route_requires_session():
+    from starlette.testclient import TestClient
+    import takyon_cli.web_server as web_server
+
+    client = TestClient(web_server.app)
+    resp = client.post(
+        "/api/takyon/apps/mathflow/media",
+        files={"file": ("pic.png", b"abc", "image/png")},
+        headers={"Host": "mathflow.fourmanifold.com"},
+    )
+    assert resp.status_code == 401

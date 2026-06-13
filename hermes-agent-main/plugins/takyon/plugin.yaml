@@ -19,7 +19,6 @@ provides_tools:
   - business_patch_file
   - business_record_memory
   - business_configure_app_budget
-  - business_grant_app_subsidy
   - business_upsert_app_surface_contract
   - business_upsert_app_plan
   - business_upsert_app_customer
@@ -34,6 +33,7 @@ provides_tools:
   - business_record_app_usage
   - business_enqueue_job
   - business_x_publish_outreach
+  - business_x_search
   - business_publish_test_outreach
   - business_ugc_ad_write
   - business_ugc_ad_generate
@@ -43,6 +43,7 @@ provides_tools:
   - business_meta_ad_control
   - business_meta_ad_insights_sync
   - business_x_metrics_sync
+  - business_reddit_publish_outreach
   - business_reddit_ad_launch
   - business_reddit_ad_control
   - business_reddit_ad_insights_sync

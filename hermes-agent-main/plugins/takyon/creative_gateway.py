@@ -673,7 +673,13 @@ def build_creative_gateway_router() -> APIRouter:
         finalized = False
         try:
             if plan["asset_kind"] == "video":
-                created["video_id"] = core._meta_upload_advideo(video_abs, cfg, name=plan["ad_name"])
+                created["video_id"] = core._meta_upload_advideo(
+                    video_abs,
+                    cfg,
+                    name=plan["ad_name"],
+                    business=business,
+                    video_rel=plan["ad_video_path"],
+                )
                 image_url = plan["image_url"] or core._meta_video_thumbnail(created["video_id"], cfg)
                 if not image_url:
                     raise RuntimeError(

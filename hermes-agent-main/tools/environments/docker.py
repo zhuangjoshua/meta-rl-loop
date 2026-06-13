@@ -12,7 +12,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import uuid
 from typing import Optional
 
@@ -213,12 +212,31 @@ def _write_text_if_changed(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _docker_userdb_root() -> Path:
+    """Return a host-visible root for synthetic passwd/group bind mounts.
+
+    Avoid macOS temp dirs here: Colima/remote Docker setups may not expose
+    per-process temp paths like ``/var/folders/...`` inside the VM, which makes
+    otherwise-valid bind mounts fail before the container starts.
+    """
+    override = os.getenv("TAKYON_DOCKER_USERDB_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    try:
+        from takyon_constants import get_default_takyon_root
+
+        return get_default_takyon_root() / "cache" / "docker-userdb"
+    except Exception:
+        return Path.home() / ".takyon" / "cache" / "docker-userdb"
+
+
 def _host_user_identity_mount_args(user_spec: str) -> list[str]:
     """Return bind mounts that give a host uid/gid a resolvable passwd entry."""
     uid_str, sep, gid_str = str(user_spec or "").partition(":")
     if not sep or not uid_str.isdigit() or not gid_str.isdigit():
         return []
-    base = Path(tempfile.gettempdir()) / "takyon-docker-userdb" / f"{uid_str}-{gid_str}"
+    base = _docker_userdb_root() / f"{uid_str}-{gid_str}"
     base.mkdir(parents=True, exist_ok=True)
     passwd_path = base / "passwd"
     group_path = base / "group"

@@ -263,6 +263,7 @@ async function main() {
   const model = String(input.model || process.env.TAKYON_CLAUDE_AGENT_MODEL || "claude-sonnet-4-6").trim();
   const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
   const allowBash = Boolean(input.allowBash);
+  const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
 
   let timeout = null;
   let text = "";
@@ -293,6 +294,7 @@ async function main() {
             persistSession: false,
             maxTurns,
             maxBudgetUsd,
+            ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
             stderr: (chunk) => {
               if (typeof chunk !== "string" || !chunk) return;
               if (workerStderr.length >= 12000) return;

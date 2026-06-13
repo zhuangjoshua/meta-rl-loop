@@ -2110,13 +2110,13 @@
         </div>
 
         <div class="chan">
-          <div class="chan-top"><span class="chan-nm">App subsidy</span><span class="chan-st${budget.app_status === "active" ? " live" : ""}">${esc(String(budget.app_status || "—"))}</span></div>
+          <div class="chan-top"><span class="chan-nm">App usage budget</span><span class="chan-st${budget.app_status === "active" ? " live" : ""}">${esc(String(budget.app_status || "—"))}</span></div>
           <div class="stat-row"><span class="k">cap</span><span class="v">${microUsdToDollars(budget.app_limit_microusd)}</span></div>
           <div class="stat-row"><span class="k">spent</span><span class="v">${microUsdToDollars(budget.app_spent_microusd)}</span></div>
           <div class="stat-row"><span class="k">remaining</span><span class="v">${microUsdToDollars(budget.app_remaining_microusd)}</span></div>
           <div class="wallet-note">${activeName
-            ? `<span class="wallet-business">${esc(activeName)}</span> uses this pool for customer usage funding.`
-            : "Select a business to view its subsidy pool."}</div>
+            ? `<span class="wallet-business">${esc(activeName)}</span> uses this budget for customer AI usage.`
+            : "Select a business to view its app usage budget."}</div>
         </div>
       </div>
     `;

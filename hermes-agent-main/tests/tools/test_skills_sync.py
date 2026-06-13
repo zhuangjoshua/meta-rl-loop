@@ -387,6 +387,61 @@ class TestSyncSkills:
             manifest = _read_manifest()
         assert "removed-skill" not in manifest
 
+    def test_force_restore_overwrites_user_modified_skill(self, tmp_path, monkeypatch):
+        """Production force-restore mode should replace user-modified bundled copies."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        user_skill = skills_dir / "old-skill"
+        user_skill.mkdir(parents=True)
+        (user_skill / "SKILL.md").write_text("# My custom version")
+        manifest_file.write_text("old-skill:stalehash000000000000000000000000\n")
+        monkeypatch.setenv("TAKYON_FORCE_RESTORE_BUNDLED_SKILLS", "1")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert "old-skill" in result["updated"]
+        assert (user_skill / "SKILL.md").read_text() == "# Old"
+        with patch("tools.skills_sync.MANIFEST_FILE", manifest_file):
+            manifest = _read_manifest()
+        assert manifest["old-skill"] == _dir_hash(bundled / "old-skill")
+
+    def test_force_restore_readds_missing_manifested_skill(self, tmp_path, monkeypatch):
+        """Production force-restore mode should re-copy missing bundled skills."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        skills_dir.mkdir(parents=True)
+        manifest_file.write_text("old-skill:stalehash000000000000000000000000\n")
+        monkeypatch.setenv("TAKYON_FORCE_RESTORE_BUNDLED_SKILLS", "1")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert "old-skill" in result["copied"]
+        assert (skills_dir / "old-skill" / "SKILL.md").read_text() == "# Old"
+
+    def test_force_restore_removes_stale_removed_skill_dir(self, tmp_path, monkeypatch):
+        """Production force-restore mode should delete removed bundled skills from disk."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        removed_skill = skills_dir / "takyon" / "removed-skill"
+        removed_skill.mkdir(parents=True)
+        (removed_skill / "SKILL.md").write_text("---\nname: removed-skill\n---\n# Removed\n")
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text("removed-skill:stalehash000000000000000000000000\n")
+        monkeypatch.setenv("TAKYON_FORCE_RESTORE_BUNDLED_SKILLS", "1")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert "removed-skill" in result["cleaned"]
+        assert not removed_skill.exists()
+
     def test_does_not_overwrite_existing_unmanifested_skill(self, tmp_path):
         """New skill whose name collides with user-created skill = skipped."""
         bundled = self._setup_bundled(tmp_path)

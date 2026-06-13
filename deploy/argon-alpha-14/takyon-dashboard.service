@@ -30,6 +30,7 @@ EnvironmentFile=-/opt/takyon/secrets/.env
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
 # Long operator tool runs (claude.agent_task, product.surface_refresh) execute on the durable
 # worker plane (takyon-worker.service) instead of inline in this process: the tool enqueues, waits
 # on the canonical work-request run row, and a PTY refresh/disconnect no longer kills the run.

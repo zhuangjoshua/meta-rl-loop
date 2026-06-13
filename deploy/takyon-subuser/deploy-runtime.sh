@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
+ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 
@@ -20,6 +21,7 @@ TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SYNC_PRODUCT_SITES="${TAKYON_SYNC_PRODUCT_SITES:-1}"
+TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -33,6 +35,11 @@ fi
 
 if [[ ! -f "$SEED_XURL_AUTH_SCRIPT" ]]; then
   echo "xurl auth seed script not found: $SEED_XURL_AUTH_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
+  echo "deno bootstrap helper not found: $ENSURE_DENO_SCRIPT" >&2
   exit 1
 fi
 
@@ -79,6 +86,10 @@ TAKYON_REMOTE_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL" \
   "$SEED_XURL_AUTH_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "env TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' TAKYON_REQUIRE_SYSTEMD_RUN=1 bash -s" \
+  < "$ENSURE_DENO_SCRIPT"
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
   install -d '$TAKYON_REMOTE_PRODUCT_SITES'
   # The tracked unit runs as the dedicated non-root 'takyon' user — provision idempotently here,
@@ -103,6 +114,9 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then
     install -m 0755 /root/.local/bin/xurl /usr/local/bin/xurl
   fi
+  command -v deno >/dev/null 2>&1
+  test \"\$(deno --version | awk 'NR==1 {print \$2}')\" = '$TAKYON_DENO_VERSION'
+  command -v systemd-run >/dev/null 2>&1
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \

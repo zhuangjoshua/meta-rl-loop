@@ -2953,6 +2953,9 @@ export default function ChatPage() {
                   onChange={setInput}
                   onKeyDown={onComposerKeyDown}
                   onSlashApply={applySlashCompletion}
+                  onStop={() => {
+                    void interrupt();
+                  }}
                   onSubmit={onComposerSubmit}
                   slashIndex={slashIndex}
                   slashItems={slashItems}
@@ -3505,6 +3508,7 @@ function Composer({
   onChange,
   onKeyDown,
   onSlashApply,
+  onStop,
   onSubmit,
   setSlashIndex,
   slashIndex,
@@ -3518,14 +3522,13 @@ function Composer({
   onChange: (value: string) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSlashApply: (item: SlashCompletionItem) => void;
+  onStop: () => void;
   onSubmit: (event: FormEvent) => void;
   setSlashIndex: (value: number) => void;
   slashIndex: number;
   slashItems: SlashCompletionItem[];
   value: string;
 }) {
-  const hasInput = !!value.trim();
-
   return (
     <form className="td-composer" onSubmit={onSubmit}>
       {slashItems.length > 0 && (
@@ -3554,17 +3557,24 @@ function Composer({
           rows={1}
           value={value}
         />
+        {isRunning && (
+          <button
+            aria-label="Stop generating"
+            className="td-stop"
+            disabled={!canAct}
+            onClick={onStop}
+            type="button"
+          >
+            <Square className="h-3 w-3 fill-current" />
+          </button>
+        )}
         <button
-          aria-label={isRunning && !hasInput ? "Stop generating" : "Send message"}
+          aria-label="Send message"
           className="td-send"
           disabled={!canAct}
           type="submit"
         >
-          {isRunning && !hasInput ? (
-            <Square className="h-3 w-3 fill-current" />
-          ) : (
-            <ArrowUp className="h-4 w-4" />
-          )}
+          <ArrowUp className="h-4 w-4" />
         </button>
       </div>
       <div className="td-composer-meta">

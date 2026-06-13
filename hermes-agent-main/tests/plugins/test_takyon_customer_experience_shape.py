@@ -56,9 +56,6 @@ def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring
     metadata = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
         {
             "subuser_app": {
-                "app_mode": "standard_saas",
-                "subscription_style": "monthly",
-                "api_mode": "shared_runtime",
                 "rail_state": {
                     "auth": "live",
                     "account": "live",
@@ -67,9 +64,6 @@ def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring
         },
         runtime_features=["auth", "account", "records"],
         previous_runtime_features=["auth", "account"],
-        app_mode="standard_saas",
-        subscription_style="monthly",
-        api_mode="shared_runtime",
     )
     assert metadata["subuser_app"]["rail_state"] == {
         "auth": "live",
@@ -140,160 +134,31 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
                 "billing_interval": "month",
                 "included_ai_budget_microusd": 5_000_000,
                 "included_action_quota": 0,
-                "allow_overage": False,
             }
         ],
     )
 
     assert (workspace_root / "package.json").exists()
-    assert (workspace_root / "next.config.js").exists()
-    assert (workspace_root / "src" / "app" / "layout.js").exists()
-    assert (workspace_root / "src" / "app" / "articles" / "page.js").exists()
-    assert (workspace_root / "src" / "app" / "faq" / "page.js").exists()
-    assert (workspace_root / "src" / "app" / "globals.css").exists()
-    assert (workspace_root / "src" / "app" / "opengraph-image.js").exists()
-    assert (workspace_root / "src" / "app" / "privacy" / "page.js").exists()
-    assert (workspace_root / "src" / "app" / "robots.js").exists()
-    assert (workspace_root / "src" / "app" / "sitemap.js").exists()
-    assert (workspace_root / "src" / "app" / "terms" / "page.js").exists()
-    assert (workspace_root / "src" / "app" / "twitter-image.js").exists()
-    assert (workspace_root / "src" / "app" / "app" / "layout.js").exists()
-    assert (workspace_root / "src" / "app" / "app" / "page.js").exists()
-    assert (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").exists()
-    assert (workspace_root / "src" / "app" / "app" / "profile" / "page.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-primitives.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-access-page.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-account-page.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-metadata.js").exists()
-    assert (workspace_root / "src" / "components" / "starter-server.js").exists()
-    starter_context = (workspace_root / "src" / "components" / "starter-context.js").read_text()
-    starter_metadata = (workspace_root / "src" / "components" / "starter-metadata.js").read_text()
-    globals_css = (workspace_root / "src" / "app" / "globals.css").read_text()
-    next_config = (workspace_root / "next.config.js").read_text()
-    assert 'export const starterDefaultPlanKey =' in starter_context
-    assert "export const starterConfiguredPlans =" in starter_context
-    assert "export const starterDefaultMonthlyPlan =" in starter_context
-    assert "export async function starterRequestAuth" in starter_context
-    assert "export async function starterSession" in starter_context
-    assert "export async function starterAccount" in starter_context
-    assert "export async function starterCancelSubscription" in starter_context
-    assert "export async function starterProfile" in starter_context
-    assert "export async function starterUpdateProfile" in starter_context
-    assert "export async function starterCheckout" in starter_context
-    assert "export async function starterGenerate" in starter_context
-    assert "export function starterIsAuthenticated" in starter_context
-    assert "export function starterIsEntitled" in starter_context
-    assert "export function starterSubscriptionState" in starter_context
-    assert "export function starterCanUseApp" in starter_context
-    assert "export function starterCanCheckout" in starter_context
-    assert "export function starterCanGenerate" in starter_context
-    assert "export function starterViewerState" in starter_context
-    assert "export function starterAppState" in starter_context
-    assert "export async function starterLoadViewer" in starter_context
-    assert "export async function starterLoadAppState" in starter_context
-    assert 'send_email: true' not in starter_context
-    starter_primitives = (workspace_root / "src" / "components" / "starter-primitives.js").read_text()
-    starter_access_page = (workspace_root / "src" / "components" / "starter-access-page.js").read_text()
-    starter_account_page = (workspace_root / "src" / "components" / "starter-account-page.js").read_text()
-    assert "export function StarterAuthCard" in starter_primitives
-    assert "export function StarterSubscriptionCard" in starter_primitives
-    assert "export function StarterBlockedCard" in starter_primitives
-    assert 'new URLSearchParams(window.location.search)' in starter_access_page
-    assert 'useSearchParams' not in starter_access_page
-    assert 'title="Access ready."' in starter_access_page
-    assert "Open account" in starter_access_page
-    assert "Use Account to review your plan, billing state, and profile details." in starter_access_page
-    assert "Plan details will appear here." in starter_access_page
-    assert "Sign in to open your account." in starter_account_page
-    assert "Use your email to manage your subscription and profile." in starter_account_page
-    assert "Cancellation scheduled." in starter_account_page
-    assert "Cancel subscription" in starter_account_page
-    assert "--starter-max: 1120px;" in globals_css
-    assert "width: min(calc(100% - clamp(24px, 4vw, 64px)), var(--starter-max));" in globals_css
-    starter_server = (workspace_root / "src" / "components" / "starter-server.js").read_text()
-    assert "function requestHasSessionCookie()" in starter_server
-    assert 'const target = "takyon_app_session="' in starter_server
-    assert 'if (!requestHasSessionCookie()) {' in starter_server
-    assert "return starterAppState({}, null, { errors });" in starter_server
-    assert "starterRootMetadata" in starter_metadata
-    assert "starterAppRobotsMetadata" in starter_metadata
-    assert "starterDefaultPublicRoutes" in starter_metadata
-    assert "starterPageMetadata" in starter_metadata
-    assert "starterPublicRoutes()" in starter_metadata
-    assert 'card: "summary_large_image"' in starter_metadata
-    assert 'starterDefaultPublicRoutes = ["/", "/privacy", "/terms", "/faq", "/articles"]' in starter_metadata
-    assert 'normalized === "/app"' in starter_metadata
-    assert 'starterAbsoluteUrl("/sitemap.xml")' in starter_metadata
-    articles_page = (workspace_root / "src" / "app" / "articles" / "page.js").read_text()
-    faq_page = (workspace_root / "src" / "app" / "faq" / "page.js").read_text()
-    home_page = (workspace_root / "src" / "app" / "page.js").read_text()
-    privacy_page = (workspace_root / "src" / "app" / "privacy" / "page.js").read_text()
-    root_layout = (workspace_root / "src" / "app" / "layout.js").read_text()
-    app_layout = (workspace_root / "src" / "app" / "app" / "layout.js").read_text()
-    app_page = (workspace_root / "src" / "app" / "app" / "page.js").read_text()
-    product_layout = (workspace_root / "src" / "app" / "app" / "(product)" / "layout.js").read_text()
-    sitemap_page = (workspace_root / "src" / "app" / "sitemap.js").read_text()
-    terms_page = (workspace_root / "src" / "app" / "terms" / "page.js").read_text()
-    twitter_image = (workspace_root / "src" / "app" / "twitter-image.js").read_text()
-    robots_page = (workspace_root / "src" / "app" / "robots.js").read_text()
-    opengraph_image = (workspace_root / "src" / "app" / "opengraph-image.js").read_text()
-    assert "starterDefaultMonthlyPlan" not in home_page
-    assert "Keep the monthly subscription visible before anyone starts checkout." not in home_page
-    assert 'redirect("/app")' in home_page
-    assert 'href="/privacy"' not in home_page
-    assert '"/pricing"' not in home_page
-    assert not (workspace_root / "src" / "app" / "pricing" / "page.js").exists()
-    assert "Privacy policy" in privacy_page
-    assert "Back to home" not in privacy_page
-    assert "starter-card starter-section-card" not in privacy_page
-    assert 'href="/faq"' in privacy_page
-    assert 'href="/articles"' in privacy_page
-    assert 'href="/terms"' in privacy_page
-    assert "StarterPrivacyPage" not in privacy_page
-    assert 'path: "/privacy"' in privacy_page
-    assert "Articles" in articles_page
-    assert "No public articles are published yet." in articles_page
-    assert 'href="/faq"' in articles_page
-    assert 'href="/privacy"' in articles_page
-    assert 'path: "/articles"' in articles_page
-    assert "Frequently asked questions" in faq_page
-    assert "No public FAQ entries are published yet." in faq_page
-    assert 'href="/articles"' in faq_page
-    assert 'href="/terms"' in faq_page
-    assert 'path: "/faq"' in faq_page
-    assert "export const metadata = starterRootMetadata;" in root_layout
-    assert "metadataBase: starterMetadataBase" in starter_metadata
-    assert "openGraph:" in starter_metadata
-    assert "twitter:" in starter_metadata
-    assert "export const metadata = starterAppRobotsMetadata;" in app_layout
-    assert 'href="/faq"' in app_layout
-    assert 'href="/articles"' in app_layout
-    assert 'href="/privacy"' in app_layout
-    assert 'href="/terms"' in app_layout
-    assert "loadServerAppState" in app_page
-    assert "StarterAccessPage initialAppState={initialAppState}" in app_page
-    assert 'if (initialAppState?.access?.state !== "ready")' in product_layout
-    assert 'redirect("/app")' in product_layout
-    assert "starterSitemapEntries" in sitemap_page
-    assert "Terms of service" in terms_page
-    assert "Back to home" not in terms_page
-    assert "starter-card starter-section-card" not in terms_page
-    assert 'href="/faq"' in terms_page
-    assert 'href="/articles"' in terms_page
-    assert 'href="/privacy"' in terms_page
-    assert "StarterTermsPage" not in terms_page
-    assert 'path: "/terms"' in terms_page
-    assert "starterRobotsConfig" in robots_page
-    assert "ImageResponse" in opengraph_image
-    assert "starterSiteName" in opengraph_image
-    assert 'export { alt, contentType, default, size } from "./opengraph-image.js";' in twitter_image
-    assert '"priceCents": 1900' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
-    assert '"includedAiBudgetMicrousd": 5000000' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
-    assert '"auth": "declared"' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
-    assert '"checkout": "declared"' in (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
-    assert 'TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN' in next_config
-    assert 'source: "/api/takyon/:path*"' in next_config
-
+    assert (workspace_root / "vite.config.ts").exists()
+    assert (workspace_root / "package-lock.json").exists()
+    assert (workspace_root / "src" / "screens" / "landing.tsx").exists()
+    assert (workspace_root / "src" / "screens" / "support.tsx").exists()
+    assert (workspace_root / "src" / "tokens.css").exists()
+    assert (workspace_root / "public" / "robots.txt").exists()
+    assert not (workspace_root / "next.config.js").exists()
+    assert not (workspace_root / "node_modules").exists()
+    assert not (workspace_root / "dist").exists()
+    assert not (workspace_root / "_takyon" / "scaffold").exists()
+    assert (workspace_root / "_takyon" / "runtime-client.js").exists()
+    assert "Plannerly" in (workspace_root / "index.html").read_text(encoding="utf-8")
+    surface_context = (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text()
+    assert "export const surfaceContext =" in surface_context
+    assert "export const subuserSurfaceContext = surfaceContext;" in surface_context
+    assert "export default surfaceContext;" in surface_context
+    assert '"priceCents": 1900' in surface_context
+    assert '"includedAiBudgetMicrousd": 5000000' in surface_context
+    assert '"auth": "declared"' in surface_context
+    assert '"checkout": "declared"' in surface_context
 
 def test_appkit_contract_block_preserves_canonical_rail_helpers():
     block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
@@ -310,30 +175,48 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     )
 
     assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
-    assert "starterRequestAuth(...)" in block
-    assert "starterIsEntitled(...)" in block
-    assert "starterCancelSubscription(...)" in block
-    assert "starterSubscriptionState(...)" in block
-    assert "starterCanUseApp(...)" in block
-    assert "starterViewerState(...)" in block
-    assert "starterAppState(...)" in block
-    assert "starterLoadViewer()" in block
-    assert "starterLoadAppState()" in block
-    assert "preset support pages at `/privacy`, `/terms`, `/faq`, and `/articles`" in block
-    assert "Do not spend normal bootstrap/design time reading, redesigning, or polishing them" in block
-    assert "Keep customer-facing copy free of developer framing." in block
+    assert "client.requestAuth(...)" in block
+    assert "client.session()" in block
+    assert "client.profile()" in block
+    assert "client.listRecords(...)" in block
+    assert "client.createActionRunner(name)" in block
+    assert "useSession()" in block
+    assert "useRecords(type)" in block
+    assert "useActionRunner(name)" in block
+    assert "src/lib/takyon.ts" in block and "src/lib/hooks.ts" in block
+    assert "do not spend bootstrap/design time" in block
 
 
-def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
-    block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
+def test_appkit_contract_block_uses_vite_scaffold_surface_when_frontend_stack_is_pinned():
+    block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
         {
-            "runtime_features": ["auth", "account", "checkout"],
+            "runtime_features": ["auth", "account", "checkout", "generate"],
             "routes": ["/", "/app"],
             "metadata": {
                 "subuser_app": {
                     "app_mode": "standard_saas",
                     "subscription_style": "monthly",
-                },
+                    "frontend_stack": "vite_react_ts",
+                }
+            },
+        }
+    )
+
+    assert "src/lib/hooks.ts" in block
+    assert "useActionRunner(name)" in block
+    assert "src/screens/support.tsx" in block
+    assert "src/screens/app-layout.tsx" in block
+    assert "starter-context.js" not in block
+    assert "src/app/app/(product)/root.js" not in block
+
+
+def test_worker_contract_block_states_positive_obligation_and_facts():
+    block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
+        {
+            "runtime_features": ["auth", "account", "checkout", "actions"],
+            "routes": ["/", "/app"],
+            "metadata": {
+                "subuser_app": {},
                 "customer_experience": {
                     "required_routes": ["/", "/app"],
                 },
@@ -342,15 +225,43 @@ def test_worker_contract_block_keeps_appkit_auth_behavior_authoritative():
         plans_configured=True,
     )
 
-    assert "keep that rail behavior authoritative" in block
-    assert "do not fake browser-only sessions" in block
-    assert "Do not pre-disable auth UI" in block
-    assert "signed-up/account-holder" in block
-    assert "subscribed/unsubscribed" in block
-    assert "src/app/app/(product)/" in block
-    assert "Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages" in block
-    assert "first monthly bootstrap" in block
-    assert "Do not ship customer-facing copy" in block
+    # The minimized worker contract is a short positive obligation, not a fear wall.
+    assert "Your overriding obligation is that the product's primary job works for real." in block
+    assert "Use the declared shared rails and named actions for backend behavior." in block
+    assert "fail truthfully with the exact blocker" in block
+    # Factual contract context is still injected.
+    assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in block
+    assert "src/screens/" in block
+    assert "must ship a real `/app` route" in block
+    assert "src/screens/support.tsx` is the seeded module" in block
+    assert "Product-specific backend work goes through declared actions" in block
+    # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
+    assert "App mode:" not in block
+    assert "Subscription style:" not in block
+    assert "do not fake browser-only sessions" not in block
+    assert "Do not use localStorage" not in block
+
+
+def test_worker_contract_block_uses_vite_lane_guidance():
+    block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
+        {
+            "runtime_features": ["auth", "account", "checkout"],
+            "routes": ["/", "/app"],
+            "metadata": {
+                "subuser_app": {},
+                "customer_experience": {
+                    "required_routes": ["/", "/app"],
+                },
+            },
+        },
+        plans_configured=True,
+    )
+
+    assert "src/screens/" in block
+    assert "src/screens/app-layout.tsx" in block
+    assert "src/screens/support.tsx" in block
+    assert "next.config.js" not in block
+    assert "src/app/app/(product)/" not in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):
@@ -399,3 +310,201 @@ def test_probe_product_public_url_retries_transient_tls_bootstrap(monkeypatch):
     assert blocker == ""
     assert attempts["count"] == 3
     assert sleeps == [2, 4]
+
+
+def test_merge_subuser_app_metadata_threads_frontend_stack():
+    metadata = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
+        {},
+        runtime_features=["auth"],
+        frontend_stack="vite-react-ts",
+    )
+    assert metadata["subuser_app"]["frontend_stack"] == "vite_react_ts"
+
+    preserved = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
+        metadata,
+        runtime_features=["auth"],
+    )
+    assert preserved["subuser_app"]["frontend_stack"] == "vite_react_ts"
+
+    invalid = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
+        {},
+        runtime_features=["auth"],
+        frontend_stack="svelte",
+    )
+    assert "frontend_stack" not in invalid["subuser_app"]
+
+
+def test_surface_shape_defaults_frontend_stack_to_vite():
+    shape = takyon_core._surface_subuser_app_shape(  # type: ignore[attr-defined]
+        {"metadata": {"subuser_app": {}}}
+    )
+    assert shape["frontend_stack"] == "vite_react_ts"
+
+
+def test_bootstrap_default_runtime_features_stay_pinned():
+    # The bootstrap access shell must stay auth/account/profile/checkout so removing
+    # the app-shape taxonomy never silently widens or narrows the seeded shell.
+    assert takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES == (
+        "auth",
+        "account",
+        "profile",
+        "checkout",
+    )
+
+
+def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails():
+    surface = {
+        "routes": ["/", "/app", "/app/profile"],
+        "metadata": {
+            "customer_experience": {
+                "required_routes": ["/", "/app"],
+            }
+        },
+    }
+
+    assert takyon_core._surface_runtime_features(surface) == []  # type: ignore[attr-defined]
+    assert takyon_core._surface_effective_runtime_features(surface) == [  # type: ignore[attr-defined]
+        "auth",
+        "account",
+        "profile",
+        "checkout",
+    ]
+
+    payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
+        surface,
+        slug="plannerly",
+    )
+    assert payload["runtimeFeatures"] == [
+        "auth",
+        "account",
+        "profile",
+        "checkout",
+    ]
+
+    block = takyon_core._runtime_ui_contract_block(surface)  # type: ignore[attr-defined]
+    assert (
+        "Declared runtime-backed features: none yet; the honest bootstrap access shell still wires "
+        "auth, account, profile, checkout"
+    ) in block
+
+
+def test_product_workflow_actions_survive_shape_normalization():
+    # product_workflow.actions must round-trip through the shape normalizer
+    # independently of the deleted app_mode/subscription_style/api_mode taxonomy.
+    surface = {
+        "metadata": {
+            "product_workflow": {
+                "actions": [{"name": "sync-data", "trigger": "http"}],
+                "primary_job": "Sync the user's data.",
+            }
+        }
+    }
+    workflow = takyon_core._surface_product_workflow_shape(surface)  # type: ignore[attr-defined]
+    assert workflow["actions"] == [{"name": "sync-data", "trigger": "http"}]
+
+
+def test_partial_product_workflow_stays_pending_and_cannot_claim_mvp_complete():
+    workflow = {
+        "primary_job": "Help the user save a plan.",
+        "core_loop": {
+            "input": "Enter a goal.",
+            "action": "Generate a starter plan.",
+            "result": "Show a saved plan draft.",
+        },
+    }
+    surface = {
+        "runtime_features": ["auth", "account", "records"],
+        "routes": ["/", "/app"],
+        "metadata": {
+            "customer_experience": {
+                "required_routes": ["/", "/app"],
+            },
+            "product_workflow": workflow,
+        },
+    }
+
+    assert takyon_core._product_workflow_is_mvp_complete(workflow) is False  # type: ignore[attr-defined]
+
+    block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
+        surface,
+        plans_configured=False,
+    )
+    assert "partial product workflow" in block
+    assert "workflow `workflow_pending`" in block
+    assert "MVP-complete product workflow for the gated app." not in block
+
+    takyon_core._validate_product_workflow_contract(  # type: ignore[attr-defined]
+        surface=surface,
+        runtime_features=["auth", "account", "records"],
+        product_workflow=workflow,
+    )
+
+
+def test_app_shell_signal_derived_from_rails_not_taxonomy():
+    # App-shell intent is derived from real declared signals (access/AI rails or an
+    # explicit in-app workflow route), not from app-shape taxonomy.
+    assert (
+        takyon_core._surface_shape_requires_app_shell(  # type: ignore[attr-defined]
+            runtime_features=["auth", "account", "actions"],
+        )
+        is True
+    )
+    assert (
+        takyon_core._surface_shape_requires_app_shell(  # type: ignore[attr-defined]
+            runtime_features=[],
+            required_routes=["/"],
+        )
+        is False
+    )
+    assert (
+        takyon_core._surface_shape_requires_app_shell(  # type: ignore[attr-defined]
+            runtime_features=[],
+            required_routes=["/", "/app"],
+        )
+        is True
+    )
+
+
+def test_bootstrap_access_shell_seed_forces_canonical_shell_for_real_app_surfaces():
+    # On a fresh seed of a real app surface, the access shell normalizes to the pinned
+    # auth/account/profile/checkout set — without any app_mode/subscription_style input.
+    forced = takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
+        ["actions"],
+        bootstrap_seed=True,
+        app_shell_required=True,
+    )
+    assert forced == ["auth", "account", "profile", "checkout"]
+
+    # Not a fresh seed → declared rails are left untouched.
+    assert takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
+        ["records"],
+        bootstrap_seed=False,
+        app_shell_required=True,
+    ) == ["records"]
+
+    # No app-shell signal (landing-style) → nothing is forced even on a fresh seed.
+    assert takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
+        [],
+        bootstrap_seed=True,
+        app_shell_required=False,
+    ) == []
+
+
+def test_bootstrap_conversion_model_collapses_free_copy_to_monthly():
+    assert (
+        takyon_core._canonical_bootstrap_conversion_model(  # type: ignore[attr-defined]
+            "free tier (5 docs) -> $9/mo paid plan",
+            bootstrap_seed=True,
+            app_shell_required=True,
+        )
+        == "monthly subscription"
+    )
+    # Real conversion copy is preserved.
+    assert (
+        takyon_core._canonical_bootstrap_conversion_model(  # type: ignore[attr-defined]
+            "paid monthly plan",
+            bootstrap_seed=True,
+            app_shell_required=True,
+        )
+        == "paid monthly plan"
+    )

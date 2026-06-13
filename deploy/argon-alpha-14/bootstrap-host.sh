@@ -6,6 +6,7 @@ SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 PRODUCT_ACTIVATION_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-activation-broker.service"
+ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TARGET_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -14,6 +15,7 @@ REMOTE_HOME="${TAKYON_REMOTE_HOME:-$REMOTE_ROOT/.takyon}"
 REMOTE_SECRETS="${TAKYON_REMOTE_SECRETS:-$REMOTE_ROOT/secrets}"
 REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-$REMOTE_ROOT/hermes-agent-main}"
 REMOTE_DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 target_ssh=(-i "$TARGET_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 
@@ -41,6 +43,15 @@ if [[ ! -f "$TARGET_KEY" ]]; then
   echo "target key not found: $TARGET_KEY" >&2
   exit 1
 fi
+
+if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
+  echo "deno bootstrap helper not found: $ENSURE_DENO_SCRIPT" >&2
+  exit 1
+fi
+
+ssh "${target_ssh[@]}" "$TARGET_HOST" \
+  "env TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' TAKYON_REQUIRE_SYSTEMD_RUN=1 bash -s" \
+  < "$ENSURE_DENO_SCRIPT"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive

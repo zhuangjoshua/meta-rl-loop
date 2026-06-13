@@ -17,6 +17,7 @@ input -> result -> save record -> reopen later.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import uuid
@@ -32,7 +33,6 @@ _RECORD_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _RECORD_COLUMNS = (
     "id, business_slug, app_user_id, record_type, title, data, metadata, created_at, updated_at"
 )
-
 
 class AppRecordError(Exception):
     """Base for shared product record errors."""
@@ -63,6 +63,284 @@ class AppRecordPayloadTooLarge(AppRecordError):
         self.size_bytes = size_bytes
         self.limit_bytes = limit_bytes
         super().__init__(f"{field} exceeds {limit_bytes} bytes ({size_bytes})")
+
+
+# --- records-v2 bounded query (§18) -------------------------------------------------
+# One compiler, both dialects. Field names are whitelist-only and NEVER interpolated
+# from caller input; values ALWAYS become bound parameters. Keyset pagination follows
+# the effective ORDER BY with an opaque, versioned cursor.
+QUERY_MAX_FILTERS = 5
+QUERY_MAX_SORT = 2
+QUERY_MAX_LIMIT = 100
+QUERY_DEFAULT_LIMIT = 25
+_QUERY_IN_MAX = 20
+_QUERY_CURSOR_VERSION = 1
+_QUERY_COMPARE_OPS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+_QUERY_OPS = frozenset(set(_QUERY_COMPARE_OPS) | {"in", "ilike", "exists"})
+_QUERY_REAL_COLUMNS = frozenset({"record_type", "title", "created_at", "updated_at"})
+_QUERY_SORT_COLUMNS = frozenset({"created_at", "updated_at", "title", "record_type"})
+_QUERY_DATA_KEY_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+class RecordQueryError(AppRecordError):
+    """Raised when a records-v2 query is malformed (caller error, surfaced truthfully)."""
+
+
+@dataclass(frozen=True)
+class _Dialect:
+    placeholder: str  # "%s" (pg) or "?" (sqlite)
+    data_column: str  # "data" (pg jsonb) or "data_json" (sqlite text)
+
+    def json_text(self, key: str) -> str:
+        if self.data_column == "data":
+            return f"data->>'{key}'"
+        return f"json_extract(data_json, '$.{key}')"
+
+    def numeric(self, expr: str) -> str:
+        if self.data_column == "data":
+            return f"({expr})::numeric"
+        return f"CAST({expr} AS REAL)"
+
+
+_PG_DIALECT = _Dialect("%s", "data")
+_SQLITE_DIALECT = _Dialect("?", "data_json")
+
+
+@dataclass(frozen=True)
+class _OrderTerm:
+    field: str
+    direction: str
+    expr: str
+
+
+def _resolve_query_field(field: str, dialect: _Dialect) -> str:
+    """Map a whitelisted field name to a SAFE SQL expression (never raw interpolation)."""
+    name = str(field or "").strip()
+    if name in _QUERY_REAL_COLUMNS:
+        return name  # bare column, whitelist-guaranteed identifier
+    if name.startswith("data."):
+        key = name[len("data."):]
+        if not _QUERY_DATA_KEY_RE.match(key):
+            raise RecordQueryError(f"query field `{name}` has an invalid data key (a-z, 0-9, _, ≤64)")
+        return dialect.json_text(key)  # key is regex-constrained, never arbitrary text
+    raise RecordQueryError(
+        f"query field `{name}` is not allowed; use record_type/title/created_at/updated_at or data.<key>"
+    )
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _sort_expr(field: str, dialect: _Dialect) -> str:
+    if field == "title":
+        return "coalesce(title, '')"
+    if field in _QUERY_SORT_COLUMNS or field == "id":
+        return field
+    raise RecordQueryError(f"sort field `{field}` is not allowed")
+
+
+def _normalize_query_order(sort: object, dialect: _Dialect) -> list[_OrderTerm]:
+    raw_sort = sort if isinstance(sort, list) else []
+    if len(raw_sort) > QUERY_MAX_SORT:
+        raise RecordQueryError(f"query allows at most {QUERY_MAX_SORT} sort keys")
+    order_terms: list[_OrderTerm] = []
+    seen: set[str] = set()
+    for item in raw_sort:
+        if not isinstance(item, dict):
+            raise RecordQueryError("each sort entry must be an object {field, dir}")
+        field = str(item.get("field") or "").strip()
+        if field not in _QUERY_SORT_COLUMNS:
+            raise RecordQueryError(f"sort field `{field}` is not allowed (created_at,updated_at,title,record_type)")
+        if field in seen:
+            raise RecordQueryError(f"sort field `{field}` may appear at most once")
+        seen.add(field)
+        direction = "ASC" if str(item.get("dir") or "desc").strip().lower() == "asc" else "DESC"
+        order_terms.append(_OrderTerm(field=field, direction=direction, expr=_sort_expr(field, dialect)))
+    if not order_terms:
+        order_terms.append(_OrderTerm(field="updated_at", direction="DESC", expr=_sort_expr("updated_at", dialect)))
+    order_terms.append(_OrderTerm(field="id", direction=order_terms[-1].direction, expr="id"))
+    return order_terms
+
+
+def _cursor_signature(order_terms: list[_OrderTerm]) -> list[str]:
+    return [f"{term.field}:{term.direction.lower()}" for term in order_terms]
+
+
+def _cursor_field_value(field: str, value: object) -> object:
+    if field == "title":
+        return "" if value is None else str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if value is None:
+        return None
+    return str(value)
+
+
+def _record_cursor_value(record: object, field: str) -> object:
+    if isinstance(record, dict):
+        return _cursor_field_value(field, record.get(field))
+    return _cursor_field_value(field, getattr(record, field))
+
+
+def _encode_cursor_payload(signature: list[str], values: list[object]) -> str:
+    raw = json.dumps(
+        {"v": _QUERY_CURSOR_VERSION, "s": signature, "k": values},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def encode_query_record_cursor(record: object, *, sort: object, dialect: _Dialect) -> str:
+    order_terms = _normalize_query_order(sort, dialect)
+    return _encode_cursor_payload(
+        _cursor_signature(order_terms),
+        [_record_cursor_value(record, term.field) for term in order_terms],
+    )
+
+
+def encode_record_cursor(updated_at: object, record_id: object) -> str:
+    return _encode_cursor_payload(
+        ["updated_at:desc", "id:desc"],
+        [
+            _cursor_field_value("updated_at", updated_at),
+            _cursor_field_value("id", record_id),
+        ],
+    )
+
+
+def _decode_cursor_payload(cursor: object) -> dict[str, object] | None:
+    text = str(cursor or "").strip()
+    if not text:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(text.encode("ascii")).decode("utf-8")
+    except Exception as exc:  # malformed cursor is a caller error, not a crash
+        raise RecordQueryError("query cursor is malformed") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        updated_at, record_id = raw.rsplit(" ", 1) if " " in raw else ("", "")
+        if not updated_at or not record_id:
+            raise RecordQueryError("query cursor is malformed")
+        return {"s": ["updated_at:desc", "id:desc"], "k": [updated_at, record_id]}
+    if not isinstance(payload, dict):
+        raise RecordQueryError("query cursor is malformed")
+    signature = payload.get("s")
+    values = payload.get("k")
+    if payload.get("v") != _QUERY_CURSOR_VERSION or not isinstance(signature, list) or not isinstance(values, list):
+        raise RecordQueryError("query cursor is malformed")
+    if not all(isinstance(item, str) for item in signature):
+        raise RecordQueryError("query cursor is malformed")
+    return {"s": signature, "k": values}
+
+
+def _decode_query_cursor(cursor: object, order_terms: list[_OrderTerm]) -> list[object] | None:
+    payload = _decode_cursor_payload(cursor)
+    if payload is None:
+        return None
+    signature = payload["s"]
+    values = payload["k"]
+    expected = _cursor_signature(order_terms)
+    if signature != expected:
+        raise RecordQueryError("query cursor is for a different sort order")
+    if len(values) != len(expected):
+        raise RecordQueryError("query cursor is malformed")
+    return list(values)
+
+
+def decode_record_cursor(cursor: object) -> tuple[str, str] | None:
+    values = _decode_query_cursor(
+        cursor,
+        [
+            _OrderTerm("updated_at", "DESC", "updated_at"),
+            _OrderTerm("id", "DESC", "id"),
+        ],
+    )
+    if values is None:
+        return None
+    return (str(values[0]), str(values[1]))
+
+
+def _cursor_where_clause(order_terms: list[_OrderTerm], cursor_values: list[object], placeholder: str) -> tuple[str, list[object]]:
+    disjuncts: list[str] = []
+    params: list[object] = []
+    for index, term in enumerate(order_terms):
+        branch: list[str] = []
+        for prev_term, prev_value in zip(order_terms[:index], cursor_values[:index]):
+            branch.append(f"{prev_term.expr} = {placeholder}")
+            params.append(prev_value)
+        comparator = ">" if term.direction == "ASC" else "<"
+        branch.append(f"{term.expr} {comparator} {placeholder}")
+        params.append(cursor_values[index])
+        disjuncts.append("(" + " AND ".join(branch) + ")")
+    return "(" + " OR ".join(disjuncts) + ")", params
+
+
+def compile_record_query(
+    *,
+    filters: object,
+    sort: object,
+    cursor: object,
+    limit: object,
+    dialect: _Dialect,
+) -> tuple[list[str], str, int, list[object]]:
+    """Return (where_fragments, order_sql, limit, params) for a bounded record query."""
+    ph = dialect.placeholder
+    where: list[str] = []
+    params: list[object] = []
+
+    raw_filters = filters if isinstance(filters, list) else []
+    if len(raw_filters) > QUERY_MAX_FILTERS:
+        raise RecordQueryError(f"query allows at most {QUERY_MAX_FILTERS} filters")
+    for item in raw_filters:
+        if not isinstance(item, dict):
+            raise RecordQueryError("each filter must be an object {field, op, value}")
+        op = str(item.get("op") or "").strip().lower()
+        if op not in _QUERY_OPS:
+            raise RecordQueryError(f"query op `{op}` is not allowed (eq,neq,gt,gte,lt,lte,in,ilike,exists)")
+        expr = _resolve_query_field(item.get("field"), dialect)
+        value = item.get("value")
+        if op in _QUERY_COMPARE_OPS:
+            sql_op = _QUERY_COMPARE_OPS[op]
+            if op in {"gt", "gte", "lt", "lte"} and _is_number(value):
+                where.append(f"{dialect.numeric(expr)} {sql_op} {ph}")
+            else:
+                where.append(f"{expr} {sql_op} {ph}")
+            params.append(value)
+        elif op == "in":
+            if not isinstance(value, list) or not value:
+                raise RecordQueryError("`in` requires a non-empty list value")
+            if len(value) > _QUERY_IN_MAX:
+                raise RecordQueryError(f"`in` allows at most {_QUERY_IN_MAX} values")
+            where.append(f"{expr} IN ({', '.join([ph] * len(value))})")
+            params.extend(value)
+        elif op == "ilike":
+            if dialect.data_column == "data":
+                where.append(f"{expr} ILIKE {ph}")
+            else:
+                where.append(f"{expr} LIKE {ph} COLLATE NOCASE")
+            params.append(f"%{value}%")
+        elif op == "exists":
+            wants = bool(value) if value is not None else True
+            where.append(f"{expr} IS NOT NULL" if wants else f"{expr} IS NULL")
+
+    order_terms = _normalize_query_order(sort, dialect)
+    order_sql = "ORDER BY " + ", ".join(f"{term.expr} {term.direction}" for term in order_terms)
+
+    decoded = _decode_query_cursor(cursor, order_terms)
+    if decoded is not None:
+        cursor_sql, cursor_params = _cursor_where_clause(order_terms, decoded, ph)
+        where.append(cursor_sql)
+        params.extend(cursor_params)
+
+    try:
+        limit_value = int(limit) if limit is not None else QUERY_DEFAULT_LIMIT
+    except (TypeError, ValueError):
+        limit_value = QUERY_DEFAULT_LIMIT
+    limit_value = max(1, min(limit_value, QUERY_MAX_LIMIT))
+    return where, order_sql, limit_value, params
 
 
 @dataclass(frozen=True)
@@ -203,6 +481,56 @@ def list_records(
     params.append(limit_value)
     rows = conn.execute(query, tuple(params)).fetchall()
     return user, [_record_from_row(row) for row in rows]
+
+
+def query_records(
+    conn,
+    business_slug: str,
+    *,
+    app_user_id: str | None = None,
+    email: str | None = None,
+    session_token: str | None = None,
+    record_type: str | None = None,
+    filters: object = None,
+    sort: object = None,
+    cursor: object = None,
+    limit: object = None,
+) -> tuple[app_identity.AppUser, list[AppRecord], str | None] | None:
+    """records-v2 bounded query (PG). Returns (user, records, next_cursor)."""
+    user = _resolve_existing_user(
+        conn,
+        business_slug,
+        app_user_id=app_user_id,
+        email=email,
+        session_token=session_token,
+    )
+    if user is None:
+        return None
+    where, order_sql, limit_value, params = compile_record_query(
+        filters=filters, sort=sort, cursor=cursor, limit=limit, dialect=_PG_DIALECT
+    )
+    sql_params: list[object] = [business_slug, user.id]
+    query = (
+        f"select {_RECORD_COLUMNS} from app_records "
+        "where business_slug = %s and app_user_id = %s"
+    )
+    if record_type is not None:
+        query += " and record_type = %s"
+        sql_params.append(_normalize_record_type(record_type))
+    for fragment in where:
+        query += f" and {fragment}"
+    sql_params.extend(params)
+    # Fetch one extra row to know whether a next page exists.
+    query += f" {order_sql} limit %s"
+    sql_params.append(limit_value + 1)
+    rows = conn.execute(query, tuple(sql_params)).fetchall()
+    records = [_record_from_row(row) for row in rows]
+    next_cursor: str | None = None
+    if len(records) > limit_value:
+        records = records[:limit_value]
+        last = records[-1]
+        next_cursor = encode_query_record_cursor(last, sort=sort, dialect=_PG_DIALECT)
+    return user, records, next_cursor
 
 
 def get_record(

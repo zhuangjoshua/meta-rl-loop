@@ -4252,6 +4252,26 @@ def _history_without_latest_user_message(messages: list[dict[str, Any]]) -> list
     return trimmed
 
 
+def _reset_session_history_for_post_bootstrap_chat(sid: str, session: dict) -> None:
+    with session["history_lock"]:
+        session["history"] = []
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+        session.pop("history_memory_only", None)
+    try:
+        agent = session.get("agent")
+        session_db = getattr(agent, "_session_db", None) or _get_db()
+        session_key = str(
+            getattr(agent, "session_id", "") or session.get("session_key") or sid
+        ).strip()
+        if session_db and session_key:
+            session_db.replace_messages(session_key, [])
+    except Exception as exc:
+        print(
+            f"[tui_gateway] bootstrap history reset persist failed: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _append_user_message_to_session_db(sid: str, session: dict, content: Any) -> None:
     try:
         agent = session.get("agent")
@@ -6875,7 +6895,9 @@ def _takyon_registry_display_payload() -> dict[str, Any]:
         "business_calculate_pulse": ["business"],
         "business_upsert_app_surface_contract": ["source_path", "publish_target", "business"],
         "business_x_publish_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
+        "business_x_search": ["query", "business"],
         "business_publish_test_outreach": ["channel", "destination_label", "destination_url", "target", "business"],
+        "business_reddit_publish_outreach": ["subreddit", "thread_external_id", "destination_label", "business"],
         "business_claude_agent_task": ["workspace", "source_path", "business"],
         "business_conversation_agent_task": ["goal", "task", "context", "business"],
         "business_record_agent": ["scope", "status", "business"],
@@ -9959,61 +9981,64 @@ def _(rid, params: dict) -> dict:
 
             warning_parts: list[str] = []
             try:
-                _takyon_require_durable_business(
-                    store,
-                    slug,
-                    context="bootstrap finalization",
-                )
-            except Exception as exc:
-                logger.warning(
-                    "bootstrap finalization skipped for business:%s: %s",
-                    slug,
-                    exc,
-                )
-                return str(exc)
-            surface_refresh = _refresh_business_surface_after_bootstrap(
-                slug,
-                job_id=f"session:{session.get('session_key') or sid or slug}",
-                operator_user_id=operator_user_id,
-            )
-            if isinstance(surface_refresh, dict):
-                publish = (
-                    surface_refresh.get("publish")
-                    if isinstance(surface_refresh.get("publish"), dict)
-                    else {}
-                )
-                publish_status = str(
-                    publish.get("status") or surface_refresh.get("status") or ""
-                ).strip()
-                publish_blocker = str(
-                    publish.get("blocker")
-                    or surface_refresh.get("blocker")
-                    or surface_refresh.get("error")
-                    or ""
-                ).strip()
-                if publish_status and publish_status != "published" and publish_blocker:
-                    warning_parts.append(
-                        f"Product surface: {publish_status} - {publish_blocker}"
+                try:
+                    _takyon_require_durable_business(
+                        store,
+                        slug,
+                        context="bootstrap finalization",
                     )
-            if schedule:
-                store.commit(
-                    scope=f"business:{slug}",
-                    operations=[
-                        {
-                            "action": "cron.ensure_ceo_wakeup",
-                            "business": slug,
-                            "schedule": schedule,
-                            "defer_first_run": True,
-                        }
-                    ],
-                    idempotency_key=(
-                        f"session-bootstrap-wake:{session.get('session_key') or sid or slug}:"
-                        f"{slug}:{schedule}"
-                    ),
-                    reason="bootstrap completed and enabled CEO wake loop",
-                    actor="worker",
+                except Exception as exc:
+                    logger.warning(
+                        "bootstrap finalization skipped for business:%s: %s",
+                        slug,
+                        exc,
+                    )
+                    return str(exc)
+                surface_refresh = _refresh_business_surface_after_bootstrap(
+                    slug,
+                    job_id=f"session:{session.get('session_key') or sid or slug}",
+                    operator_user_id=operator_user_id,
                 )
-            return "\n".join(part for part in warning_parts if part)
+                if isinstance(surface_refresh, dict):
+                    publish = (
+                        surface_refresh.get("publish")
+                        if isinstance(surface_refresh.get("publish"), dict)
+                        else {}
+                    )
+                    publish_status = str(
+                        publish.get("status") or surface_refresh.get("status") or ""
+                    ).strip()
+                    publish_blocker = str(
+                        publish.get("blocker")
+                        or surface_refresh.get("blocker")
+                        or surface_refresh.get("error")
+                        or ""
+                    ).strip()
+                    if publish_status and publish_status != "published" and publish_blocker:
+                        warning_parts.append(
+                            f"Product surface: {publish_status} - {publish_blocker}"
+                        )
+                if schedule:
+                    store.commit(
+                        scope=f"business:{slug}",
+                        operations=[
+                            {
+                                "action": "cron.ensure_ceo_wakeup",
+                                "business": slug,
+                                "schedule": schedule,
+                                "defer_first_run": True,
+                            }
+                        ],
+                        idempotency_key=(
+                            f"session-bootstrap-wake:{session.get('session_key') or sid or slug}:"
+                            f"{slug}:{schedule}"
+                        ),
+                        reason="bootstrap completed and enabled CEO wake loop",
+                        actor="worker",
+                    )
+                return "\n".join(part for part in warning_parts if part)
+            finally:
+                _reset_session_history_for_post_bootstrap_chat(sid, session)
 
         _start_streaming_session_turn(
             rid,

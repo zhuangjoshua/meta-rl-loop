@@ -41,14 +41,14 @@ from .ai_provider import (
     call_anthropic,
     microusd_cost,
 )
-from . import app_entitlements, app_funding, app_identity
+from . import app_entitlements, app_identity
 from .app_gateway_keys import GatewayPrincipal, resolve_gateway_key
 from .app_runtime_constants import APP_SESSION_COOKIE
 from .app_usage import (
     AppBudgetExceeded,
     AppBudgetInactive,
+    AppUserBudgetExceeded,
     AppUserNotFound,
-    ensure_app_budget,
     release_usage,
     reserve_usage,
     settle_usage,
@@ -137,15 +137,6 @@ def _session_token(body: dict, header_value: str | None, cookie_header: str | No
     return "" if morsel is None else str(morsel.value or "").strip()
 
 
-def _coerce_nonnegative_int(value) -> int:
-    if value in {None, ""}:
-        return 0
-    try:
-        return max(0, int(float(value)))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _resolve_plan_for_user(conn, business_slug: str, user: app_identity.AppUser):
     entitlement = app_entitlements.get_active_entitlement(conn, business_slug, user.id)
     if entitlement is not None and entitlement.plan_key:
@@ -178,22 +169,10 @@ def _model_allowed(plan, model: str) -> bool:
     return True
 
 
-def _user_credit_limit_microusd(plan) -> int:
+def _user_monthly_budget_microusd(plan) -> int:
     if plan is None or str(plan.tier or "free") == "free":
         return 0
     return max(0, int(plan.included_ai_budget_microusd))
-
-
-def _subsidy_cap_microusd(plan) -> int:
-    if plan is None:
-        return 0
-    metadata = plan.metadata if isinstance(plan.metadata, dict) else {}
-    explicit = metadata.get("subsidy_cap_microusd")
-    if explicit is not None:
-        return _coerce_nonnegative_int(explicit)
-    if str(plan.tier or "free") == "free" or bool(plan.allow_overage):
-        return max(0, int(plan.included_ai_budget_microusd))
-    return 0
 
 
 def broker_message_for_business(
@@ -208,9 +187,9 @@ def broker_message_for_business(
     """Run the canonical app-generation broker flow for one business/app session.
 
     This is the one hardened path that compatibility surfaces should delegate to:
-    validate app session -> reserve funding -> reserve app budget -> call shared
-    provider key server-side -> settle actual cost. The caller never sees the
-    provider key and never gets to bypass the funding/budget rails.
+    validate app session -> reserve usage under the current plan + app budget ->
+    call shared provider key server-side -> settle actual cost. The caller never
+    sees the provider key and never gets to bypass the budget rails.
     """
     body = body or {}
     if caller is _CALLER_UNSET:
@@ -256,45 +235,7 @@ def broker_message_for_business(
             status_code=403,
             detail={"error": "model_not_in_plan", "model": model},
         )
-    budget = ensure_app_budget(conn, business_slug)
-    user_credit_limit = _user_credit_limit_microusd(plan)
-    subsidy_cap = _subsidy_cap_microusd(plan)
-    plan_key = None
-    if entitlement is not None and entitlement.plan_key:
-        plan_key = entitlement.plan_key
-    elif plan is not None:
-        plan_key = plan.plan_key
-
     reservation_key = uuid.uuid4().hex
-    try:
-        app_funding.reserve_funding(
-            conn,
-            business_slug,
-            app_user_id=app_user.id,
-            reservation_key=reservation_key,
-            estimated_cost_microusd=estimated_cost,
-            user_credit_limit_microusd=user_credit_limit,
-            subsidy_cap_microusd=subsidy_cap,
-            period_start=budget.current_period_start,
-            plan_key=plan_key,
-            metadata={
-                "feature": feature_name,
-                "cost_rate_source": rate_source,
-                "route": audit_route,
-            },
-        )
-    except app_funding.InsufficientAppFunding as exc:
-        raise GatewayMessageError(
-            status_code=402,
-            detail={
-                "error": "app_funding_exhausted",
-                "requested_microusd": exc.requested_microusd,
-                "user_credit_remaining_microusd": exc.user_credit_remaining_microusd,
-                "user_subsidy_remaining_microusd": exc.user_subsidy_remaining_microusd,
-                "business_subsidy_remaining_microusd": exc.business_subsidy_remaining_microusd,
-            },
-        ) from exc
-
     try:
         reserve_usage(
             conn,
@@ -302,6 +243,7 @@ def broker_message_for_business(
             estimated_cost_microusd=estimated_cost,
             reservation_key=reservation_key,
             app_user_id=app_user.id,
+            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
             app_user_tier=app_user.tier,
             purpose=str(body.get("purpose") or "ai_generate"),
             route=audit_route,
@@ -310,17 +252,11 @@ def broker_message_for_business(
             metadata={"cost_rate_source": rate_source},
         )
     except AppBudgetInactive as exc:
-        app_funding.release_funding(
-            conn, reservation_key, metadata={"error": "app_budget_inactive"}
-        )
         raise GatewayMessageError(
             status_code=402,
             detail={"error": "app_budget_inactive", "status": exc.status},
         ) from exc
     except AppBudgetExceeded as exc:
-        app_funding.release_funding(
-            conn, reservation_key, metadata={"error": "app_budget_exceeded"}
-        )
         raise GatewayMessageError(
             status_code=402,
             detail={
@@ -331,17 +267,25 @@ def broker_message_for_business(
                 "remaining_microusd": exc.remaining_microusd,
             },
         ) from exc
+    except AppUserBudgetExceeded as exc:
+        raise GatewayMessageError(
+            status_code=402,
+            detail={
+                "error": "app_user_budget_exceeded",
+                "app_user_id": exc.app_user_id,
+                "user_monthly_limit_microusd": exc.user_monthly_limit_microusd,
+                "committed_microusd": exc.committed_microusd,
+                "requested_microusd": exc.requested_microusd,
+                "remaining_microusd": exc.remaining_microusd,
+            },
+        ) from exc
     except AppUserNotFound as exc:
-        app_funding.release_funding(
-            conn, reservation_key, metadata={"error": "unknown_app_user"}
-        )
         raise GatewayMessageError(status_code=400, detail="unknown_app_user") from exc
 
     try:
         provider_response = caller(payload)
     except Exception as exc:
         release_usage(conn, business_slug, reservation_key, error=str(exc))
-        app_funding.release_funding(conn, reservation_key, metadata={"error": str(exc)})
         raise GatewayMessageError(status_code=502, detail="provider_error") from exc
 
     usage = provider_response.get("usage") or {}
@@ -360,12 +304,6 @@ def broker_message_for_business(
         provider_request_id=provider_request_id,
         provider="anthropic",
         model=model,
-    )
-    app_funding.settle_funding(
-        conn,
-        reservation_key,
-        actual_cost_microusd=actual_cost,
-        metadata={"provider_request_id": provider_request_id},
     )
 
     return {

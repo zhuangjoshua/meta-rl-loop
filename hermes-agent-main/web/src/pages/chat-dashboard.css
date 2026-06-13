@@ -375,8 +375,12 @@
 .tk-dash .td-composer .td-box:focus-within { border-color: var(--td-accent); }
 .tk-dash .td-composer textarea, .tk-dash .td-composer input { flex: 1; border: 0; outline: 0; font: inherit; font-size: 13.5px; background: transparent; color: var(--td-fg); resize: none; max-height: 120px; }
 .tk-dash .td-composer textarea::placeholder, .tk-dash .td-composer input::placeholder { color: var(--td-meta); }
+.tk-dash .td-composer .td-stop,
 .tk-dash .td-composer .td-send { width: 34px; height: 34px; border-radius: 8px; background: var(--td-accent); color: #fff; display: grid; place-items: center; flex-shrink: 0; transition: filter .15s ease; }
+.tk-dash .td-composer .td-stop { background: var(--td-surface); color: var(--td-fg); border: 1px solid var(--td-border); }
+.tk-dash .td-composer .td-stop:hover:not(:disabled) { background: color-mix(in srgb, var(--td-surface-2) 72%, #fff 28%); }
 .tk-dash .td-composer .td-send:hover:not(:disabled) { filter: brightness(1.1); }
+.tk-dash .td-composer .td-stop:disabled,
 .tk-dash .td-composer .td-send:disabled { opacity: .4; box-shadow: none; }
 .tk-dash .td-composer-meta { display: flex; align-items: center; justify-content: flex-end; margin-top: 10px; padding: 0 2px; gap: 8px; }
 .tk-dash .td-composer-meta .td-meta { color: var(--td-meta); }

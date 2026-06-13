@@ -56,11 +56,11 @@ except Exception:  # pragma: no cover - Takyon normally depends on python-dotenv
         return True
 
 from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
-from takyon_constants import get_takyon_home
+from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
-from . import safebox
+from . import composio_distribution, safebox
 
 
 TAKYON_TOOLSET = "takyon"
@@ -97,7 +97,6 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_delete_business",
         "business_set_mode",
         "business_configure_app_budget",
-        "business_grant_app_subsidy",
         "business_refresh_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
@@ -128,6 +127,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
         "business_meta_ad_insights_sync",
+        "business_x_search",
         "business_x_metrics_sync",
         "business_reddit_ad_launch",
         "business_reddit_ad_control",
@@ -187,15 +187,6 @@ def _remote_workspace_sync_allowed(backend_name: str) -> bool:
     if home is None:
         return False
     return any(home == prefix or prefix in home.parents for prefix in _APPROVED_REMOTE_WORKSPACE_HOME_PREFIXES)
-NO_PRETEND_PRODUCT_CONTRACT = """Hermes no-pretend product contract:
-- You are not allowed to invent backend behavior.
-- Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, provider calls, metrics, or business outcomes.
-- Use canonical Hermes/Takyon runtime tools or endpoints for auth, billing, entitlements, usage, outreach, and receipts.
-- If no browser endpoint exists for auth, billing, entitlements, usage, or outreach, build the screen as unavailable/blocking, not fake.
-- If a runtime endpoint or provider path is unavailable in this workspace, keep the customer UI normal and unavailable; record the missing runtime step in operator-facing contracts, receipts, or summaries instead of customer-visible debug copy.
-- Do not use localStorage, demo query parameters, hardcoded test users, or fake checkout URLs to simulate business reality in product source.
-- In customer-facing product copy, describe capabilities instead of naming upstream foundation model vendors or snapshot ids unless the operator explicitly wants model-led positioning.
-"""
 CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 - This work may ship to customers or prospects.
 - Default to capability-first language, not vendor/model-name-first language.
@@ -204,56 +195,34 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 - Never mix vendors accidentally. Do not describe Claude-backed behavior with GPT names or stale model labels like GPT-4o-mini.
 - Prefer customer-visible claims like analyze feedback, cluster themes, rank opportunities, explain why, and export insights.
 """
-PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition contract:
-- For the public `/` route on desktop, make the first screen occupy most of the viewport instead of reading like a small centered island.
-- If you use a split hero, both sides must carry real visual weight. Aim for a balanced `50/50` to `55/45` feel, not a tiny proof card floating beside a text column.
-- Let the hero actually use the container width. On desktop, prefer a broad container roughly in the `1320px` to `1440px` range unless the brief explicitly calls for a tighter editorial column.
-- On large desktop viewports, widen further when the page still leaves obvious dead margins. A good default is roughly `90vw` capped around `1600px` to `1720px`, not a fixed narrow frame.
-- A strong large-screen default is something like `width: min(92vw, 1680px)` with side padding in the rough `24px` to `40px` range, not a boxed `1400px` shell with oversized gutters.
-- The top masthead/navigation lane may run slightly wider than the main content lane when that keeps the logo, nav, and primary CTA from feeling cramped.
-- A good pattern is a header shell around `min(94vw, 1760px)` while the main hero/body shell sits around `min(92vw, 1680px)`. Keep the difference modest and intentional, not dramatic.
-- Avoid inner max-widths or timid card sizes that leave the page feeling half-empty on laptop screens.
-- The proof rail in a split hero should usually read around `520px` to `680px` wide on desktop and feel like a real half of the first screen, not an accessory.
-- Let the hero headline scale decisively on desktop before wrapping; conservative caps that make the entire composition feel miniature are the wrong tradeoff here.
-- Do not cap both hero columns to similar mid-`500px` widths inside a wide container. At least one side of the hero should expand beyond that so the first screen reads broad rather than bottled up.
-- Keep the headline block and proof rail snapped toward the outer edges of the hero grid. Avoid a layout where both columns are centered little islands with extra dead space between them.
-- When using a split hero on a very wide screen, prefer a slightly asymmetric grid such as `58/42` or `60/40` if that helps the composition fill the page more convincingly.
-- If the browser viewport is very wide, the first screen should not leave huge blank gutters on both outer sides. Reduce side padding or increase the max width until the hero reads page-scale.
-- Keep hero support copy to 1 or 2 short sentences. Cut prose before shrinking the layout.
-- Do not place a long explanatory paragraph directly under the hero. Follow with concise proof, features, pricing, or another clearly structured section instead.
+PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
+- On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
+- Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
 """
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI to the declared Takyon app-runtime contract, not browser-only state.
 - Call ONLY the declared runtime rails. On product hosts, same-origin bare rails such as `/session` or `/generate` resolve to the shared runtime. Off-host or in preview/local, use the prefixed runtime API base. Do not shorten, rename, or invent rail paths.
-- Do not invent local-only auth, sessions, entitlements, checkout, billing, or usage state.
 - If a declared shared AppKit rail is present, treat its canonical helper path as callable by default unless that rail is explicitly marked `blocked` or `broken`, or an actual request fails.
 - If a declared runtime feature is explicitly `blocked` or `broken`, keep the customer UI normal without exposing runtime/debug ontology and leave the exact runtime reason to operator-facing state.
 - Frontend-local, non-authoritative features that do not persist account/business truth and do not call provider or authority endpoints may be implemented without declaring a runtime rail.
-- Do not claim undeclared runtime-backed or authority-backed features without first updating the app surface contract.
 """
 SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
-- You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI.
-- Never build operator/admin routes, `/v1`, `/api/ws`, `/api/tui/rpc`, raw business-tool controls, shell/file access UI, or direct provider/authority dashboards into product code.
-- `tk_` top-level operator tokens never belong in product code, browser code, or customer flows.
-- `tkg_` is the app/business AI mediation boundary, not a customer login or session token.
-- Customer identity comes only from the app session rails and account/session endpoints.
-- Only declared runtime-backed or authority-backed features may look live as shared Takyon truth.
-- Frontend-local, non-authoritative behavior may look live when it runs entirely in the browser, does not contradict declared rails, and does not simulate persistence, auth, billing, or provider-backed results.
-- Long-running or mutating customer actions are typed app jobs only when explicitly declared; never replace them with generic tool access.
+- You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI; never put operator/admin routes or `tk_`/`tkg_` operator tokens in product code.
+- Customer identity and all account/session/entitlement/checkout/usage truth come only from the declared app runtime rails, never from browser-only state.
 """
 SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
 - Keep product ambition high, but stay inside the small set of Takyon-supported app/build shapes.
-- Supported shapes today are: plain static source, Vite static app, Next static export, and Next service app.
-- Match your chosen build shape consistently across package.json scripts, source layout, and publishable output.
-- If you use Next config, emit `next.config.js` or `next.config.mjs`. Do not emit `next.config.ts`.
+- For product apps, the supported target lane today is the pinned Vite static app scaffold; treat any surviving Next/AppKit tree as upgrade input, not a target shape to extend.
+- Match that lane consistently across package.json scripts, source layout, and publishable output.
 - Runtime/publish facts come from the real refresh/build/publish rail, so keep the source truthful instead of inventing a novel build shape Takyon does not support.
 """
 WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - You may edit files only inside the current workspace.
-- You may not call Takyon `business_*` tools, publish, deploy, verify, send, charge, post externally, or mutate operator/admin authority.
+- The delegated worker does not own operator/admin authority, publishing, or deploys; do the local source/build/test/install work available inside this workspace.
 - For `product/site` work in the Docker lane, you may use Bash only for local build/test/install/cleanup inside the isolated workspace.
 - If a task needs unsupported external execution or authority actions, finish the local source work you can do and report the blocker in your final summary.
-- Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.
+- If product/site work reveals the surface contract must change in the same run, write the exact patch JSON to `./_takyon/worker-surface-contract.json`; Takyon applies that patch before refresh so you do not need to bounce back out to the CEO for a second pass.
+- The path namespace `/api/takyon/apps/` (and `generated-apps`) is platform-reserved and served by the runtime, so product source must not define custom handlers under it.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -394,6 +363,45 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Persist real saved product entities through the shared records rail instead of localStorage or fake synced browser data.",
             "Use the records rail for history/detail/reopen flows so saved state survives sign-out/sign-in honestly.",
+            "For feeds, browse, search, or filtered lists, pass listRecords({filters, sort, cursor}) — a bounded server-side query (ops eq/neq/gt/gte/lt/lte/in/ilike/exists over record_type/title/created_at/updated_at or data.<key>, keyset paginated). Never fetch every record and filter in the browser.",
+        ],
+    },
+    "actions": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_invoke_app_action"],
+        "endpoints": [("POST", "actions/<name>")],
+        "worker_contract": [
+            "Backend actions are per-product TypeScript files under product/site/actions/<name>.ts, default-exporting async (payload, ctx) => result; declare each one on the surface contract under product_workflow.actions before referencing it from UI.",
+            "The action name is one identity end to end: every useActionRunner(\"<name>\")/invokeAction(\"<name>\") call in the UI MUST match a declared product_workflow.actions name AND a product/site/actions/<name>.ts file. Inventing a client-side action name with no declared spec or file is a hard refresh blocker, not a stylistic choice — never mint a new action name in UI code.",
+            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token, and fetch only hosts declared in product_workflow.outbound_hosts; there is no filesystem write, no shell, no env access, and no npm or remote imports.",
+            "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
+            "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
+        ],
+    },
+    "media": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_list_app_media"],
+        "endpoints": [
+            ("POST", "media"),
+            ("GET", "media/<id>"),
+            ("DELETE", "media/<id>"),
+        ],
+        "worker_contract": [
+            "Upload customer images ONLY through the shared runtime client's uploadMedia(file) (multipart), never base64-into-records or a data: URL; the rail enforces type/size/quota and meters the store.",
+            "Reference stored media by the rail URL from uploadMedia/mediaUrl(id); serving is session-gated, so never hardcode or fabricate an image URL.",
+            "Allowed types are image/jpeg, png, webp, gif under the per-user and per-business byte quotas; surface the truthful quota/type error to the customer instead of silently dropping the file.",
+        ],
+    },
+    "email": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_send_app_email"],
+        "endpoints": [
+            ("POST", "email/send"),
+        ],
+        "worker_contract": [
+            "Product email is server-side only: schedule-triggered actions send via POST email/send using their service session; customer sessions cannot send email and the endpoint refuses them truthfully.",
+            "Recipients are app users by id and content comes from real product state; never fake a send — the receipt under metrics/receipts/app-email/ and the email_send usage event are the proof.",
+            "Auth/magic-link email belongs to the platform, not the product; the email rail is for product re-engagement and transactional notices with an explicit purpose, and test mode suppresses real sends with receipts.",
         ],
     },
     "connections": {
@@ -441,7 +449,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     },
     "usage": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_configure_app_budget", "business_record_app_usage", "business_grant_app_subsidy"],
+        "tools": ["business_configure_app_budget", "business_record_app_usage"],
         "endpoints": [("GET", "account"), ("POST", "usage")],
         "worker_contract": [
             "Usage summary currently reads from the account rail and usage metering writes through POST /usage.",
@@ -455,7 +463,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "endpoints": [("POST", "generate")],
         "worker_contract": [
             "Treat POST /generate on product hosts or POST <runtime_api_base>/generate off-host as the public product contract for AI generation; product code should not call providers or internal authority endpoints directly.",
-            "That public runtime route brokers server-side through the shared Takyon AI authority, which owns provider credentials, funding checks, and spend settlement.",
+            "That public runtime route brokers server-side through the shared Takyon AI authority, which owns provider credentials, plan/app-budget checks, and spend settlement.",
             "Treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as generation-not-configured (keep the action visible but clearly blocked; never fake a completion).",
             "Use the returned {text, content, model, usage} as the only source of truth for output and spend; do not invent token counts or cost.",
         ],
@@ -469,6 +477,9 @@ _RUNTIME_FEATURE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "profile": ("auth", "account"),
     "directory": ("auth", "account", "profile"),
     "records": ("auth", "account"),
+    "actions": ("auth", "account"),
+    "media": ("auth", "account"),
+    "email": ("auth", "account"),
     "connections": ("auth", "account", "directory"),
     "checkout": ("auth", "account"),
     "entitlements": ("auth", "account"),
@@ -480,6 +491,9 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "profile",
     "directory",
     "records",
+    "actions",
+    "media",
+    "email",
     "connections",
     "checkout",
     "entitlements",
@@ -487,33 +501,39 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "generate",
 )
 
-SUBUSER_APP_MODE_CHOICES = frozenset({"standard_saas", "ai_tool", "api_product"})
-DEFAULT_SUBUSER_SUBSCRIPTION_STYLE = "monthly"
-SUBUSER_SUBSCRIPTION_STYLE_CHOICES = frozenset({DEFAULT_SUBUSER_SUBSCRIPTION_STYLE})
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY = "monthly"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
 DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout")
-SUBUSER_API_MODE_CHOICES = frozenset({"none", "docs_playground", "external_api"})
+SUBUSER_FRONTEND_STACK_CHOICES = frozenset({"vite_react_ts", "legacy"})
+DEFAULT_SUBUSER_FRONTEND_STACK = "vite_react_ts"
+WORKER_SURFACE_CONTRACT_UPDATE_RELPATH = "_takyon/worker-surface-contract.json"
+
+
+def _frontend_stack_for_contract_upsert(existing_surface: Any, requested: Any) -> Any:
+    """All app surfaces now normalize onto the pinned scaffold lane."""
+    normalized_requested = _normalize_frontend_stack_choice(requested)
+    if normalized_requested:
+        return normalized_requested
+    if existing_surface:
+        return None
+    return "vite_react_ts"
+
+
+def _normalize_frontend_stack_choice(value: Any) -> str:
+    normalized = _normalize_subuser_surface_choice(value, allowed=SUBUSER_FRONTEND_STACK_CHOICES)
+    if normalized == "legacy":
+        return "vite_react_ts"
+    return normalized
+
+
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "declared", "blocked", "broken"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "declared", "unknown": "declared"}
 SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
 SUBUSER_KIT_DIRNAME = "_takyon"
 DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES = ("research/strategy.md",)
-_APP_MODE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
-    "standard_saas": ("auth", "account"),
-    "ai_tool": ("auth", "account", "generate"),
-    "api_product": ("auth", "account"),
-}
-_SUBSCRIPTION_STYLE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
-    DEFAULT_SUBUSER_SUBSCRIPTION_STYLE: ("auth", "account", "checkout"),
-}
-_API_MODE_REQUIRED_RUNTIME_FEATURES: dict[str, tuple[str, ...]] = {
-    "docs_playground": ("auth", "account"),
-    "external_api": ("auth", "account"),
-}
 
 _POSTGRES_POOL_MAX_SIZE = max(
     1,
@@ -873,6 +893,16 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
+_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
+    "claude-design",
+    "claude-design-openai",
+    "claude-design-stripe",
+    "claude-design-superhuman",
+    "claude-design-vibrant",
+    "claude-design-doodle",
+)
+
+
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
     workspace_raw: str,
@@ -882,6 +912,11 @@ def _resolve_worker_guidance_skills(
 ) -> tuple[list[str], str]:
     if "guidance_skills" in args:
         return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
+    # Customer-facing product surfaces default to the full design-pack set so the worker always
+    # builds with a coherent visual direction instead of bare layout rules. The caller can still
+    # narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
+    if _workspace_needs_runtime_ui_contract(workspace_raw) or _workspace_needs_customer_ai_copy_contract(workspace_raw):
+        return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected design packs for customer-facing product surface"
     return [], ""
 
 
@@ -951,22 +986,59 @@ def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     declared = _surface_declared_runtime_features(surface)
     if not isinstance(surface, dict):
         return declared
-    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-    payload = metadata.get("subuser_app") if isinstance(metadata.get("subuser_app"), dict) else {}
-    return _canonical_runtime_features_for_surface_shape(
-        declared,
-        app_mode=payload.get("app_mode"),
-        subscription_style=payload.get("subscription_style"),
-        api_mode=payload.get("api_mode"),
-    )
+    return _canonical_runtime_features_for_surface_shape(declared)
 
 
-def _normalize_subscription_style(value: Any) -> str:
-    normalized = _normalize_subuser_surface_choice(
-        value,
-        allowed=SUBUSER_SUBSCRIPTION_STYLE_CHOICES,
+def _surface_bootstrap_access_shell_runtime_features(
+    surface: dict[str, Any] | None,
+    *,
+    declared_runtime_features: list[str] | None = None,
+    customer_experience: dict[str, Any] | None = None,
+) -> list[str]:
+    if not isinstance(surface, dict) or _surface_allows_landing_only(surface):
+        return []
+    if _surface_product_workflow_shape(surface):
+        return []
+    declared = list(
+        declared_runtime_features
+        if declared_runtime_features is not None
+        else _surface_runtime_features(surface)
     )
-    return normalized or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE
+    if declared and not set(declared).issubset(set(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)):
+        return []
+    customer_shape = (
+        customer_experience
+        if isinstance(customer_experience, dict)
+        else _surface_customer_experience_shape(surface)
+    )
+    if customer_shape.get("required_app_tabs"):
+        return []
+    required_routes = customer_shape.get("required_routes") or []
+    if not _surface_shape_requires_app_shell(
+        runtime_features=declared,
+        required_app_tabs=[],
+        required_routes=required_routes,
+    ):
+        return []
+    declared_app_routes = {
+        route
+        for route in _surface_routes(surface)
+        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) and not _is_shared_runtime_route_path(route)
+    }
+    if declared_app_routes and not declared_app_routes.issubset({"/app", "/app/profile"}):
+        return []
+    return list(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
+
+
+def _surface_effective_runtime_features(surface: dict[str, Any] | None) -> list[str]:
+    declared = _surface_runtime_features(surface)
+    bootstrap = _surface_bootstrap_access_shell_runtime_features(
+        surface,
+        declared_runtime_features=declared,
+    )
+    if bootstrap:
+        return bootstrap
+    return declared
 
 
 def _normalize_subuser_surface_choice(
@@ -982,10 +1054,6 @@ def _normalize_subuser_surface_choice(
 
 def _canonical_runtime_features_for_surface_shape(
     runtime_features: list[str] | None,
-    *,
-    app_mode: str = "",
-    subscription_style: str = "",
-    api_mode: str = "",
 ) -> list[str]:
     declared = list(runtime_features or [])
 
@@ -994,15 +1062,11 @@ def _canonical_runtime_features_for_surface_shape(
             if rail not in declared:
                 declared.append(rail)
 
-    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    normalized_subscription = _normalize_subscription_style(subscription_style)
-    normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
-
+    # `generate` is the only rail with an implicit dependency that is not already
+    # captured by _RUNTIME_FEATURE_DEPENDENCIES; every other rail (including
+    # `actions`) is now declared explicitly during the workflow step.
     if "generate" in declared:
         include(("auth", "account"))
-    include(_APP_MODE_REQUIRED_RUNTIME_FEATURES.get(normalized_app_mode, ()))
-    include(_SUBSCRIPTION_STYLE_REQUIRED_RUNTIME_FEATURES.get(normalized_subscription, ()))
-    include(_API_MODE_REQUIRED_RUNTIME_FEATURES.get(normalized_api_mode, ()))
     return _normalize_runtime_features(declared, strict=True)
 
 
@@ -1041,15 +1105,6 @@ def _surface_subuser_app_metadata(surface: dict[str, Any] | None) -> dict[str, A
 def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
     payload = _surface_subuser_app_metadata(surface)
     runtime_features = _surface_runtime_features(surface)
-    app_mode = _normalize_subuser_surface_choice(
-        payload.get("app_mode"),
-        allowed=SUBUSER_APP_MODE_CHOICES,
-    )
-    subscription_style = _normalize_subscription_style(payload.get("subscription_style"))
-    api_mode = _normalize_subuser_surface_choice(
-        payload.get("api_mode"),
-        allowed=SUBUSER_API_MODE_CHOICES,
-    )
     rail_state = _normalize_subuser_rail_state(
         payload.get("rail_state"),
         declared_rails=runtime_features,
@@ -1058,11 +1113,11 @@ def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]
     if not frontend_api_mode:
         frontend_api_mode = SUBUSER_FRONTEND_API_MODE
     kit_path = str(payload.get("kit_path") or SUBUSER_KIT_DIRNAME).strip() or SUBUSER_KIT_DIRNAME
+    # frontend_stack is hidden internal platform state (the scaffold lane key),
+    # not an operator-authored field; it always resolves to the pinned lane.
     return {
-        "app_mode": app_mode,
-        "subscription_style": subscription_style,
-        "api_mode": api_mode,
         "frontend_api_mode": frontend_api_mode,
+        "frontend_stack": _normalize_frontend_stack_choice(payload.get("frontend_stack")) or DEFAULT_SUBUSER_FRONTEND_STACK,
         "kit_path": kit_path,
         "rail_state": rail_state,
     }
@@ -1104,14 +1159,11 @@ _BOOTSTRAP_DEBUG_NOTE_PATTERN = re.compile(
 def _canonical_bootstrap_conversion_model(
     raw: Any,
     *,
-    subscription_style: str,
     bootstrap_seed: bool,
     app_shell_required: bool,
 ) -> str:
     text = str(raw or "").strip()
     if not (bootstrap_seed and app_shell_required):
-        return text
-    if subscription_style != DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
         return text
     if not text or _BOOTSTRAP_FREE_OR_TRIAL_PATTERN.search(text):
         return "monthly subscription"
@@ -1123,17 +1175,26 @@ def _canonical_bootstrap_access_runtime_features(
     *,
     bootstrap_seed: bool,
     app_shell_required: bool,
-    app_mode: str,
-    subscription_style: str,
 ) -> list[str]:
     if not (bootstrap_seed and app_shell_required):
         return runtime_features
-    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    if normalized_app_mode not in SUBUSER_APP_MODE_CHOICES:
-        return runtime_features
-    if subscription_style != DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
-        return runtime_features
     return list(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)
+
+
+def _validate_frontend_stack_runtime_feature_contract(
+    *,
+    frontend_stack: Any,
+    runtime_features: list[str],
+) -> None:
+    normalized_frontend_stack = _normalize_frontend_stack_choice(frontend_stack) or DEFAULT_SUBUSER_FRONTEND_STACK
+    if normalized_frontend_stack != "vite_react_ts":
+        return
+    if "generate" in set(runtime_features or []):
+        raise TakyonError(
+            "generate is not a declarable rail on the vite_react_ts lane — AI generation must be "
+            "a named action under product_workflow.actions; the action calls the shared generate "
+            "broker via ctx"
+        )
 
 
 def _canonical_bootstrap_surface_notes(
@@ -1211,6 +1272,11 @@ def _normalize_product_workflow_range(raw: Any) -> dict[str, int]:
 
 
 def _surface_product_workflow_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+
     payload = _surface_product_workflow_metadata(surface)
     shape: dict[str, Any] = {}
 
@@ -1309,6 +1375,14 @@ def _surface_product_workflow_shape(surface: dict[str, Any] | None) -> dict[str,
     if acceptance_tests:
         shape["acceptance_tests"] = acceptance_tests
 
+    actions = takyon_app_actions.normalize_action_specs(payload.get("actions"))
+    if actions:
+        shape["actions"] = actions
+
+    outbound_hosts = takyon_app_actions.normalize_outbound_hosts(payload.get("outbound_hosts"))
+    if outbound_hosts:
+        shape["outbound_hosts"] = outbound_hosts
+
     not_now = _normalize_surface_string_list(payload.get("not_now"))
     if not_now:
         shape["not_now"] = not_now
@@ -1348,6 +1422,40 @@ def _merge_product_workflow_metadata(
     return merged
 
 
+def _product_workflow_declares_actions(product_workflow: dict[str, Any] | None) -> bool:
+    if not isinstance(product_workflow, dict):
+        return False
+    try:
+        from . import app_actions as takyon_app_actions
+    except ImportError:
+        from plugins.takyon import app_actions as takyon_app_actions
+    return bool(takyon_app_actions.normalize_action_specs(product_workflow.get("actions")))
+
+
+def _runtime_features_implied_by_product_workflow(product_workflow: dict[str, Any] | None) -> list[str]:
+    if not isinstance(product_workflow, dict):
+        return []
+    implied: list[str] = []
+
+    def include(raw_rail: Any) -> None:
+        rail = _normalize_runtime_rail_name(raw_rail)
+        if not rail or rail in _RUNTIME_FEATURE_LEGACY_ALIASES:
+            return
+        if rail not in PRODUCT_RUNTIME_RAILS or rail == "billing" or rail in implied:
+            return
+        implied.append(rail)
+
+    if _product_workflow_declares_actions(product_workflow):
+        include("actions")
+    persistence_rules = (
+        product_workflow.get("persistence_rules")
+        if isinstance(product_workflow.get("persistence_rules"), dict)
+        else {}
+    )
+    include(persistence_rules.get("persistence_rail"))
+    return _canonical_runtime_features_for_surface_shape(implied)
+
+
 def _product_workflow_screen_claims(customer_experience: dict[str, Any] | None) -> list[str]:
     if not isinstance(customer_experience, dict):
         return []
@@ -1369,6 +1477,72 @@ def _product_workflow_screen_claims(customer_experience: dict[str, Any] | None) 
     return claims
 
 
+def _product_workflow_claims_mvp_completeness(product_workflow: dict[str, Any] | None) -> bool:
+    if not isinstance(product_workflow, dict):
+        return False
+    return any(
+        product_workflow.get(key)
+        for key in (
+            "core_loop",
+            "persistence_rules",
+            "product_budget",
+            "first_run",
+            "success_moment",
+            "acceptance_tests",
+            "not_now",
+            "actions",
+            "outbound_hosts",
+        )
+    )
+
+
+def _product_workflow_completion_gaps(product_workflow: dict[str, Any] | None) -> list[str]:
+    if not isinstance(product_workflow, dict):
+        return []
+    gaps: list[str] = []
+
+    def require_text(key: str) -> None:
+        if not str(product_workflow.get(key) or "").strip():
+            gaps.append(key)
+
+    require_text("primary_user")
+    require_text("workspace_model")
+    require_text("primary_job")
+    require_text("success_moment")
+
+    core_loop = product_workflow.get("core_loop") if isinstance(product_workflow.get("core_loop"), dict) else {}
+    for key in ("input", "action", "result"):
+        if not str(core_loop.get(key) or "").strip():
+            gaps.append(f"core_loop.{key}")
+    if core_loop.get("save_record") is not True:
+        gaps.append("core_loop.save_record=true")
+    if core_loop.get("return_to_record_later") is not True:
+        gaps.append("core_loop.return_to_record_later=true")
+
+    persistence_rules = (
+        product_workflow.get("persistence_rules")
+        if isinstance(product_workflow.get("persistence_rules"), dict)
+        else {}
+    )
+    if persistence_rules.get("requires_server_state") is not True:
+        gaps.append("persistence_rules.requires_server_state=true")
+    if not str(persistence_rules.get("persistence_rail") or "").strip():
+        gaps.append("persistence_rules.persistence_rail")
+    if persistence_rules.get("truthful_empty_state") is not True:
+        gaps.append("persistence_rules.truthful_empty_state=true")
+    if persistence_rules.get("reopenable_history") is not True:
+        gaps.append("persistence_rules.reopenable_history=true")
+
+    acceptance_tests = product_workflow.get("acceptance_tests") or []
+    if not isinstance(acceptance_tests, list) or not [item for item in acceptance_tests if str(item or "").strip()]:
+        gaps.append("acceptance_tests")
+    return gaps
+
+
+def _product_workflow_is_mvp_complete(product_workflow: dict[str, Any] | None) -> bool:
+    return bool(product_workflow) and not _product_workflow_completion_gaps(product_workflow)
+
+
 def _validate_product_workflow_contract(
     *,
     surface: dict[str, Any] | None,
@@ -1376,6 +1550,11 @@ def _validate_product_workflow_contract(
     customer_experience: dict[str, Any] | None = None,
     product_workflow: dict[str, Any] | None = None,
 ) -> None:
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+
     workflow = product_workflow or _surface_product_workflow_shape(surface)
     if not workflow:
         return
@@ -1410,6 +1589,14 @@ def _validate_product_workflow_contract(
             raise TakyonError(
                 f"product_workflow.persistence_rules.persistence_rail `{persistence_rail}` must also be selected in runtime_features"
             )
+    try:
+        takyon_app_actions.validate_action_contract(
+            specs=takyon_app_actions.normalize_action_specs(workflow.get("actions")),
+            outbound_hosts=takyon_app_actions.normalize_outbound_hosts(workflow.get("outbound_hosts")),
+            runtime_features=list(runtime_features or []),
+        )
+    except takyon_app_actions.ActionContractError as exc:
+        raise TakyonError(str(exc)) from exc
     product_budget = workflow.get("product_budget") if isinstance(workflow.get("product_budget"), dict) else {}
     for key, raw_range in product_budget.items():
         if not isinstance(raw_range, dict):
@@ -1479,19 +1666,13 @@ def _surface_has_explicit_workflow_route(routes: list[str] | None) -> bool:
 
 def _surface_shape_requires_app_shell(
     *,
-    app_mode: str = "",
-    subscription_style: str = "",
     runtime_features: list[str] | None = None,
     required_app_tabs: list[str] | None = None,
     required_routes: list[str] | None = None,
 ) -> bool:
+    # App-shell need is derived from real signals — an explicit workflow route,
+    # a declared access/AI rail, or app tabs — not from app-shape taxonomy.
     if _surface_has_explicit_workflow_route(required_routes):
-        return True
-    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    if normalized_app_mode in {"standard_saas", "ai_tool", "api_product"}:
-        return True
-    normalized_subscription = _normalize_subscription_style(subscription_style)
-    if normalized_subscription == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
         return True
     runtime_feature_set = set(runtime_features or [])
     if {"auth", "account", "checkout", "generate"} & runtime_feature_set:
@@ -1504,8 +1685,6 @@ def _surface_shape_requires_app_shell(
 def _surface_requires_app_shell(
     surface: dict[str, Any] | None,
     *,
-    app_mode: str = "",
-    subscription_style: str = "",
     runtime_features: list[str] | None = None,
     required_app_tabs: list[str] | None = None,
     required_routes: list[str] | None = None,
@@ -1515,8 +1694,6 @@ def _surface_requires_app_shell(
     if _surface_allows_landing_only(surface):
         return False
     return _surface_shape_requires_app_shell(
-        app_mode=app_mode,
-        subscription_style=subscription_style,
         runtime_features=runtime_features,
         required_app_tabs=required_app_tabs,
         required_routes=required_routes,
@@ -1526,7 +1703,6 @@ def _surface_requires_app_shell(
 def _normalize_required_routes_for_surface(
     surface: dict[str, Any] | None,
     *,
-    app_mode: str = "",
     required_routes: list[str],
     required_app_tabs: list[str] | None = None,
 ) -> list[str]:
@@ -1543,10 +1719,6 @@ def _normalize_required_routes_for_surface(
         normalized.append(route_value)
     if not _surface_requires_app_shell(
         surface,
-        app_mode=app_mode,
-        subscription_style=_normalize_subscription_style(
-            _surface_subuser_app_metadata(surface).get("subscription_style")
-        ),
         runtime_features=_surface_runtime_features(surface),
         required_app_tabs=required_app_tabs,
         required_routes=required_routes,
@@ -1561,13 +1733,11 @@ def _normalize_required_routes_for_surface(
 
 def _surface_customer_experience_shape(surface: dict[str, Any] | None) -> dict[str, Any]:
     payload = _surface_customer_experience_metadata(surface)
-    app_mode = _surface_subuser_app_shape(surface).get("app_mode") or ""
     required_app_tabs = _normalize_surface_string_list(
         payload.get("required_app_tabs") if payload.get("required_app_tabs") is not None else payload.get("tabs")
     )
     required_routes = _normalize_required_routes_for_surface(
         surface,
-        app_mode=app_mode,
         required_routes=_normalize_surface_string_list(
             payload.get("required_routes") if payload.get("required_routes") is not None else payload.get("routes")
         ),
@@ -1669,7 +1839,6 @@ def _starter_plan_shape_payload(plans: list[dict[str, Any]] | None) -> list[dict
                 "billingInterval": _normalize_billing_interval(raw.get("billing_interval") or "month"),
                 "includedAiBudgetMicrousd": int(raw.get("included_ai_budget_microusd") or 0),
                 "includedActionQuota": int(raw.get("included_action_quota") or 0),
-                "allowOverage": bool(raw.get("allow_overage")),
             }
         )
     return payloads
@@ -1685,15 +1854,14 @@ def _subuser_surface_context_payload(
     customer_experience = _surface_customer_experience_shape(surface)
     product_workflow = _surface_product_workflow_shape(surface)
     routes = _surface_routes(surface)
+    effective_runtime_features = _surface_effective_runtime_features(surface)
     return {
         "business": slug,
-        "appMode": shape.get("app_mode") or "",
-        "subscriptionStyle": shape.get("subscription_style") or "",
-        "apiMode": shape.get("api_mode") or "",
         "frontendApiMode": shape.get("frontend_api_mode") or SUBUSER_FRONTEND_API_MODE,
         "kitPath": shape.get("kit_path") or SUBUSER_KIT_DIRNAME,
+        "frontendStack": shape.get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK,
         "runtimeApiBase": str((surface or {}).get("runtime_api_base") or f"/api/takyon/apps/{slug}"),
-        "runtimeFeatures": _surface_runtime_features(surface),
+        "runtimeFeatures": effective_runtime_features,
         "railState": shape.get("rail_state") or {},
         "plans": _starter_plan_shape_payload(plans),
         "routes": routes,
@@ -1759,28 +1927,25 @@ def _merge_subuser_app_metadata(
     *,
     runtime_features: list[str],
     previous_runtime_features: list[str] | None = None,
-    app_mode: Any = None,
-    subscription_style: Any = None,
-    api_mode: Any = None,
     rail_state: Any = None,
+    frontend_stack: Any = None,
 ) -> dict[str, Any]:
     merged = dict(metadata if isinstance(metadata, dict) else {})
     existing = merged.get("subuser_app") if isinstance(merged.get("subuser_app"), dict) else {}
     next_payload = dict(existing)
-    normalized_app_mode = _normalize_subuser_surface_choice(app_mode, allowed=SUBUSER_APP_MODE_CHOICES)
-    normalized_subscription = _normalize_subscription_style(
-        subscription_style if subscription_style is not None else existing.get("subscription_style")
-    )
-    normalized_api_mode = _normalize_subuser_surface_choice(api_mode, allowed=SUBUSER_API_MODE_CHOICES)
-    if normalized_app_mode:
-        next_payload["app_mode"] = normalized_app_mode
-    elif "app_mode" not in next_payload and existing.get("app_mode"):
-        next_payload["app_mode"] = existing.get("app_mode")
-    next_payload["subscription_style"] = normalized_subscription
-    if normalized_api_mode:
-        next_payload["api_mode"] = normalized_api_mode
-    elif "api_mode" not in next_payload and existing.get("api_mode"):
-        next_payload["api_mode"] = existing.get("api_mode")
+    # Shed deleted app-shape taxonomy from any previously-persisted metadata so
+    # stored state never carries the removed fields forward.
+    for stale_key in ("app_mode", "subscription_style", "api_mode"):
+        next_payload.pop(stale_key, None)
+    normalized_frontend_stack = _normalize_frontend_stack_choice(frontend_stack)
+    if normalized_frontend_stack:
+        next_payload["frontend_stack"] = normalized_frontend_stack
+    else:
+        existing_frontend_stack = _normalize_frontend_stack_choice(existing.get("frontend_stack"))
+        if existing_frontend_stack:
+            next_payload["frontend_stack"] = existing_frontend_stack
+        else:
+            next_payload.pop("frontend_stack", None)
     raw_rail_state = rail_state if rail_state is not None else existing.get("rail_state")
     normalized_rail_state = _normalize_subuser_rail_state(raw_rail_state, declared_rails=runtime_features)
     next_payload["rail_state"] = normalized_rail_state
@@ -1871,25 +2036,28 @@ def _materialize_subuser_app_kit(
             if not path.is_file():
                 continue
             rel = path.relative_to(kit_source)
+            # scaffold/ is the seed source for new vite_react_ts products, not part of
+            # the runtime kit payload; node_modules/dist are local build artifacts.
+            if rel.parts and rel.parts[0] == "scaffold":
+                continue
+            if {"node_modules", "dist", ".git"} & set(rel.parts):
+                continue
             destination = target_root / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
     context_payload = _subuser_surface_context_payload(surface, slug=slug, plans=plans)
     (target_root / "surface-context.js").write_text(
-        "export const subuserSurfaceContext = "
+        "export const surfaceContext = "
         + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + ";\nexport default subuserSurfaceContext;\n",
+        + ";\nexport const subuserSurfaceContext = surfaceContext;\nexport default surfaceContext;\n",
         encoding="utf-8",
     )
     _materialize_subuser_app_starter(workspace_root, slug=slug, surface=surface)
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
-    shape = _surface_subuser_app_shape(surface)
     customer_experience = _surface_customer_experience_shape(surface)
     return _surface_shape_requires_app_shell(
-        app_mode=shape.get("app_mode") or "",
-        subscription_style=shape.get("subscription_style") or "",
         runtime_features=_surface_runtime_features(surface),
         required_app_tabs=customer_experience.get("required_app_tabs") or [],
         required_routes=customer_experience.get("required_routes") or [],
@@ -5596,6 +5764,54 @@ def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> 
     }
 
 
+_SCAFFOLD_SEED_SKIP_PARTS = frozenset({"_takyon", "node_modules", "dist", ".git"})
+_SCAFFOLD_SEED_TOKEN_SUFFIXES = frozenset({".html", ".ts", ".tsx", ".css", ".md", ".json", ".txt"})
+
+
+def _subuser_app_scaffold_source_dir() -> Path:
+    return _subuser_app_kit_source_dir() / "scaffold"
+
+
+def _materialize_subuser_app_scaffold(
+    workspace_root: Path,
+    *,
+    slug: str,
+    surface: dict[str, Any] | None,
+) -> None:
+    source = _subuser_app_scaffold_source_dir()
+    if not source.exists():
+        raise TakyonError(
+            "frontend_stack vite_react_ts requires the bundled scaffold at "
+            "plugins/takyon/subuser_app_kit/scaffold, which is missing from this runtime"
+        )
+    copy = _subuser_app_starter_strings(surface, slug=slug)
+    # Seed values land in JSX text / HTML attribute positions: keep them markup-safe.
+    def _seed_safe(value: Any) -> str:
+        return re.sub(r'["<>{}]', "", str(value or "")).strip()
+
+    replacements = {
+        "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
+        "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
+    }
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source)
+        if _SCAFFOLD_SEED_SKIP_PARTS & set(rel.parts):
+            continue
+        destination = workspace_root / rel
+        if destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix.lower() in _SCAFFOLD_SEED_TOKEN_SUFFIXES:
+            text = path.read_text(encoding="utf-8")
+            for token, value in replacements.items():
+                text = text.replace(token, value)
+            destination.write_text(text, encoding="utf-8")
+        else:
+            shutil.copy2(path, destination)
+
+
 def _materialize_subuser_app_starter(
     workspace_root: Path,
     *,
@@ -5606,20 +5822,32 @@ def _materialize_subuser_app_starter(
         return
     if _product_source_files(workspace_root, limit=1):
         return
+    if _surface_subuser_app_shape(surface).get("frontend_stack") == "vite_react_ts":
+        _materialize_subuser_app_scaffold(workspace_root, slug=slug, surface=surface)
+        return
     for rel, content in _subuser_app_starter_files(surface, slug=slug).items():
         _write_text_if_missing(workspace_root / rel, content)
 
 
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
-    runtime_features = _surface_runtime_features(surface)
+    declared_runtime_features = _surface_runtime_features(surface)
+    runtime_features = _surface_effective_runtime_features(surface)
     if not runtime_features:
         return ""
+    frontend_stack = _surface_subuser_app_shape(surface).get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK
     runtime_api_base = ""
     if isinstance(surface, dict):
         runtime_api_base = str(surface.get("runtime_api_base") or "").strip()
     base = runtime_api_base.rstrip("/")
     lines = [RUNTIME_UI_CONTRACT_INTRO.rstrip(), ""]
-    lines.append(f"- Declared runtime-backed features: {', '.join(runtime_features)}")
+    if declared_runtime_features:
+        lines.append(f"- Declared runtime-backed features: {', '.join(declared_runtime_features)}")
+    elif runtime_features:
+        lines.append(
+            "- Declared runtime-backed features: none yet; the honest bootstrap access shell still wires "
+            + ", ".join(runtime_features)
+            + " until takyon-product-workflow declares the deeper product rails."
+        )
     if runtime_api_base:
         lines.append(f"- Runtime API base fallback: {runtime_api_base}")
     lines.append("- Product-host rail mode: same-origin bare rails on subuser product hosts, prefixed fallback off-host.")
@@ -5654,7 +5882,8 @@ def _subuser_app_worker_contract_block(
     *,
     plans_configured: bool,
 ) -> str:
-    runtime_features = _surface_runtime_features(surface)
+    declared_runtime_features = _surface_runtime_features(surface)
+    runtime_features = _surface_effective_runtime_features(surface)
     shape = _surface_subuser_app_shape(surface)
     customer_experience = _surface_customer_experience_shape(surface)
     product_workflow = _surface_product_workflow_shape(surface)
@@ -5666,12 +5895,23 @@ def _subuser_app_worker_contract_block(
         if isinstance(raw_routes, list):
             routes = [str(route).strip() for route in raw_routes if str(route).strip()]
     lines = [SUBUSER_APP_WORKER_CONTRACT_INTRO.rstrip(), "", SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT.rstrip(), ""]
+    # The whole worker obligation. Security and integrity are enforced by the
+    # runtime rails, validators, and refresh gate — not by prompt nagging — so
+    # this stays a short positive contract instead of a wall of prohibitions.
+    lines.extend(
+        [
+            "Your contract:",
+            "- Your overriding obligation is that the product's primary job works for real.",
+            "- Build only inside the assigned source lane and workspace.",
+            "- Use the declared shared rails and named actions for backend behavior.",
+            "- Do not edit out-of-scope routes or surfaces unless the instruction asks for it.",
+            "- If a required capability is not actually available through the declared rails, fail truthfully with the exact blocker instead of simulating it.",
+            f"- If you discover the surface contract itself must change in this same pass, update `./{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH}` with the exact patch before you finish; Takyon applies it before refresh instead of bouncing this job back out to the CEO.",
+            "",
+        ]
+    )
     if routes:
         lines.append(f"- Current declared product routes: {', '.join(routes)}")
-    lines.append(f"- App mode: {shape.get('app_mode') or 'not set'}")
-    lines.append(f"- Subscription style: {shape.get('subscription_style') or 'not set'}")
-    lines.append(f"- API mode: {shape.get('api_mode') or 'not set'}")
-    lines.append(f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}")
     lines.append(f"- Surface goal chosen by the CEO from research/: {customer_experience.get('surface_goal') or 'not set'}")
     lines.append(f"- Conversion model chosen by the CEO: {customer_experience.get('conversion_model') or 'not set'}")
     required_routes = customer_experience.get("required_routes") or []
@@ -5687,7 +5927,16 @@ def _subuser_app_worker_contract_block(
     if research_sources:
         lines.append(f"- The recorded customer shape was grounded in research/, especially: {', '.join(research_sources)}")
     if product_workflow:
-        lines.append("- The surface contract records an MVP-complete product workflow for the gated app. Treat it as the source of truth for what the product actually does inside `/app`; do not invent a second MVP spec or a different workflow.")
+        if _product_workflow_is_mvp_complete(product_workflow):
+            lines.append("- The surface contract records an MVP-complete product workflow for the gated app. Treat it as the source of truth for what the product actually does inside `/app`; do not invent a second MVP spec or a different workflow.")
+        else:
+            lines.append(
+                "- The surface contract records a partial product workflow for the gated app. "
+                "Treat the recorded fields as provisional context, not a frozen spec: build the smallest real loop "
+                "that fits the request and current surface, and if the concrete implementation proves the contract is "
+                "missing or wrong, update `./_takyon/worker-surface-contract.json` in the same run and continue. "
+                "Keep the workflow `workflow_pending` until the real loop, persistence, and acceptance tests are fully recorded."
+            )
         if product_workflow.get("primary_user"):
             lines.append(f"- Primary user: {product_workflow.get('primary_user')}")
         if product_workflow.get("workspace_model"):
@@ -5770,20 +6019,26 @@ def _subuser_app_worker_contract_block(
         not_now = product_workflow.get("not_now") or []
         if not_now:
             lines.append(f"- Explicitly out of scope for this MVP: {', '.join(not_now)}")
+    if declared_runtime_features:
+        lines.append(f"- Declared runtime-backed features for this app: {', '.join(declared_runtime_features)}")
+    elif runtime_features:
+        lines.append(
+            "- Declared runtime-backed features for this app: none yet; the bootstrap access shell still wires "
+            + ", ".join(runtime_features)
+            + " until takyon-product-workflow records the real product rails."
+        )
     if runtime_features:
-        lines.append(f"- Declared runtime-backed features for this app: {', '.join(runtime_features)}")
         rail_state = shape.get("rail_state") if isinstance(shape.get("rail_state"), dict) else {}
         if rail_state:
             lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'declared'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
-    lines.append("- Supported Takyon build shapes: plain static source, Vite static app, Next static export, and Next service app.")
-    lines.append("- Keep product ambition/design high, but stay within those supported platform shapes.")
-    lines.append("- If you use Next config, emit `next.config.js` or `next.config.mjs`, never `next.config.ts`.")
+    # Static Vite scaffold lane: source layout and the single routed /app entrypoint.
+    # Per-rail usage facts are carried by the registry-driven runtime UI contract and
+    # the AppKit kit block, so they are not restated here.
+    lines.append("- This contract is on the pinned static Vite+React+TS scaffold lane. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
     if _surface_requires_app_shell(
         surface,
-        app_mode=shape.get("app_mode") or "",
-        subscription_style=shape.get("subscription_style") or DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
         runtime_features=runtime_features,
         required_app_tabs=required_tabs,
         required_routes=required_routes,
@@ -5792,76 +6047,154 @@ def _subuser_app_worker_contract_block(
             "- This surface is app-like and must ship a real `/app` route in source. "
             f"Required routes for this contract are `{', '.join(required_routes or ['/', '/app'])}`."
         )
-        lines.append("- On a first monthly bootstrap, `/app` may stop at sign-in, subscribe, and account access. Do not invent product tabs, generators, or extra in-app workflow until the contract explicitly asks for them.")
-        lines.append("- If you intentionally collapse to landing-only, the owning Takyon surface must be marked landing_page_only instead of silently dropping `/app`.")
-        if _surface_disallows_free_tier_copy(surface):
-            lines.append("- This is a paid monthly app surface. Customer-facing pricing language must stay paid-only: one real monthly subscription path backed by the canonical `monthly` plan.")
-            lines.append("- Do not write or imply `Free`, `Start free`, `Try free`, `free tier`, `trial`, `freemium`, `starter plan`, or `$0/month` copy unless the operator explicitly changes the contract.")
-
-    if "auth" in runtime_features:
-        lines.append("- Auth flows must use the runtime rails for sign-in, verification, session, and account state; do not fake browser-only sessions.")
-        lines.append("- If AppKit already provides working auth helpers (for example `starterRequestAuth(...)`, `starterSession()`, or `starterAccount()`), keep that rail behavior authoritative and build your page around those calls instead of rewriting auth logic unless you are intentionally changing the auth rail itself.")
-        lines.append("- Do not pre-disable auth UI just because a declared rail state looks conservative; for shared rails, trust the canonical helper path unless the rail is explicitly marked blocked/broken or the real request fails.")
-    else:
-        lines.append("- Auth is not declared for this surface. Do not imply signed-in product state or customer account ownership as live.")
-
-    if "profile" in runtime_features:
-        lines.append("- Profile reads and edits must go through GET/POST /profile on product hosts (or the prefixed fallback off-host), not browser-only draft state.")
-
-    if "generate" in runtime_features:
-        generate_target = f"{runtime_api_base.rstrip('/')}/generate" if runtime_api_base else "<runtime_api_base>/generate"
-        lines.append(f"- AI generation must call POST /generate on product hosts or POST {generate_target} off-host. Do not call providers directly or invent output/spend state.")
-    else:
-        lines.append("- AI generation is not declared for this surface. Do not present a live AI chat/generate flow.")
-
-    paid_runtime = set(runtime_features)
-    if "checkout" in paid_runtime or "account" in paid_runtime:
-        lines.append("- `account` is the canonical paid-state read rail. Use it for current user, entitlements, usage, and subscription state; do not model customer-facing paid state as a standalone `billing` dependency.")
-        lines.append("- Subscription cancellation should flow through the shared account rail behavior (for example the AppKit helper `starterCancelSubscription(...)`) instead of a fake support form or browser-only toggle.")
-    if "checkout" not in paid_runtime and "account" not in paid_runtime:
-        lines.append("- Paid rails are not declared. Do not render pricing cards, upgrade buttons, subscriptions, or paid-tier UI as live.")
-    elif not {"account", "checkout"} <= paid_runtime:
-        missing = ", ".join(sorted({"account", "checkout"} - paid_runtime))
-        lines.append(f"- Paid rails are incomplete (missing {missing}). Do not render live pricing or subscribe flows until both account and checkout are declared.")
-    elif not plans_configured:
-        lines.append("- No app plans are configured yet. Do not render pricing cards, upgrade buttons, or paid tiers as live until real plans exist.")
-    elif shape.get("subscription_style") == "monthly":
-        lines.append("- For the canonical `monthly` plan, set both `price_cents` and `included_ai_budget_microusd`. The included AI budget is a plan parameter and must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`).")
-        lines.append("- Treat the product as paid-only by default. Do not invent a free plan, free tier, trial, waitlist tier, or limited starter offer in customer-facing pricing copy unless the operator explicitly records that change first.")
-        lines.append("- Use AppKit semantic helpers for signed-in, signed-up/account-holder, subscribed/unsubscribed, entitled, checkout-ready, and generate-ready state instead of re-parsing raw rail state or raw account JSON in page code.")
-        lines.append("- Treat `/app` as the single routed entrypoint. Keep the main entitled product surface in `src/app/app/(product)/root.js`, and keep nested product routes under the gated `src/app/app/(product)/` shell unless you intentionally want a route to stay outside the entitlement gate, such as `/app/profile`.")
-        lines.append("- Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages, not as bootstrap design targets.")
-
-    if "usage" in runtime_features:
-        lines.append("- Usage summary currently comes from the account rail, and usage writes go through POST /usage. Do not invent counters or local quota state.")
-
-    lines.append("- Do not use localStorage or hardcoded browser state as the source of truth for auth, account, usage, billing, or generated results.")
-    lines.append("- Do not ship customer-facing copy that frames the surface as a stub, demo, placeholder, scaffold, or developer preview. Keep operator/runtime explanations out of customer-facing UI.")
+        lines.append("- Keep `/app` as the single routed entrypoint: the shared shell in `src/screens/app-layout.tsx`, the main product view in `src/screens/app-home.tsx`, and `/app/profile` in `src/screens/profile.tsx`. `src/screens/support.tsx` is the seeded module for `/privacy`, `/terms`, `/faq`, and `/articles`.")
+    if "actions" in runtime_features:
+        lines.append("- Product-specific backend work goes through declared actions: client code uses `createActionRunner(name)` / `useActionRunner(name)`, and action files call the shared generate broker via ctx.")
     return "\n".join(lines).strip()
 
 
 def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
     shape = _surface_subuser_app_shape(surface)
+    kit_path = shape.get("kit_path") or SUBUSER_KIT_DIRNAME
     lines = [
         "Prepared subuser app kit:",
         "- Managed kit files are available under `./_takyon/` in this workspace.",
         "- `./_takyon/surface-context.js` exports the current app truth for this business, including the CEO-chosen customer experience shape.",
         "- `./_takyon/surface-context.js` also exports any configured starter plan shape, including `priceCents` and `includedAiBudgetMicrousd` for the canonical monthly plan when present.",
         "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
-        "- `./_takyon/packs.js` exports app-mode, subscription-style, and API-mode composition hints.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        "- When `subscription_style` is `monthly`, treat that as a paid-only monthly subscription contract unless the operator explicitly records otherwise. Do not invent free-tier, trial, freemium, or `$0` pricing language on your own.",
+        f"- `./{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH}` is the one same-run contract-patch file. Edit it only when the source you actually built proves the surface contract must change too (for example adding `actions`, named `product_workflow.actions`, or new required app routes).",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts` (for example `client.requestAuth(...)`, `client.session()`, `client.profile()`, `client.listRecords(...)`, `client.createActionRunner(name)`, `useSession()`, `useRecords(type)`, and `useActionRunner(name)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Any starter source already present in `src/` is thin bootstrap scaffolding only. Keep the package/runtime wiring and shared rail helpers you still need, but do not treat any seeded structure as the product.",
-        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of helpers in `starter-context.js` (for example `starterRequestAuth(...)`, `starterSession()`, `starterAccount()`, `starterCancelSubscription(...)`, `starterProfile()`, `starterUpdateProfile(...)`, `starterCheckout(...)`, `starterGenerate(...)`, `starterIsAuthenticated(...)`, `starterIsEntitled(...)`, `starterSubscriptionState(...)`, `starterCanUseApp(...)`, `starterCanCheckout(...)`, `starterCanGenerate(...)`, `starterViewerState(...)`, `starterAppState(...)`, `starterLoadViewer()`, and `starterLoadAppState()`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
-        "- AppKit starter source includes preset support pages at `/privacy`, `/terms`, `/faq`, and `/articles`, a thin `/app` entrypoint that decides between access-gate and product-root state, a shared product-root module at `src/app/app/(product)/root.js`, and a thin `/app/profile` account page.",
-        "- Treat `src/app/privacy/page.js`, `src/app/terms/page.js`, `src/app/faq/page.js`, and `src/app/articles/page.js` as preset support pages. Do not spend normal bootstrap/design time reading, redesigning, or polishing them unless the operator explicitly asks for support-page work.",
+        f"- Put business-specific UI outside `./{kit_path}/` unless you are intentionally updating the shared kit. Reuse the seeded auth/paywall/account rail wrappers instead of reinventing them.",
+        "- AppKit scaffold source includes preset support routes at `/privacy`, `/terms`, `/faq`, and `/articles` through `src/screens/support.tsx`, an `/app` shell in `src/screens/app-layout.tsx`, an app home screen at `src/screens/app-home.tsx`, and a profile screen at `src/screens/profile.tsx`.",
+        "- Treat `src/screens/support.tsx` as the seeded support-route module; do not spend bootstrap/design time redesigning those support screens unless the operator asks for support-page work.",
         "- For a first monthly bootstrap, treat the seeded `/app` route as the truthful membership entrypoint and `/app/profile` as the truthful account/subscription page, unless the contract explicitly requires more product workflow.",
-        "- Keep customer-facing copy free of developer framing. Do not label the surface as a stub, demo, placeholder, scaffold, or similar internal state.",
-        f"- Put business-specific UI outside `./{shape.get('kit_path') or SUBUSER_KIT_DIRNAME}/` unless you are intentionally updating the shared kit. Do not reinvent auth/paywall/account rails when the seeded wrappers already cover the route.",
     ]
     return "\n".join(lines).strip()
+
+
+_WORKER_SURFACE_CONTRACT_PATCH_FIELDS = frozenset(
+    {
+        "runtime_features",
+        "surface_goal",
+        "conversion_model",
+        "required_routes",
+        "required_sections",
+        "required_app_tabs",
+        "research_sources",
+        "product_workflow",
+    }
+)
+
+
+def _worker_surface_contract_update_path(workspace_root: Path) -> Path:
+    return workspace_root / WORKER_SURFACE_CONTRACT_UPDATE_RELPATH
+
+
+def _worker_surface_contract_update_template(surface: dict[str, Any] | None) -> dict[str, Any]:
+    customer_experience = _surface_customer_experience_shape(surface)
+    product_workflow = _surface_product_workflow_shape(surface)
+    return {
+        "requested": False,
+        "why": "",
+        "patch": {
+            "runtime_features": _surface_runtime_features(surface),
+            "surface_goal": customer_experience.get("surface_goal") or "",
+            "conversion_model": customer_experience.get("conversion_model") or "",
+            "required_routes": customer_experience.get("required_routes") or [],
+            "required_sections": customer_experience.get("required_sections") or [],
+            "required_app_tabs": customer_experience.get("required_app_tabs") or [],
+            "research_sources": customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES),
+            "product_workflow": product_workflow,
+        },
+    }
+
+
+def _write_worker_surface_contract_update_template(
+    workspace_root: Path,
+    surface: dict[str, Any] | None,
+) -> None:
+    path = _worker_surface_contract_update_path(workspace_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_worker_surface_contract_update_template(surface), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_worker_surface_contract_update_request(workspace_root: Path) -> dict[str, Any] | None:
+    path = _worker_surface_contract_update_path(workspace_root)
+    if not path.exists():
+        return None
+    raw = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise TakyonError(
+            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} must contain valid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise TakyonError(
+            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} must be a JSON object"
+        )
+    if not bool(payload.get("requested")):
+        return None
+    patch = payload.get("patch")
+    if not isinstance(patch, dict) or not patch:
+        raise TakyonError(
+            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} set requested=true but patch is missing"
+        )
+    unknown = sorted(
+        key for key in patch.keys() if str(key or "").strip() not in _WORKER_SURFACE_CONTRACT_PATCH_FIELDS
+    )
+    if unknown:
+        raise TakyonError(
+            f"{WORKER_SURFACE_CONTRACT_UPDATE_RELPATH} includes unsupported patch fields: {', '.join(unknown)}"
+        )
+    normalized_patch = {
+        str(key).strip(): value
+        for key, value in patch.items()
+        if str(key).strip() in _WORKER_SURFACE_CONTRACT_PATCH_FIELDS
+    }
+    return {
+        "why": str(payload.get("why") or "").strip(),
+        "patch": normalized_patch,
+        "path": str(path),
+    }
+
+
+def _clear_worker_surface_contract_update_request(workspace_root: Path) -> None:
+    path = _worker_surface_contract_update_path(workspace_root)
+    if path.exists():
+        path.unlink()
+
+
+def _worker_surface_upsert_operation(
+    *,
+    business: str,
+    surface: dict[str, Any] | None,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    current = surface if isinstance(surface, dict) else {}
+    return {
+        "action": "app.surface.upsert",
+        "business": business,
+        "status": str(current.get("status") or "draft"),
+        "source_path": str(current.get("source_path") or "product/site"),
+        "runtime_api_base": current.get("runtime_api_base"),
+        "routes": current.get("routes") or [],
+        "theme": current.get("theme") or {"source": "business product workspace"},
+        "constraints": current.get("constraints") or {},
+        "publish_target": current.get("publish_target"),
+        "publish_policy": current.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
+        "mode_behavior": current.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
+        "done_gate": current.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
+        "notes": current.get("notes") or "",
+        **patch,
+    }
 
 
 def _claude_agent_summary_is_blocked(summary: Any) -> bool:
@@ -5887,6 +6220,9 @@ _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
 _ACTIVE_OPERATOR_TASK_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "takyon_active_operator_task_run_id", default=""
 )
+_ACTIVE_OPERATOR_TASK_KIND: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "takyon_active_operator_task_kind", default=""
+)
 
 
 @contextmanager
@@ -5901,6 +6237,20 @@ def _bound_operator_task_run(run_id: str):
         yield
     finally:
         _ACTIVE_OPERATOR_TASK_RUN_ID.reset(token)
+
+
+@contextmanager
+def _bound_operator_task_context(*, run_id: str = "", task_kind: str = ""):
+    """Bind the active worker task context so tool handlers can reject phase-invalid operations."""
+    normalized_run_id = str(run_id or "").strip()
+    normalized_task_kind = str(task_kind or "").strip()
+    run_token = _ACTIVE_OPERATOR_TASK_RUN_ID.set(normalized_run_id)
+    kind_token = _ACTIVE_OPERATOR_TASK_KIND.set(normalized_task_kind)
+    try:
+        yield
+    finally:
+        _ACTIVE_OPERATOR_TASK_KIND.reset(kind_token)
+        _ACTIVE_OPERATOR_TASK_RUN_ID.reset(run_token)
 
 
 def _record_claude_agent_runtime_event(
@@ -6078,6 +6428,89 @@ def _run_claude_agent_task_process(
     )
 
 
+def _docker_server_arch(docker_exe: str) -> str:
+    try:
+        result = subprocess.run(
+            [docker_exe, "version", "--format", "{{.Server.Arch}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return str(result.stdout or "").strip().lower()
+
+
+def _claude_agent_sdk_version(repo_root: Path) -> str:
+    package_json = repo_root / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "package.json"
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise TakyonError(f"Unable to read Claude Agent SDK package metadata: {exc}") from exc
+    version = str(payload.get("version") or "").strip()
+    if not version:
+        raise TakyonError("Claude Agent SDK package metadata is missing a version")
+    return version
+
+
+def _docker_claude_worker_binary_mounts(*, docker_exe: str, repo_root: Path) -> tuple[list[str], dict[str, str]]:
+    arch = _docker_server_arch(docker_exe)
+    package_suffix = {
+        "arm64": "linux-arm64",
+        "aarch64": "linux-arm64",
+        "amd64": "linux-x64",
+        "x86_64": "linux-x64",
+    }.get(arch)
+    if not package_suffix:
+        return [], {}
+
+    package_name = f"@anthropic-ai/claude-agent-sdk-{package_suffix}"
+    repo_binary = repo_root / "node_modules" / "@anthropic-ai" / f"claude-agent-sdk-{package_suffix}" / "claude"
+    if repo_binary.exists():
+        return [], {
+            "TAKYON_CLAUDE_CODE_EXECUTABLE": f"/repo/node_modules/@anthropic-ai/claude-agent-sdk-{package_suffix}/claude"
+        }
+
+    npm = _resolve_runtime_executable("npm")
+    if not npm:
+        raise TakyonError("npm runtime unavailable for Docker Claude worker bootstrap")
+
+    version = _claude_agent_sdk_version(repo_root)
+    cache_root = (
+        get_default_takyon_root()
+        / "cache"
+        / "claude-agent-sdk"
+        / f"{package_suffix}-{version}"
+    )
+    binary_path = cache_root / "node_modules" / "@anthropic-ai" / f"claude-agent-sdk-{package_suffix}" / "claude"
+    if not binary_path.exists():
+        cache_root.mkdir(parents=True, exist_ok=True)
+        install = subprocess.run(
+            [npm, "install", "--no-save", "--force", f"{package_name}@{version}"],
+            cwd=str(cache_root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_runtime_env(),
+        )
+        if install.returncode != 0 or not binary_path.exists():
+            detail = (install.stderr or install.stdout or "").strip()
+            raise TakyonError(
+                f"Unable to prepare Docker Claude SDK binary {package_name}@{version}: {detail or 'install failed'}"
+            )
+
+    return [
+        "--mount",
+        f"type=bind,src={cache_root},dst=/opt/takyon-claude-sdk,readonly",
+    ], {
+        "TAKYON_CLAUDE_CODE_EXECUTABLE": (
+            f"/opt/takyon-claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk-{package_suffix}/claude"
+        )
+    }
+
+
 def _run_claude_agent_task_in_docker(
     *,
     payload: dict[str, Any],
@@ -6126,6 +6559,11 @@ def _run_claude_agent_task_in_docker(
         if value is not None and value != "":
             env_args.extend(["-e", f"{key}={value}"])
 
+    sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(docker_exe=docker, repo_root=repo_root)
+    for key, value in sdk_env.items():
+        if value:
+            env_args.extend(["-e", f"{key}={value}"])
+
     user_args: list[str] = []
     identity_mount_args: list[str] = []
     user_spec = _resolve_host_user_spec()
@@ -6149,6 +6587,7 @@ def _run_claude_agent_task_in_docker(
         "/root:rw,exec,size=512m",
         "--tmpfs",
         "/home:rw,exec,size=512m",
+        *sdk_mount_args,
         *identity_mount_args,
         "--mount",
         f"type=bind,src={workspace_path},dst=/workspace",
@@ -6319,6 +6758,21 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         design_reference = _excerpt_guidance_design_reference(skill_file, skill_name)
         if design_reference:
             blocks.append(design_reference)
+    design_pack_count = sum(
+        1
+        for name in resolved_names
+        if name.lower() == "claude-design" or name.lower().startswith("claude-design-")
+    )
+    if design_pack_count >= 2:
+        blocks.insert(
+            0,
+            (
+                "[Design direction selection]\n"
+                "Multiple design packs are provided. Choose exactly ONE coherent visual direction from the "
+                "business brief and follow it consistently across the surface. Do not blend packs or mix their "
+                "aesthetics; treat the others only as contrast references."
+            ),
+        )
     return resolved_names, "\n\n".join(blocks).strip()
 
 
@@ -7004,6 +7458,26 @@ def _parse_jsonish_output(text: str) -> dict[str, Any]:
     return {"raw": raw}
 
 
+def _composio_tool_unwrap(payload: Any) -> Any:
+    current = payload
+    for _ in range(4):
+        if isinstance(current, Mapping) and current.get("data") is not None:
+            next_value = current.get("data")
+            if next_value is current:
+                break
+            current = next_value
+            continue
+        break
+    return current
+
+
+def _composio_tool_mapping(payload: Any) -> dict[str, Any]:
+    unwrapped = _composio_tool_unwrap(payload)
+    if isinstance(unwrapped, Mapping):
+        return dict(unwrapped)
+    return {}
+
+
 def _run_xurl_json_command(
     command: list[str],
     *,
@@ -7052,28 +7526,23 @@ def _x_metrics_lookup(
     published_at: Any = None,
     home: str | None = None,
 ) -> dict[str, Any]:
-    resolved_home, xurl, app_name, auth_mode, username = _xurl_metrics_request_context(home=home)
-    query = urllib.parse.urlencode(
-        {
-            "ids": str(post_id or "").strip(),
-            "tweet.fields": ",".join(_x_metrics_field_list(published_at=published_at)),
-        }
-    )
-    command = [xurl]
-    if app_name:
-        command.extend(["--app", app_name])
-    if auth_mode:
-        command.extend(["--auth", auth_mode])
-    if username:
-        command.extend(["-u", username])
-    command.append(f"/2/tweets?{query}")
-    payload = _run_xurl_json_command(command, home=resolved_home, timeout=60)
-    data = payload.get("data")
-    tweets = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
-    for item in tweets:
-        if isinstance(item, Mapping) and str(item.get("id") or "").strip() == str(post_id or "").strip():
-            return dict(item)
-    raise TakyonError(f"X metrics lookup returned no post for id {post_id}")
+    del home  # X metrics now resolve through Composio, not the local xurl CLI.
+    fields = _x_metrics_field_list(published_at=published_at)
+    try:
+        payload = composio_distribution.twitter_execute_tool(
+            "TWITTER_POST_LOOKUP_BY_POST_ID",
+            arguments={
+                "id": str(post_id or "").strip(),
+                "tweet_fields": fields,
+            },
+            timeout=60.0,
+        )
+    except Exception as exc:
+        raise TakyonError(f"X metrics lookup failed via Composio: {exc}") from exc
+    tweet = _composio_tool_mapping(payload)
+    if str(tweet.get("id") or "").strip() != str(post_id or "").strip():
+        raise TakyonError(f"X metrics lookup returned no post for id {post_id}")
+    return tweet
 
 
 def _x_metrics_value_map(snapshot: Mapping[str, Any] | None, key: str) -> dict[str, int]:
@@ -7145,7 +7614,7 @@ def _command_version(command: list[str], *, timeout_seconds: int = 10) -> str | 
 
 
 def _runtime_capabilities(names: Iterable[str] | None = None) -> dict[str, Any]:
-    requested = list(names or ("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg"))
+    requested = list(names or ("node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg", "deno"))
     capabilities: dict[str, Any] = {}
     for name in requested:
         clean = str(name).strip()
@@ -7549,7 +8018,63 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/api/takyon/apps/"),
     re.compile(r"\bcreateSubuserRuntimeClient\s*\("),
     re.compile(r"_takyon/runtime-client"),
+    re.compile(r"\binvokeAction\s*\("),
     re.compile(r"\bHermes\b.*\bruntime\b", re.IGNORECASE),
+)
+_RESERVED_PRODUCT_RUNTIME_ROUTE_PREFIXES: tuple[str, ...] = (
+    "/api/takyon/apps/",
+    "/api/generated-apps/",
+)
+_FORBIDDEN_PROVIDER_HOSTS: tuple[str, ...] = (
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.mistral.ai",
+    "api.deepseek.com",
+    "openrouter.ai",
+    "api.groq.com",
+    "api.together.xyz",
+)
+_FORBIDDEN_PROVIDER_ENV_NAMES: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+)
+_FORBIDDEN_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "direct provider host",
+        re.compile(r"\b(?:" + "|".join(re.escape(host) for host in _FORBIDDEN_PROVIDER_HOSTS) + r")\b", re.IGNORECASE),
+        "product source calls an AI provider directly",
+    ),
+    (
+        "provider credential or base-url env read",
+        re.compile(
+            r"\b(?:"
+            + "|".join(re.escape(name) for name in _FORBIDDEN_PROVIDER_ENV_NAMES)
+            + r"|TAKYON_[A-Z_]*API_KEY|TAKYON_[A-Z_]*BASE_URL)\b"
+        ),
+        "product source reads provider credentials or base URLs directly",
+    ),
+    (
+        "provider sdk import",
+        re.compile(
+            r"(?:"
+            r"from\s+openai\s+import|openai\.OpenAI\s*\(|new\s+OpenAI\s*\(|"
+            r"\bimport\b[^\n;]*['\"]openai['\"]|from\s+['\"]openai['\"]|"
+            r"require\(\s*['\"]openai['\"]\s*\)|"
+            r"\bimport\b[^\n;]*['\"]@anthropic-ai/sdk['\"]|from\s+['\"]@anthropic-ai/sdk['\"]|"
+            r"require\(\s*['\"]@anthropic-ai/sdk['\"]\s*\)|openai/[A-Za-z0-9_./-]+|"
+            r"anthropic\.Anthropic\s*\("
+            r")",
+            re.IGNORECASE,
+        ),
+        "product source imports or constructs an AI provider SDK directly",
+    ),
 )
 # On subuser product hosts, bare same-origin rails resolve to the shared runtime.
 # Off-host, the canonical prefixed runtime base remains the fallback.
@@ -7561,6 +8086,7 @@ _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] =
     ("session", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
     ("account", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
     ("profile", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"profile\b|\.\s*profile\s*\(|\.\s*updateProfile\s*\(", re.IGNORECASE)),
+    ("actions", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"actions(?:/|\\b)|\.\s*invokeAction\s*\(|\.\s*createActionRunner\s*\(|\buseActionRunner\s*\(", re.IGNORECASE)),
     ("checkout", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"checkout\b|\.\s*checkout\s*\(", re.IGNORECASE)),
     ("usage", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"usage\b|\.\s*recordUsage\s*\(", re.IGNORECASE)),
     ("generate", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"generate\b|\.\s*generate\s*\(", re.IGNORECASE)),
@@ -7616,16 +8142,38 @@ def _product_source_is_skipped(path: Path) -> bool:
     return any(part in _PRODUCT_SOURCE_SKIP_DIRS for part in path.parts)
 
 
-def _source_has_runtime_backing(text: str) -> bool:
+def _is_reserved_product_runtime_route(route: str) -> bool:
+    normalized = "/" + str(route or "").lstrip("/")
+    return any(normalized.startswith(prefix) for prefix in _RESERVED_PRODUCT_RUNTIME_ROUTE_PREFIXES)
+
+
+def _reserved_product_runtime_route_from_source_rel(source_rel: str) -> str | None:
+    rel = str(source_rel or "").strip().lstrip("./")
+    if rel.startswith("src/"):
+        rel = rel[4:]
+    parts = [part for part in rel.split("/") if part]
+    if len(parts) >= 4 and parts[0] == "app" and parts[1] == "api" and parts[-1].startswith("route."):
+        route = "/" + "/".join(parts[1:-1])
+    elif len(parts) >= 3 and parts[0] == "pages" and parts[1] == "api":
+        stem_parts = parts[1:]
+        stem_parts[-1] = Path(stem_parts[-1]).stem
+        route = "/" + "/".join(part for part in stem_parts if part != "index")
+    else:
+        return None
+    return route if _is_reserved_product_runtime_route(route) else None
+
+
+def _source_has_runtime_backing(text: str, *, source_rel: str = "") -> bool:
+    if source_rel and _reserved_product_runtime_route_from_source_rel(source_rel):
+        return False
     return any(pattern.search(text) for pattern in _RUNTIME_BACKED_PATTERNS)
 
 
 def _surface_disallows_free_tier_copy(surface: dict[str, Any] | None) -> bool:
+    # Every app-like, non-landing product surface is the paid monthly shape, so
+    # free-tier customer copy is disallowed without operator opt-in.
     kind = _surface_contract_kind(surface)
-    if not kind["app_like"] or kind["landing_only"]:
-        return False
-    shape = _surface_subuser_app_shape(surface)
-    return str(shape.get("subscription_style") or "").strip() == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE
+    return bool(kind["app_like"] and not kind["landing_only"])
 
 
 def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
@@ -7645,7 +8193,7 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
         except UnicodeDecodeError:
             continue
         lines = text.splitlines()
-        runtime_backed = _source_has_runtime_backing(text)
+        runtime_backed = _source_has_runtime_backing(text, source_rel=str(path.relative_to(root)))
         for number, line in enumerate(lines, start=1):
             for label, pattern in _PRETEND_PRODUCT_PATTERNS:
                 if pattern.search(line):
@@ -7672,6 +8220,208 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
             if len(findings) >= limit:
                 break
     return findings
+
+
+def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
+    """Detect product-source code that bypasses runtime/provider boundaries."""
+    findings: list[dict[str, Any]] = []
+    if not root.exists():
+        return findings
+    for path in sorted(root.rglob("*")):
+        if len(findings) >= limit:
+            break
+        if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+            continue
+        if _product_source_is_skipped(path):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        rel = str(path.relative_to(root))
+        for number, line in enumerate(lines, start=1):
+            for issue, pattern, blocker in _FORBIDDEN_PRODUCT_PATTERNS:
+                if not pattern.search(line):
+                    continue
+                findings.append(
+                    {
+                        "path": rel,
+                        "line": number,
+                        "issue": issue,
+                        "blocker": blocker,
+                        "snippet": line.strip()[:240],
+                    }
+                )
+                break
+            if len(findings) >= limit:
+                break
+    return findings
+
+
+_SCAFFOLD_PLACEHOLDER_TOKENS_PATH = Path(__file__).resolve().parent / "subuser_app_kit" / "scaffold" / "src" / "tokens.css"
+
+
+def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
+    """Advisory (never a blocker): the product still ships the scaffold's placeholder tokens."""
+    product_tokens = root / "src" / "tokens.css"
+    try:
+        if not product_tokens.is_file() or not _SCAFFOLD_PLACEHOLDER_TOKENS_PATH.is_file():
+            return None
+        if product_tokens.read_text(encoding="utf-8") != _SCAFFOLD_PLACEHOLDER_TOKENS_PATH.read_text(encoding="utf-8"):
+            return None
+    except OSError:
+        return None
+    return {
+        "path": "src/tokens.css",
+        "issue": "scaffold_placeholder_tokens",
+        "snippet": "tokens.css is byte-identical to the scaffold placeholder; theme it from the design brief before publish",
+    }
+
+
+def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
+    """Do-not-publish gate: a build that still ships the scaffold's placeholder theme is unfinished.
+
+    The byte-identical ``tokens.css`` marker is detected during inventory as an advisory, and the
+    build-product skill already calls it a do-not-publish signal. So a successful build that still
+    carries it must block publish (and drive the one local-repair retry) instead of shipping an
+    unthemed product. Returns the exact blocker text, or ``""`` when no placeholder marker is present.
+    """
+    if not isinstance(refresh, dict):
+        return ""
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    markers = inventory.get("risk_markers") if isinstance(inventory.get("risk_markers"), list) else []
+    for marker in markers:
+        if isinstance(marker, dict) and str(marker.get("issue") or "").strip() == "scaffold_placeholder_tokens":
+            snippet = str(marker.get("snippet") or "").strip()
+            return (
+                "product still ships the scaffold placeholder theme: "
+                + (snippet or "src/tokens.css is byte-identical to the scaffold placeholder")
+                + " — apply the design brief's colors and typography to src/tokens.css and the Tailwind theme before publish"
+            )
+    return ""
+
+
+_PINNED_STACK_SERVER_IMPORT_PATTERN = re.compile(
+    r"""(?:from\s+['"](?:express|fastify|hono|koa)['"]|require\(\s*['"](?:express|fastify|hono|koa)['"]\s*\))"""
+)
+_PINNED_STACK_ROUTE_FILE_PATTERN = re.compile(r"(?:^|/)(?:src/)?app/.+/route\.(?:js|jsx|ts|tsx)$")
+
+
+def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
+    """frontend_stack=vite_react_ts is static-only: any server entrypoint is a finding."""
+    findings: list[dict[str, Any]] = []
+    if not root.exists():
+        return findings
+    for path in sorted(root.rglob("*")):
+        if len(findings) >= limit:
+            break
+        if not path.is_file() or _product_source_is_skipped(path):
+            continue
+        rel = str(path.relative_to(root))
+        if path.name.lower().startswith("next.config."):
+            findings.append({
+                "path": rel, "line": 1, "kind": "server_entrypoint",
+                "blocker": "product source carries a Next.js config on the static vite_react_ts lane",
+            })
+            continue
+        if _PINNED_STACK_ROUTE_FILE_PATTERN.search(rel) or "/pages/api/" in f"/{rel}" :
+            findings.append({
+                "path": rel, "line": 1, "kind": "server_entrypoint",
+                "blocker": "product source defines a server route handler on the static vite_react_ts lane",
+            })
+            continue
+        if path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            if _PINNED_STACK_SERVER_IMPORT_PATTERN.search(line):
+                findings.append({
+                    "path": rel, "line": number, "kind": "server_entrypoint",
+                    "blocker": "product source imports a server framework on the static vite_react_ts lane",
+                })
+                break
+    return findings
+
+
+def _scan_for_pinned_stack_client_generate_usage(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
+    """frontend_stack=vite_react_ts should call AI through actions, not client-side generate."""
+    findings: list[dict[str, Any]] = []
+    if not root.exists():
+        return findings
+    pattern = _PRODUCT_RUNTIME_INTEGRATION_PATTERNS[-1][1]
+    for path in sorted(root.rglob("*")):
+        if len(findings) >= limit:
+            break
+        if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+            continue
+        if _product_source_is_skipped(path):
+            continue
+        rel = str(path.relative_to(root))
+        if rel.startswith("actions/") or rel.startswith("_takyon/"):
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        for number, line in enumerate(lines, start=1):
+            if not pattern.search(line):
+                continue
+            findings.append({
+                "path": rel,
+                "line": number,
+                "kind": "vite_client_generate",
+                "blocker": "product source calls the shared generate rail directly from vite_react_ts client code",
+                "snippet": line.strip()[:240],
+            })
+            break
+    return findings
+
+
+def _format_forbidden_product_source_blockers(
+    forbidden_findings: list[dict[str, Any]],
+    reserved_namespace_routes: list[dict[str, Any]],
+    *,
+    limit: int = 5,
+) -> list[str]:
+    blockers: list[str] = []
+    for finding in forbidden_findings:
+        if len(blockers) >= limit:
+            break
+        if str(finding.get("kind") or "") == "server_entrypoint":
+            blockers.append(
+                f"{finding.get('blocker') or 'product source defines a server entrypoint'} at "
+                f"{finding.get('path')}:{finding.get('line')}; declared frontend_stack vite_react_ts is "
+                "static-only — move server logic into a declared action and rebuild as a static Vite app"
+            )
+            continue
+        if str(finding.get("kind") or "") == "vite_client_generate":
+            blockers.append(
+                f"{finding.get('blocker') or 'product source calls the shared generate rail directly from client code'} at "
+                f"{finding.get('path')}:{finding.get('line')}; declared frontend_stack vite_react_ts requires "
+                "client AI flows to call a declared action instead of `/generate`"
+            )
+            continue
+        blockers.append(
+            f"{finding.get('blocker') or 'product source bypasses the runtime'} at "
+            f"{finding.get('path')}:{finding.get('line')}; runtime AI must go through the "
+            "generate rail (or a declared action)"
+        )
+    for finding in reserved_namespace_routes:
+        if len(blockers) >= limit:
+            break
+        route = str(finding.get("route") or "").strip() or "/api/takyon/apps/..."
+        blockers.append(
+            "product source defines its own handler under the platform-reserved path "
+            f"{route} at {finding.get('path')}; platform rails are served by the Takyon "
+            "runtime; remove the handler and call the rail from the client or a declared action"
+        )
+    remaining = max(0, len(forbidden_findings) + len(reserved_namespace_routes) - len(blockers))
+    if remaining:
+        blockers.append(f"... and {remaining} more forbidden product-source finding(s)")
+    return blockers
 
 
 def _route_from_source_path(rel: str) -> tuple[str, str] | None:
@@ -7716,10 +8466,12 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "api_routes": [],
         "package": {},
         "runtime_integrations": [],
+        "reserved_namespace_routes": [],
         "workflow_markers": [],
         "risk_markers": [],
         "claim_snippets": [],
         "pretend_findings": [],
+        "forbidden_findings": [],
         "files_scanned": 0,
         "files_skipped": 0,
         "public_url": "",
@@ -7739,6 +8491,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
     declared_routes: set[str] = set()
     api_routes: set[str] = set()
     runtime_integrations: set[str] = set()
+    reserved_namespace_routes: list[dict[str, Any]] = []
     workflow_markers: set[str] = set()
     risk_markers: list[dict[str, Any]] = []
     claim_snippets: list[dict[str, Any]] = []
@@ -7755,10 +8508,14 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
             continue
         rel = path.relative_to(root).as_posix()
         route = _route_from_source_path(rel)
+        reserved_route_path = _reserved_product_runtime_route_from_source_rel(rel)
+        reserved_runtime_route = bool(reserved_route_path)
         if route:
             kind, value = route
             if kind == "api_route":
                 api_routes.add(value)
+                if reserved_runtime_route and len(reserved_namespace_routes) < _PRODUCT_INVENTORY_MAX_MARKERS:
+                    reserved_namespace_routes.append({"path": rel, "route": reserved_route_path})
             else:
                 routes.add(value)
         if path.name == "package.json":
@@ -7801,9 +8558,10 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
                 route_value = (route_match.group("html") or route_match.group("quoted") or "").strip("'\"")
                 if route_value and not route_value.startswith("/api/") and route_value != "/":
                     declared_routes.add(route_value.rstrip("/") or "/")
-            for label, pattern in _PRODUCT_RUNTIME_INTEGRATION_PATTERNS:
-                if pattern.search(line):
-                    runtime_integrations.add(label)
+            if not reserved_runtime_route:
+                for label, pattern in _PRODUCT_RUNTIME_INTEGRATION_PATTERNS:
+                    if pattern.search(line):
+                        runtime_integrations.add(label)
             for label, pattern in _PRODUCT_WORKFLOW_MARKERS:
                 if pattern.search(line):
                     workflow_markers.add(label)
@@ -7826,6 +8584,23 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         inventory["pretend_findings"] = _scan_for_pretend_product_state(root, limit=12)
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "pretend_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
+    try:
+        inventory["forbidden_findings"] = _scan_for_forbidden_product_backend_code(root, limit=12)
+    except Exception as exc:
+        risk_markers.append({"path": source_rel, "issue": "forbidden_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
+    try:
+        if _surface_subuser_app_shape(surface).get("frontend_stack") == "vite_react_ts":
+            inventory["forbidden_findings"] = list(inventory.get("forbidden_findings") or []) + (
+                _scan_for_pinned_stack_server_entrypoints(root, limit=12)
+            )
+            inventory["forbidden_findings"] = list(inventory.get("forbidden_findings") or []) + (
+                _scan_for_pinned_stack_client_generate_usage(root, limit=12)
+            )
+            placeholder_marker = _scaffold_placeholder_tokens_marker(root)
+            if placeholder_marker:
+                risk_markers.append(placeholder_marker)
+    except Exception as exc:
+        risk_markers.append({"path": source_rel, "issue": "stack_gate_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
 
     inventory.update({
         "status": "partial" if partial else "collected",
@@ -7833,6 +8608,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "declared_routes": sorted(declared_routes),
         "api_routes": sorted(api_routes),
         "runtime_integrations": sorted(runtime_integrations),
+        "reserved_namespace_routes": reserved_namespace_routes,
         "workflow_markers": sorted(workflow_markers),
         "risk_markers": risk_markers,
         "claim_snippets": claim_snippets,
@@ -7856,10 +8632,12 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
             "api_routes": [],
             "package": {},
             "runtime_integrations": [],
+            "reserved_namespace_routes": [],
             "workflow_markers": [],
             "risk_markers": [],
             "claim_snippets": [],
             "pretend_findings": [],
+            "forbidden_findings": [],
             "files_scanned": 0,
             "files_skipped": 0,
             "public_url": str((surface or {}).get("public_url") or "") if isinstance(surface, dict) else "",
@@ -8061,38 +8839,27 @@ def _surface_contract_kind(surface: dict[str, Any] | None) -> dict[str, bool]:
     routes = _surface_routes(surface)
     route_text = "\n".join(route for route in routes if route != "/")
     has_workflow_route = any(_PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) for route in routes if route != "/")
+    ai_surface = _PRODUCT_AI_SURFACE_PATTERN.search(text) is not None
+    auth_surface = _PRODUCT_AUTH_SURFACE_PATTERN.search(text) is not None
+    checkout_surface = _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(text) is not None
     return {
         "landing_only": _surface_allows_landing_only(surface),
         "app_like": has_workflow_route
-        or _PRODUCT_AI_SURFACE_PATTERN.search(text) is not None
-        or _PRODUCT_AUTH_SURFACE_PATTERN.search(text) is not None
-        or _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(text) is not None
+        or ai_surface
+        or auth_surface
+        or checkout_surface
         or _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route_text) is not None,
-        "ai": _PRODUCT_AI_SURFACE_PATTERN.search(text) is not None,
-        "auth": _PRODUCT_AUTH_SURFACE_PATTERN.search(text) is not None,
-        "checkout": _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(text) is not None,
+        "ai": ai_surface,
+        "auth": auth_surface,
+        "checkout": checkout_surface,
     }
 
 
 def _surface_is_bootstrap_access_shell(surface: dict[str, Any] | None) -> bool:
-    if not isinstance(surface, dict) or _surface_allows_landing_only(surface):
+    bootstrap_rails = _surface_bootstrap_access_shell_runtime_features(surface)
+    if not bootstrap_rails:
         return False
-    customer_experience = _surface_customer_experience_shape(surface)
-    if customer_experience.get("required_app_tabs"):
-        return False
-    declared_runtime_features = set(_surface_runtime_features(surface))
-    if not declared_runtime_features:
-        return False
-    if not declared_runtime_features.issubset(set(DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES)):
-        return False
-    if not {"auth", "account", "checkout"}.issubset(declared_runtime_features):
-        return False
-    declared_app_routes = {
-        route
-        for route in _surface_routes(surface)
-        if route != "/" and _PRODUCT_WORKFLOW_ROUTE_PATTERN.search(route) and not _is_shared_runtime_route_path(route)
-    }
-    return declared_app_routes.issubset({"/app", "/app/profile"})
+    return {"auth", "account", "checkout"}.issubset(set(bootstrap_rails))
 
 
 def _validate_product_surface_contract(
@@ -8130,6 +8897,7 @@ def _validate_product_surface_contract(
         return False, "app-like product surface must contain a real product workflow, not only marketing sections"
 
     integrations = set(str(item) for item in inventory.get("runtime_integrations") or [])
+    frontend_stack = _surface_subuser_app_shape(surface).get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK
     base_hint = str((surface or {}).get("runtime_api_base") or "/api/takyon/apps/<business>").rstrip("/") if isinstance(surface, dict) else "/api/takyon/apps/<business>"
     if _surface_is_bootstrap_access_shell(surface):
         if not ({"auth", "session", "account"} & integrations):
@@ -8143,7 +8911,10 @@ def _validate_product_surface_contract(
         or {"auth", "account", "profile", "checkout", "billing", "entitlements", "usage"} & declared_runtime_features
     )
     if kind["ai"]:
-        if "generate" not in integrations:
+        if frontend_stack == "vite_react_ts":
+            if "actions" not in integrations:
+                return False, "AI-backed vite_react_ts product surface must call declared actions (for example `invokeAction(...)`, `createActionRunner(...)`, or `useActionRunner(...)`) instead of client-side `/generate`"
+        elif "generate" not in integrations:
             return False, f"AI-backed product surface must call the shared runtime generate rail on product hosts (`/generate`) or via the fallback runtime base ({base_hint}/generate)"
         if session_backed_surface and not ({"auth", "session", "account"} & integrations):
             return False, f"AI-backed product surface must use the shared app-session rails (`/session`, `/account`, `/auth/request` on product hosts, or the fallback base {base_hint}/...)"
@@ -8685,6 +9456,32 @@ def _worker_local_repair_instruction(base_instruction: str, *, blocker: str, att
     )
 
 
+def _worker_surface_contract_retry_instruction(
+    base_instruction: str,
+    *,
+    why: str,
+    patch_fields: list[str],
+    attempt_number: int,
+) -> str:
+    reason = _truncate_text(str(why or "").strip() or "surface contract changed", 800)
+    fields = ", ".join(patch_fields) if patch_fields else "surface contract fields"
+    return "\n\n".join(
+        [
+            base_instruction.rstrip(),
+            dedent(
+                f"""
+                Hermes same-run contract continuation ({attempt_number} of 3):
+                - The previous worker pass proved the product surface contract had to change, and Takyon has already applied that patch.
+                - Updated contract fields: {fields}
+                - Reason: {reason}
+                - Continue from the current workspace state instead of restarting from scratch.
+                - Align the source you already built with the updated contract, then stop once contract and code agree.
+                """
+            ).strip(),
+        ]
+    )
+
+
 def _claude_agent_hit_turn_cap(error_text: str) -> bool:
     clean = str(error_text or "").strip().lower()
     return "reached maximum number of turns" in clean
@@ -8854,6 +9651,19 @@ def _refresh_product_surface_path(
         return result
     if not files:
         result.update({"status": "missing", "error": "source path contains no recognized product source files"})
+        return result
+    inventory = result.get("inventory") if isinstance(result.get("inventory"), dict) else {}
+    forbidden_findings = inventory.get("forbidden_findings") if isinstance(inventory.get("forbidden_findings"), list) else []
+    reserved_namespace_routes = inventory.get("reserved_namespace_routes") if isinstance(inventory.get("reserved_namespace_routes"), list) else []
+    blockers = _format_forbidden_product_source_blockers(forbidden_findings, reserved_namespace_routes)
+    if blockers:
+        result.update(
+            {
+                "status": "blocked",
+                "error": "product source violates runtime authority boundaries:\n- " + "\n- ".join(blockers),
+                "blockers": blockers,
+            }
+        )
         return result
 
     package_json = root / "package.json"
@@ -9025,7 +9835,9 @@ def _normalize_included_ai_budget_microusd(
     return budget
 
 
-def _plan_validation_warnings(plan_key: str, tier: str, quota: int, allow_overage: bool, metadata: dict[str, Any]) -> list[str]:
+def _plan_validation_warnings(
+    plan_key: str, tier: str, quota: int, metadata: dict[str, Any]
+) -> list[str]:
     warnings: list[str] = []
     normalized_key = _file_slug(plan_key, plan_key)
     normalized_tier = _file_slug(tier, tier)
@@ -9041,8 +9853,10 @@ def _plan_validation_warnings(plan_key: str, tier: str, quota: int, allow_overag
         if isinstance(value, list):
             return any(contains_unlimited(item) for item in value)
         return False
-    if contains_unlimited(metadata) and quota > 0 and not allow_overage:
-        warnings.append("metadata suggests an unlimited entitlement but included_action_quota is finite and overage is disabled")
+    if contains_unlimited(metadata) and quota > 0:
+        warnings.append(
+            "metadata suggests an unlimited entitlement but included_action_quota is finite"
+        )
     return warnings
 
 
@@ -9162,6 +9976,21 @@ def _normalize_email(value: str) -> str:
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         raise TakyonError("valid email is required")
     return email
+
+
+def _is_service_email(value: Any) -> bool:
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+
+    return takyon_app_actions.is_service_email(value)
+
+
+def _app_user_is_service_identity(user: Mapping[str, Any] | None) -> bool:
+    if not isinstance(user, Mapping):
+        return False
+    return _is_service_email(user.get("email"))
 
 
 def _normalize_domain_name(value: str, *, field: str = "domain") -> str:
@@ -11310,12 +12139,12 @@ class TakyonStore:
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
         """Lazy-import the canonical Postgres app leaf modules that own the ``app_*`` writes the operator
-        store delegates to on the Postgres backend (identity/profiles/directory/records/connections/entitlements/payments/usage/funding). Imported lazily and only
+        store delegates to on the Postgres backend (identity/profiles/directory/records/connections/entitlements/payments/usage). Imported lazily and only
         on the Postgres branch so the default SQLite path stays dependency-free and pays no import cost."""
         try:
-            from . import app_connections, app_directory, app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
+            from . import app_connections, app_directory, app_entitlements, app_identity, app_payments, app_profiles, app_records, app_usage
         except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-            from plugins.takyon import app_connections, app_directory, app_entitlements, app_funding, app_identity, app_payments, app_profiles, app_records, app_usage
+            from plugins.takyon import app_connections, app_directory, app_entitlements, app_identity, app_payments, app_profiles, app_records, app_usage
         return {
             "identity": app_identity,
             "profiles": app_profiles,
@@ -11323,7 +12152,6 @@ class TakyonStore:
             "records": app_records,
             "connections": app_connections,
             "entitlements": app_entitlements,
-            "funding": app_funding,
             "payments": app_payments,
             "usage": app_usage,
         }
@@ -11458,7 +12286,6 @@ class TakyonStore:
               billing_interval TEXT NOT NULL DEFAULT 'month',
               included_ai_budget_microusd INTEGER NOT NULL DEFAULT 0,
               included_action_quota INTEGER NOT NULL DEFAULT 0,
-              allow_overage INTEGER NOT NULL DEFAULT 0,
               stripe_product_id TEXT,
               stripe_price_id TEXT,
               stripe_payment_link_id TEXT,
@@ -11536,6 +12363,20 @@ class TakyonStore:
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               PRIMARY KEY (business_slug, app_user_id, record_type, id),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
+              FOREIGN KEY (business_slug, app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS app_media (
+              id TEXT PRIMARY KEY,
+              business_slug TEXT NOT NULL,
+              app_user_id TEXT NOT NULL,
+              media_id TEXT NOT NULL,
+              filename TEXT,
+              mime TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              storage_key TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE (business_slug, media_id),
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
               FOREIGN KEY (business_slug, app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
             );
@@ -11680,6 +12521,20 @@ class TakyonStore:
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
               FOREIGN KEY (app_user_id) REFERENCES app_users(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS app_action_schedules (
+              business_slug TEXT NOT NULL,
+              action_name TEXT NOT NULL,
+              cron_schedule TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              next_run_at TEXT NOT NULL,
+              last_run_at TEXT,
+              last_status TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, action_name),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS webhook_events (
               id TEXT PRIMARY KEY,
               provider TEXT NOT NULL,
@@ -11700,6 +12555,7 @@ class TakyonStore:
             CREATE INDEX IF NOT EXISTS app_checkout_sessions_business_idx ON app_checkout_sessions(business_slug, created_at DESC);
             CREATE INDEX IF NOT EXISTS app_revenue_events_business_idx ON app_revenue_events(business_slug, occurred_at DESC);
             CREATE INDEX IF NOT EXISTS app_usage_events_business_idx ON app_usage_events(business_slug, created_at DESC);
+            CREATE INDEX IF NOT EXISTS app_action_schedules_due_idx ON app_action_schedules(enabled, next_run_at);
             """
         )
         self._migrate_db(conn)
@@ -11786,6 +12642,29 @@ class TakyonStore:
             conn.execute(
                 "CREATE INDEX app_user_profiles_directory_idx ON app_user_profiles(business_slug, directory_enabled, updated_at DESC)"
             )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_action_schedules (
+              business_slug TEXT NOT NULL,
+              action_name TEXT NOT NULL,
+              cron_schedule TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              next_run_at TEXT NOT NULL,
+              last_run_at TEXT,
+              last_status TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, action_name),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            )
+            """
+        )
+        action_schedule_indexes = {row["name"] for row in conn.execute("PRAGMA index_list(app_action_schedules)").fetchall()}
+        if "app_action_schedules_due_idx" not in action_schedule_indexes:
+            conn.execute(
+                "CREATE INDEX app_action_schedules_due_idx ON app_action_schedules(enabled, next_run_at)"
+            )
         needs_surface_defaults = conn.execute(
             """
             SELECT 1 FROM app_surface_contracts
@@ -11863,19 +12742,28 @@ class TakyonStore:
             local_root = self.root / "storage"
         return storage.get_storage_backend(root=local_root)
 
-    def _sync_business_workspace_remote(self, slug: str) -> None:
+    def _sync_business_workspace_remote(self, slug: str) -> str:
+        """Push the durable business workspace to the configured backend.
+
+        Returns a truthful status so callers that REQUIRE durable persistence (the worker
+        copy-back path) can fail closed instead of reporting success while nothing
+        materialized. Most callers ignore the return — only success-critical paths gate on
+        it. Statuses: ``synced``, ``skipped_no_backend``, ``skipped_disallowed``,
+        ``skipped_missing_workspace``.
+        """
         from . import storage
 
         backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
-            return
+            return "skipped_no_backend"
         if not _remote_workspace_sync_allowed(backend_name):
-            return
+            return "skipped_disallowed"
         workspace = self._business_root(slug, sync=False)
         if not workspace.exists():
-            return
+            return "skipped_missing_workspace"
         storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
+        return "synced"
 
     def _delete_business_workspace_remote(self, slug: str) -> None:
         from . import storage
@@ -12215,8 +13103,14 @@ class TakyonStore:
         return self._reconcile_app_surface_contract(conn, slug)
 
     def _product_surface_evidence(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            from . import app_actions as takyon_app_actions
+        except Exception:
+            from plugins.takyon import app_actions as takyon_app_actions
+
         surface = surface if isinstance(surface, dict) else self._app_surface_contract(conn, slug)
         source_path = str(surface.get("source_path") or "").strip()
+        product_workflow = _surface_product_workflow_shape(surface)
         inventory = _product_inventory(self._business_root(slug), source_path, surface=surface) if source_path else {}
         if isinstance(inventory, dict):
             inventory = {
@@ -12232,6 +13126,11 @@ class TakyonStore:
             surface=surface,
             receipt=receipt,
             inventory=inventory,
+        )
+        action_invocations = takyon_app_actions.summarize_action_invocations(
+            conn,
+            slug,
+            product_workflow.get("actions"),
         )
         root = self._business_root(slug) / source_path if source_path else None
         has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
@@ -12262,6 +13161,7 @@ class TakyonStore:
             "publish_blocker": str(surface.get("publish_blocker") or ""),
             "inventory": inventory or {},
             "operational_facts": operational_facts,
+            "action_invocations": action_invocations,
             "local_continuable_work": local_work[:8],
         }
 
@@ -12309,6 +13209,15 @@ class TakyonStore:
             f"- Source path: {surface.get('source_path') or 'not set'}",
             f"- Runtime API base fallback: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
             f"- Runtime features: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
+            (
+                "- Bootstrap access-shell rails available now: "
+                + ", ".join(_surface_effective_runtime_features(surface))
+            )
+            if (
+                not _surface_runtime_features(surface)
+                and _surface_bootstrap_access_shell_runtime_features(surface)
+            )
+            else "- Bootstrap access-shell rails available now: not applicable",
             f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
             f"- Publish policy: {surface.get('publish_policy') or _DEFAULT_PRODUCT_PUBLISH_POLICY}",
             f"- Mode behavior: {surface.get('mode_behavior') or _DEFAULT_PRODUCT_MODE_BEHAVIOR}",
@@ -12319,14 +13228,6 @@ class TakyonStore:
             f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
             f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             f"- Notes: {surface.get('notes') or 'not set'}",
-            "",
-            "## App Shape",
-            "",
-            f"- App mode: {shape.get('app_mode') or 'not set'}",
-            f"- Subscription style: {shape.get('subscription_style') or 'not set'}",
-            f"- API mode: {shape.get('api_mode') or 'not set'}",
-            f"- Frontend API mode: {shape.get('frontend_api_mode') or SUBUSER_FRONTEND_API_MODE}",
-            f"- Managed kit path: {shape.get('kit_path') or SUBUSER_KIT_DIRNAME}",
             "",
             "## Customer Experience Shape",
             "",
@@ -12341,6 +13242,11 @@ class TakyonStore:
             "",
         ]
         if product_workflow:
+            surface_lines.append(
+                "- Workflow status: MVP-complete"
+                if _product_workflow_is_mvp_complete(product_workflow)
+                else "- Workflow status: workflow_pending / partial"
+            )
             surface_lines.extend(
                 [
                     f"- Primary user: {product_workflow.get('primary_user') or 'not set'}",
@@ -12412,13 +13318,42 @@ class TakyonStore:
             )
             surface_lines.append(f"- First-run requirements: {', '.join(first_run_bits) or 'not set'}")
             surface_lines.append(f"- Success moment: {product_workflow.get('success_moment') or 'not set'}")
+            action_specs = product_workflow.get("actions") if isinstance(product_workflow.get("actions"), list) else []
+            if action_specs:
+                action_labels = []
+                for spec in action_specs[:10]:
+                    if not isinstance(spec, dict):
+                        continue
+                    label = str(spec.get("name") or "").strip()
+                    trigger = str(spec.get("trigger") or "").strip()
+                    schedule = str(spec.get("schedule") or "").strip()
+                    if label and trigger == "schedule" and schedule:
+                        label = f"{label} ({schedule})"
+                    elif label and trigger:
+                        label = f"{label} ({trigger})"
+                    if label:
+                        action_labels.append(label)
+                surface_lines.append(f"- Actions: {', '.join(action_labels) or 'not set'}")
+                action_invocations = surface_evidence.get("action_invocations") if isinstance(surface_evidence.get("action_invocations"), list) else []
+                if action_invocations:
+                    invocation_labels = []
+                    for item in action_invocations[:10]:
+                        if not isinstance(item, dict):
+                            continue
+                        label = f"{str(item.get('name') or '').strip()}={str(item.get('last_status') or '').strip()}"
+                        error = str(item.get("last_error") or "").strip()
+                        if str(item.get("last_status") or "").strip() == "failed" and error:
+                            label = f"{label} ({_truncate_text(error, 80)})"
+                        invocation_labels.append(label)
+                    surface_lines.append(f"- Action invocation status: {', '.join(invocation_labels) or 'not set'}")
+            surface_lines.append(f"- Outbound hosts: {', '.join(product_workflow.get('outbound_hosts') or []) or 'not set'}")
             acceptance_tests = product_workflow.get("acceptance_tests") or []
             surface_lines.append(f"- Acceptance tests: {len(acceptance_tests)} recorded" if acceptance_tests else "- Acceptance tests: not set")
             surface_lines.extend(f"  - {item}" for item in acceptance_tests[:10])
             not_now = product_workflow.get("not_now") or []
             surface_lines.append(f"- Not now: {', '.join(not_now) or 'not set'}")
         else:
-            surface_lines.append("- No MVP-complete product workflow has been recorded on the surface contract.")
+            surface_lines.append("- No product workflow has been recorded on the surface contract.")
         surface_lines.extend(["", "## Routes", ""])
         routes = surface.get("routes") or []
         if isinstance(routes, list) and routes:
@@ -14168,36 +15103,43 @@ class TakyonStore:
                 if runtime_features_raw is not None
                 else _surface_runtime_features(existing)
             )
-            app_mode = _normalize_subuser_surface_choice(
-                op.get("app_mode") if op.get("app_mode") is not None else existing_shape.get("app_mode"),
-                allowed=SUBUSER_APP_MODE_CHOICES,
-            )
-            subscription_style = _normalize_subscription_style(
-                op.get("subscription_style") if op.get("subscription_style") is not None else existing_shape.get("subscription_style")
-            )
-            api_mode = _normalize_subuser_surface_choice(
-                op.get("api_mode") if op.get("api_mode") is not None else existing_shape.get("api_mode"),
-                allowed=SUBUSER_API_MODE_CHOICES,
+            frontend_stack_value = (
+                _frontend_stack_for_contract_upsert(existing, op.get("frontend_stack"))
+                or existing_shape.get("frontend_stack")
+                or DEFAULT_SUBUSER_FRONTEND_STACK
             )
             bootstrap_seed = not existing_has_source_files
             existing_product_workflow = _surface_product_workflow_shape(existing)
-            product_workflow_requested = (
-                (isinstance(op.get("product_workflow"), dict) and bool(op.get("product_workflow")))
-                or (op.get("product_workflow") is None and bool(existing_product_workflow))
+            requested_product_workflow = (
+                _surface_product_workflow_shape({"metadata": {"product_workflow": op.get("product_workflow")}})
+                if isinstance(op.get("product_workflow"), dict)
+                else existing_product_workflow if op.get("product_workflow") is None else {}
             )
-            bootstrap_access_seed = bootstrap_seed and not product_workflow_requested
+            workflow_runtime_features = _runtime_features_implied_by_product_workflow(requested_product_workflow)
             runtime_features = _canonical_runtime_features_for_surface_shape(
-                runtime_features,
-                app_mode=app_mode,
-                subscription_style=subscription_style,
-                api_mode=api_mode,
+                list(runtime_features or []) + list(workflow_runtime_features or [])
             )
-            runtime_features = _canonical_bootstrap_access_runtime_features(
-                runtime_features,
-                bootstrap_seed=bootstrap_access_seed,
-                app_shell_required=bool(app_mode) and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE,
-                app_mode=app_mode,
-                subscription_style=subscription_style,
+            # A fresh shell should stay on the bootstrap access-shell path only while the
+            # workflow is still semantically empty. Once the workflow references real
+            # runtime-backed capability (for example a persistence rail or named actions),
+            # we persist those rails automatically instead of forcing the CEO to predeclare
+            # them in a separate knob before the workflow can even be saved.
+            bootstrap_access_seed = bootstrap_seed and not workflow_runtime_features
+            if bootstrap_access_seed:
+                # Bootstrap owns the honest shared shell wiring, not the declared
+                # product rail contract. On a fresh access-shell seed we keep
+                # runtime_features empty on the stored contract even if the caller
+                # guessed deeper rails too early; the effective auth/account/profile/
+                # checkout shell still materializes through bootstrap-only helpers.
+                runtime_features = []
+            # App-shell intent is derived from real declared signals — an in-app workflow,
+            # declared access/AI rails, app tabs, or explicit workflow routes — not app-shape
+            # taxonomy. This keeps the bootstrap access-shell seed firing for real app
+            # surfaces without app_mode/subscription_style.
+            app_shell_required_seed = bool(requested_product_workflow) or _surface_shape_requires_app_shell(
+                runtime_features=runtime_features,
+                required_app_tabs=_normalize_surface_string_list(op.get("required_app_tabs")),
+                required_routes=_normalize_surface_string_list(op.get("required_routes")),
             )
             routes = op.get("routes") if op.get("routes") is not None else []
             theme = op.get("theme") if op.get("theme") is not None else (existing.get("theme") or {"source": "business product workspace"})
@@ -14225,10 +15167,8 @@ class TakyonStore:
                 {**existing_metadata, **metadata},
                 runtime_features=runtime_features,
                 previous_runtime_features=_surface_runtime_features(existing),
-                app_mode=app_mode,
-                subscription_style=subscription_style,
-                api_mode=api_mode,
                 rail_state=op.get("rail_state"),
+                frontend_stack=frontend_stack_value,
             )
             metadata = _merge_customer_experience_metadata(
                 metadata,
@@ -14245,6 +15185,10 @@ class TakyonStore:
             )
             customer_experience = _surface_customer_experience_shape({"metadata": metadata, "constraints": constraints})
             product_workflow = _surface_product_workflow_shape({"metadata": metadata})
+            _validate_frontend_stack_runtime_feature_contract(
+                frontend_stack=frontend_stack_value,
+                runtime_features=runtime_features,
+            )
             _validate_product_workflow_contract(
                 surface={"metadata": metadata, "constraints": constraints},
                 runtime_features=runtime_features,
@@ -14258,8 +15202,6 @@ class TakyonStore:
             }
             surface_requires_app_shell = _surface_requires_app_shell(
                 surface_preview,
-                app_mode=app_mode,
-                subscription_style=subscription_style,
                 runtime_features=runtime_features,
                 required_app_tabs=customer_experience.get("required_app_tabs") or [],
                 required_routes=customer_experience.get("required_routes") or [],
@@ -14275,7 +15217,6 @@ class TakyonStore:
                 customer_experience_metadata.pop("required_app_tabs", None)
                 canonical_conversion_model = _canonical_bootstrap_conversion_model(
                     customer_experience_metadata.get("conversion_model"),
-                    subscription_style=subscription_style,
                     bootstrap_seed=bootstrap_seed,
                     app_shell_required=surface_requires_app_shell,
                 )
@@ -14293,7 +15234,7 @@ class TakyonStore:
                 product_workflow=_surface_product_workflow_shape({"metadata": metadata}),
             )
             seeded_bootstrap_monthly_plan = False
-            if surface_requires_app_shell and subscription_style == DEFAULT_SUBUSER_SUBSCRIPTION_STYLE:
+            if surface_requires_app_shell:
                 existing_monthly_plan = self._row_to_dict(
                     conn.execute(
                         "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
@@ -14321,7 +15262,6 @@ class TakyonStore:
                                     billing_interval="month",
                                     included_ai_budget_microusd=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
                                     included_action_quota=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
-                                    allow_overage=False,
                                     source="takyon_starter",
                                     notes="",
                                     metadata=bootstrap_plan_metadata,
@@ -14334,11 +15274,11 @@ class TakyonStore:
                             """
                             INSERT INTO app_plan_policies (
                               id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
-                              included_ai_budget_microusd, included_action_quota, allow_overage,
+                              included_ai_budget_microusd, included_action_quota,
                               stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
                               source, notes, metadata_json, created_at, updated_at
                             )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(business_slug, plan_key) DO NOTHING
                             """,
                             (
@@ -14351,7 +15291,6 @@ class TakyonStore:
                                 "month",
                                 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
                                 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
-                                0,
                                 None,
                                 None,
                                 None,
@@ -14430,6 +15369,15 @@ class TakyonStore:
                     now,
                 ),
             )
+            try:
+                from . import app_actions as takyon_app_actions
+            except Exception:
+                from plugins.takyon import app_actions as takyon_app_actions
+            takyon_app_actions.reconcile_action_schedules(
+                conn,
+                slug,
+                _surface_product_workflow_shape({"metadata": metadata}),
+            )
             self._rewrite_app_files(conn, slug)
             self._sync_business_workspace_remote(slug)
             event_surface = {"metadata": metadata, "runtime_features": runtime_features}
@@ -14445,9 +15393,6 @@ class TakyonStore:
                     "publish_target": publish_target,
                     "publish_policy": publish_policy,
                     "done_gate": done_gate,
-                    "app_mode": (_surface_subuser_app_shape(event_surface).get("app_mode") or ""),
-                    "subscription_style": (_surface_subuser_app_shape(event_surface).get("subscription_style") or ""),
-                    "api_mode": (_surface_subuser_app_shape(event_surface).get("api_mode") or ""),
                     "rail_state": (_surface_subuser_app_shape(event_surface).get("rail_state") or {}),
                     "customer_experience": _surface_customer_experience_shape(event_surface),
                     "product_workflow": _surface_product_workflow_shape(event_surface),
@@ -14569,20 +15514,46 @@ class TakyonStore:
             plan_key = _file_slug(str(op.get("plan_key") or "free"), "free")
             tier = str(op.get("tier") or plan_key or "free")
             price_cents = int(float(op.get("price_cents") or op.get("price_usd_cents") or 0))
+            leaves = None
             if price_cents < 0:
                 raise TakyonError("plan price must be non-negative")
             interval = _normalize_billing_interval(op.get("billing_interval") or "month")
             if interval not in {"month", "year", "one_time"}:
                 raise TakyonError("billing_interval must be one of: month, year, one_time")
+            included_ai_budget_default = 0
+            if op.get("included_ai_budget_microusd") in {None, ""}:
+                if _db_backend() == "postgres":
+                    leaves = self._app_leaves()
+                    try:
+                        with self._leaf_conn(conn) as raw:
+                            existing_policy = leaves["entitlements"].get_plan_policy(
+                                raw, slug, plan_key
+                            )
+                    except leaves["entitlements"].EntitlementError as exc:
+                        raise TakyonError(str(exc)) from exc
+                    if existing_policy is not None:
+                        included_ai_budget_default = int(
+                            existing_policy.included_ai_budget_microusd
+                        )
+                else:
+                    existing_row = conn.execute(
+                        "SELECT included_ai_budget_microusd FROM app_plan_policies "
+                        "WHERE business_slug = ? AND plan_key = ?",
+                        (slug, plan_key),
+                    ).fetchone()
+                    if existing_row is not None:
+                        included_ai_budget_default = int(
+                            existing_row["included_ai_budget_microusd"] or 0
+                        )
             included_ai_budget_microusd = _normalize_included_ai_budget_microusd(
                 op.get("included_ai_budget_microusd"),
                 price_cents=price_cents,
                 billing_interval=interval,
                 tier=tier,
+                default=included_ai_budget_default,
             )
             quota_raw = op.get("included_action_quota")
             included_action_quota = int(0 if quota_raw in {None, ""} else quota_raw)
-            allow_overage = bool(op.get("allow_overage"))
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
@@ -14591,7 +15562,7 @@ class TakyonStore:
                 # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
                 # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
                 # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
-                leaves = self._app_leaves()
+                leaves = leaves or self._app_leaves()
                 try:
                     with self._leaf_conn(conn) as raw:
                         policy = leaves["entitlements"].upsert_plan_policy(
@@ -14604,7 +15575,6 @@ class TakyonStore:
                             billing_interval=interval,
                             included_ai_budget_microusd=included_ai_budget_microusd,
                             included_action_quota=included_action_quota,
-                            allow_overage=allow_overage,
                             stripe_product_id=op.get("stripe_product_id"),
                             stripe_price_id=op.get("stripe_price_id"),
                             source=str(op.get("source") or "takyon"),
@@ -14615,7 +15585,9 @@ class TakyonStore:
                     raise TakyonError(str(exc)) from exc
                 plan_key = policy.plan_key
             else:
-                warnings = _plan_validation_warnings(plan_key, tier, included_action_quota, allow_overage, metadata)
+                warnings = _plan_validation_warnings(
+                    plan_key, tier, included_action_quota, metadata
+                )
                 if warnings:
                     validation = metadata.get("takyon_plan_validation") if isinstance(metadata.get("takyon_plan_validation"), dict) else {}
                     metadata = {
@@ -14632,11 +15604,11 @@ class TakyonStore:
                     """
                     INSERT INTO app_plan_policies (
                       id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
-                      included_ai_budget_microusd, included_action_quota, allow_overage,
+                      included_ai_budget_microusd, included_action_quota,
                       stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
                       source, notes, metadata_json, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(business_slug, plan_key) DO UPDATE SET
                       tier = excluded.tier,
                       price_cents = excluded.price_cents,
@@ -14644,7 +15616,6 @@ class TakyonStore:
                       billing_interval = excluded.billing_interval,
                       included_ai_budget_microusd = excluded.included_ai_budget_microusd,
                       included_action_quota = excluded.included_action_quota,
-                      allow_overage = excluded.allow_overage,
                       stripe_product_id = COALESCE(excluded.stripe_product_id, app_plan_policies.stripe_product_id),
                       stripe_price_id = COALESCE(excluded.stripe_price_id, app_plan_policies.stripe_price_id),
                       stripe_payment_link_id = COALESCE(excluded.stripe_payment_link_id, app_plan_policies.stripe_payment_link_id),
@@ -14664,7 +15635,6 @@ class TakyonStore:
                         interval,
                         included_ai_budget_microusd,
                         included_action_quota,
-                        1 if allow_overage else 0,
                         op.get("stripe_product_id"),
                         op.get("stripe_price_id"),
                         op.get("stripe_payment_link_id"),
@@ -14683,6 +15653,8 @@ class TakyonStore:
 
         if action == "app.customer.upsert":
             email = _normalize_email(str(op.get("email") or ""))
+            if _is_service_email(email):
+                raise TakyonError("service identities cannot be managed as app customers")
             now = _now()
             user_id = op.get("id") or uuid.uuid4().hex
             if _db_backend() == "postgres":
@@ -14798,6 +15770,8 @@ class TakyonStore:
                     ).fetchone())
                 elif op.get("email"):
                     email = _normalize_email(str(op.get("email")))
+                    if _is_service_email(email):
+                        raise TakyonError("service identities cannot be managed as app customers")
                     user_result = self._apply_operation(
                         conn,
                         parsed_scope,
@@ -14817,6 +15791,8 @@ class TakyonStore:
                     ).fetchone())
                 if not user:
                     raise TakyonError("app user not found")
+                if _app_user_is_service_identity(user):
+                    raise TakyonError("service identities have no profile")
                 app_user_id = str(user["id"])
                 existing = _ensure_sqlite_app_profile(
                     conn,
@@ -14929,6 +15905,8 @@ class TakyonStore:
                 except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = resolved.user.id
+                if _is_service_email(resolved.user.email):
+                    raise TakyonError("service identities cannot appear in the directory")
                 user_payload = _app_user_runtime_payload(resolved.user)
                 entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
             else:
@@ -14943,6 +15921,8 @@ class TakyonStore:
                 )
                 if not user:
                     raise TakyonError("app user not found")
+                if _app_user_is_service_identity(user):
+                    raise TakyonError("service identities cannot appear in the directory")
                 app_user_id = str(user["id"])
                 existing = _ensure_sqlite_app_profile(
                     conn,
@@ -15004,6 +15984,8 @@ class TakyonStore:
                 except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = resolved.user.id
+                if _is_service_email(resolved.user.email):
+                    raise TakyonError("service identities cannot appear in the directory")
                 user_payload = _app_user_runtime_payload(resolved.user)
                 entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
             else:
@@ -15016,6 +15998,8 @@ class TakyonStore:
                 )
                 if not user:
                     raise TakyonError("app user not found")
+                if _app_user_is_service_identity(user):
+                    raise TakyonError("service identities cannot appear in the directory")
                 app_user_id = str(user["id"])
                 existing = _ensure_sqlite_app_profile(
                     conn,
@@ -15546,6 +16530,36 @@ class TakyonStore:
                 leaves = self._app_leaves()
                 try:
                     with self._leaf_conn(conn) as raw:
+                        resolved_user_tier = op.get("app_user_tier")
+                        user_monthly_limit_microusd = None
+                        if app_user_id:
+                            app_user = leaves["identity"].get_app_user(
+                                raw, slug, app_user_id=app_user_id
+                            )
+                            if app_user is None:
+                                raise leaves["usage"].AppUserNotFound(app_user_id)
+                            resolved_user_tier = resolved_user_tier or app_user.tier
+                            entitlement = leaves["entitlements"].get_active_entitlement(
+                                raw, slug, app_user_id
+                            )
+                            plan = None
+                            if entitlement is not None and entitlement.plan_key:
+                                plan = leaves["entitlements"].get_plan_policy(
+                                    raw, slug, entitlement.plan_key
+                                )
+                            if plan is None:
+                                for candidate in leaves["entitlements"].list_plan_policies(
+                                    raw, slug
+                                ):
+                                    if candidate.tier == resolved_user_tier:
+                                        plan = candidate
+                                        break
+                            if plan is not None and str(plan.tier or "free") != "free":
+                                user_monthly_limit_microusd = max(
+                                    0, int(plan.included_ai_budget_microusd)
+                                )
+                            else:
+                                user_monthly_limit_microusd = 0
                         event = leaves["usage"].record_completed_usage(
                             raw,
                             slug,
@@ -15553,7 +16567,8 @@ class TakyonStore:
                             reservation_key=event_id,
                             estimated_cost_microusd=estimated,
                             app_user_id=app_user_id,
-                            app_user_tier=op.get("app_user_tier"),
+                            user_monthly_limit_microusd=user_monthly_limit_microusd,
+                            app_user_tier=resolved_user_tier,
                             purpose=str(op.get("purpose") or "product_usage"),
                             route=str(op.get("route") or "app"),
                             input_tokens=op.get("input_tokens"),
@@ -15563,7 +16578,10 @@ class TakyonStore:
                             model=op.get("model"),
                             metadata=op.get("metadata") or {},
                         )
-                except leaves["usage"].AppUsageError as exc:
+                except (
+                    leaves["usage"].AppUsageError,
+                    leaves["entitlements"].EntitlementError,
+                ) as exc:
                     raise TakyonError(str(exc)) from exc
                 event_id = event.id
             else:
@@ -16413,7 +17431,7 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
             if str(item).strip()
         ]
         if not requested:
-            requested = ["node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg"]
+            requested = ["node", "npm", "npx", "corepack", "pnpm", "yarn", "bun", "python", "pip", "uv", "git", "rg", "deno"]
 
         ensure_results: list[dict[str, Any]] = []
         for ecosystem in ecosystems:
@@ -16433,6 +17451,15 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
                     "installed": False,
                     "capabilities": _runtime_capabilities(("python", "pip", "uv")),
                     "error": None if _resolve_runtime_executable("python") else "python runtime is unavailable",
+                })
+            elif ecosystem in {"actions", "app-actions", "app_actions"}:
+                capabilities = _runtime_capabilities(("deno", "systemd-run"))
+                ensure_results.append({
+                    "ecosystem": ecosystem,
+                    "success": bool(capabilities.get("deno", {}).get("available")),
+                    "installed": False,
+                    "capabilities": capabilities,
+                    "error": None if capabilities.get("deno", {}).get("available") else "deno runtime is unavailable",
                 })
             else:
                 ensure_results.append({
@@ -16698,54 +17725,6 @@ def handle_business_configure_app_budget(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
-def handle_business_grant_app_subsidy(args: dict, **_: Any) -> str:
-    store = _store()
-    try:
-        business = _resolved_business_slug(args, required=True)
-        amount_microusd = int(float(args.get("amount_microusd") or 0))
-        idempotency_key = str(args.get("idempotency_key") or "").strip()
-        if amount_microusd <= 0:
-            raise TakyonError("amount_microusd must be > 0")
-        if not idempotency_key:
-            raise TakyonError("idempotency_key is required")
-        if _db_backend() != "postgres":
-            raise TakyonError("app subsidy funding requires the postgres runtime")
-        leaves = store._app_leaves()
-        with store._connect() as conn:
-            store._ensure_business(conn, business)
-            try:
-                with store._leaf_conn(conn) as raw:
-                    balances = leaves["funding"].grant_business_subsidy(
-                        raw,
-                        business,
-                        amount_microusd,
-                        idempotency_key,
-                        metadata=args.get("metadata") or {},
-                    )
-            except leaves["funding"].AppFundingError as exc:
-                raise TakyonError(str(exc)) from exc
-            store._record_event(
-                conn,
-                scope=f"business:{business}/app",
-                business_slug=business,
-                event_type="app.subsidy.grant",
-                payload={
-                    "amount_microusd": amount_microusd,
-                    "balance_microusd": balances.balance_microusd,
-                },
-            )
-        return tool_result(
-            {
-                "success": True,
-                "business": business,
-                "amount_microusd": amount_microusd,
-                "balance_microusd": balances.balance_microusd,
-            }
-        )
-    except Exception as exc:
-        return tool_error(str(exc), success=False)
-
-
 def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     operation = {
         "action": "app.surface.upsert",
@@ -16754,9 +17733,6 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
         "runtime_features": args.get("runtime_features"),
-        "app_mode": args.get("app_mode"),
-        "subscription_style": args.get("subscription_style"),
-        "api_mode": args.get("api_mode"),
         "rail_state": args.get("rail_state"),
         "surface_goal": args.get("surface_goal"),
         "conversion_model": args.get("conversion_model"),
@@ -16792,6 +17768,11 @@ def _finalize_product_surface_refresh(
     receipt_path: str,
     refresh_source: str,
 ) -> dict[str, Any]:
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+
     refresh = _refresh_product_surface_path(
         store._business_root(business),
         source_path,
@@ -16808,6 +17789,41 @@ def _finalize_product_surface_refresh(
                 "status": "blocked",
                 "error": surface_error,
             }
+    if refresh.get("status") == "passed":
+        # A build that compiles but still ships the scaffold placeholder theme is an unfinished
+        # product. Block publish and feed the one local-repair retry instead of shipping it.
+        theme_blocker = _scaffold_theme_unfinished_blocker(refresh)
+        if theme_blocker:
+            refresh = {
+                **refresh,
+                "status": "blocked",
+                "error": theme_blocker,
+            }
+    # Run the action-consistency blocker UNCONDITIONALLY: an earlier build/surface blocker
+    # must not mask a real action-contract inconsistency (declared-spec/UI-call/file drift).
+    # When both exist, surface both so the operator sees the full truth, not just the first.
+    action_blocker = takyon_app_actions.action_refresh_blocker(
+        store=store,
+        business=business,
+        surface={
+            **surface,
+            "product_workflow": _surface_product_workflow_shape(surface),
+        },
+        source_path=source_path,
+    )
+    if action_blocker:
+        existing_error = str(refresh.get("error") or "").strip()
+        if refresh.get("status") == "passed" or not existing_error:
+            merged_error = action_blocker
+        elif action_blocker in existing_error:
+            merged_error = existing_error
+        else:
+            merged_error = f"{existing_error}; also: {action_blocker}"
+        refresh = {
+            **refresh,
+            "status": "blocked",
+            "error": merged_error,
+        }
     if requested_publish_policy and _is_shared_renderer_publish_policy(requested_publish_policy):
         warnings = list(refresh.get("warnings") or [])
         warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
@@ -16840,12 +17856,20 @@ def _finalize_product_surface_refresh(
         "public_url": publish.get("public_url") or inventory.get("public_url") or "",
         "publish_receipt_path": receipt_path,
     }
+    product_workflow = _surface_product_workflow_shape(surface)
+    with store._connect() as conn:
+        action_invocations = takyon_app_actions.summarize_action_invocations(
+            conn,
+            business,
+            product_workflow.get("actions"),
+        )
     return {
         **refresh,
         "business": business,
         "receipt_path": receipt_path,
         "publish": publish,
         "inventory": inventory,
+        "action_invocations": action_invocations,
         "blocker": "" if publish.get("status") == "published" and refresh.get("status") == "passed" else (_surface_refresh_exact_blocker(refresh, publish) or "product surface is not published"),
         "source": refresh_source,
     }
@@ -17003,7 +18027,6 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         "billing_interval": args.get("billing_interval") or "month",
         "included_ai_budget_microusd": args.get("included_ai_budget_microusd"),
         "included_action_quota": 0 if args.get("included_action_quota") in {None, ""} else args.get("included_action_quota"),
-        "allow_overage": bool(args.get("allow_overage")),
         "stripe_product_id": args.get("stripe_product_id"),
         "stripe_price_id": args.get("stripe_price_id"),
         "source": args.get("source") or "takyon",
@@ -17371,9 +18394,11 @@ def _ensure_sqlite_app_profile(
     if existing is not None:
         return dict(existing)
     user = conn.execute(
-        "SELECT name FROM app_users WHERE business_slug = ? AND id = ?",
+        "SELECT name, email FROM app_users WHERE business_slug = ? AND id = ?",
         (business_slug, app_user_id),
     ).fetchone()
+    if user is not None and _is_service_email(user["email"]):
+        raise TakyonError("service identities have no profile")
     now = _now()
     resolved_display_name = display_name if display_name is not None else (
         str(user["name"]) if user is not None and user["name"] is not None else None
@@ -17423,6 +18448,8 @@ def _resolve_sqlite_app_user(
         ).fetchone())
     if email:
         normalized_email = _normalize_email(str(email))
+        if create_if_missing and _is_service_email(normalized_email):
+            raise TakyonError("service identities cannot be managed as app customers")
         user = _store()._row_to_dict(conn.execute(
             "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
             (business_slug, normalized_email),
@@ -17553,6 +18580,20 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
     try:
         business = _slugify(str(args.get("business") or ""))
         email = _normalize_email(str(args.get("email") or ""))
+        if _is_service_email(email):
+            return tool_result({
+                "success": True,
+                "business": business,
+                "email": email,
+                "magic_link_id": "",
+                "token": "",
+                "verify_url": "",
+                "expires_at": "",
+                "email_sent": False,
+                "email_requested": bool(args.get("send_email")),
+                "provider_message_id": None,
+                "external_side_effects": "none",
+            })
         origin = str(args.get("origin") or "").rstrip("/")
         app_slug = _file_slug(str(args.get("app_slug") or business), business)
         send_email = bool(args.get("send_email"))
@@ -17679,6 +18720,16 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                 str(business_row.get("work_focus") or "all"),
             )
             if isinstance(conn, _PGConn):
+                link_target = store._row_to_dict(conn.execute(
+                    "SELECT u.id, u.email, u.status FROM app_magic_links l "
+                    "JOIN app_users u ON u.business_slug = l.business_slug AND u.id = l.app_user_id "
+                    "WHERE l.business_slug = ? AND l.token_hash = ? AND l.used_at IS NULL AND l.expires_at > ? LIMIT 1",
+                    (business, _hash_token(token), _now()),
+                ).fetchone())
+                if not link_target:
+                    raise TakyonError("magic link is invalid, expired, or already used")
+                if _app_user_is_service_identity(link_target):
+                    raise TakyonError("magic link is invalid, expired, or already used")
                 leaves = store._app_leaves()
                 with store._leaf_conn(conn) as leaf:
                     session, session_token = leaves["identity"].verify_magic_link(leaf, business, token)
@@ -17738,6 +18789,8 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                 user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, link["app_user_id"])).fetchone())
                 if not user:
                     raise TakyonError("magic link user is missing")
+                if _app_user_is_service_identity(user):
+                    raise TakyonError("magic link is invalid, expired, or already used")
                 if str(user.get("status") or "active") != "active":
                     raise TakyonError("app user is not active")
                 now = _now()
@@ -17972,6 +19025,8 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
                     raise TakyonError("app profile not found")
+                if _is_service_email(resolved.user.email):
+                    raise TakyonError("service identities have no profile")
                 if resolved.profile is None:
                     with store._leaf_conn(conn) as leaf:
                         resolved = leaves["profiles"].ensure_profile(
@@ -18006,6 +19061,8 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
                     raise TakyonError("app profile read requires session_token, app_user_id, or email")
                 if not user:
                     raise TakyonError("app profile not found")
+                if _app_user_is_service_identity(user):
+                    raise TakyonError("service identities have no profile")
                 profile = _ensure_sqlite_app_profile(
                     conn,
                     business,
@@ -18520,6 +19577,11 @@ def handle_business_act_on_app_connection(args: dict, **_: Any) -> str:
 
 def handle_business_list_app_records(args: dict, **_: Any) -> str:
     store = _store()
+    records_mod = store._app_leaves()["records"]
+    # records-v2: a bounded filter/sort/cursor query is requested only when one of these
+    # is present; otherwise this stays the plain newest-first list (back-compat).
+    query_requested = any(args.get(k) is not None for k in ("filters", "sort", "cursor"))
+    next_cursor: str | None = None
     try:
         business = _resolved_business_slug(args, required=True)
         limit = _clamp_int(args.get("limit"), default=50, minimum=1, maximum=200)
@@ -18534,20 +19596,37 @@ def handle_business_list_app_records(args: dict, **_: Any) -> str:
                 leaves = store._app_leaves()
                 try:
                     with store._leaf_conn(conn) as leaf:
-                        resolved = leaves["records"].list_records(
-                            leaf,
-                            business,
-                            app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                            email=(str(args.get("email")) if args.get("email") else None),
-                            session_token=(str(args.get("session_token")) if args.get("session_token") else None),
-                            record_type=record_type,
-                            limit=limit,
-                        )
+                        if query_requested:
+                            resolved = leaves["records"].query_records(
+                                leaf,
+                                business,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                record_type=record_type,
+                                filters=args.get("filters"),
+                                sort=args.get("sort"),
+                                cursor=args.get("cursor"),
+                                limit=args.get("limit"),
+                            )
+                        else:
+                            resolved = leaves["records"].list_records(
+                                leaf,
+                                business,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                record_type=record_type,
+                                limit=limit,
+                            )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
                     raise TakyonError("app account not found")
-                user, records = resolved
+                if query_requested:
+                    user, records, next_cursor = resolved
+                else:
+                    user, records = resolved
                 user_payload = _app_user_runtime_payload(user)
                 record_payloads = [_app_record_runtime_payload(record) for record in records]
             else:
@@ -18578,11 +19657,38 @@ def handle_business_list_app_records(args: dict, **_: Any) -> str:
                 if record_type:
                     query += " AND record_type = ?"
                     params.append(record_type)
-                query += " ORDER BY updated_at DESC LIMIT ?"
-                params.append(limit)
-                rows = conn.execute(query, tuple(params)).fetchall()
+                if query_requested:
+                    try:
+                        where, order_sql, limit_value, query_params = records_mod.compile_record_query(
+                            filters=args.get("filters"),
+                            sort=args.get("sort"),
+                            cursor=args.get("cursor"),
+                            limit=args.get("limit"),
+                            dialect=records_mod._SQLITE_DIALECT,
+                        )
+                    except records_mod.AppRecordError as exc:
+                        raise TakyonError(str(exc)) from exc
+                    for fragment in where:
+                        query += f" AND {fragment}"
+                    params.extend(query_params)
+                    query += f" {order_sql} LIMIT ?"
+                    params.append(limit_value + 1)
+                    rows = conn.execute(query, tuple(params)).fetchall()
+                    record_rows = [store._row_to_dict(row) for row in rows]
+                    if len(record_rows) > limit_value:
+                        record_rows = record_rows[:limit_value]
+                        last = record_rows[-1]
+                        next_cursor = records_mod.encode_query_record_cursor(
+                            last,
+                            sort=args.get("sort"),
+                            dialect=records_mod._SQLITE_DIALECT,
+                        )
+                else:
+                    query += " ORDER BY updated_at DESC LIMIT ?"
+                    params.append(limit)
+                    record_rows = [store._row_to_dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
                 user_payload = _app_user_runtime_payload(user)
-                record_payloads = [_app_record_runtime_payload(store._row_to_dict(row)) for row in rows]
+                record_payloads = [_app_record_runtime_payload(row) for row in record_rows]
         return tool_result(
             {
                 "success": True,
@@ -18591,6 +19697,7 @@ def handle_business_list_app_records(args: dict, **_: Any) -> str:
                 "count": len(record_payloads),
                 "user": user_payload,
                 "records": record_payloads,
+                "next_cursor": next_cursor or "",
             }
         )
     except Exception as exc:
@@ -18693,6 +19800,227 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
             else {}
         )
         return tool_result({"success": True, **payload})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_list_app_media(args: dict, **_: Any) -> str:
+    try:
+        try:
+            from . import app_media as takyon_app_media
+        except Exception:
+            from plugins.takyon import app_media as takyon_app_media
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+        usage = takyon_app_media.media_usage(store, business)
+        return tool_result({"success": True, "business": business, **usage})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def app_media_get_bytes(business: str, media_id: str, session_token: str) -> dict[str, Any]:
+    """Route-only: return {content: bytes, mime, size_bytes} for a session-gated media fetch."""
+    try:
+        from . import app_media as takyon_app_media
+    except Exception:
+        from plugins.takyon import app_media as takyon_app_media
+    store = _store()
+    business_slug = _slugify(str(business or ""))
+    return takyon_app_media.get_media(
+        store, business_slug=business_slug, media_id=str(media_id or ""), session_token=str(session_token or "")
+    )
+
+
+def _media_session_user_id(store: "TakyonStore", business: str, session_token: str) -> str | None:
+    try:
+        from . import app_media as takyon_app_media
+    except Exception:
+        from plugins.takyon import app_media as takyon_app_media
+    return takyon_app_media._session_user_id(store, business, session_token)
+
+
+def handle_business_upload_app_media(args: dict, **_: Any) -> str:
+    """Route-only (not a CEO tool): customer media upload through the media rail."""
+    try:
+        try:
+            from . import app_media as takyon_app_media
+        except Exception:
+            from plugins.takyon import app_media as takyon_app_media
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        session_token = str(args.get("session_token") or "").strip()
+        with store._connect() as conn:
+            surface = store._app_surface_contract(conn, business)
+            if "media" not in _surface_runtime_features(surface):
+                raise TakyonError("runtime_features does not include media for this business")
+        user_id = _media_session_user_id(store, business, session_token) if session_token else None
+        if not user_id:
+            raise TakyonError("app account not found")
+        idempotency_key = str(args.get("idempotency_key") or "").strip() or f"media:{business}:{uuid.uuid4().hex}"
+        result = takyon_app_media.store_media(
+            store,
+            business_slug=business,
+            app_user_id=user_id,
+            filename=str(args.get("filename") or ""),
+            content=args.get("content") or b"",
+            mime=str(args.get("mime") or ""),
+            idempotency_key=idempotency_key,
+            test_mode=_business_mode(store, business) == "test",
+            principal={"kind": "session", "id": user_id},
+        )
+        return tool_result({"success": True, **result})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_delete_app_media(args: dict, **_: Any) -> str:
+    """Route-only (not a CEO tool): uploader-only media delete."""
+    try:
+        try:
+            from . import app_media as takyon_app_media
+        except Exception:
+            from plugins.takyon import app_media as takyon_app_media
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        session_token = str(args.get("session_token") or "").strip()
+        user_id = _media_session_user_id(store, business, session_token) if session_token else None
+        if not user_id:
+            raise TakyonError("app account not found")
+        result = takyon_app_media.delete_media(
+            store, business_slug=business, media_id=str(args.get("media_id") or ""), app_user_id=user_id
+        )
+        return tool_result({"success": True, **result})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_send_app_email(args: dict, **_: Any) -> str:
+    try:
+        try:
+            from . import app_actions as takyon_app_actions
+            from . import app_email as takyon_app_email
+        except Exception:
+            from plugins.takyon import app_actions as takyon_app_actions
+            from plugins.takyon import app_email as takyon_app_email
+
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        recipient = str(args.get("app_user_id") or args.get("recipient_app_user_id") or "").strip()
+        if not recipient:
+            raise TakyonError("app_user_id (recipient) is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        session_token = str(args.get("session_token") or "").strip()
+        with store._connect() as conn:
+            surface = store._app_surface_contract(conn, business)
+            if "email" not in _surface_runtime_features(surface):
+                raise TakyonError("runtime_features does not include email for this business")
+            principal: dict[str, Any] = {"kind": "owner"}
+            if session_token:
+                if isinstance(conn, _PGConn):
+                    leaves = store._app_leaves()
+                    with store._leaf_conn(conn) as leaf:
+                        user = leaves["identity"].validate_session(leaf, business, session_token)
+                    if user is None:
+                        raise TakyonError("app account not found")
+                    caller_email = user.email
+                    principal = {"kind": "service", "id": user.id, "email": user.email}
+                else:
+                    user = _resolve_sqlite_app_user(conn, business, session_token=session_token)
+                    if not user:
+                        raise TakyonError("app account not found")
+                    caller_email = str(user.get("email") or "")
+                    principal = {"kind": "service", "id": str(user.get("id") or ""), "email": caller_email}
+                if not takyon_app_actions.is_service_email(caller_email):
+                    raise TakyonError("email sends are service-side only; customer sessions cannot send product email")
+        html_raw = args.get("html") if args.get("html") is not None else args.get("html_body")
+        result = takyon_app_email.send_app_email(
+            store,
+            business_slug=business,
+            recipient_app_user_id=recipient,
+            subject=str(args.get("subject") or ""),
+            text_body=str(args.get("text") or args.get("text_body") or ""),
+            html_body=str(html_raw) if html_raw is not None else None,
+            purpose=str(args.get("purpose") or "product_email"),
+            idempotency_key=idempotency_key,
+            test_mode=_business_mode(store, business) == "test",
+            principal=principal,
+        )
+        return tool_result({"success": True, **result})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
+    try:
+        try:
+            from . import app_actions as takyon_app_actions
+        except Exception:
+            from plugins.takyon import app_actions as takyon_app_actions
+        from gateway.session_context import get_session_env
+
+        active_task_kind = str(
+            get_session_env("TAKYON_SESSION_TASK_KIND", "") or _ACTIVE_OPERATOR_TASK_KIND.get() or ""
+        ).strip().lower()
+        if active_task_kind == "ceo_bootstrap":
+            raise TakyonError(
+                "app action invocation is unavailable during ceo_bootstrap; finish bootstrap and continue into takyon-product-workflow first"
+            )
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        action_name = str(args.get("action") or args.get("name") or "").strip().lower()
+        if not action_name:
+            raise TakyonError("action is required")
+        session_token = str(args.get("session_token") or "").strip()
+        if not session_token:
+            raise TakyonError("session_token is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        with store._connect() as conn:
+            surface = store._app_surface_contract(conn, business)
+            if "actions" not in _surface_runtime_features(surface):
+                raise TakyonError("runtime_features does not include actions for this business")
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                with store._leaf_conn(conn) as leaf:
+                    user = leaves["identity"].validate_session(leaf, business, session_token)
+                if user is None:
+                    raise TakyonError("app account not found")
+                principal_user = {
+                    "id": user.id,
+                    "email": user.email,
+                    "tier": user.tier,
+                    "status": user.status,
+                }
+            else:
+                user = _resolve_sqlite_app_user(conn, business, session_token=session_token)
+                if not user:
+                    raise TakyonError("app account not found")
+                principal_user = {
+                    "id": str(user.get("id") or ""),
+                    "email": str(user.get("email") or ""),
+                    "tier": str(user.get("tier") or ""),
+                    "status": str(user.get("status") or ""),
+                }
+        result = takyon_app_actions.invoke_action(
+            store,
+            business_slug=business,
+            action_name=action_name,
+            payload=args.get("payload") if "payload" in args else {},
+            principal={
+                "kind": "session",
+                "session_token": session_token,
+                "user": principal_user,
+            },
+            trigger="http",
+            idempotency_key=idempotency_key,
+            bound_origin=str(args.get("bound_origin") or ""),
+        )
+        return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -19069,6 +20397,38 @@ def handle_business_publish_test_outreach(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
+_X_IMAGE_MEDIA_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+_X_VIDEO_MEDIA_SUFFIXES = frozenset({".mp4"})
+
+
+def _validated_x_media_paths(store: "TakyonStore", business: str, raw_media_paths: Any) -> list[str]:
+    validated: list[str] = []
+    image_count = 0
+    video_count = 0
+    for raw in _as_list(raw_media_paths):
+        rel = _safe_relpath(str(raw or ""), field="media_paths").as_posix()
+        abs_path = store._resolve_business_file(business, rel)
+        if not abs_path.is_file():
+            raise TakyonError(f"media file not found: {rel}")
+        suffix = abs_path.suffix.lower()
+        if suffix in _X_IMAGE_MEDIA_SUFFIXES:
+            image_count += 1
+        elif suffix in _X_VIDEO_MEDIA_SUFFIXES:
+            video_count += 1
+        else:
+            raise TakyonError(
+                f"unsupported X media file type for {rel}; only png, jpg, jpeg, gif, webp, and mp4 are supported"
+            )
+        validated.append(rel)
+    if image_count and video_count:
+        raise TakyonError("X media attachments cannot mix images and video")
+    if image_count > 4:
+        raise TakyonError("X media attachments support at most 4 images")
+    if video_count > 1:
+        raise TakyonError("X media attachments support at most 1 video")
+    return validated
+
+
 def handle_business_x_publish_outreach(args: dict, **_: Any) -> str:
     try:
         x_args = dict(args)
@@ -19092,6 +20452,7 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
         body = _normalize_outreach_body(args.get("body") or args.get("content"))
         if not body:
             raise TakyonError("body is required")
+        media_paths = _validated_x_media_paths(store, business, args.get("media_paths"))
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
             business_mode = _effective_business_mode(business_row.get("mode"))
@@ -19110,11 +20471,14 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
         }
         if canonical_replacements:
             metadata["canonicalized_product_links"] = canonical_replacements
+        if media_paths:
+            metadata["media_paths"] = list(media_paths)
 
         canonical_args = dict(args)
         canonical_args["business"] = business
         canonical_args["body"] = body
         canonical_args["metadata"] = metadata
+        canonical_args["media_paths"] = list(media_paths)
         if business_mode == "test":
             return handle_business_publish_test_outreach(canonical_args)
 
@@ -19161,6 +20525,7 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
             "destination_label": destination_label,
             "thread_external_id": args.get("thread_external_id"),
             "metadata": metadata,
+            "media_paths": list(media_paths),
             "requested_external_side_effect": "publish_outreach",
         }
         if is_x_outreach:
@@ -19409,6 +20774,137 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
                 "summary_path": summary_rel,
                 "totals": summary.get("totals") if isinstance(summary, dict) else {},
                 "value": sync_receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def _composio_result_items_and_meta(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    current = payload
+    for _ in range(4):
+        if isinstance(current, Mapping):
+            data = current.get("data")
+            if isinstance(data, list):
+                return [dict(item) for item in data if isinstance(item, Mapping)], (
+                    dict(current.get("meta")) if isinstance(current.get("meta"), Mapping) else {}
+                )
+            items = current.get("items")
+            if isinstance(items, list):
+                return [dict(item) for item in items if isinstance(item, Mapping)], (
+                    dict(current.get("meta")) if isinstance(current.get("meta"), Mapping) else {}
+                )
+            if data is not None and data is not current:
+                current = data
+                continue
+        break
+    if isinstance(current, list):
+        return [dict(item) for item in current if isinstance(item, Mapping)], {}
+    if isinstance(current, Mapping):
+        items = current.get("items")
+        if isinstance(items, list):
+            return [dict(item) for item in items if isinstance(item, Mapping)], (
+                dict(current.get("meta")) if isinstance(current.get("meta"), Mapping) else {}
+            )
+    return [], {}
+
+
+def handle_business_x_search(args: dict, **_: Any) -> str:
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise TakyonError("query is required")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        max_results = _clamp_int(args.get("max_results"), default=10, minimum=10, maximum=100)
+        since_id = str(args.get("since_id") or "").strip()
+        snapshot_key = _file_slug(idempotency_key, "x-search")
+        snapshot_rel = f"metrics/x/search/{snapshot_key}.json"
+        snapshot_abs = store._resolve_business_file(business, snapshot_rel)
+        prior = _read_existing_receipt(snapshot_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_x_search",
+                    "business": business,
+                    "idempotent": True,
+                    "query": query,
+                    "snapshot_path": snapshot_rel,
+                    "status": prior.get("status") or "synced",
+                    "tweets": prior.get("tweets") or [],
+                    "meta": prior.get("meta") or {},
+                    "value": prior,
+                }
+            )
+
+        search_arguments: dict[str, Any] = {
+            "query": query,
+            # [composio-schema] Confirm TWITTER_RECENT_SEARCH uses max_results.
+            "max_results": max_results,
+            "tweet_fields": ["created_at", "public_metrics", "author_id"],
+        }
+        if since_id:
+            # [composio-schema] Confirm TWITTER_RECENT_SEARCH uses since_id.
+            search_arguments["since_id"] = since_id
+        payload = composio_distribution.twitter_execute_tool(
+            "TWITTER_RECENT_SEARCH",
+            arguments=search_arguments,
+            timeout=60.0,
+        )
+        tweets, meta = _composio_result_items_and_meta(payload)
+        snapshot = {
+            "idempotency_key": idempotency_key,
+            "success": True,
+            "status": "synced",
+            "business": business,
+            "query": query,
+            "requested_max_results": max_results,
+            "since_id": since_id or None,
+            "result_count": len(tweets),
+            "newest_id": str(meta.get("newest_id") or "").strip(),
+            "oldest_id": str(meta.get("oldest_id") or "").strip(),
+            "meta": meta,
+            "tweets": tweets,
+            "synced_at": _now(),
+        }
+        _atomic_write_text(snapshot_abs, json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/metrics:x/search",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "x.search",
+                    "payload": {
+                        "query": query,
+                        "requested_max_results": max_results,
+                        "result_count": len(tweets),
+                        "snapshot_path": snapshot_rel,
+                    },
+                }
+            ],
+            idempotency_key=idempotency_key,
+            reason=args.get("reason") or "record x search snapshot",
+            actor=args.get("actor") or "agent",
+        )
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_x_search",
+                "business": business,
+                "status": "synced",
+                "query": query,
+                "snapshot_path": snapshot_rel,
+                "result_count": len(tweets),
+                "newest_id": snapshot["newest_id"],
+                "oldest_id": snapshot["oldest_id"],
+                "tweets": tweets,
+                "meta": meta,
+                "value": snapshot,
             }
         )
     except Exception as exc:
@@ -21269,7 +22765,6 @@ _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
 _REDDIT_ADS_API_BASE = "https://ads-api.reddit.com/api/v3"
-_REDDIT_ADS_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 _REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _REDDIT_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
 _META_VALID_CTA = {
@@ -21281,6 +22776,7 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
     "x_publish_outreach": 1,
+    "reddit_publish_outreach": 1,
     "meta_ad_launch": 1,
     "reddit_ad_launch": 1,
 }
@@ -21288,11 +22784,13 @@ _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "x_publish_outreach": "TAKYON_CREATIVE_CREDITS_X_POST",
+    "reddit_publish_outreach": "TAKYON_CREATIVE_CREDITS_REDDIT_POST",
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
     "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
 }
 _CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS = {
     "x_publish_outreach": "x",
+    "reddit_publish_outreach": "reddit",
     "meta_ad_launch": "meta",
     "reddit_ad_launch": "reddit",
 }
@@ -21306,30 +22804,79 @@ def _meta_daily_budget_cap() -> float:
         return _META_MAX_DAILY_BUDGET_USD_DEFAULT
 
 
+def _meta_env_value(env_key: str) -> str:
+    if safebox.is_sensitive_env_key(env_key):
+        try:
+            value = safebox.read_env_backed_value(env_key) or ""
+        except Exception:
+            value = os.getenv(env_key) or ""
+    else:
+        value = os.getenv(env_key) or ""
+    return str(value).strip()
+
+
 def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
-    """Resolve Meta Marketing API config from env. Never returns the token to callers that print."""
+    """Resolve Meta Ads config from env and the active Composio connection."""
     load_takyon_env()
-    token = (
-        safebox.read_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN")
-        or safebox.read_env_backed_value("META_ACCESS_TOKEN")
-        or safebox.read_env_backed_value("FACEBOOK_ACCESS_TOKEN")
-        or ""
-    ).strip()
-    if require_token and not token:
-        raise TakyonError(
-            "Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN"
-        )
     version = (os.getenv("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
     if not version:
         version = _META_DEFAULT_GRAPH_VERSION
     elif not version.startswith("v"):
         version = f"v{version}"
-    return {
-        "token": token,
+    cfg = {
+        "token": "",
         "version": version,
         "ad_account_id": (os.getenv("META_AD_ACCOUNT_ID") or "").strip(),
         "page_id": (os.getenv("META_PAGE_ID") or "").strip(),
+        "composio_connected_account_id": "",
+        "composio_user_id": (
+            _meta_env_value("COMPOSIO_METAADS_USER_ID")
+            or _meta_env_value("COMPOSIO_USER_ID")
+            or "takyon_prod_operator"
+        ),
+        "composio_alias": _meta_env_value("COMPOSIO_METAADS_ALIAS") or "takyon-prod-meta-ads",
     }
+    if require_token:
+        try:
+            cfg["composio_connected_account_id"] = composio_distribution.resolve_metaads_connected_account_id()
+        except Exception as exc:
+            raise TakyonError(f"Meta action requires a Composio Meta Ads connection: {exc}") from exc
+    return cfg
+
+
+def _business_file_presigned_get_url(
+    business: str,
+    rel: str,
+    *,
+    expires_in: int = 3600,
+) -> str:
+    from . import storage
+
+    store = _store()
+    relative = _canonical_business_relpath(rel)
+    store._sync_business_workspace_remote(business)
+    backend = store._workspace_storage_backend()
+    backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+    if backend_name != "supabase_s3":
+        raise TakyonError(
+            "Meta Composio video upload requires the supabase_s3 workspace storage backend"
+        )
+    client = getattr(backend, "_client", None)
+    bucket = str(getattr(backend, "bucket", "") or "").strip()
+    if client is None or not bucket:
+        raise TakyonError("Meta Composio video upload could not access the workspace storage client")
+    key = f"{storage.object_prefix(_slugify(business))}{relative.as_posix()}"
+    try:
+        return str(
+            client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=max(60, int(expires_in or 3600)),
+            )
+            or ""
+        ).strip()
+    except Exception as exc:
+        raise TakyonError(f"failed to create a presigned URL for {relative.as_posix()}: {exc}") from exc
 
 
 def _meta_account_path(ad_account_id: str) -> str:
@@ -21348,90 +22895,111 @@ def _meta_graph(
     host: str = "graph.facebook.com",
     timeout: int = 60,
 ) -> dict[str, Any]:
-    """Call the Meta Graph API. Errors surface Meta's body but never the access token."""
+    """Call the Meta Graph API via the Composio Meta Ads connection."""
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if not connected_account_id:
+        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
     clean = {k: v for k, v in (params or {}).items() if v is not None}
-    clean["access_token"] = cfg["token"]
     rel = path.lstrip("/")
-    url = f"https://{host}/{cfg['version']}/{rel}"
     method = method.upper()
-    if method == "GET":
-        request = urllib.request.Request(f"{url}?{urllib.parse.urlencode(clean)}", method="GET")
-    else:
-        data = urllib.parse.urlencode(clean).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+    try:
+        payload = composio_distribution.metaads_proxy_request(
             method=method,
+            endpoint=f"https://{host}/{cfg['version']}/{rel}",
+            connected_account_id=connected_account_id,
+            body=clean if method != "GET" else None,
+            parameters=[
+                {"name": key, "value": str(value), "type": "query"}
+                for key, value in clean.items()
+            ]
+            if method == "GET"
+            else None,
+            timeout=float(timeout),
         )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise TakyonError(f"Meta Graph {method} /{rel} failed: {exc.code} {body}") from exc
-    except urllib.error.URLError as exc:
-        raise TakyonError(f"Meta Graph {method} /{rel} connection error: {exc.reason}") from exc
+    except Exception as exc:
+        raise TakyonError(f"Meta Graph {method} /{rel} failed via Composio: {exc}") from exc
+    result = _composio_tool_unwrap(payload)
+    if isinstance(result, Mapping):
+        return dict(result)
+    if isinstance(result, list):
+        return {"data": result}
+    return {}
 
 
-def _meta_upload_advideo(video_path: Path, cfg: dict[str, Any], *, name: str) -> str:
-    """Upload a local mp4 as an AdVideo via multipart (graph-video host). Returns the video id."""
+def _meta_upload_advideo(
+    video_path: Path,
+    cfg: dict[str, Any],
+    *,
+    name: str,
+    business: str = "",
+    video_rel: str = "",
+) -> str:
+    """Upload a local mp4 to Meta via Composio using a short-lived signed file URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
-    url = f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos"
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if not connected_account_id:
+        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
+    if not business or not video_rel:
+        raise TakyonError("Meta Composio video upload requires the business slug and ad_video_path")
+    signed_url = _business_file_presigned_get_url(business, video_rel)
     try:
-        import httpx  # lazy: only the live multipart upload needs it
-    except Exception as exc:  # pragma: no cover - dependency missing
-        raise TakyonError("Meta video upload requires the httpx package") from exc
-    try:
-        with video_path.open("rb") as handle:
-            resp = httpx.post(
-                url,
-                data={"access_token": cfg["token"], "name": name},
-                files={"source": (video_path.name, handle, "video/mp4")},
-                timeout=180.0,
-            )
-    except httpx.HTTPError as exc:
-        raise TakyonError(f"Meta video upload connection error: {exc}") from exc
-    if resp.status_code >= 400:
-        raise TakyonError(f"Meta video upload failed: {resp.status_code} {resp.text}")
-    video_id = str((resp.json() or {}).get("id") or "").strip()
+        payload = composio_distribution.metaads_proxy_request(
+            method="POST",
+            endpoint=f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos",
+            connected_account_id=connected_account_id,
+            body={
+                "name": name,
+                "file_url": signed_url,
+            },
+            timeout=180.0,
+        )
+    except Exception as exc:
+        raise TakyonError(f"Meta video upload failed via Composio: {exc}") from exc
+    video_id = str(_composio_tool_mapping(payload).get("id") or "").strip()
     if not video_id:
-        raise TakyonError(f"Meta video upload returned no id: {resp.text}")
+        raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
     return video_id
 
 
 def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Upload a local image as an AdImage. Returns the uploaded image hash and URL when present."""
+    """Upload a local image to Meta via Composio and return the image hash and URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
-    url = f"https://graph.facebook.com/{cfg['version']}/{acct}/adimages"
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if not connected_account_id:
+        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
     try:
-        import httpx  # lazy: only the live multipart upload needs it
-    except Exception as exc:  # pragma: no cover - dependency missing
-        raise TakyonError("Meta image upload requires the httpx package") from exc
-    content_type = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
-    try:
-        with image_path.open("rb") as handle:
-            resp = httpx.post(
-                url,
-                data={"access_token": cfg["token"], "name": image_path.name},
-                files={"image_file": (image_path.name, handle, content_type)},
-                timeout=180.0,
-            )
-    except httpx.HTTPError as exc:
-        raise TakyonError(f"Meta image upload connection error: {exc}") from exc
-    if resp.status_code >= 400:
-        raise TakyonError(f"Meta image upload failed: {resp.status_code} {resp.text}")
-    payload = resp.json() or {}
-    images = payload.get("images") if isinstance(payload, dict) else None
-    if not isinstance(images, dict) or not images:
-        raise TakyonError(f"Meta image upload returned no image hash: {resp.text}")
-    first = next(iter(images.values()))
-    image_hash = str((first or {}).get("hash") or "").strip()
+        descriptor = composio_distribution.upload_file_descriptor(
+            toolkit_slug="metaads",
+            tool_slug="METAADS_UPLOAD_AD_IMAGE",
+            file_path=image_path,
+            timeout=180.0,
+        )
+        payload = composio_distribution.metaads_execute_tool(
+            "METAADS_UPLOAD_AD_IMAGE",
+            arguments={
+                "ad_account_id": acct,
+                "name": image_path.name,
+                "image": descriptor,
+            },
+            connected_account_id=connected_account_id,
+            timeout=180.0,
+        )
+    except Exception as exc:
+        raise TakyonError(f"Meta image upload failed via Composio: {exc}") from exc
+    result = _composio_tool_mapping(payload)
+    image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
+    image_url = str(result.get("url") or result.get("image_url") or "").strip()
+    images = result.get("images") if isinstance(result, dict) else None
+    if (not image_hash or not image_url) and isinstance(images, Mapping) and images:
+        first = next(iter(images.values()))
+        if isinstance(first, Mapping):
+            image_hash = image_hash or str(first.get("hash") or "").strip()
+            image_url = image_url or str(first.get("url") or "").strip()
     if not image_hash:
-        raise TakyonError(f"Meta image upload returned no image hash: {resp.text}")
+        raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
     return {
         "hash": image_hash,
-        "url": str((first or {}).get("url") or "").strip() or None,
+        "url": image_url or None,
     }
 
 
@@ -23002,168 +24570,241 @@ def _reddit_daily_budget_cap() -> float:
         return _REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT
 
 
-def _reddit_ads_state_path() -> Path:
-    return Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser() / "secrets" / "reddit_ads.json"
-
-
-def _reddit_ads_load_state(path: Path | None = None) -> dict[str, Any]:
-    state_path = path or _reddit_ads_state_path()
-    if not state_path.is_file():
-        return {}
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _reddit_ads_save_state(state: Mapping[str, Any], path: Path | None = None) -> None:
-    state_path = path or _reddit_ads_state_path()
-    _atomic_write_text(state_path, json.dumps(dict(state), ensure_ascii=False, indent=2) + "\n")
-
-
-def _reddit_ads_state_or_env(state: Mapping[str, Any], env_key: str, state_key: str | None = None) -> str:
+def _reddit_ads_env_value(env_key: str) -> str:
     if safebox.is_sensitive_env_key(env_key):
-        value = safebox.read_env_backed_value(env_key) or ""
+        try:
+            value = safebox.read_env_backed_value(env_key) or ""
+        except Exception:
+            value = os.getenv(env_key) or ""
     else:
         value = os.getenv(env_key) or ""
-    if value:
-        return str(value).strip()
-    return str(state.get(state_key or env_key.lower()) or "").strip()
+    return str(value).strip()
 
 
-def _reddit_ads_user_agent(cfg: Mapping[str, Any]) -> str:
-    explicit = str(cfg.get("user_agent") or "").strip()
-    if explicit:
-        return explicit
-    username = str(cfg.get("username") or "takyon").strip() or "takyon"
-    client_id = str(cfg.get("client_id") or "redditads").strip() or "redditads"
-    return f"desktop:{client_id}:v1 (by /u/{username})"
+def _normalize_reddit_subreddit(value: Any, *, required: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        if required:
+            raise TakyonError("subreddit is required")
+        return ""
+    normalized = re.sub(r"^/?r/", "", raw, flags=re.IGNORECASE).strip().strip("/")
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9_]+", normalized):
+        raise TakyonError(f"invalid subreddit: {raw}")
+    return normalized
 
 
-def _reddit_ads_token_request(
-    *,
-    client_id: str,
-    client_secret: str,
-    form_data: Mapping[str, Any],
-    user_agent: str,
-) -> dict[str, Any]:
-    auth = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
-    body = urllib.parse.urlencode({k: v for k, v in form_data.items() if v is not None}).encode("utf-8")
-    request = urllib.request.Request(
-        _REDDIT_ADS_TOKEN_URL,
-        data=body,
-        headers={
-            "Authorization": f"Basic {auth}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": user_agent,
-        },
-        method="POST",
-    )
+def _normalize_reddit_fullname(value: Any) -> str:
+    fullname = str(value or "").strip()
+    if fullname and not re.fullmatch(r"t[13]_[A-Za-z0-9]+", fullname):
+        raise TakyonError("thread_external_id must be a Reddit fullname like t3_<id> or t1_<id>")
+    return fullname
+
+
+def _reddit_subreddit_url(subreddit: str) -> str:
+    name = _normalize_reddit_subreddit(subreddit)
+    return f"https://www.reddit.com/r/{name}/" if name else ""
+
+
+def handle_business_reddit_publish_outreach(args: dict, **_: Any) -> str:
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise TakyonError(f"Reddit Ads token exchange failed ({exc.code}): {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise TakyonError(f"Reddit Ads token exchange connection error: {exc.reason}") from exc
+        reddit_args = dict(args)
+        channel = str(reddit_args.get("channel") or "").strip()
+        provider = str(reddit_args.get("provider") or "").strip()
+        if channel and _file_slug(channel, "") not in {"reddit"}:
+            raise TakyonError("business_reddit_publish_outreach only supports the Reddit channel")
+        if provider and _file_slug(provider, "") not in {"reddit"}:
+            raise TakyonError("business_reddit_publish_outreach only supports the Reddit provider")
+        reddit_args["channel"] = "reddit"
+        reddit_args["provider"] = "reddit"
+        return _handle_live_business_reddit_publish_outreach(reddit_args)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def _handle_live_business_reddit_publish_outreach(args: dict) -> str:
+    try:
+        store = _store()
+        business = _resolved_business_slug(args, required=True)
+        thread_external_id = _normalize_reddit_fullname(args.get("thread_external_id"))
+        subreddit = _normalize_reddit_subreddit(args.get("subreddit"), required=not thread_external_id)
+        title = str(args.get("title") or args.get("subject") or "").strip()
+        body = _normalize_outreach_body(args.get("body") or args.get("content"))
+        post_kind = _file_slug(str(args.get("post_kind") or "self").strip().lower(), "self")
+        if post_kind not in {"self", "link"}:
+            raise TakyonError("post_kind must be self or link")
+        url = _normalize_destination_url(args.get("url"))
+
+        if thread_external_id:
+            if not body:
+                raise TakyonError("body is required when thread_external_id is provided")
+            post_kind = "comment"
+        else:
+            if not title:
+                raise TakyonError("title is required for a Reddit post")
+            if post_kind == "self" and not body:
+                raise TakyonError("body is required for a self post")
+            if post_kind == "link" and not url:
+                raise TakyonError("url is required for a link post")
+
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            business_mode = _effective_business_mode(business_row.get("mode"))
+            canonical_product_url = _canonical_product_url(store, conn, business)
+
+        if body:
+            body, canonical_replacements = _canonicalize_business_product_links(
+                body,
+                business=business,
+                canonical_url=canonical_product_url,
+            )
+        else:
+            canonical_replacements = []
+        metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+        metadata = {
+            **metadata,
+            "canonical_product_url": canonical_product_url,
+        }
+        if canonical_replacements:
+            metadata["canonicalized_product_links"] = canonical_replacements
+        if subreddit:
+            metadata["subreddit"] = subreddit
+        if thread_external_id:
+            metadata["parent_fullname"] = thread_external_id
+
+        destination_url = _outreach_destination_url(
+            channel="reddit",
+            provider="reddit",
+            target=f"r/{subreddit}" if subreddit else thread_external_id,
+            destination_url=args.get("destination_url") or args.get("intended_destination_url") or _reddit_subreddit_url(subreddit),
+            metadata=metadata,
+        )
+        destination_label = str(
+            args.get("destination_label")
+            or metadata.get("destination_label")
+            or (f"r/{subreddit}" if subreddit else thread_external_id)
+            or ""
+        ).strip()
+
+        canonical_args = dict(args)
+        canonical_args.update(
+            {
+                "business": business,
+                "channel": "reddit",
+                "provider": "reddit",
+                "subreddit": subreddit,
+                "title": title,
+                "body": body,
+                "url": url,
+                "post_kind": post_kind,
+                "thread_external_id": thread_external_id,
+                "target": args.get("target") or (f"r/{subreddit}" if subreddit else thread_external_id),
+                "destination_url": destination_url,
+                "destination_label": destination_label,
+                "metadata": metadata,
+            }
+        )
+        if business_mode == "test":
+            return handle_business_publish_test_outreach(canonical_args)
+
+        requires_api = [
+            str(item).strip()
+            for item in _as_list(args.get("requires_api"))
+            if str(item).strip()
+        ]
+        requires_env = [
+            str(item).strip()
+            for item in _as_list(args.get("requires_env"))
+            if str(item).strip()
+        ]
+        requires_api.append("reddit")
+        credit_gate = _creative_credit_preflight_gate(
+            business,
+            action="reddit_publish_outreach",
+            budget_bucket="reddit",
+            metadata=metadata,
+        )
+        if not credit_gate.get("success"):
+            return tool_result(
+                {
+                    "success": False,
+                    "blocked": True,
+                    "action": "business_reddit_publish_outreach",
+                    "business": business,
+                    "channel": "reddit",
+                    "provider": "reddit",
+                    "status": credit_gate.get("status"),
+                    "requested_credits": credit_gate.get("requested_credits"),
+                    "available_credits": credit_gate.get("available_credits"),
+                    "balance_credits": credit_gate.get("balance_credits"),
+                    "reserved_credits": credit_gate.get("reserved_credits"),
+                    "budget_bucket": credit_gate.get("budget_bucket"),
+                    "channel_budget": credit_gate.get("channel_budget"),
+                    "error": credit_gate.get("error") or "reddit publish blocked on creative credits",
+                    "note": (
+                        "Live Reddit publication was not enqueued because the business creative-credit "
+                        "gate cannot cover the fixed Reddit post cost yet."
+                    ),
+                }
+            )
+
+        payload = {
+            "channel": "reddit",
+            "provider": "reddit",
+            "target": canonical_args["target"],
+            "recipient": args.get("recipient"),
+            "subject": title,
+            "title": title,
+            "body": body,
+            "url": url,
+            "post_kind": post_kind,
+            "subreddit": subreddit,
+            "destination_url": destination_url,
+            "destination_label": destination_label,
+            "thread_external_id": thread_external_id,
+            "metadata": metadata,
+            "requested_external_side_effect": "publish_outreach",
+        }
+        operation = {
+            "action": "job.enqueue",
+            "business": business,
+            "scope": args.get("scope") or f"business:{business}",
+            "kind": "reddit.publish_outreach",
+            "status": args.get("status") or "pending",
+            "payload": payload,
+            "requires_api": sorted(set(requires_api)),
+            "requires_env": sorted(set(requires_env)),
+            "worker_queue": True,
+            "worker_max_attempts": 1,
+        }
+        return _commit_tool(canonical_args, operation, scope=operation["scope"])
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
 
 
 def _reddit_ads_config(*, require_auth: bool = True) -> dict[str, Any]:
     load_takyon_env()
-    state_path = _reddit_ads_state_path()
-    state = _reddit_ads_load_state(state_path)
     cfg = {
-        "client_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_CLIENT_ID", "client_id"),
-        "client_secret": _reddit_ads_state_or_env(state, "REDDIT_ADS_CLIENT_SECRET", "client_secret"),
-        "redirect_uri": _reddit_ads_state_or_env(state, "REDDIT_ADS_REDIRECT_URI", "redirect_uri"),
-        "business_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_BUSINESS_ID", "business_id"),
-        "ad_account_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_ACCOUNT_ID", "ad_account_id"),
-        "profile_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_PROFILE_ID", "profile_id"),
-        "funding_instrument_id": _reddit_ads_state_or_env(
-            state, "REDDIT_ADS_FUNDING_INSTRUMENT_ID", "funding_instrument_id"
-        ),
-        "pixel_id": _reddit_ads_state_or_env(state, "REDDIT_ADS_PIXEL_ID", "pixel_id"),
-        "username": _reddit_ads_state_or_env(state, "REDDIT_ADS_USERNAME", "username"),
-        "user_agent": _reddit_ads_state_or_env(state, "REDDIT_ADS_USER_AGENT", "user_agent"),
-        "access_token": _reddit_ads_state_or_env(state, "REDDIT_ADS_ACCESS_TOKEN", "access_token"),
-        "refresh_token": _reddit_ads_state_or_env(state, "REDDIT_ADS_REFRESH_TOKEN", "refresh_token"),
-        "scope": _reddit_ads_state_or_env(state, "REDDIT_ADS_SCOPE", "scope"),
+        "business_id": _reddit_ads_env_value("REDDIT_ADS_BUSINESS_ID"),
+        "ad_account_id": _reddit_ads_env_value("REDDIT_ADS_ACCOUNT_ID"),
+        "profile_id": _reddit_ads_env_value("REDDIT_ADS_PROFILE_ID"),
+        "funding_instrument_id": _reddit_ads_env_value("REDDIT_ADS_FUNDING_INSTRUMENT_ID"),
+        "pixel_id": _reddit_ads_env_value("REDDIT_ADS_PIXEL_ID"),
         "api_base": _REDDIT_ADS_API_BASE,
-        "state_path": state_path if state_path.exists() else None,
-        "state": dict(state),
+        "composio_connected_account_id": "",
+        "composio_user_id": (
+            _reddit_ads_env_value("COMPOSIO_REDDIT_ADS_USER_ID")
+            or _reddit_ads_env_value("COMPOSIO_USER_ID")
+            or "takyon_prod_operator"
+        ),
+        "composio_alias": _reddit_ads_env_value("COMPOSIO_REDDIT_ADS_ALIAS") or "takyon-prod-reddit-ads",
     }
-    raw_expires = _reddit_ads_state_or_env(state, "REDDIT_ADS_TOKEN_EXPIRES_AT", "expires_at")
+    if not require_auth:
+        return cfg
     try:
-        cfg["expires_at"] = int(raw_expires) if raw_expires else 0
-    except (TypeError, ValueError):
-        cfg["expires_at"] = 0
-    if require_auth and (not cfg["client_id"] or not cfg["client_secret"]):
-        raise TakyonError(
-            "Reddit Ads action requires REDDIT_ADS_CLIENT_ID and REDDIT_ADS_CLIENT_SECRET "
-            "or a saved $TAKYON_HOME/secrets/reddit_ads.json auth state"
-        )
-    if require_auth and not (cfg["refresh_token"] or cfg["access_token"]):
-        raise TakyonError(
-            "Reddit Ads action requires REDDIT_ADS_REFRESH_TOKEN or REDDIT_ADS_ACCESS_TOKEN "
-            "or a saved $TAKYON_HOME/secrets/reddit_ads.json auth state"
-        )
-    if not cfg["user_agent"]:
-        cfg["user_agent"] = _reddit_ads_user_agent(cfg)
+        cfg["composio_connected_account_id"] = composio_distribution.resolve_reddit_ads_connected_account_id()
+    except Exception as exc:
+        raise TakyonError(f"Reddit Ads action requires a Composio Reddit Ads connection: {exc}") from exc
     return cfg
-
-
-def _reddit_ads_ensure_access_token(cfg: dict[str, Any]) -> str:
-    access_token = str(cfg.get("access_token") or "").strip()
-    expires_at = int(cfg.get("expires_at") or 0)
-    if access_token and (not expires_at or expires_at > int(time.time()) + 120):
-        return access_token
-
-    refresh_token = str(cfg.get("refresh_token") or "").strip()
-    if not refresh_token:
-        if access_token:
-            return access_token
-        raise TakyonError("Reddit Ads auth state does not include an access token or refresh token")
-
-    payload = _reddit_ads_token_request(
-        client_id=str(cfg.get("client_id") or ""),
-        client_secret=str(cfg.get("client_secret") or ""),
-        form_data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-        user_agent=_reddit_ads_user_agent(cfg),
-    )
-    cfg["access_token"] = str(payload.get("access_token") or "").strip()
-    cfg["refresh_token"] = str(payload.get("refresh_token") or refresh_token).strip()
-    cfg["scope"] = str(payload.get("scope") or cfg.get("scope") or "").strip()
-    try:
-        expires_in = int(payload.get("expires_in") or 0)
-    except (TypeError, ValueError):
-        expires_in = 0
-    cfg["expires_at"] = int(time.time()) + expires_in if expires_in > 0 else 0
-    state = dict(cfg.get("state") or {})
-    state.update(
-        {
-            "client_id": cfg.get("client_id"),
-            "client_secret": cfg.get("client_secret"),
-            "redirect_uri": cfg.get("redirect_uri"),
-            "business_id": cfg.get("business_id"),
-            "ad_account_id": cfg.get("ad_account_id"),
-            "profile_id": cfg.get("profile_id"),
-            "funding_instrument_id": cfg.get("funding_instrument_id"),
-            "pixel_id": cfg.get("pixel_id"),
-            "username": cfg.get("username"),
-            "user_agent": cfg.get("user_agent"),
-            "access_token": cfg.get("access_token"),
-            "refresh_token": cfg.get("refresh_token"),
-            "scope": cfg.get("scope"),
-            "expires_at": cfg.get("expires_at"),
-        }
-    )
-    cfg["state"] = state
-    state_path = cfg.get("state_path")
-    if isinstance(state_path, Path):
-        _reddit_ads_save_state(state, state_path)
-    return str(cfg.get("access_token") or "").strip()
 
 
 def _reddit_ads_request(
@@ -23174,33 +24815,16 @@ def _reddit_ads_request(
     json_body: Mapping[str, Any] | None = None,
     timeout: int = 60,
 ) -> dict[str, Any]:
-    token = _reddit_ads_ensure_access_token(cfg)
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "User-Agent": _reddit_ads_user_agent(cfg),
-        "Accept": "application/json",
-    }
-    body: bytes | None = None
-    if json_body is not None:
-        body = json.dumps(dict(json_body)).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    url = path if path.startswith("http://") or path.startswith("https://") else f"{cfg['api_base']}{path}"
-    request = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            content_type = response.headers.get("Content-Type", "")
-            data: Any
-            if "json" in content_type:
-                data = json.loads(raw)
-            else:
-                data = raw
-            return {"status": response.getcode(), "headers": dict(response.headers.items()), "data": data}
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise TakyonError(f"Reddit Ads {method.upper()} {path} failed: {exc.code} {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise TakyonError(f"Reddit Ads {method.upper()} {path} connection error: {exc.reason}") from exc
+        return composio_distribution.reddit_proxy_request(
+            method=method,
+            endpoint=path,
+            connected_account_id=str(cfg.get("composio_connected_account_id") or "").strip() or None,
+            body=json_body,
+            timeout=float(timeout),
+        )
+    except Exception as exc:
+        raise TakyonError(f"Reddit Ads {method.upper()} {path} failed via Composio: {exc}") from exc
 
 
 def _reddit_ads_data(payload: Any) -> Any:
@@ -23261,17 +24885,6 @@ def _reddit_ads_preflight(cfg: dict[str, Any]) -> dict[str, Any]:
         "pixel_id": str(cfg.get("pixel_id") or "").strip() or _reddit_ads_default_id(pixels),
     }
     cfg.update(defaults)
-    state = dict(cfg.get("state") or {})
-    changed = False
-    for key, value in defaults.items():
-        if value and str(state.get(key) or "").strip() != value:
-            state[key] = value
-            changed = True
-    if changed:
-        cfg["state"] = state
-        state_path = cfg.get("state_path")
-        if isinstance(state_path, Path):
-            _reddit_ads_save_state(state, state_path)
 
     return {
         "success": True,
@@ -25736,7 +27349,9 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         sdk_result: dict[str, Any] = {}
         pretend_findings: list[dict[str, Any]] = []
         surface_refresh: dict[str, Any] | None = None
+        surface_contract_update: dict[str, Any] | None = None
         worker_attempts = 0
+        surface_contract_retries: list[dict[str, Any]] = []
         active_max_turns = max_turns
         local_repair_retries: list[str] = []
         turn_cap_retries: list[dict[str, int]] = []
@@ -25758,7 +27373,16 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 surface=surface_for_worker,
                 instruction=instruction,
             )
-            resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
+            try:
+                resolved_guidance_skills, guidance_block = _compose_worker_guidance_block(guidance_skills)
+            except TakyonError:
+                # An explicit caller request for a missing guidance skill must fail loud. The
+                # auto-selected default design packs degrade to no guidance when a design skill is
+                # not installed, rather than failing the whole product build.
+                if "guidance_skills" in args:
+                    raise
+                resolved_guidance_skills, guidance_block = [], ""
+                guidance_selection_reason = "design packs unavailable; proceeded without guidance"
             if refresh_surface and workspace_targets_product_surface:
                 _enforce_canonical_product_surface_source_path(
                     business=business,
@@ -25801,20 +27425,28 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     surface=surface_for_worker,
                     plans=app.get("plans") if isinstance(app, dict) else None,
                 )
-            worker_instruction_parts = [instruction.rstrip()]
-            if guidance_block:
-                worker_instruction_parts.append(guidance_block)
-            if _workspace_needs_customer_ai_copy_contract(workspace_rel):
-                worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
-            if _workspace_needs_runtime_ui_contract(workspace_rel):
-                worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
-                runtime_ui_contract = _runtime_ui_contract_block(surface_for_worker)
-                if runtime_ui_contract:
-                    worker_instruction_parts.append(runtime_ui_contract)
-                worker_instruction_parts.append(_subuser_app_worker_contract_block(surface_for_worker, plans_configured=plans_configured))
-                worker_instruction_parts.append(_subuser_app_kit_contract_block(surface_for_worker))
-            worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract, NO_PRETEND_PRODUCT_CONTRACT])
-            worker_instruction = "\n\n".join(part for part in worker_instruction_parts if part)
+            def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
+                worker_instruction_parts = [instruction.rstrip()]
+                if guidance_block:
+                    worker_instruction_parts.append(guidance_block)
+                if _workspace_needs_customer_ai_copy_contract(workspace_rel):
+                    worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
+                if _workspace_needs_runtime_ui_contract(workspace_rel):
+                    worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
+                    runtime_ui_contract = _runtime_ui_contract_block(current_surface)
+                    if runtime_ui_contract:
+                        worker_instruction_parts.append(runtime_ui_contract)
+                    worker_instruction_parts.append(
+                        _subuser_app_worker_contract_block(
+                            current_surface,
+                            plans_configured=plans_configured,
+                        )
+                    )
+                    worker_instruction_parts.append(_subuser_app_kit_contract_block(current_surface))
+                worker_instruction_parts.extend([WORKER_CAPABILITY_CONTRACT, workspace_contract])
+                return "\n\n".join(part for part in worker_instruction_parts if part)
+
+            worker_instruction = build_worker_instruction(surface_for_worker)
             payload_base = {
                 "business": business,
                 "workspace": workspace_rel,
@@ -25833,8 +27465,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
             active_worker_instruction = worker_instruction
             max_local_repair_retries = 1 if refresh_surface and _workspace_needs_runtime_ui_contract(workspace_rel) else 0
+            max_surface_contract_retries = 2 if _workspace_needs_runtime_ui_contract(workspace_rel) else 0
             while True:
                 worker_attempts += 1
+                if _workspace_needs_runtime_ui_contract(workspace_rel):
+                    _write_worker_surface_contract_update_template(
+                        workspace_path,
+                        surface_for_worker,
+                    )
                 attempt_payload = {
                     **payload_base,
                     "maxTurns": active_max_turns,
@@ -25914,6 +27552,82 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             "Claude Agent SDK output blocked because source files were written under a "
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
+                if sdk_result.get("success") and _workspace_needs_runtime_ui_contract(workspace_rel):
+                    try:
+                        contract_update_request = _read_worker_surface_contract_update_request(
+                            workspace_path
+                        )
+                    finally:
+                        _clear_worker_surface_contract_update_request(workspace_path)
+                    if contract_update_request:
+                        surface_update_result = active_store.commit(
+                            scope=f"business:{business}",
+                            operations=[
+                                _worker_surface_upsert_operation(
+                                    business=business,
+                                    surface=surface_for_worker,
+                                    patch=contract_update_request["patch"],
+                                )
+                            ],
+                            idempotency_key=f"{idempotency_key}:worker-surface-contract:{worker_attempts}",
+                            reason=contract_update_request.get("why")
+                            or "worker-requested product surface contract update",
+                            actor=args.get("actor") or "agent",
+                        )
+                        summary = active_store.read(
+                            scope=f"business:{business}",
+                            query="summary",
+                            include=["app"],
+                        )
+                        app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
+                        plans_configured = (
+                            _app_summary_has_configured_plans(app)
+                            if _workspace_needs_runtime_ui_contract(workspace_rel)
+                            else False
+                        )
+                        surface_for_worker = app.get("surface") or app.get("surface_contract") or {}
+                        if not isinstance(surface_for_worker, dict):
+                            surface_for_worker = {}
+                        _materialize_subuser_app_kit(
+                            workspace_path,
+                            slug=business,
+                            surface=surface_for_worker,
+                            plans=app.get("plans") if isinstance(app, dict) else None,
+                        )
+                        worker_instruction = build_worker_instruction(surface_for_worker)
+                        surface_contract_update = {
+                            "requested": True,
+                            "why": contract_update_request.get("why") or "",
+                            "patch": contract_update_request["patch"],
+                            "result": surface_update_result,
+                        }
+                        if len(surface_contract_retries) < max_surface_contract_retries:
+                            patch_fields = sorted(contract_update_request["patch"].keys())
+                            retry_reason = str(contract_update_request.get("why") or "").strip()
+                            surface_contract_retries.append(
+                                {
+                                    "why": retry_reason,
+                                    "patch_fields": patch_fields,
+                                }
+                            )
+                            retry_note = _truncate_text(
+                                retry_reason or f"updated {', '.join(patch_fields)}",
+                                280,
+                            )
+                            _record_claude_agent_runtime_event(
+                                business=business,
+                                workspace_rel=workspace_rel,
+                                status="output",
+                                detail=f"Continuing same-run worker after contract update: {retry_note}",
+                                line=f"Continuing same-run worker after contract update: {retry_note}",
+                            )
+                            active_worker_instruction = _worker_surface_contract_retry_instruction(
+                                worker_instruction,
+                                why=retry_reason,
+                                patch_fields=patch_fields,
+                                attempt_number=worker_attempts + 1,
+                            )
+                            continue
                 pretend_findings = _scan_for_pretend_product_state(workspace_path) if sdk_result.get("success") else []
                 if pretend_findings:
                     sdk_result["success"] = False
@@ -25945,7 +27659,33 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         )
                 if sdk_result.get("success"):
                     # Persist successful worker edits before later refresh/publish logic can fail.
-                    active_store._sync_business_workspace_remote(business)
+                    # A worker build that cannot reach durable state is NOT a success: fail
+                    # closed with an exact blocker rather than reporting success while the
+                    # scratch tree (and its real edits) is discarded on exit.
+                    sync_status = active_store._sync_business_workspace_remote(business)
+                    if sync_status == "skipped_disallowed":
+                        sdk_result = {
+                            **sdk_result,
+                            "success": False,
+                            "error": (
+                                "workspace_sync_skipped: worker edits could not be persisted to durable "
+                                "business state on this host (remote workspace sync is disallowed for the "
+                                "configured backend outside the approved VPS). The scratch build is "
+                                "discarded. Set TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1 for dev, "
+                                "use the local storage backend, or run on the approved host."
+                            ),
+                            "blocker": "workspace_sync_skipped",
+                            "workspace_sync_status": sync_status,
+                        }
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="failed",
+                            detail="workspace_sync_skipped: durable persistence unavailable on this host",
+                            line="workspace_sync_skipped",
+                        )
+                    else:
+                        sdk_result = {**sdk_result, "workspace_sync_status": sync_status}
                 surface_refresh = None
                 if sdk_result.get("success") and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -26079,10 +27819,12 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "worker_stderr": sdk_result.get("worker_stderr"),
                         "raw_stdout": sdk_result.get("raw_stdout"),
                         "worker_attempts": worker_attempts,
+                        "surface_contract_retries": surface_contract_retries,
                         "local_repair_retries": local_repair_retries,
                         "turn_cap_retries": turn_cap_retries,
                         "pretend_product_findings": pretend_findings,
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
+                        "surface_contract_update": surface_contract_update,
                         "surface_refresh": surface_refresh,
                     },
                 }
@@ -26116,6 +27858,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "agent_record": agent_record,
             "surface_refresh": surface_refresh,
             "worker_attempts": worker_attempts,
+            "surface_contract_retries": surface_contract_retries,
             "local_repair_retries": local_repair_retries,
             "turn_cap_retries": turn_cap_retries,
             "summary": sdk_result.get("summary") or "",
@@ -26125,6 +27868,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "worker_stderr": sdk_result.get("worker_stderr"),
             "raw_stdout": sdk_result.get("raw_stdout"),
             "pretend_product_findings": pretend_findings,
+            "surface_contract_update": surface_contract_update,
         }
         if status != "completed":
             error_text = str(
@@ -26353,24 +28097,6 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_configure_app_budget", "Set product app budget cap.", {"business": _BUSINESS_PROP, "hard_limit_microusd": {"type": "integer"}, "status": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "hard_limit_microusd", "idempotency_key"]),
     },
     {
-        "name": "business_grant_app_subsidy",
-        "description": "Credit the business-owned app subsidy pool used as fallback funding for product subusers.",
-        "handler": handle_business_grant_app_subsidy,
-        "schema": _schema(
-            "business_grant_app_subsidy",
-            "Grant product app subsidy pool balance.",
-            {
-                "business": _BUSINESS_PROP,
-                "amount_microusd": {"type": "integer"},
-                "metadata": {"type": "object"},
-                "idempotency_key": _IDEMPOTENCY_PROP,
-                "reason": _REASON_PROP,
-                "actor": _ACTOR_PROP,
-            },
-            ["business", "amount_microusd", "idempotency_key"],
-        ),
-    },
-    {
         "name": "business_upsert_app_surface_contract",
         "description": "Record the business-owned product surface contract: source/routes, customer experience shape, plus publish target, policy, and done gate.",
         "handler": handle_business_upsert_app_surface_contract,
@@ -26382,18 +28108,15 @@ TAKYON_TOOL_DEFINITIONS = [
                 "status": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
-                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime features this product source should build toward, such as auth, account, profile, directory, records, connections, checkout, entitlements, usage, or generate. Legacy `billing` is accepted as an alias and normalizes to account + checkout."},
-                "app_mode": {"type": "string", "enum": ["standard_saas", "ai_tool", "api_product"], "description": "High-level subuser app shape for worker handoff and shared kit composition."},
-                "subscription_style": {"type": "string", "enum": ["monthly"], "description": "Subscription style the prepared subuser app kit should assume for this business. Monthly is the only supported customer pricing mode right now, and it should be treated as a paid-only monthly subscription path unless the operator explicitly records another offer shape."},
-                "api_mode": {"type": "string", "enum": ["none", "docs_playground", "external_api"], "description": "Whether this app exposes no API surface, docs/playground only, or a true external API product mode."},
-                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, generate=broken, or usage=live."},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared Takyon app-runtime rails this product builds toward, such as auth, account, profile, directory, records, connections, checkout, entitlements, usage, or actions. This is the one shared-rail contract; keep it minimal on a first bootstrap seed (the honest access shell wires auth/account/checkout on its own) and declare the deeper product rails — especially `actions` — during the post-sign-in workflow pass owned by takyon-product-workflow, not at bootstrap. Legacy `billing` is accepted as an alias and normalizes to account + checkout; AI products use named actions instead of declaring generate directly."},
+                "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
                 "surface_goal": {"type": "string", "description": "CEO-chosen customer surface goal for this business, grounded in research/ and especially research/strategy.md."},
                 "conversion_model": {"type": "string", "description": "CEO-chosen customer conversion model for the product surface. For app-like monthly products, keep this aligned to a paid monthly subscription path and avoid inventing free-tier or trial language unless the operator explicitly changes the contract."},
                 "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Required customer-facing routes the delegated product worker should implement, chosen from research/ and the canonical product surface contract."},
                 "required_sections": {"type": "array", "items": {"type": "string"}, "description": "Required public sections the delegated product worker should implement on the customer surface."},
                 "required_app_tabs": {"type": "array", "items": {"type": "string"}, "description": "Required in-app tabs or app-shell areas the delegated product worker should implement."},
                 "research_sources": {"type": "array", "items": {"type": "string"}, "description": "Research files that grounded the CEO's customer-shape decision. Default and canonical first source is research/strategy.md, but the whole research/ tree may contribute."},
-                "product_workflow": {"type": "object", "description": "Canonical MVP-complete in-app workflow doctrine for this product. Record the primary user/job, closed-loop product behavior, scope guardrails, persistence requirements, complexity target, first-run requirements, success moment, acceptance tests, and explicit not-now cuts here instead of inventing a separate MVP markdown spec. Top-level product_workflow sections replace wholesale when re-sent; pass {} to clear the block."},
+                "product_workflow": {"type": "object", "description": "Canonical in-app workflow doctrine for this product. Record the primary user/job, closed-loop product behavior, scope guardrails, persistence requirements, complexity target, first-run requirements, success moment, acceptance tests, and explicit not-now cuts here instead of inventing a separate MVP markdown spec. Leave the workflow `workflow_pending` until those fields describe one scoped-but-real loop instead of placeholder doctrine. Top-level product_workflow sections replace wholesale when re-sent; pass {} to clear the block."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "theme": {"type": "object"},
                 "constraints": {"type": "object"},
@@ -26436,7 +28159,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer", "description": "Included AI budget for the plan, denominated in microusd. For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "allow_overage": {"type": "boolean"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update product app plan.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string"}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer", "description": "Included AI budget for the plan, denominated in microusd. For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",
@@ -26598,6 +28321,9 @@ TAKYON_TOOL_DEFINITIONS = [
                 "email": {"type": "string"},
                 "record_type": {"type": "string", "description": "Optional normalized record type filter such as project, draft, or generation."},
                 "limit": {"type": "integer"},
+                "filters": {"type": "array", "description": "records-v2 bounded filters: list of {field, op, value}. field = record_type/title/created_at/updated_at or data.<key>; op = eq,neq,gt,gte,lt,lte,in,ilike,exists. Max 5.", "items": {"type": "object"}},
+                "sort": {"type": "array", "description": "records-v2 sort: list of {field, dir} over created_at/updated_at/title/record_type. Max 2.", "items": {"type": "object"}},
+                "cursor": {"type": "string", "description": "records-v2 opaque keyset cursor from a prior query's next_cursor."},
             },
             ["business"],
         ),
@@ -26642,6 +28368,58 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "record_type", "data", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_invoke_app_action",
+        "description": "Invoke one declared business-scoped product backend action using a real app session token.",
+        "handler": handle_business_invoke_app_action,
+        "schema": _schema(
+            "business_invoke_app_action",
+            "Invoke one declared product app action.",
+            {
+                "business": _BUSINESS_PROP,
+                "action": {"type": "string"},
+                "payload": {"description": "JSON-serializable action payload."},
+                "session_token": {"type": "string"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "action", "session_token", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_list_app_media",
+        "description": "Report product media storage usage and quota for one business (media rail).",
+        "handler": handle_business_list_app_media,
+        "schema": _schema(
+            "business_list_app_media",
+            "Report product media usage and quota.",
+            {"business": _BUSINESS_PROP},
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_send_app_email",
+        "description": "Send one product email to an app user through the email rail (test mode suppresses the real send with a receipt).",
+        "handler": handle_business_send_app_email,
+        "schema": _schema(
+            "business_send_app_email",
+            "Send one product email to an app user.",
+            {
+                "business": _BUSINESS_PROP,
+                "app_user_id": {"type": "string", "description": "Recipient app user id."},
+                "subject": {"type": "string"},
+                "text": {"type": "string", "description": "Plain-text body."},
+                "html": {"type": "string", "description": "Optional HTML body."},
+                "purpose": {"type": "string", "description": "Slug-like purpose, e.g. new_match_notice."},
+                "session_token": {"type": "string", "description": "Only for service-session sends; owner-driven sends omit it."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "app_user_id", "subject", "text", "idempotency_key"],
         ),
     },
     {
@@ -26772,7 +28550,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_x_publish_outreach",
             "Publish a business X post or reply using the live X provider path.",
-            {"business": _BUSINESS_PROP, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this X outreach would be posted."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this X outreach would be posted."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "media_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional business-relative paths to attach to the first post segment. Up to 4 images or 1 video."}, "metadata": {"type": "object"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
         ),
     },
@@ -26785,6 +28563,25 @@ TAKYON_TOOL_DEFINITIONS = [
             "Publish a suppressed local outreach artifact.",
             {"business": _BUSINESS_PROP, "channel": {"type": "string"}, "provider": {"type": "string"}, "target": {"type": "string"}, "recipient": {"type": "string"}, "destination_url": {"type": "string", "description": "Exact URL or composer endpoint where this outreach would be posted or sent."}, "destination_label": {"type": "string"}, "subject": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}, "content": {"type": "string"}, "thread_external_id": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "body", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_x_search",
+        "description": "Search recent X posts for one business and persist truthful snapshots under metrics/x/search/. This is read-only and does not spend creative credits.",
+        "handler": handle_business_x_search,
+        "schema": _schema(
+            "business_x_search",
+            "Search recent X posts and persist a durable local snapshot.",
+            {
+                "business": _BUSINESS_PROP,
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 10, "maximum": 100},
+                "since_id": {"type": "string"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "query", "idempotency_key"],
         ),
     },
     {
@@ -27069,6 +28866,37 @@ TAKYON_TOOL_DEFINITIONS = [
                     "type": "integer",
                     "description": "Required for source=manual.",
                 },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_reddit_publish_outreach",
+        "description": "Publish a business Reddit post or comment through the dedicated live Reddit worker path. Missing credentials or budget gates hard-fail instead of falling back to local suppressed publication.",
+        "handler": handle_business_reddit_publish_outreach,
+        "schema": _schema(
+            "business_reddit_publish_outreach",
+            "Publish a business Reddit post or comment using the live Reddit provider path.",
+            {
+                "business": _BUSINESS_PROP,
+                "subreddit": {"type": "string"},
+                "title": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "content": {"type": "string"},
+                "url": {"type": "string"},
+                "post_kind": {"type": "string", "enum": ["self", "link"]},
+                "thread_external_id": {"type": "string"},
+                "target": {"type": "string"},
+                "recipient": {"type": "string"},
+                "destination_url": {"type": "string"},
+                "destination_label": {"type": "string"},
+                "metadata": {"type": "object"},
+                "requires_api": _REQUIRES_API_PROP,
+                "requires_env": _REQUIRES_ENV_PROP,
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

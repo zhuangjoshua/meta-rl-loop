@@ -196,9 +196,18 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == []
-    assert result["guidance_selection_reason"] == ""
-    assert "[Hermes guidance skill: default-product-site]" not in instruction
+    # Customer-facing product surfaces now default to the full design-pack set so the worker
+    # always builds with a coherent visual direction instead of bare layout rules.
+    assert result["guidance_skills"] == [
+        "claude-design",
+        "claude-design-openai",
+        "claude-design-stripe",
+        "claude-design-superhuman",
+        "claude-design-vibrant",
+        "claude-design-doodle",
+    ]
+    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
+    assert "[Hermes guidance skill: default-product-site]" in instruction
 
 
 def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
@@ -249,22 +258,17 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert "Public landing composition contract:" in instruction
+    assert "Public landing composition floor:" in instruction
     assert "small centered island" in instruction
-    assert "1320px" in instruction
-    assert "520px" in instruction
-    assert "mid-`500px` widths" in instruction
-    assert "1600px" in instruction
-    assert "90vw" in instruction
-    assert "92vw" in instruction
-    assert "1680px" in instruction
-    assert "94vw" in instruction
-    assert "1760px" in instruction
-    assert "masthead/navigation lane" in instruction
-    assert "58/42" in instruction
+    assert "page-scale" in instruction
+    assert "selected design direction" in instruction
+    # Exact pixel/width prescriptions now live in the design packs, not this floor.
+    assert "1680px" not in instruction
+    assert "92vw" not in instruction
+    assert "58/42" not in instruction
 
 
-def test_claude_agent_task_does_not_infer_guidance_for_bold_consumer_brief(tmp_path, monkeypatch):
+def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
     store = _FakeStore(
@@ -324,9 +328,18 @@ def test_claude_agent_task_does_not_infer_guidance_for_bold_consumer_brief(tmp_p
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == []
-    assert result["guidance_selection_reason"] == ""
-    assert "[Hermes guidance skill: inferred-product-site]" not in instruction
+    # The default is the FULL pack set (the worker chooses one coherent direction), not a single
+    # pack inferred from brief keywords like "bold consumer".
+    assert result["guidance_skills"] == [
+        "claude-design",
+        "claude-design-openai",
+        "claude-design-stripe",
+        "claude-design-superhuman",
+        "claude-design-vibrant",
+        "claude-design-doodle",
+    ]
+    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
+    assert "[Hermes guidance skill: inferred-product-site]" in instruction
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
@@ -769,3 +782,225 @@ def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
     assert "/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp /bin/bash -lc" in text
+
+
+def test_docker_claude_worker_binary_mounts_uses_repo_binary_when_present(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    binary = repo_root / "node_modules" / "@anthropic-ai" / "claude-agent-sdk-linux-arm64" / "claude"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(takyon_core, "_docker_server_arch", lambda docker_exe: "arm64")
+
+    mounts, env_map = takyon_core._docker_claude_worker_binary_mounts(
+        docker_exe="/usr/bin/docker",
+        repo_root=repo_root,
+    )
+
+    assert mounts == []
+    assert env_map == {
+        "TAKYON_CLAUDE_CODE_EXECUTABLE": "/repo/node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64/claude"
+    }
+
+
+def test_docker_claude_worker_binary_mounts_installs_cached_binary_when_repo_binary_missing(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    package_json = repo_root / "node_modules" / "@anthropic-ai" / "claude-agent-sdk" / "package.json"
+    package_json.parent.mkdir(parents=True, exist_ok=True)
+    package_json.write_text(json.dumps({"version": "0.3.148"}), encoding="utf-8")
+
+    fake_root = tmp_path / "takyon-root"
+    monkeypatch.setattr(takyon_core, "_docker_server_arch", lambda docker_exe: "arm64")
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/npm" if name == "npm" else None)
+    monkeypatch.setattr(takyon_core, "get_default_takyon_root", lambda: fake_root)
+    monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: dict(extra or {}))
+
+    def fake_run(cmd, **kwargs):
+        binary = Path(kwargs["cwd"]) / "node_modules" / "@anthropic-ai" / "claude-agent-sdk-linux-arm64" / "claude"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    mounts, env_map = takyon_core._docker_claude_worker_binary_mounts(
+        docker_exe="/usr/bin/docker",
+        repo_root=repo_root,
+    )
+
+    expected_root = fake_root / "cache" / "claude-agent-sdk" / "linux-arm64-0.3.148"
+    assert mounts == [
+        "--mount",
+        f"type=bind,src={expected_root},dst=/opt/takyon-claude-sdk,readonly",
+    ]
+    assert env_map == {
+        "TAKYON_CLAUDE_CODE_EXECUTABLE": "/opt/takyon-claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64/claude"
+    }
+    assert expected_root.joinpath("node_modules", "@anthropic-ai", "claude-agent-sdk-linux-arm64", "claude").exists()
+
+
+def test_claude_agent_task_script_honors_explicit_claude_executable_env():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "TAKYON_CLAUDE_CODE_EXECUTABLE" in text
+    assert "pathToClaudeCodeExecutable" in text
+
+
+def test_claude_agent_task_applies_same_run_surface_contract_patch_before_refresh_and_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured_payloads: list[dict[str, object]] = []
+    refresh_calls: list[dict[str, object]] = []
+
+    class _SurfaceUpdatingStore(_FakeStore):
+        def __init__(self, root: Path):
+            super().__init__(
+                root,
+                surface_contract={
+                    "source_path": "product/site",
+                    "runtime_features": ["auth", "account", "checkout"],
+                    "routes": ["/", "/app"],
+                    "metadata": {
+                        "customer_experience": {
+                            "required_routes": ["/", "/app"],
+                        }
+                    },
+                },
+            )
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            for op in kwargs.get("operations", []):
+                if op.get("action") != "app.surface.upsert":
+                    continue
+                updated = dict(self._surface_contract)
+                metadata = dict(updated.get("metadata") or {})
+                customer_experience = (
+                    dict(metadata.get("customer_experience") or {})
+                    if isinstance(metadata.get("customer_experience"), dict)
+                    else {}
+                )
+                for key in ("surface_goal", "conversion_model", "required_routes", "required_sections", "required_app_tabs", "research_sources"):
+                    if key in op:
+                        customer_experience[key] = op.get(key)
+                if customer_experience:
+                    metadata["customer_experience"] = customer_experience
+                if "product_workflow" in op:
+                    metadata["product_workflow"] = op.get("product_workflow")
+                if metadata:
+                    updated["metadata"] = metadata
+                if "runtime_features" in op:
+                    updated["runtime_features"] = op.get("runtime_features")
+                self._surface_contract = updated
+            return {"success": True, "results": kwargs.get("operations", [])}
+
+    store = _SurfaceUpdatingStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured_payloads.append(dict(payload))
+        workspace = Path(str(payload["cwd"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        workspace.joinpath("index.html").write_text("<h1>Plannerly</h1>\n", encoding="utf-8")
+        if len(captured_payloads) == 1:
+            patch_path = workspace / "_takyon" / "worker-surface-contract.json"
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text(
+                json.dumps(
+                    {
+                        "requested": True,
+                        "why": "The build needed a real action rail and named action.",
+                        "patch": {
+                            "runtime_features": ["auth", "account", "actions", "checkout"],
+                            "product_workflow": {
+                                "actions": [{"name": "plan-workflow", "trigger": "http"}],
+                                "outbound_hosts": ["api.example.com"],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    def fake_refresh(*, surface: dict[str, object], **kwargs):
+        refresh_calls.append(dict(surface))
+        return {"status": "completed"}
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "plannerly")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_refresh)
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", lambda **_kwargs: [])
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "plannerly",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-same-run-surface-contract-update",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["worker_attempts"] == 2
+    assert result["surface_contract_retries"] == [
+        {
+            "why": "The build needed a real action rail and named action.",
+            "patch_fields": ["product_workflow", "runtime_features"],
+        }
+    ]
+    assert result["surface_contract_update"]["requested"] is True
+    assert result["surface_contract_update"]["why"] == "The build needed a real action rail and named action."
+    assert result["surface_contract_update"]["patch"] == {
+        "runtime_features": ["auth", "account", "actions", "checkout"],
+        "product_workflow": {
+            "actions": [{"name": "plan-workflow", "trigger": "http"}],
+            "outbound_hosts": ["api.example.com"],
+        },
+    }
+    assert result["surface_contract_update"]["result"]["success"] is True
+    upsert_result = result["surface_contract_update"]["result"]["results"][0]
+    assert upsert_result["action"] == "app.surface.upsert"
+    assert upsert_result["runtime_features"] == ["auth", "account", "actions", "checkout"]
+    assert upsert_result["product_workflow"] == {
+        "actions": [{"name": "plan-workflow", "trigger": "http"}],
+        "outbound_hosts": ["api.example.com"],
+    }
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0]["runtime_features"] == ["auth", "account", "actions", "checkout"]
+    assert len(captured_payloads) == 2
+    assert "Declared runtime-backed features for this app: auth, account, checkout" in str(captured_payloads[0]["instruction"])
+    assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in str(captured_payloads[1]["instruction"])
+    assert "Hermes same-run contract continuation (2 of 3):" in str(captured_payloads[1]["instruction"])
+    assert "Product-specific backend work goes through declared actions" in str(captured_payloads[1]["instruction"])
+    operations = store.commits[-1]["operations"]
+    agent_record = next(op for op in operations if op.get("action") == "agent.record")
+    assert agent_record["result"]["surface_contract_retries"] == [
+        {
+            "why": "The build needed a real action rail and named action.",
+            "patch_fields": ["product_workflow", "runtime_features"],
+        }
+    ]
+    assert agent_record["result"]["surface_contract_update"]["patch"]["runtime_features"] == [
+        "auth",
+        "account",
+        "actions",
+        "checkout",
+    ]

@@ -67,7 +67,6 @@ def test_upsert_plan_creates_with_documented_defaults(pg_conn):
     assert plan.billing_interval == "month"
     assert plan.included_ai_budget_microusd == 0
     assert plan.included_action_quota == 0  # documented default
-    assert plan.allow_overage is False
     assert plan.source == "takyon"
 
 
@@ -137,6 +136,28 @@ def test_upsert_monthly_plan_rejects_included_ai_budget_above_plan_price(pg_conn
         )
 
 
+def test_upsert_monthly_plan_price_drop_reuses_existing_budget_and_rejects_if_now_too_high(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(
+        pg_conn,
+        slug,
+        "pro",
+        tier="paid",
+        price_cents=1900,
+        billing_interval="month",
+        included_ai_budget_microusd=5_000_000,
+    )
+    with pytest.raises(InvalidPlan):
+        app_entitlements.upsert_plan_policy(
+            pg_conn,
+            slug,
+            "pro",
+            tier="paid",
+            price_cents=300,
+            billing_interval="month",
+        )
+
+
 def test_upsert_plan_normalizes_plan_key_slug(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     plan = app_entitlements.upsert_plan_policy(pg_conn, slug, "Pro Plan")
@@ -152,13 +173,12 @@ def test_upsert_plan_unknown_business_fails_loud(pg_conn):
 
 def test_upsert_plan_folds_validation_warnings_into_metadata(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    # metadata claims unlimited, but quota is finite and overage disabled → a coherence warning
+    # metadata claims unlimited, but quota is finite → a coherence warning
     plan = app_entitlements.upsert_plan_policy(
         pg_conn,
         slug,
         "pro",
         included_action_quota=10,
-        allow_overage=False,
         metadata={"marketing": "unlimited everything"},
     )
     validation = plan.metadata.get("takyon_plan_validation")

@@ -1,7 +1,7 @@
 ---
 name: takyon-x
 description: Create, review, and continue honest X posts, replies, and thread handling for one Takyon business — now powered by an embedded viral-copy engine (hooks, edge dial, anti-AI/de-Claude humanization, adversarial refinement). Use for X posts, replies, threads, and durable X voice for one business.
-version: 2.0.0
+version: 2.1.0
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -16,6 +16,7 @@ metadata:
         business_read_business,
         business_calculate_pulse,
         business_x_publish_outreach,
+        business_x_search,
         business_record_conversation_message,
         business_update_conversation_message_status,
       ]
@@ -70,8 +71,9 @@ If `distribution/voice/x.md` is missing, stale, or weak and X is a repeated lane
 - Primary root: `distribution/`
 - Publication paths: `distribution/voice/x.md`, `distribution/campaign/`, `distribution/local-published/`, `metrics/conversations/`
 - Best call points: X posting, X replies, X thread handling, X voice maintenance
-- Tools: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_list_conversation_messages`, `business_read_conversation_thread`, `business_write_file`, `business_patch_file`, `business_x_publish_outreach`, `business_publish_test_outreach`, `business_record_conversation_message`, `business_update_conversation_message_status`, `business_enqueue_job`
+- Tools: `business_read_business`, `business_calculate_pulse`, `business_read_file`, `business_list_files`, `business_list_conversation_messages`, `business_read_conversation_thread`, `business_write_file`, `business_patch_file`, `business_x_publish_outreach`, `business_x_search`, `business_publish_test_outreach`, `business_record_conversation_message`, `business_update_conversation_message_status`, `business_enqueue_job`
 - Live budget rule: live X publication spends the fixed X creative-credit price from the business X bucket; a business with at least 1 total creative credit starts with 1 credit allocated to X by default
+- Media rule: `business_x_publish_outreach` accepts optional `media_paths`, but only up to 4 images or 1 video, attached to the first post segment only
 
 **Copy engine (how to write):**
 
@@ -130,6 +132,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 - Read current `research/` state before drafting a top-level X post so the audience, promise, objection, and hook come from current business strategy.
 - Use `business_list_conversation_messages` and `business_read_conversation_thread` to inspect the actual thread state before replying.
 - Use `business_write_file` or `business_patch_file` to create or refresh `distribution/voice/x.md` when repeated X work needs durable channel guidance.
+- Use `business_x_search` when you need fresh thread discovery before choosing what to post or reply to.
 - Treat `distribution/campaign/` as the canonical campaign workspace. If only legacy X drafts live under `distribution/phase-1-outreach/`, move or merge that visible state forward before drafting new work.
 - Keep in-progress X drafts visible under `distribution/campaign/` when the turn is not publishing immediately.
 - Draft with the copy engine (hooks → build → refine → de-Claude/humanize → set edge dial), then ship one send-ready piece.
@@ -145,7 +148,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 4. **If this is a top-level post or thread:** read current `research/` state first, then draft one send-ready piece with one concrete payload. Use that research state to choose the audience, promise, objection, and hook. Generate hooks (`references/hook-library.md`), build with `references/x-playbook.md`, then run the refinement and de-Claude passes (`references/refinement-protocol.md`, `references/ai-tells.md`). Prefer a real number, product contrast, tradeoff, or direct observation over generic positioning.
 5. If the turn is still in draft mode, keep the draft visible under `distribution/campaign/` rather than pretending it was published.
 6. If the business is in test mode or the publish path should remain local, call `business_x_publish_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a conversation mirror or receipt. If you explicitly need the local-only path, call `business_publish_test_outreach` directly.
-7. If the business is in live mode and the publish path is provider-backed, call `business_x_publish_outreach` and inspect the resulting receipt, job, or blocker. If the channel requires deferred action rather than immediate publication, record that next step with `business_enqueue_job`.
+7. If the business is in live mode and the publish path is provider-backed, call `business_x_publish_outreach` and inspect the resulting receipt, job, or blocker. If the post should carry creative, pass truthful business-relative `media_paths`; never invent placeholder media paths. If the channel requires deferred action rather than immediate publication, record that next step with `business_enqueue_job`.
 8. After the draft or publish step, keep `metrics/conversations/` truthful with the conversation tools. Do not mark a thread resolved just because a draft exists.
 
 ## Output Format
@@ -179,6 +182,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 - [ ] `distribution/voice/x.md` exists and matches the current business voice when X is a repeated lane.
 - [ ] Any claimed post or reply has a corresponding tool result, local artifact, queued job, or receipt.
 - [ ] `distribution/local-published/` contains the expected suppressed artifact in test-mode publication paths.
+- [ ] When `media_paths` were requested, the live receipt shows the uploaded media entries or the suppressed receipt metadata keeps the intended paths visible.
 - [ ] `metrics/conversations/` reflects unresolved X thread state truthfully.
 - [ ] Hook stops the scroll; one concrete payload; ends sharp (no soft summary).
 - [ ] Zero AI tells; de-Claude'd (no rule-of-three, ≤1 "not X/it's Y" flip, no fortune-cookie closer); passes the read-aloud bar test.

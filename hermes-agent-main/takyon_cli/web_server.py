@@ -66,6 +66,11 @@ from plugins.takyon.core import (
     handle_business_disable_app_directory_entry,
     handle_business_delete_app_record,
     handle_business_enqueue_job,
+    handle_business_invoke_app_action,
+    handle_business_send_app_email,
+    handle_business_upload_app_media,
+    handle_business_delete_app_media,
+    app_media_get_bytes,
     handle_business_list_app_connections,
     handle_business_list_app_directory_entries,
     handle_business_meta_ad_bind_manual_launch,
@@ -1009,6 +1014,15 @@ def _email_allowed(email: str, cfg: Auth0DashboardConfig) -> bool:
     return True
 
 
+def _auth0_allowed_identities_label(cfg: Auth0DashboardConfig) -> str:
+    parts: list[str] = []
+    if cfg.allowed_emails:
+        parts.append("emails: " + ", ".join(cfg.allowed_emails))
+    if cfg.allowed_domains:
+        parts.append("domains: " + ", ".join(cfg.allowed_domains))
+    return "; ".join(parts) or "all verified Auth0 users"
+
+
 def _session_from_cookie_header(
     cookie_header: str,
     cfg: Auth0DashboardConfig,
@@ -1148,6 +1162,9 @@ _REVEAL_WINDOW_SECONDS = 30
 _directory_lookup_timestamps: Dict[str, List[float]] = {}
 _DIRECTORY_LOOKUP_MAX_PER_WINDOW = 60
 _DIRECTORY_LOOKUP_WINDOW_SECONDS = 60
+_action_invoke_timestamps: Dict[str, List[float]] = {}
+_ACTION_INVOKE_MAX_PER_WINDOW = 20
+_ACTION_INVOKE_WINDOW_SECONDS = 60
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -2089,6 +2106,19 @@ def _takyon_app_rate_limit_directory_lookup(*, business: str, session_token: str
     _directory_lookup_timestamps[key] = timestamps
 
 
+def _takyon_app_rate_limit_action_invoke(*, business: str, session_token: str, action_name: str) -> None:
+    if not session_token:
+        return
+    key = hashlib.sha256(f"{business}:{action_name}:{session_token}".encode("utf-8")).hexdigest()
+    now = time.time()
+    cutoff = now - _ACTION_INVOKE_WINDOW_SECONDS
+    timestamps = [stamp for stamp in _action_invoke_timestamps.get(key, []) if stamp > cutoff]
+    if len(timestamps) >= _ACTION_INVOKE_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many action requests. Try again shortly.")
+    timestamps.append(now)
+    _action_invoke_timestamps[key] = timestamps
+
+
 def _takyon_app_origin(request: Request, body: dict[str, Any] | None = None) -> str:
     body_origin = (body or {}).get("origin")
     if isinstance(body_origin, str) and body_origin.strip():
@@ -2231,6 +2261,10 @@ def _takyon_render_test_checkout_page(*, business: str, receipt: dict[str, Any])
 
 async def _takyon_app_read_json(request: Request) -> dict[str, Any]:
     raw = await request.body()
+    return _takyon_app_parse_json_bytes(raw)
+
+
+def _takyon_app_parse_json_bytes(raw: bytes) -> dict[str, Any]:
     if not raw.strip():
         return {}
     data = json.loads(raw.decode("utf-8", errors="replace"))
@@ -2327,6 +2361,9 @@ _PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
     "checkout",
     "usage",
     "generate",
+    "actions",
+    "media",
+    "email/send",
 })
 
 
@@ -2352,7 +2389,80 @@ def _normalize_product_rail_route(path: str) -> Optional[str]:
         return candidate
     if candidate == "records" or candidate.startswith("records/"):
         return candidate
+    if candidate == "actions" or candidate.startswith("actions/"):
+        return candidate
+    if candidate == "media" or candidate.startswith("media/"):
+        return candidate
     return None
+
+
+def _takyon_media_status_payload(
+    status: int,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if int(status) == int(HTTPStatus.OK):
+        return int(status), payload
+    error = str(payload.get("error") or payload.get("detail") or "").strip().lower()
+    if "runtime_features does not include media" in error or "media not found" in error:
+        return int(HTTPStatus.NOT_FOUND), {"success": False, "error": "not found"}
+    if error == "app account not found":
+        return int(HTTPStatus.UNAUTHORIZED), {"success": False, "error": "missing app session"}
+    if "only the uploader" in error or "service identities" in error:
+        return int(HTTPStatus.FORBIDDEN), payload
+    if "quota" in error or "too large" in error:
+        return int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), payload
+    if "unsupported media type" in error:
+        return int(HTTPStatus.UNSUPPORTED_MEDIA_TYPE), payload
+    return int(status), payload
+
+
+def _takyon_email_status_payload(
+    status: int,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if int(status) == int(HTTPStatus.OK):
+        return int(status), payload
+    error = str(payload.get("error") or payload.get("detail") or "").strip().lower()
+    if "runtime_features does not include email" in error:
+        return int(HTTPStatus.NOT_FOUND), {"success": False, "error": "not found"}
+    if "service-side only" in error:
+        return int(HTTPStatus.FORBIDDEN), payload
+    if error == "app account not found":
+        return int(HTTPStatus.UNAUTHORIZED), {"success": False, "error": "missing app session"}
+    if "daily" in error and "cap" in error:
+        return int(HTTPStatus.TOO_MANY_REQUESTS), payload
+    if "budget" in error:
+        return int(HTTPStatus.PAYMENT_REQUIRED), payload
+    return int(status), payload
+
+
+def _takyon_action_status_payload(
+    status: int,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if int(status) == int(HTTPStatus.OK):
+        return int(status), payload
+    error = str(payload.get("error") or payload.get("detail") or "").strip().lower()
+    if error == "app account not found":
+        return int(HTTPStatus.UNAUTHORIZED), {"success": False, "error": "missing app session"}
+    if (
+        "runtime_features does not include actions" in error
+        or "declared action not found" in error
+        or "has no file at product/site/actions" in error
+        or "is declared for schedule, not http" in error
+    ):
+        return int(HTTPStatus.NOT_FOUND), {"success": False, "error": "not found"}
+    if "payload too large" in error:
+        return int(HTTPStatus.REQUEST_ENTITY_TOO_LARGE), {"success": False, "error": "payload too large"}
+    if "action_already_running" in error:
+        return int(HTTPStatus.TOO_MANY_REQUESTS), {"success": False, "error": "action_already_running"}
+    if "budget" in error:
+        return int(HTTPStatus.PAYMENT_REQUIRED), payload
+    if "deadline" in error and "action exceeded" in error:
+        return int(HTTPStatus.GATEWAY_TIMEOUT), payload
+    if "deno is not installed" in error or "requires the deno runtime" in error or "rails_base_url" in error:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), payload
+    return int(status), payload
 
 
 async def _takyon_app_get(request: Request, business: str, route: str) -> Response:
@@ -2425,6 +2535,23 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             return _takyon_app_json(status, payload)
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
+    if parts and parts[0] == "media" and len(parts) == 2:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        try:
+            result = app_media_get_bytes(business, parts[1], token)
+        except Exception as exc:
+            error = str(exc).lower()
+            if "app account not found" in error:
+                return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+        return Response(
+            content=result["content"],
+            media_type=result["mime"],
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
     if parts and parts[0] == "records":
         token = _takyon_app_session_token(request)
         if not token:
@@ -2488,12 +2615,48 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             HTTPStatus.FORBIDDEN,
             {"success": False, "error": "owner_token_rejected_on_app_plane"},
         )
+    raw_body = await request.body()
+    parts = _takyon_app_route_parts(route)
+    if parts and parts[0] == "actions" and len(parts) == 2:
+        try:
+            from plugins.takyon import app_actions as takyon_app_actions
+        except Exception:
+            import plugins.takyon.app_actions as takyon_app_actions
+
+        if len(raw_body) > int(takyon_app_actions._ACTION_REQUEST_BODY_LIMIT):
+            return _takyon_app_json(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"success": False, "error": "payload too large"},
+            )
+    if parts == ["media"]:
+        # Multipart upload: intercept before the JSON parse below.
+        try:
+            from plugins.takyon import app_media as takyon_app_media
+        except Exception:
+            import plugins.takyon.app_media as takyon_app_media
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        if len(raw_body) > int(takyon_app_media._max_bytes()):
+            return _takyon_app_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"success": False, "error": "media too large"})
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "missing file field"})
+        content = await upload.read()
+        status, payload = _takyon_app_tool(handle_business_upload_app_media({
+            "business": business,
+            "session_token": token,
+            "filename": getattr(upload, "filename", "") or "",
+            "mime": getattr(upload, "content_type", "") or form.get("mime") or "",
+            "content": content,
+        }))
+        status, payload = _takyon_media_status_payload(status, payload)
+        return _takyon_app_json(status, payload)
     try:
-        body = await _takyon_app_read_json(request)
+        body = _takyon_app_parse_json_bytes(raw_body)
     except json.JSONDecodeError as exc:
         return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": f"invalid JSON body: {exc}"})
-
-    parts = _takyon_app_route_parts(route)
     if parts == ["auth", "request"]:
         status, payload = _takyon_app_tool(handle_business_request_app_magic_link({
             "business": business,
@@ -2580,6 +2743,22 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         }))
         return _takyon_app_json(status, payload)
 
+    if parts == ["records", "query"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
+        status, payload = _takyon_app_tool(handle_business_list_app_records({
+            "business": business,
+            "session_token": token,
+            "record_type": body.get("record_type") or body.get("type"),
+            "filters": body.get("filters") if body.get("filters") is not None else [],
+            "sort": body.get("sort"),
+            "cursor": body.get("cursor"),
+            "limit": body.get("limit"),
+        }))
+        return _takyon_app_json(status, payload)
+
     if parts and parts[0] == "records":
         token = _takyon_app_session_token(request)
         if not token:
@@ -2660,6 +2839,56 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         )
         return _takyon_app_json(status, payload)
 
+    if parts == ["email", "send"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_send_app_email({
+            "business": business,
+            "session_token": token,
+            "app_user_id": body.get("app_user_id") or body.get("recipient_app_user_id"),
+            "subject": body.get("subject"),
+            "text": body.get("text") or body.get("text_body"),
+            "html": body.get("html") or body.get("html_body"),
+            "purpose": body.get("purpose"),
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"email:{business}:{uuid.uuid4().hex}",
+        }))
+        status, payload = _takyon_email_status_payload(status, payload)
+        return _takyon_app_json(status, payload)
+
+    if parts and parts[0] == "actions":
+        if len(parts) != 2:
+            return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        action_name = parts[1]
+        try:
+            _takyon_app_rate_limit_action_invoke(
+                business=business,
+                session_token=token,
+                action_name=action_name,
+            )
+        except HTTPException as exc:
+            return _takyon_app_json(exc.status_code, {"success": False, "error": str(exc.detail)})
+        payload_value = body.get("payload")
+        if "payload" not in body:
+            payload_value = {
+                key: value
+                for key, value in body.items()
+                if key not in {"idempotency_key", "idempotencyKey", "origin"}
+            }
+        status, payload = _takyon_app_tool(handle_business_invoke_app_action({
+            "business": business,
+            "action": action_name,
+            "session_token": token,
+            "payload": payload_value if payload_value is not None else {},
+            "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"action:{business}:{action_name}:{uuid.uuid4().hex}",
+            "bound_origin": _takyon_app_origin(request, body),
+        }))
+        status, payload = _takyon_action_status_payload(status, payload)
+        return _takyon_app_json(status, payload)
+
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
@@ -2691,6 +2920,17 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
             "record_id": parts[2],
             "idempotency_key": f"record-delete:{business}:{uuid.uuid4().hex}",
         }))
+        return _takyon_app_json(status, payload)
+    if parts and parts[0] == "media" and len(parts) == 2:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_tool(handle_business_delete_app_media({
+            "business": business,
+            "session_token": token,
+            "media_id": parts[1],
+        }))
+        status, payload = _takyon_media_status_payload(status, payload)
         return _takyon_app_json(status, payload)
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
@@ -9574,7 +9814,7 @@ def start_server(
     if auth0_cfg:
         public_host = _configured_public_host()
         scope = "all hosts" if auth0_cfg.force else (public_host or "configured public host")
-        allowed = ", ".join(auth0_cfg.allowed_domains) or "all Auth0 users"
+        allowed = _auth0_allowed_identities_label(auth0_cfg)
         print(f"  Auth0 gate → {scope} ({allowed})")
     # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the

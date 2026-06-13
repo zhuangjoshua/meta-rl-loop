@@ -259,6 +259,38 @@ def test_auth0_callback_rejects_unverified_email(auth0_env, monkeypatch):
     assert "not verified" in resp.text
 
 
+def test_auth0_allowed_identities_label_reports_email_allowlist(auth0_env):
+    cfg = auth0_env.Auth0DashboardConfig(
+        domain="https://fourmanifold.auth0.com",
+        client_id="client-id",
+        client_secret="client-secret",
+        secret="cookie-signing-secret",
+        base_url=f"https://{HOST}",
+        allowed_domains=(),
+        allowed_emails=("jmzworkhub@gmail.com",),
+        force=False,
+    )
+
+    assert auth0_env._auth0_allowed_identities_label(cfg) == "emails: jmzworkhub@gmail.com"
+
+
+def test_auth0_allowed_identities_label_reports_email_and_domain_allowlists(auth0_env):
+    cfg = auth0_env.Auth0DashboardConfig(
+        domain="https://fourmanifold.auth0.com",
+        client_id="client-id",
+        client_secret="client-secret",
+        secret="cookie-signing-secret",
+        base_url=f"https://{HOST}",
+        allowed_domains=("fourmanifold.com",),
+        allowed_emails=("jmzworkhub@gmail.com",),
+        force=False,
+    )
+
+    assert auth0_env._auth0_allowed_identities_label(cfg) == (
+        "emails: jmzworkhub@gmail.com; domains: fourmanifold.com"
+    )
+
+
 def test_configured_public_host_is_accepted_for_reverse_proxy(auth0_env):
     assert auth0_env._is_accepted_host(HOST, "127.0.0.1")
     assert not auth0_env._is_accepted_host("evil.example", "127.0.0.1")
