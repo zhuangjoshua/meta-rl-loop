@@ -252,6 +252,14 @@ if getattr(backend, 'name', '') != 'supabase_s3':
 PY
   fi
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
+  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
+    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from tools.skills_sync import sync_skills
+
+result = sync_skills(quiet=False)
+if result.get('user_modified'):
+    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
+PY
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'

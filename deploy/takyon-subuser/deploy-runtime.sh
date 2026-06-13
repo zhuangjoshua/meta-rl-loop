@@ -118,6 +118,14 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   test \"\$(deno --version | awk 'NR==1 {print \$2}')\" = '$TAKYON_DENO_VERSION'
   command -v systemd-run >/dev/null 2>&1
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
+  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
+    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from tools.skills_sync import sync_skills
+
+result = sync_skills(quiet=False)
+if result.get('user_modified'):
+    raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
+PY
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
