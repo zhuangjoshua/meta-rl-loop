@@ -9221,6 +9221,41 @@ def _static_surface_can_skip_package_manager(root: Path, scripts: dict[str, Any]
     return bool(re.match(r"^(?::|true|echo\b|printf\b|exit\s+0\b)", build))
 
 
+def _product_allows_unbuilt_static_publish(source_root: Path) -> bool:
+    package_json = source_root / "package.json"
+    if not package_json.exists():
+        return True
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(package_data, dict):
+        return False
+    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+    return _static_surface_can_skip_package_manager(source_root, scripts)
+
+
+def _product_publish_output_requirements(source_root: Path) -> str:
+    requirements = ["dist/index.html", "out/index.html", "build/index.html"]
+    if _product_allows_unbuilt_static_publish(source_root):
+        requirements.insert(0, "index.html at the source root")
+    return ", ".join(requirements[:-1]) + f", or {requirements[-1]}, or a supported Next.js service app"
+
+
+def _product_publish_readiness_blocker(source_root: Path) -> str:
+    static_publish_source, _static_publish_label = _product_static_publish_source(source_root)
+    if static_publish_source is not None:
+        return ""
+    next_metadata, next_blocker = _product_next_service_metadata(source_root)
+    if next_metadata is not None:
+        return ""
+    detail = str(next_blocker or "").strip() or "no publishable output exists after the refresh/build step"
+    return (
+        "refresh/build finished, but no publishable output exists; "
+        f"{detail}; {_product_publish_output_requirements(source_root)}"
+    )
+
+
 def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -9361,6 +9396,10 @@ def _refresh_product_surface_path(
         else:
             result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
     if "build" not in scripts:
+        publish_blocker = _product_publish_readiness_blocker(root)
+        if publish_blocker:
+            result.update({"status": "blocked", "error": publish_blocker})
+            return result
         result.update({"status": "passed", "kind": "source_present"})
         return result
     build_command = _javascript_run_script_command(package_manager, "build", root=root)
@@ -9400,6 +9439,10 @@ def _refresh_product_surface_path(
         if typecheck["status"] != "passed":
             result.update({"status": "failed", "error": "product typecheck failed"})
             return result
+    publish_blocker = _product_publish_readiness_blocker(root)
+    if publish_blocker:
+        result.update({"status": "blocked", "error": publish_blocker})
+        return result
     result.update({"status": "passed", "kind": "node_build"})
     return result
 
@@ -10146,12 +10189,17 @@ def _reddit_stage_launch_args(
 
 def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
     candidates = [
-        ("source", source_root),
         ("dist", source_root / "dist"),
         ("out", source_root / "out"),
         ("build", source_root / "build"),
-        ("public", source_root / "public"),
     ]
+    if _product_allows_unbuilt_static_publish(source_root):
+        candidates.extend(
+            [
+                ("source", source_root),
+                ("public", source_root / "public"),
+            ]
+        )
     for label, candidate in candidates:
         if candidate.is_dir() and (candidate / "index.html").is_file():
             return candidate.resolve(), label
@@ -11044,8 +11092,8 @@ def _publish_next_product_service(*, source_root: Path, slug: str, publish_targe
             "publish_root": "",
             "publish_source_path": "",
             "blocker": (
-            "product surface source exists, but no static publish directory with index.html exists; "
-            f"{blocker}; provide source/index.html, dist/index.html, out/index.html, or a supported Next.js service app"
+            "product surface source exists, but no publishable static output with index.html exists; "
+            f"{blocker}; {_product_publish_output_requirements(source_root)}"
             ),
             "deploy_kind": "next_systemd_caddy",
             "service_name": _product_service_name(slug),
@@ -17221,7 +17269,7 @@ def _finalize_product_surface_refresh(
         }
     if requested_publish_policy and _is_shared_renderer_publish_policy(requested_publish_policy):
         warnings = list(refresh.get("warnings") or [])
-        warnings.append("legacy shared_renderer policy ignored; publishing the real product source_path")
+        warnings.append("legacy shared_renderer policy ignored; real source/build output is still required before publish")
         refresh = {
             **refresh,
             "requested_publish_policy": requested_publish_policy,
@@ -27402,7 +27450,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are treated as source publishing and will not create fallback pages."},
+                "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are ignored; Takyon still requires real source/build output and will not publish fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 300"},
                 "activate_on_success": {"type": "boolean", "description": "Update app surface status after publication; active only when publication succeeds; default true"},
