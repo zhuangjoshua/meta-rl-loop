@@ -767,7 +767,13 @@ def live_build_pointer(
         except (TypeError, ValueError):
             bounded_timeout_ms = 2_000
         try:
-            conn.execute("SET LOCAL statement_timeout = ?", (bounded_timeout_ms,))
+            # ``SET LOCAL ... = $1`` trips Postgres/psycopg on the live pgbouncer rail and poisons
+            # the whole transaction before the pointer SELECT. ``set_config(..., true)`` preserves
+            # the same transaction-local timeout semantics while remaining safely parameterizable.
+            conn.execute(
+                "SELECT set_config('statement_timeout', ?, true)",
+                (f"{bounded_timeout_ms}ms",),
+            )
         except Exception:
             pass
         row = conn.execute(

@@ -33,6 +33,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
+import plugins.takyon.core as core_module  # noqa: E402
 from plugins.takyon import storage  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.core import TakyonStore  # noqa: E402
@@ -540,3 +541,51 @@ def test_supabase_listing_skips_objects_that_vanish_after_list():
 
     digests = backend.list_digests("biz-x/")
     assert digests == {"biz-x/product/site/index.html": "abc123"}
+
+
+def test_live_build_pointer_uses_transaction_local_set_config(monkeypatch, tmp_path):
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class _CursorResult:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def execute(self, sql, params=None):
+            normalized = tuple(params) if params is not None else None
+            executed.append((sql, normalized))
+            if "SELECT live_build_id" in sql:
+                return _CursorResult({"live_build_id": "build123"})
+            return _CursorResult({"set_config": normalized[0] if normalized else None})
+
+    class _FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def _connect(self):
+            return _FakeConn()
+
+    monkeypatch.setattr(core_module, "TakyonStore", _FakeStore)
+
+    assert (
+        core_module.live_build_pointer(
+            "Lotest",
+            takyon_home=tmp_path,
+            database_url="postgresql://example.invalid/postgres",
+            timeout_ms=2500,
+        )
+        == "build123"
+    )
+    assert executed == [
+        ("SELECT set_config('statement_timeout', ?, true)", ("2500ms",)),
+        ("SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?", ("lotest",)),
+    ]
