@@ -5,10 +5,181 @@ export interface SessionUser {
   [key: string]: unknown;
 }
 
+export interface SessionPayload {
+  [key: string]: unknown;
+}
+
+export interface AccountPayload {
+  [key: string]: unknown;
+}
+
 export interface UseSessionResult {
   user: SessionUser | null;
   loading: boolean;
   error: Error | null;
+}
+
+export type ViewerAccessState =
+  | "anonymous"
+  | "account_unavailable"
+  | "subscription_required"
+  | "past_due"
+  | "ready";
+
+export interface ViewerAccessResult {
+  state: ViewerAccessState;
+  authenticated: boolean;
+  entitled: boolean;
+  user: SessionUser | null;
+  session: SessionPayload | null;
+  account: AccountPayload | null;
+  subscriptionState: string;
+  loading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;
+}
+
+export interface ViewerCta {
+  primaryHref: string;
+  primaryLabel: string;
+  secondaryHref: string;
+  secondaryLabel: string;
+  membershipState: string;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function lowerText(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function sessionUser(payload: unknown): SessionUser | null {
+  if (!isObject(payload)) return null;
+  if (isObject(payload.user)) return payload.user as SessionUser;
+  if (isObject(payload.session) && isObject(payload.session.user)) {
+    return payload.session.user as SessionUser;
+  }
+  return null;
+}
+
+function accountUser(payload: AccountPayload | null): SessionUser | null {
+  return payload && isObject(payload.user) ? (payload.user as SessionUser) : null;
+}
+
+function accountEntitlements(payload: AccountPayload | null): Record<string, unknown>[] {
+  return payload && Array.isArray(payload.entitlements)
+    ? payload.entitlements.filter((item): item is Record<string, unknown> => isObject(item))
+    : [];
+}
+
+function isPaidTier(value: unknown): boolean {
+  return ["paid", "pro", "trial"].includes(lowerText(value));
+}
+
+function entitlementStatus(entitlement: Record<string, unknown>): string {
+  const status = lowerText(entitlement.status);
+  if (status === "paid") return "active";
+  if (status === "cancelled") return "canceled";
+  return status;
+}
+
+function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
+  const status = entitlementStatus(entitlement);
+  const tier = lowerText(entitlement.tier);
+  if (!["active", "trialing", "paid"].includes(status)) return false;
+  if (isPaidTier(tier)) return true;
+  if (String(entitlement.plan_key ?? entitlement.planKey ?? "").trim()) return true;
+  if (entitlement.stripe_subscription_id || entitlement.stripeSubscriptionId) return true;
+  return false;
+}
+
+export function isAccountEntitled(payload: AccountPayload | null): boolean {
+  if (!payload || !isObject(payload)) return false;
+  if (payload.entitled === true) return true;
+  if (isObject(payload.plan) && payload.plan.active === true) return true;
+  if (accountEntitlements(payload).some((entitlement) => activePaidEntitlement(entitlement))) {
+    return true;
+  }
+  const user = accountUser(payload);
+  return isPaidTier(user?.tier);
+}
+
+export function subscriptionStateFromAccount(payload: AccountPayload | null): string {
+  const ranked = accountEntitlements(payload)
+    .filter((entitlement) => {
+      const tier = lowerText(entitlement.tier);
+      return Boolean(
+        isPaidTier(tier) ||
+          String(entitlement.plan_key ?? entitlement.planKey ?? "").trim() ||
+          entitlement.stripe_subscription_id ||
+          entitlement.stripeSubscriptionId,
+      );
+    })
+    .map((entitlement) => entitlementStatus(entitlement))
+    .sort((left, right) => {
+      const rank: Record<string, number> = {
+        active: 0,
+        trialing: 1,
+        past_due: 2,
+        canceled: 3,
+        revoked: 4,
+      };
+      return (rank[left] ?? 9) - (rank[right] ?? 9);
+    });
+  if (ranked[0]) return ranked[0];
+  const user = accountUser(payload);
+  if (isPaidTier(user?.tier)) {
+    return lowerText(user?.tier) === "trial" ? "trialing" : "active";
+  }
+  return "none";
+}
+
+export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "state" | "subscriptionState"> | null): ViewerCta {
+  if (!access || !access.authenticated || access.state === "anonymous") {
+    return {
+      primaryHref: "/app?intent=subscribe",
+      primaryLabel: "Subscribe",
+      secondaryHref: "/app?intent=signin",
+      secondaryLabel: "Sign in",
+      membershipState: "",
+    };
+  }
+  if (access.entitled || access.state === "ready") {
+    return {
+      primaryHref: "/app",
+      primaryLabel: "Open app",
+      secondaryHref: "/app/profile",
+      secondaryLabel: "Account",
+      membershipState: access.subscriptionState || "active",
+    };
+  }
+  if (access.state === "account_unavailable") {
+    return {
+      primaryHref: "/app",
+      primaryLabel: "Continue",
+      secondaryHref: "/app/profile",
+      secondaryLabel: "Account",
+      membershipState: access.subscriptionState || "signed_in",
+    };
+  }
+  if (access.state === "past_due") {
+    return {
+      primaryHref: "/app?intent=subscribe",
+      primaryLabel: "Update billing",
+      secondaryHref: "/app/profile",
+      secondaryLabel: "Account",
+      membershipState: access.subscriptionState || "past_due",
+    };
+  }
+  return {
+    primaryHref: "/app?intent=subscribe",
+    primaryLabel: "Complete subscription",
+    secondaryHref: "/app/profile",
+    secondaryLabel: "Account",
+    membershipState: access.subscriptionState || "signed_in",
+  };
 }
 
 /** Loads the current product session once on mount via client.session(). */
@@ -43,6 +214,119 @@ export function useSession(): UseSessionResult {
   }, []);
 
   return { user, loading, error };
+}
+
+/** Loads session first, then account, and keeps CTA-safe access state in one place. */
+export function useViewerAccess(): ViewerAccessResult {
+  const [state, setState] = useState<ViewerAccessState>("anonymous");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [entitled, setEntitled] = useState(false);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
+  const [account, setAccount] = useState<AccountPayload | null>(null);
+  const [subscriptionState, setSubscriptionState] = useState("none");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const aliveRef = useRef(true);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const sessionPayload = await client.session();
+      if (!aliveRef.current) return;
+      const nextSession = isObject(sessionPayload) ? (sessionPayload as SessionPayload) : null;
+      const nextSessionUser = sessionUser(nextSession);
+      const hasSession =
+        (nextSession && nextSession.authenticated === true) ||
+        nextSessionUser !== null ||
+        Boolean(String(nextSession?.email ?? "").trim());
+
+      setSession(nextSession);
+
+      if (!hasSession) {
+        setState("anonymous");
+        setAuthenticated(false);
+        setEntitled(false);
+        setUser(null);
+        setAccount(null);
+        setSubscriptionState("none");
+        setError(null);
+        return;
+      }
+
+      setAuthenticated(true);
+      setUser(nextSessionUser);
+
+      try {
+        const accountPayload = await client.account();
+        if (!aliveRef.current) return;
+        const nextAccount =
+          isObject(accountPayload) && accountPayload.authenticated === false
+            ? null
+            : isObject(accountPayload)
+              ? (accountPayload as AccountPayload)
+              : null;
+        const nextEntitled = isAccountEntitled(nextAccount);
+        const nextSubscriptionState = subscriptionStateFromAccount(nextAccount);
+
+        setAccount(nextAccount);
+        setUser(accountUser(nextAccount) ?? nextSessionUser);
+        setEntitled(nextEntitled);
+        setSubscriptionState(nextSubscriptionState);
+        setState(
+          nextEntitled
+            ? "ready"
+            : nextSubscriptionState === "past_due" || nextSubscriptionState === "canceled"
+              ? "past_due"
+              : "subscription_required",
+        );
+        setError(null);
+      } catch (err) {
+        if (!aliveRef.current) return;
+        setAccount(null);
+        setEntitled(false);
+        setSubscriptionState("none");
+        setState("account_unavailable");
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } catch (err) {
+      if (!aliveRef.current) return;
+      setState("anonymous");
+      setAuthenticated(false);
+      setEntitled(false);
+      setUser(null);
+      setSession(null);
+      setAccount(null);
+      setSubscriptionState("none");
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return {
+    state,
+    authenticated,
+    entitled,
+    user,
+    session,
+    account,
+    subscriptionState,
+    loading,
+    error,
+    refresh,
+  };
 }
 
 export interface RecordItem {

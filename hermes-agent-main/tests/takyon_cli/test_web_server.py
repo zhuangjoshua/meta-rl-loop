@@ -2326,6 +2326,79 @@ def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
     assert 'href="/app?checkout=success"' in response.text
 
 
+def test_app_session_get_dispatches_session_handler_without_account_lookup(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[dict[str, str]] = []
+
+    def fake_session_handler(args):
+        calls.append(args)
+        return json.dumps(
+            {
+                "success": True,
+                "business": args["business"],
+                "authenticated": True,
+                "user": {"id": "u_123", "email": "member@example.com"},
+                "session": {"active": True, "app_user_id": "u_123"},
+            }
+        )
+
+    def fail_account_handler(_args):
+        raise AssertionError("session route should not use account lookup")
+
+    monkeypatch.setattr(web_server, "handle_business_read_app_session", fake_session_handler)
+    monkeypatch.setattr(web_server, "handle_business_read_app_account", fail_account_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get(
+            "/api/takyon/apps/mathflow/session",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is True
+    assert response.json()["user"]["email"] == "member@example.com"
+    assert calls == [{"business": "mathflow", "session_token": "session_123"}]
+
+
+def test_app_session_get_returns_unauthenticated_when_cookie_is_stale(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    def stale_session_handler(_args):
+        return json.dumps({"success": False, "error": "app account not found"})
+
+    monkeypatch.setattr(web_server, "handle_business_read_app_session", stale_session_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get(
+            "/api/takyon/apps/mathflow/session",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=stale_cookie",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "authenticated": False}
+
+
 def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
     from starlette.testclient import TestClient
 

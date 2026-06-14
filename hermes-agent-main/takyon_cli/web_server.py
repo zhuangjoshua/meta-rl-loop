@@ -59,6 +59,7 @@ from takyon_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from plugins.takyon.app_runtime_constants import APP_SESSION_COOKIE
 from plugins.takyon.core import (
     handle_business_act_on_app_connection,
     handle_business_cancel_app_subscription,
@@ -76,6 +77,7 @@ from plugins.takyon.core import (
     handle_business_meta_ad_bind_manual_launch,
     handle_business_meta_ad_insights_sync,
     handle_business_read_app_account,
+    handle_business_read_app_session,
     handle_business_read_app_directory_entry,
     handle_business_read_app_profile,
     handle_business_read_app_record,
@@ -91,7 +93,7 @@ from plugins.takyon.core import (
 )
 from plugins.takyon import safebox as takyon_safebox
 
-TAKYON_APP_SESSION_COOKIE = "takyon_app_session"
+TAKYON_APP_SESSION_COOKIE = APP_SESSION_COOKIE
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -2397,7 +2399,23 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         _takyon_app_set_session_cookie(response, request, str(payload["session_token"]))
         return response
 
-    if parts in (["session"], ["account"]):
+    if parts == ["session"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+        status, payload = _takyon_app_tool(handle_business_read_app_session({
+            "business": business,
+            "session_token": token,
+        }))
+        if (
+            status == int(HTTPStatus.BAD_REQUEST)
+            and str(payload.get("error") or "").strip().lower() == "app account not found"
+        ):
+            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+        payload["authenticated"] = status == int(HTTPStatus.OK)
+        return _takyon_app_json(status, payload)
+
+    if parts == ["account"]:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
@@ -2405,6 +2423,11 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             "business": business,
             "session_token": token,
         }))
+        if (
+            status == int(HTTPStatus.BAD_REQUEST)
+            and str(payload.get("error") or "").strip().lower() == "app account not found"
+        ):
+            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
         payload["authenticated"] = status == int(HTTPStatus.OK)
         return _takyon_app_json(status, payload)
 

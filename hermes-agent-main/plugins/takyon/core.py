@@ -17761,6 +17761,50 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_read_app_session(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or ""))
+        session_token = str(args.get("session_token") or "").strip()
+        if not session_token:
+            raise TakyonError("session_token is required")
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        user = leaves["identity"].validate_session(leaf, business, session_token)
+                except leaves["identity"].AppIdentityError as exc:
+                    raise TakyonError(str(exc)) from exc
+                if user is None:
+                    raise TakyonError("app account not found")
+                user_payload = _app_user_runtime_payload(user)
+            else:
+                user = _resolve_sqlite_app_user(
+                    conn,
+                    business,
+                    session_token=session_token,
+                )
+                if not user:
+                    raise TakyonError("app account not found")
+                user_payload = _app_user_runtime_payload(user)
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "authenticated": True,
+                "user": user_payload,
+                "session": {
+                    "active": True,
+                    "app_user_id": str((user_payload or {}).get("id") or ""),
+                },
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_read_app_account(args: dict, **_: Any) -> str:
     store = _store()
     try:

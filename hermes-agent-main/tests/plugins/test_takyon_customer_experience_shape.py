@@ -155,6 +155,9 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert '"includedAiBudgetMicrousd": 5000000' in surface_context
     assert '"auth": "declared"' in surface_context
     assert '"checkout": "declared"' in surface_context
+    hooks = (workspace_root / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
+    assert "useViewerAccess" in hooks
+    assert "resolveViewerCta" in hooks
 
 def test_appkit_contract_block_preserves_canonical_rail_helpers():
     block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
@@ -173,6 +176,9 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
     assert "src/lib/takyon.ts" in block and "src/lib/hooks.ts" in block
     assert "shared client/hooks" in block
+    assert "useViewerAccess()" in block
+    assert "resolveViewerCta()" in block
+    assert "Landing and pricing CTAs must derive from real runtime session/account state" in block
     assert "do not spend bootstrap/design time" in block.lower()
     assert "createActionRunner" not in block
     assert "useActionRunner" not in block
