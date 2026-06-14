@@ -1,5 +1,6 @@
 import pytest
 import types
+from pathlib import Path
 
 from plugins.takyon.cli import (
     TakyonError,
@@ -85,6 +86,15 @@ def test_bootstrap_turn_config_uses_expanded_shared_turn_budget():
     )
 
     assert config["max_turns"] == 30
+
+
+def test_ceo_prompt_rule_8_stops_redelegation_on_blocked_authority_violation():
+    prompt_path = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "prompts" / "ceo.md"
+    text = prompt_path.read_text(encoding="utf-8")
+
+    assert "bounded same-run continuation" in text
+    assert "do not re-delegate the same unchanged `product/site/` task" in text
+    assert "automatic local source/build repair retry" not in text
 
 
 def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):

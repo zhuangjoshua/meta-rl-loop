@@ -365,7 +365,12 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Backend actions are per-product TypeScript files under product/site/actions/<name>.ts, default-exporting async (payload, ctx) => result.",
             "The action name is one identity end to end: every useActionRunner(\"<name>\")/invokeAction(\"<name>\") call in the UI MUST match a real product/site/actions/<name>.ts file.",
-            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token; there is no filesystem write, no shell, no env access, and no npm or remote imports.",
+            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token; there is no filesystem write, no shell, no provider credential/base-url env access, and no provider SDK or remote imports.",
+            "The runtime-authority scanner rejects direct provider hosts in product source (for example api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, api.mistral.ai, api.deepseek.com, openrouter.ai, api.groq.com, api.together.xyz).",
+            "Do not read provider credentials or base URLs from product env in product source (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, any `TAKYON_*_API_KEY`, any `TAKYON_*_BASE_URL`).",
+            "Do not import or construct provider SDKs such as `openai` or `@anthropic-ai/sdk` in product source; route AI through Takyon rails instead.",
+            "The pinned Vite SPA forbids product-side server entrypoints: no `express`/`fastify`/`hono`/`koa`, no `src/app/**/route.ts`, no `pages/api/*`, and no `next.config.*`; backend logic lives only in product/site/actions/<name>.ts.",
+            "Client code must not call `/generate` directly; browser AI flows call createActionRunner/invokeAction, and the named action reaches the generate rail over ctx.base_url + ctx.session_token.",
             "Drive customer-triggered actions through the shared runtime client's createActionRunner(name): disable the trigger while the runner is pending, render the truthful error message by kind, and on budget errors offer the upgrade path via the provided checkoutUrl; never retry-loop a 402, never hide it, and never fake or simulate an action result client-side.",
             "Schedule-triggered actions persist their output through the records rail; show customers what happened since they left by reading existing records (listRecords), not by polling or fabricating an activity feed.",
         ],
@@ -8147,13 +8152,15 @@ def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) ->
         rel = str(path.relative_to(root))
         if path.name.lower().startswith("next.config."):
             findings.append({
-                "path": rel, "line": 1, "kind": "server_entrypoint",
+                "path": rel, "line": 1, "kind": "server_entrypoint", "issue": "server entrypoint",
+                "snippet": path.name,
                 "blocker": "product source carries a Next.js config on the pinned static Vite scaffold",
             })
             continue
         if _PINNED_STACK_ROUTE_FILE_PATTERN.search(rel) or "/pages/api/" in f"/{rel}" :
             findings.append({
-                "path": rel, "line": 1, "kind": "server_entrypoint",
+                "path": rel, "line": 1, "kind": "server_entrypoint", "issue": "server entrypoint",
+                "snippet": rel,
                 "blocker": "product source defines a server route handler on the pinned static Vite scaffold",
             })
             continue
@@ -8166,7 +8173,8 @@ def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) ->
         for number, line in enumerate(text.splitlines(), start=1):
             if _PINNED_STACK_SERVER_IMPORT_PATTERN.search(line):
                 findings.append({
-                    "path": rel, "line": number, "kind": "server_entrypoint",
+                    "path": rel, "line": number, "kind": "server_entrypoint", "issue": "server entrypoint",
+                    "snippet": line.strip()[:240],
                     "blocker": "product source imports a server framework on the pinned static Vite scaffold",
                 })
                 break
@@ -8199,11 +8207,49 @@ def _scan_for_pinned_stack_client_generate_usage(root: Path, *, limit: int = 25)
                 "path": rel,
                 "line": number,
                 "kind": "vite_client_generate",
+                "issue": "client /generate call",
                 "blocker": "product source calls the shared generate rail directly from pinned Vite client code",
                 "snippet": line.strip()[:240],
             })
             break
     return findings
+
+
+def _forbidden_product_source_remedy(*, issue: str = "", kind: str = "") -> str:
+    normalized_issue = str(issue or "").strip().lower()
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind == "server_entrypoint":
+        return (
+            "pinned Vite SPA only: remove the product-side server entrypoint and put backend logic in "
+            "product/site/actions/<name>.ts"
+        )
+    if normalized_kind == "vite_client_generate":
+        return (
+            "the browser must not call `/generate`; call a named action via "
+            "createActionRunner/invokeAction instead"
+        )
+    if normalized_issue == "provider sdk import":
+        return (
+            "remove the SDK import and call your declared action over `ctx.base_url` + "
+            "`ctx.session_token`, which brokers the generate rail server-side"
+        )
+    if normalized_issue in {"direct provider host", "provider credential or base-url env read"}:
+        return (
+            "do not call providers directly or read provider keys/base URLs from product source; use "
+            "the action runtime's `ctx` and shared Takyon rails instead"
+        )
+    return "route runtime AI through a declared action and shared Takyon rails instead of product-side provider code"
+
+
+def _forbidden_product_source_detail(finding: Mapping[str, Any]) -> str:
+    issue = str(finding.get("issue") or "").strip()
+    snippet = str(finding.get("snippet") or "").strip()
+    details: list[str] = []
+    if issue:
+        details.append(f"issue: {issue}")
+    if snippet:
+        details.append(f"snippet: {snippet}")
+    return "; ".join(details)
 
 
 def _format_forbidden_product_source_blockers(
@@ -8216,24 +8262,27 @@ def _format_forbidden_product_source_blockers(
     for finding in forbidden_findings:
         if len(blockers) >= limit:
             break
+        detail = _forbidden_product_source_detail(finding)
+        detail_suffix = f"; {detail}" if detail else ""
+        remedy = _forbidden_product_source_remedy(
+            issue=str(finding.get("issue") or ""),
+            kind=str(finding.get("kind") or ""),
+        )
         if str(finding.get("kind") or "") == "server_entrypoint":
             blockers.append(
                 f"{finding.get('blocker') or 'product source defines a server entrypoint'} at "
-                f"{finding.get('path')}:{finding.get('line')}; the pinned Vite scaffold is "
-                "static-only — move server logic into a declared action and rebuild as a static Vite app"
+                f"{finding.get('path')}:{finding.get('line')}{detail_suffix}; {remedy}"
             )
             continue
         if str(finding.get("kind") or "") == "vite_client_generate":
             blockers.append(
                 f"{finding.get('blocker') or 'product source calls the shared generate rail directly from client code'} at "
-                f"{finding.get('path')}:{finding.get('line')}; the pinned Vite scaffold requires "
-                "client AI flows to call a declared action instead of `/generate`"
+                f"{finding.get('path')}:{finding.get('line')}{detail_suffix}; {remedy}"
             )
             continue
         blockers.append(
             f"{finding.get('blocker') or 'product source bypasses the runtime'} at "
-            f"{finding.get('path')}:{finding.get('line')}; runtime AI must go through the "
-            "generate rail (or a declared action)"
+            f"{finding.get('path')}:{finding.get('line')}{detail_suffix}; {remedy}"
         )
     for finding in reserved_namespace_routes:
         if len(blockers) >= limit:
@@ -8241,8 +8290,8 @@ def _format_forbidden_product_source_blockers(
         route = str(finding.get("route") or "").strip() or "/api/takyon/apps/..."
         blockers.append(
             "product source defines its own handler under the platform-reserved path "
-            f"{route} at {finding.get('path')}; platform rails are served by the Takyon "
-            "runtime; remove the handler and call the rail from the client or a declared action"
+            f"{route} at {finding.get('path')}; issue: reserved runtime namespace; platform rails are "
+            "served by the Takyon runtime; remove the handler and call the rail from the client or a declared action"
         )
     remaining = max(0, len(forbidden_findings) + len(reserved_namespace_routes) - len(blockers))
     if remaining:
@@ -8980,48 +9029,6 @@ def _surface_refresh_exact_blocker(
     return str(refresh_dict.get("error") or "").strip()
 
 
-def _surface_refresh_supports_local_repair_retry(surface_refresh: dict[str, Any] | None) -> bool:
-    if not isinstance(surface_refresh, dict):
-        return False
-    refresh_status = str(surface_refresh.get("status") or "").strip().lower()
-    if refresh_status in {"failed", "blocked", "missing"}:
-        return True
-    publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
-    publish_status = str(publish.get("status") or "").strip().lower()
-    if publish_status != "blocked":
-        return False
-    blocker = str(publish.get("blocker") or surface_refresh.get("blocker") or "").strip().lower()
-    return any(
-        marker in blocker
-        for marker in (
-            "no package.json start script",
-            "source path contains no recognized product source files",
-            "static publish directory",
-            "next.js build output .next is incomplete",
-            "product source is not a next.js app",
-        )
-    )
-
-
-def _worker_local_repair_instruction(base_instruction: str, *, blocker: str, attempt_number: int) -> str:
-    trimmed = _truncate_text(str(blocker or "").strip() or "local verification failed", 1600)
-    return "\n\n".join(
-        [
-            base_instruction.rstrip(),
-            dedent(
-                f"""
-                Hermes automatic local repair retry ({attempt_number} of 2):
-                - The previous source pass produced real local files, but Takyon blocked refresh/publish on this exact local verification result:
-                  {trimmed}
-                - Repair the existing source in place instead of restarting from scratch.
-                - Use local build/test/install commands inside the current workspace until this blocker is cleared.
-                - Keep the runtime contract truthful and preserve any working files that do not need changes.
-                """
-            ).strip(),
-        ]
-    )
-
-
 def _worker_surface_contract_retry_instruction(
     base_instruction: str,
     *,
@@ -9189,6 +9196,22 @@ def _product_publish_readiness_blocker(source_root: Path) -> str:
         "refresh/build finished, but no publishable output exists; "
         f"{detail}; {_product_publish_output_requirements(source_root)}"
     )
+
+
+def _surface_refresh_has_forbidden_source_blockers(surface_refresh: dict[str, Any] | None) -> bool:
+    if not isinstance(surface_refresh, dict):
+        return False
+    blockers = surface_refresh.get("blockers")
+    return isinstance(blockers, list) and bool(blockers)
+
+
+def _blocked_message(text: Any) -> str:
+    message = str(text or "").strip()
+    if not message:
+        return "BLOCKED: exact blocker unavailable"
+    if message.startswith("BLOCKED:"):
+        return message
+    return f"BLOCKED: {message}"
 
 
 def _refresh_product_surface_path(
@@ -26166,7 +26189,7 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
         maximum=900,
     )
     deferred_args = {**args, "business": business, "workspace": workspace_rel, "refresh_surface": refresh_surface}
-    # Worst case: one local-repair retry doubles the SDK run + surface refresh, plus claim slack.
+    # Worst case: one bounded turn-cap continuation doubles the SDK run + surface refresh, plus claim slack.
     wait_seconds = 2.0 * (timeout_ms / 1000.0 + float(refresh_timeout_seconds)) + 120.0
     return _run_operator_task_on_worker(
         store=store,
@@ -26910,6 +26933,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         active_max_turns = next_max_turns
                         continue
                 break
+            if _surface_refresh_has_forbidden_source_blockers(surface_refresh):
+                sdk_result["blocked"] = True
+                blocked_summary = _blocked_message(_surface_refresh_exact_blocker(surface_refresh or {}))
+                if not _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+                    sdk_result["summary"] = blocked_summary
             status = "completed" if sdk_result.get("success") else "failed"
             if sdk_result.get("blocked"):
                 status = "blocked"
@@ -26996,12 +27024,23 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "raw_stdout": sdk_result.get("raw_stdout"),
         }
         if status != "completed":
-            error_text = str(
-                sdk_result.get("error")
-                or (surface_refresh or {}).get("blocker")
-                or _surface_refresh_exact_blocker(surface_refresh or {})
+            blocked_error = ""
+            if _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+                blocked_error = _blocked_message(sdk_result.get("summary"))
+            elif _surface_refresh_has_forbidden_source_blockers(surface_refresh):
+                blocked_error = _blocked_message(
+                    (surface_refresh or {}).get("blocker")
+                    or _surface_refresh_exact_blocker(surface_refresh or {})
+                )
+            error_text = blocked_error or (
+                str(
+                    sdk_result.get("error")
+                    or (surface_refresh or {}).get("blocker")
+                    or _surface_refresh_exact_blocker(surface_refresh or {})
+                    or "Claude Agent SDK task failed"
+                ).strip()
                 or "Claude Agent SDK task failed"
-            ).strip() or "Claude Agent SDK task failed"
+            )
             return tool_error(error_text, **result_payload)
         return tool_result(result_payload)
     except subprocess.TimeoutExpired as exc:

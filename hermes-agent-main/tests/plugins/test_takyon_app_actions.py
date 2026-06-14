@@ -28,6 +28,12 @@ def test_actions_runtime_registry_entry_is_canonical():
     assert rail["endpoints"] == [("POST", "actions/<name>")]
     assert takyon_core._RUNTIME_FEATURE_DEPENDENCIES["actions"] == ("auth", "account")
     assert "actions" in takyon_core._RUNTIME_FEATURE_ORDER
+    worker_contract = "\n".join(rail["worker_contract"])
+    assert "api.openai.com" in worker_contract
+    assert "`OPENAI_API_KEY`" in worker_contract
+    assert "`@anthropic-ai/sdk`" in worker_contract
+    assert "`next.config.*`" in worker_contract
+    assert "Client code must not call `/generate` directly" in worker_contract
 
 
 def test_validate_action_contract_does_not_require_actions_rail():

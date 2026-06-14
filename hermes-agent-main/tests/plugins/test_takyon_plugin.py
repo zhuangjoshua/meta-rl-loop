@@ -2713,6 +2713,9 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Runtime API base fallback: /api/takyon/apps/latexflow" in instruction
     assert "account (owner: takyon-app-runtime)" in instruction
     assert "checkout (owner: takyon-app-runtime)" in instruction
+    assert "api.openai.com" in instruction
+    assert "`OPENAI_API_KEY`" in instruction
+    assert "Client code must not call `/generate` directly" in instruction
     assert "Canonical tools: business_read_app_account" in instruction
     assert "Canonical tools: business_list_app_records, business_read_app_record, business_upsert_app_record, business_delete_app_record" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
@@ -3101,7 +3104,7 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refre
     assert captured["install"] is True
 
 
-def test_claude_agent_task_retries_once_on_local_surface_refresh_blocker(tmp_path, monkeypatch):
+def test_claude_agent_task_prefixes_forbidden_surface_blockers_with_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -3126,7 +3129,6 @@ def test_claude_agent_task_retries_once_on_local_surface_refresh_blocker(tmp_pat
     )
 
     payloads: list[dict[str, object]] = []
-    refresh_calls: list[str] = []
 
     def fake_run(command, *, input=None, **kwargs):
         if len(command) > 1 and str(command[1]).endswith("takyon-claude-agent-task.mjs"):
@@ -3136,44 +3138,33 @@ def test_claude_agent_task_retries_once_on_local_surface_refresh_blocker(tmp_pat
         return types.SimpleNamespace(returncode=0, stdout="v99.0.0\n", stderr="")
 
     def fake_finalize(**kwargs: object) -> dict[str, object]:
-        refresh_calls.append(str(kwargs["receipt_path"]))
-        if len(refresh_calls) == 1:
-            blocker = "npm run build failed: Module not found: Can't resolve './globals.css'"
-            return {
-                "status": "failed",
-                "source_path": "product/site",
-                "checks": [
-                    {
-                        "status": "failed",
-                        "command": ["npm", "run", "build"],
-                        "stderr": "Module not found: Can't resolve './globals.css'",
-                    }
-                ],
-                "publish": {
-                    "status": "blocked",
-                    "publish_target": "https://latexflow.fourmanifold.com/",
-                    "publish_source_path": "product/site",
-                    "blocker": blocker,
-                },
-                "inventory": {},
-                "receipt_path": str(kwargs["receipt_path"]),
-                "blocker": blocker,
-            }
+        blocker = (
+            "product source violates runtime authority boundaries:\n"
+            "- product source imports or constructs an AI provider SDK directly at "
+            "product/site/actions/coach.ts:133; issue: provider sdk import; snippet: "
+            "import OpenAI from 'openai';; remove the SDK import and call your declared action "
+            "over `ctx.base_url` + `ctx.session_token`, which brokers the generate rail server-side"
+        )
         return {
-            "status": "passed",
+            "status": "blocked",
             "source_path": "product/site",
             "checks": [],
             "publish": {
-                "status": "published",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "status": "blocked",
+                "public_url": "",
                 "publish_target": "https://latexflow.fourmanifold.com/",
                 "publish_source_path": "product/site",
-                "published_at": "2026-06-04T23:59:00+00:00",
-                "blocker": "",
+                "blocker": blocker,
             },
             "inventory": {},
+            "blockers": [
+                "product source imports or constructs an AI provider SDK directly at "
+                "product/site/actions/coach.ts:133; issue: provider sdk import; snippet: "
+                "import OpenAI from 'openai';; remove the SDK import and call your declared action "
+                "over `ctx.base_url` + `ctx.session_token`, which brokers the generate rail server-side"
+            ],
             "receipt_path": str(kwargs["receipt_path"]),
-            "blocker": "",
+            "blocker": blocker,
         }
 
     monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
@@ -3194,14 +3185,13 @@ def test_claude_agent_task_retries_once_on_local_surface_refresh_blocker(tmp_pat
         )
     )
 
-    assert result["success"] is True
-    assert result["worker_attempts"] == 2
-    assert len(result["local_repair_retries"]) == 1
-    assert len(payloads) == 2
-    assert len(refresh_calls) == 2
-    assert "Hermes automatic local repair retry (2 of 2)" in str(payloads[1]["instruction"])
-    assert "globals.css" in str(payloads[1]["instruction"])
-    assert result["surface_refresh"]["publish"]["status"] == "published"
+    assert result["success"] is False
+    assert result["worker_attempts"] == 1
+    assert len(payloads) == 1
+    assert result["blocked"] is True
+    assert str(result["error"]).startswith("BLOCKED: product source violates runtime authority boundaries:")
+    assert str(result["summary"]).startswith("BLOCKED: product source violates runtime authority boundaries:")
+    assert "provider sdk import" in str(result["error"])
 
 
 def test_product_surface_refresh_defaults_publish_root_to_takyon_home_product_sites(tmp_path, monkeypatch):
