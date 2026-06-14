@@ -1791,6 +1791,11 @@ def test_auth0_public_path_allows_litebulb_shell_and_machine_facing_pg_routes():
     assert web_server._auth0_public_path("/internal/creative-gateway/meta-launch") is True
 
 
+def _clear_product_serving_caches(web_server) -> None:
+    web_server._PRODUCT_HOST_BUSINESS_CACHE.clear()
+    web_server._PRODUCT_LIVE_BUILD_POINTER_CACHE.clear()
+
+
 def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg_store_dsn):
     from starlette.testclient import TestClient
 
@@ -1810,6 +1815,7 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    _clear_product_serving_caches(web_server)
     store = TakyonStore(tmp_path, database_url=pg_store_dsn)
     store.seed_platform_owner()
     store.commit(
@@ -1878,6 +1884,7 @@ def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypa
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    _clear_product_serving_caches(web_server)
     store = TakyonStore(tmp_path, database_url=pg_store_dsn)
     store.seed_platform_owner()
     store.commit(
@@ -1922,7 +1929,6 @@ def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypa
 def test_product_subdomain_materializes_published_site_from_storage(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
-    import plugins.takyon.core as takyon_core
     import plugins.takyon.storage as takyon_storage
     import takyon_cli.web_server as web_server
 
@@ -1930,22 +1936,7 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-
-    class FakeStore:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def read(self, **_kwargs):
-            return {
-                "app": {
-                    "surface_contract": {
-                        "publish_status": "published",
-                        "published_at": "2026-06-03T05:37:01.783509+00:00",
-                        "source_path": "product/site",
-                        "live_build_id": "build123",
-                    }
-                }
-            }
+    _clear_product_serving_caches(web_server)
 
     def fake_materialize_build(_backend, slug, build_id, dest_dir, *, delete_local=False):
         assert slug == "latexflow"
@@ -1958,7 +1949,7 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
         )
         return takyon_storage.SyncReport(downloaded=("index.html",))
 
-    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
     monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fake_materialize_build)
 
@@ -1979,32 +1970,14 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
 def test_product_subdomain_without_live_build_pointer_returns_404(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
-    import plugins.takyon.core as takyon_core
-    import plugins.takyon.storage as takyon_storage
     import takyon_cli.web_server as web_server
 
     site_root = tmp_path / "product-sites"
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-
-    class FakeStore:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def read(self, **_kwargs):
-            return {
-                "app": {
-                    "surface_contract": {
-                        "publish_status": "blocked",
-                        "published_at": "",
-                        "source_path": "product/site",
-                    }
-                }
-            }
-
-    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
-    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
+    _clear_product_serving_caches(web_server)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, None))
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2020,8 +1993,6 @@ def test_product_subdomain_without_live_build_pointer_returns_404(tmp_path, monk
 def test_product_subdomain_serves_existing_current_pointer_without_materialize(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
-    import plugins.takyon.core as takyon_core
-    import plugins.takyon.storage as takyon_storage
     import takyon_cli.web_server as web_server
 
     site_root = tmp_path / "product-sites"
@@ -2038,30 +2009,13 @@ def test_product_subdomain_serves_existing_current_pointer_without_materialize(t
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    _clear_product_serving_caches(web_server)
 
-    class FakeStore:
-        def __init__(self, *_args, **_kwargs):
-            pass
+    def fail_materialize(_business: str, _build_id: str):
+        raise AssertionError("materialize should not run when the pointed build already exists locally")
 
-        def read(self, **_kwargs):
-            return {
-                "app": {
-                    "surface_contract": {
-                        "publish_status": "published",
-                        "published_at": "2026-06-14T06:00:00+00:00",
-                        "source_path": "product/site",
-                        "live_build_id": "build123",
-                    }
-                }
-            }
-
-    def fail_materialize(_backend, slug, build_id, dest_dir, *, delete_local=False):
-        raise AssertionError("materialize_build_artifact should not run when the current build already exists locally")
-
-    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
-    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
-    monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fail_materialize)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
+    monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", fail_materialize)
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2078,7 +2032,6 @@ def test_product_subdomain_serves_existing_current_pointer_without_materialize(t
 def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
-    import plugins.takyon.core as takyon_core
     import plugins.takyon.storage as takyon_storage
     import takyon_cli.web_server as web_server
 
@@ -2086,22 +2039,7 @@ def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monke
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
-
-    class FakeStore:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def read(self, **_kwargs):
-            return {
-                "app": {
-                    "surface_contract": {
-                        "publish_status": "published",
-                        "published_at": "2026-06-13T22:05:00+00:00",
-                        "source_path": "product/site",
-                        "live_build_id": "build123",
-                    }
-                }
-            }
+    _clear_product_serving_caches(web_server)
 
     def fake_materialize_build(_backend, slug, build_id, dest_dir, *, delete_local=False):
         assert slug == "latexflow"
@@ -2114,7 +2052,7 @@ def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monke
         )
         return takyon_storage.SyncReport(downloaded=("index.html",))
 
-    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
     monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fake_materialize_build)
 
@@ -2129,6 +2067,81 @@ def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monke
     assert response.status_code == 200
     assert "Rehydrated published build" in response.text
     assert (site_root / "latexflow" / "current").is_symlink()
+
+
+def test_product_subdomain_pointer_timeout_returns_503(tmp_path, monkeypatch):
+    import httpx
+
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS", 0.01)
+    _clear_product_serving_caches(web_server)
+
+    def slow_pointer(_slug: str):
+        time.sleep(0.2)
+        return True, "build123"
+
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", slow_pointer)
+
+    async def _exercise() -> tuple[httpx.Response, float]:
+        transport = httpx.ASGITransport(app=web_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            started = time.perf_counter()
+            response = await client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+            elapsed = time.perf_counter() - started
+            return response, elapsed
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        response, elapsed = asyncio.run(_exercise())
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 503
+    assert elapsed < 0.15
+
+
+def test_product_subdomain_materialize_timeout_returns_503(tmp_path, monkeypatch):
+    import httpx
+
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_PRODUCT_SITE_MATERIALIZE_TIMEOUT_SECONDS", 0.01)
+    _clear_product_serving_caches(web_server)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
+
+    def slow_materialize(_business: str, _build_id: str):
+        time.sleep(0.2)
+        return None
+
+    monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", slow_materialize)
+
+    async def _exercise() -> tuple[httpx.Response, float]:
+        transport = httpx.ASGITransport(app=web_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            started = time.perf_counter()
+            response = await client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+            elapsed = time.perf_counter() - started
+            return response, elapsed
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        response, elapsed = asyncio.run(_exercise())
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 503
+    assert elapsed < 0.15
 
 
 def test_reserved_public_host_does_not_resolve_as_product_business():
@@ -2943,16 +2956,21 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
     publish_root = tmp_path / "product-sites"
     publish_root.mkdir(parents=True, exist_ok=True)
 
-    def _slow_materialize(_business: str):
+    def _slow_materialize(_business: str, _build_id: str):
         time.sleep(0.25)
         return None
 
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
     monkeypatch.setattr(web_server, "_dashboard_product_site_root", lambda: publish_root)
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
     monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", _slow_materialize)
     monkeypatch.setattr(web_server, "check_config_version", lambda: (23, 23))
     monkeypatch.setattr(web_server, "get_running_pid", lambda: None)
     monkeypatch.setattr(web_server, "read_runtime_status", lambda: None)
     monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "")
+    _clear_product_serving_caches(web_server)
 
     async def _exercise() -> tuple[httpx.Response, float]:
         transport = httpx.ASGITransport(app=web_server.app)
@@ -2965,7 +2983,7 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
             status_resp = await client.get("/api/status")
             elapsed = time.perf_counter() - started
             product_resp = await product_task
-            assert product_resp.status_code == 404
+            assert product_resp.status_code == 503
             return status_resp, elapsed
 
     status_resp, elapsed = asyncio.run(_exercise())
@@ -2983,11 +3001,16 @@ def test_product_host_assets_route_serves_published_product_assets(monkeypatch, 
     build_root = publish_root / "plannerly" / "builds" / "build123"
     assets_root = build_root / "assets"
     assets_root.mkdir(parents=True, exist_ok=True)
+    (build_root / "index.html").write_text("<!doctype html><title>Plannerly</title>", encoding="utf-8")
     (assets_root / "app.js").write_text("console.log('plannerly');\n", encoding="utf-8")
     os.symlink("builds/build123", publish_root / "plannerly" / "current")
 
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
     monkeypatch.setattr(web_server, "_dashboard_product_site_root", lambda: publish_root)
-    monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", lambda business: publish_root / business / "current")
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    monkeypatch.setattr(web_server, "_resolve_live_build_pointer", lambda _slug: (True, "build123"))
+    _clear_product_serving_caches(web_server)
 
     client = TestClient(web_server.app)
     response = client.get("/assets/app.js", headers={"Host": "plannerly.fourmanifold.com"})

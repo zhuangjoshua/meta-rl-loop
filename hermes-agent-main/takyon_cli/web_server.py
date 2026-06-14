@@ -7842,8 +7842,39 @@ _PRODUCT_HOST_BUSINESS_CACHE: dict[str, tuple[float, bool, str]] = {}
 _PRODUCT_HOST_BUSINESS_POSITIVE_TTL_SECONDS = 60.0
 _PRODUCT_HOST_BUSINESS_NEGATIVE_TTL_SECONDS = 5.0
 _PRODUCT_HOST_BUSINESS_CACHE_MAX = 2048
+_PRODUCT_LIVE_BUILD_POINTER_CACHE_LOCK = threading.Lock()
+_PRODUCT_LIVE_BUILD_POINTER_CACHE: dict[str, tuple[float, str | None]] = {}
+_PRODUCT_LIVE_BUILD_POINTER_CACHE_MAX = 2048
 _PRODUCT_SITE_MATERIALIZE_LOCK = threading.Lock()
 _PRODUCT_SITE_MATERIALIZE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+_PRODUCT_LIVE_BUILD_POINTER_TTL_SECONDS = max(
+    0.1,
+    _env_float("TAKYON_PRODUCT_LIVE_BUILD_POINTER_TTL_SECONDS", 3.0),
+)
+_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS = max(
+    0.1,
+    _env_float("TAKYON_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS", 2.0),
+)
+_PRODUCT_SITE_MATERIALIZE_TIMEOUT_SECONDS = max(
+    0.1,
+    _env_float("TAKYON_PRODUCT_SITE_MATERIALIZE_TIMEOUT_SECONDS", 5.0),
+)
+_PRODUCT_SITE_LOCK_TIMEOUT_SECONDS = max(
+    0.1,
+    _env_float("TAKYON_PRODUCT_SITE_LOCK_TIMEOUT_SECONDS", 2.0),
+)
 
 
 def _product_site_materialize_lock_for_slug(slug: str) -> threading.Lock:
@@ -7909,6 +7940,97 @@ def _product_host_has_business(domain: str) -> tuple[bool, str]:
     return result
 
 
+def _resolve_live_build_pointer_uncached(slug: str) -> str | None:
+    from plugins.takyon.core import live_build_pointer
+
+    timeout_ms = max(1, int(_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS * 1000))
+    return live_build_pointer(
+        slug,
+        takyon_home=get_takyon_home(),
+        timeout_ms=timeout_ms,
+    )
+
+
+def _resolve_live_build_pointer(slug: str) -> tuple[bool, str | None]:
+    normalized = _safe_product_slug(slug)
+    now = time.monotonic()
+    with _PRODUCT_LIVE_BUILD_POINTER_CACHE_LOCK:
+        cached = _PRODUCT_LIVE_BUILD_POINTER_CACHE.get(normalized)
+        if cached is not None:
+            expires_at, build_id = cached
+            if expires_at > now:
+                return True, build_id
+            _PRODUCT_LIVE_BUILD_POINTER_CACHE.pop(normalized, None)
+
+    try:
+        build_id = _resolve_live_build_pointer_uncached(normalized)
+    except Exception as exc:
+        _log.warning("product live build pointer lookup failed for %s: %s", normalized, exc)
+        return False, None
+
+    with _PRODUCT_LIVE_BUILD_POINTER_CACHE_LOCK:
+        if len(_PRODUCT_LIVE_BUILD_POINTER_CACHE) >= _PRODUCT_LIVE_BUILD_POINTER_CACHE_MAX:
+            stale = [
+                key
+                for key, (expires_at, _build_id) in _PRODUCT_LIVE_BUILD_POINTER_CACHE.items()
+                if expires_at <= now
+            ]
+            for key in stale:
+                _PRODUCT_LIVE_BUILD_POINTER_CACHE.pop(key, None)
+            while len(_PRODUCT_LIVE_BUILD_POINTER_CACHE) >= _PRODUCT_LIVE_BUILD_POINTER_CACHE_MAX:
+                _PRODUCT_LIVE_BUILD_POINTER_CACHE.pop(next(iter(_PRODUCT_LIVE_BUILD_POINTER_CACHE)))
+        _PRODUCT_LIVE_BUILD_POINTER_CACHE[normalized] = (
+            now + _PRODUCT_LIVE_BUILD_POINTER_TTL_SECONDS,
+            build_id,
+        )
+    return True, build_id
+
+
+def _product_live_build_dir(slug: str, build_id: str) -> Path | None:
+    try:
+        from plugins.takyon.core import _product_live_build_root
+    except Exception as exc:
+        _log.warning("product live build root import failed for %s: %s", slug, exc)
+        return None
+
+    publish_root = _dashboard_product_site_root().resolve()
+    build_root = _product_live_build_root(slug, build_id)
+    if publish_root not in (build_root, *build_root.parents):
+        return None
+    return build_root
+
+
+def _repair_product_current_pointer(slug: str, build_root: Path) -> None:
+    try:
+        from plugins.takyon.core import _product_live_current_root, _replace_symlink_atomic
+    except Exception:
+        return
+    current_root = _product_live_current_root(slug)
+    if current_root.exists():
+        try:
+            if build_root == current_root.resolve():
+                return
+        except Exception:
+            pass
+    try:
+        _replace_symlink_atomic(current_root, build_root)
+    except Exception:
+        pass
+
+
+def _product_site_unavailable_response(slug: str, rel: str, *, detail: str) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": "product site temporarily unavailable",
+            "business": slug,
+            "requested_path": rel,
+            "detail": detail,
+        },
+        status_code=503,
+        headers={"Cache-Control": "no-store", "Retry-After": "3"},
+    )
+
+
 @app.get("/api/product-tls/ask")
 async def product_tls_ask(domain: str = "") -> Response:
     """Caddy on-demand TLS gate for shared product subdomains.
@@ -7950,51 +8072,30 @@ def _safe_product_slug(value: str) -> str:
     return slug
 
 
-def _materialize_product_site_from_storage(business: str) -> Path | None:
+def _materialize_product_site_from_storage(business: str, build_id: str) -> Path | None:
     slug = _safe_product_slug(business)
-    publish_root = _dashboard_product_site_root().resolve()
+    normalized_build_id = str(build_id or "").strip().lower()
+    if not normalized_build_id:
+        return None
+    build_root = _product_live_build_dir(slug, normalized_build_id)
+    if build_root is None:
+        return None
     materialize_lock = _product_site_materialize_lock_for_slug(slug)
+    acquired = materialize_lock.acquire(timeout=_PRODUCT_SITE_LOCK_TIMEOUT_SECONDS)
+    if not acquired:
+        _log.warning("product site materialize lock timed out for %s build %s", slug, normalized_build_id)
+        return None
 
-    with materialize_lock:
+    try:
         try:
-            from plugins.takyon.core import (
-                TakyonStore,
-                _product_live_build_root,
-                _product_live_current_root,
-                _replace_symlink_atomic,
-            )
             from plugins.takyon.storage import get_storage_backend, materialize_build_artifact
         except Exception as exc:
             _log.warning("product site materialize imports failed for %s: %s", slug, exc)
             return None
 
-        try:
-            app = (
-                # System serving surface (product-site materialization), not an operator action —
-                # declared via system_plane so per-session identity enforcement does not apply.
-                TakyonStore(get_takyon_home(), system_plane="product-serving")
-                .read(scope=f"business:{slug}", query="summary", include=["app"], limit=1)
-                .get("app")
-                or {}
-            )
-        except Exception as exc:
-            _log.warning("product site summary read failed for %s: %s", slug, exc)
-            return None
-
-        surface = app.get("surface_contract") or {}
-        live_build_id = str(surface.get("live_build_id") or "").strip().lower()
-        if not live_build_id:
-            return None
-        build_root = _product_live_build_root(slug, live_build_id)
-        current_root = _product_live_current_root(slug)
-        if publish_root not in (build_root, *build_root.parents):
-            return None
         if build_root.is_dir() and (build_root / "index.html").is_file():
-            try:
-                _replace_symlink_atomic(current_root, build_root)
-            except Exception:
-                pass
-            return current_root if current_root.exists() else build_root
+            _repair_product_current_pointer(slug, build_root)
+            return build_root
 
         try:
             backend = get_storage_backend()
@@ -8002,45 +8103,82 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
             _log.warning("product site backend unavailable for %s: %s", slug, exc)
             return None
 
-        publish_root.mkdir(parents=True, exist_ok=True)
+        _dashboard_product_site_root().resolve().mkdir(parents=True, exist_ok=True)
         try:
             materialize_build_artifact(
                 backend,
                 slug,
-                live_build_id,
+                normalized_build_id,
                 build_root,
                 delete_local=True,
             )
         except Exception as exc:
-            _log.warning("product site build materialize failed for %s build %s: %s", slug, live_build_id, exc)
+            _log.warning("product site build materialize failed for %s build %s: %s", slug, normalized_build_id, exc)
             return None
-        try:
-            _replace_symlink_atomic(current_root, build_root)
-        except Exception as exc:
-            _log.warning("product site pointer update failed for %s build %s: %s", slug, live_build_id, exc)
-            return build_root
-
-    if current_root.is_dir() and (current_root / "index.html").is_file():
-        return current_root
-    return build_root if build_root.is_dir() else None
+        _repair_product_current_pointer(slug, build_root)
+        return build_root if build_root.is_dir() else None
+    finally:
+        materialize_lock.release()
 
 
 async def _serve_product_site_file(business: str, full_path: str = "", *, request: Request | None = None) -> Response:
     slug = _safe_product_slug(business)
     root = _dashboard_product_site_root().resolve()
     rel = full_path.strip("/") or "index.html"
-    site_root = await asyncio.to_thread(
-        _materialize_product_site_from_storage,
-        slug,
-    )
-    if site_root is None:
+    try:
+        resolved, build_id = await asyncio.wait_for(
+            asyncio.to_thread(_resolve_live_build_pointer, slug),
+            timeout=_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return _product_site_unavailable_response(
+            slug,
+            rel,
+            detail="live build pointer lookup timed out",
+        )
+    if not resolved:
+        return _product_site_unavailable_response(
+            slug,
+            rel,
+            detail="live build pointer lookup failed",
+        )
+    if not build_id:
         detail = {
             "error": "product site file not found",
             "business": slug,
             "requested_path": rel,
-            "site_root": str((root / slug).resolve()),
+            "site_root": str((root / slug / "current").resolve()),
         }
         return JSONResponse(detail, status_code=404, headers={"Cache-Control": "no-store"})
+    build_root = _product_live_build_dir(slug, build_id)
+    if build_root is None:
+        detail = {
+            "error": "product site file not found",
+            "business": slug,
+            "requested_path": rel,
+            "site_root": str((root / slug / "builds" / build_id).resolve()),
+        }
+        return JSONResponse(detail, status_code=404, headers={"Cache-Control": "no-store"})
+    if (build_root / "index.html").is_file():
+        site_root = build_root
+    else:
+        try:
+            site_root = await asyncio.wait_for(
+                asyncio.to_thread(_materialize_product_site_from_storage, slug, build_id),
+                timeout=_PRODUCT_SITE_MATERIALIZE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return _product_site_unavailable_response(
+                slug,
+                rel,
+                detail="live build materialization timed out",
+            )
+        if site_root is None:
+            return _product_site_unavailable_response(
+                slug,
+                rel,
+                detail="live build materialization failed",
+            )
     target = (site_root / rel).resolve()
     if target.is_dir():
         target = target / "index.html"

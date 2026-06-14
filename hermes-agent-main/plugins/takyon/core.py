@@ -740,6 +740,45 @@ def _write_workspace_base_revisions(workspace_root: Path | None, revisions: Mapp
     _atomic_write_text(path, _json_dumps(payload) + "\n")
 
 
+def live_build_pointer(
+    business: str,
+    *,
+    takyon_home: Path | str | None = None,
+    database_url: str | None = None,
+    timeout_ms: int = 2_000,
+) -> str | None:
+    """Resolve the intended live build pointer with one control-plane read.
+
+    This is the narrow product-serving seam: one indexed SELECT against
+    ``app_surface_contracts.live_build_id`` and nothing else. No summary read,
+    no filesystem hydrate, no receipt scan, no workspace sync.
+    """
+    slug = _slugify(business)
+    if not slug:
+        return None
+    store = TakyonStore(
+        Path(takyon_home).expanduser() if takyon_home else get_takyon_home(),
+        database_url=database_url,
+        system_plane="product-serving",
+    )
+    with store._connect() as conn:
+        try:
+            bounded_timeout_ms = max(1, int(timeout_ms or 0))
+        except (TypeError, ValueError):
+            bounded_timeout_ms = 2_000
+        try:
+            conn.execute("SET LOCAL statement_timeout = ?", (bounded_timeout_ms,))
+        except Exception:
+            pass
+        row = conn.execute(
+            "SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?",
+            (slug,),
+        ).fetchone()
+    if not row:
+        return None
+    return str(row.get("live_build_id") or "").strip().lower() or None
+
+
 def _surface_live_publication_state(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
     payload = surface if isinstance(surface, dict) else {}
     build_id = str(payload.get("live_build_id") or "").strip()
