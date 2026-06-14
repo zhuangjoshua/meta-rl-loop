@@ -699,27 +699,60 @@ def _workspace_truth_metadata(*, session_scoped: bool) -> dict[str, Any]:
     }
 
 
-def _recorded_live_truth_metadata(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
+def _surface_live_publication_state(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
     payload = surface if isinstance(surface, dict) else {}
-    public_url = str(payload.get("public_url") or payload.get("publish_target") or _product_publish_target(business)).strip()
-    publish_status = str(payload.get("publish_status") or "not_published").strip() or "not_published"
+    build_id = str(payload.get("live_build_id") or "").strip()
+    recorded_status = str(payload.get("publish_status") or "not_published").strip().lower() or "not_published"
+    publish_target = str(
+        payload.get("publish_target")
+        or (_product_publish_target(business) if str(business or "").strip() else "")
+    ).strip()
+    recorded_public_url = str(payload.get("public_url") or "").strip()
+    recorded_published_at = str(payload.get("published_at") or "").strip()
+    publish_blocker = str(payload.get("publish_blocker") or "").strip()
+    if build_id:
+        publish_status = "published"
+    elif recorded_status == "published":
+        publish_status = "published"
+    elif publish_blocker:
+        publish_status = "blocked"
+    else:
+        publish_status = "not_published"
+    return {
+        "build_id": build_id,
+        "publish_status": publish_status,
+        "public_url": recorded_public_url or (publish_target if publish_status == "published" else ""),
+        "published_at": recorded_published_at if publish_status == "published" else "",
+        "probe": (
+            str(payload.get("live_probe_status") or "unknown").strip().lower() or "unknown"
+            if publish_status == "published"
+            else "unknown"
+        ),
+        "probe_detail": str(payload.get("live_probe_detail") or "").strip() if publish_status == "published" else "",
+        "publish_blocker": publish_blocker,
+        "publish_target": publish_target,
+    }
+
+
+def _recorded_live_truth_metadata(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
+    publication = _surface_live_publication_state(surface, business=business)
     return {
         "surface": "recorded_live",
-        "committed": bool(str(payload.get("live_build_id") or "").strip()),
+        "committed": bool(publication.get("build_id")),
         "live": True,
-        "build_id": str(payload.get("live_build_id") or "").strip(),
-        "publish_status": publish_status,
-        "public_url": public_url,
-        "published_at": str(payload.get("published_at") or "").strip(),
-        "probe": str(payload.get("live_probe_status") or "unknown").strip() or "unknown",
-        "probe_detail": str(payload.get("live_probe_detail") or "").strip(),
+        "build_id": str(publication.get("build_id") or ""),
+        "publish_status": str(publication.get("publish_status") or "not_published"),
+        "public_url": str(publication.get("public_url") or ""),
+        "published_at": str(publication.get("published_at") or ""),
+        "probe": str(publication.get("probe") or "unknown"),
+        "probe_detail": str(publication.get("probe_detail") or ""),
         "guidance": "This is the recorded live/public state from the app surface contract and live build pointer. Probe status reports whether the public host matched that intended live build the last time publish checked it.",
     }
 
 
 def _live_truth_snapshot(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
     truth = _recorded_live_truth_metadata(surface, business=business)
-    if truth.get("build_id") and str(truth.get("publish_status") or "").strip().lower() == "published":
+    if truth.get("build_id"):
         probe_status, probe_detail = _probe_product_public_url_status(str(truth.get("public_url") or ""))
         if probe_status:
             truth["probe"] = probe_status
@@ -8354,6 +8387,10 @@ def _product_surface_operational_facts(
     inventory: dict[str, Any] | None,
 ) -> dict[str, Any]:
     surface_dict = surface if isinstance(surface, dict) else {}
+    publication = _surface_live_publication_state(
+        surface_dict,
+        business=str(surface_dict.get("business_slug") or "").strip(),
+    )
     receipt_dict = receipt if isinstance(receipt, dict) else {}
     publish = receipt_dict.get("publish") if isinstance(receipt_dict.get("publish"), dict) else {}
     effective_inventory = (
@@ -8422,7 +8459,7 @@ def _product_surface_operational_facts(
     if not blocker:
         blocker = (
             str(receipt_dict.get("blocker") or publish.get("blocker") or receipt_dict.get("error") or "").strip()
-            or str(surface_dict.get("publish_blocker") or "").strip()
+            or str(publication.get("publish_blocker") or "").strip()
         )
     return {
         "detected_frameworks": frameworks,
@@ -8439,8 +8476,9 @@ def _product_surface_operational_facts(
         "publish_mode": str(publish.get("publish_mode") or publish.get("deploy_kind") or "").strip(),
         "publish_source_path": str(publish.get("publish_source_path") or "").strip(),
         "publish_root": str(publish.get("publish_root") or "").strip(),
-        "publish_status": str(publish.get("status") or surface_dict.get("publish_status") or "").strip(),
-        "public_url": str(publish.get("public_url") or surface_dict.get("public_url") or "").strip(),
+        "publish_status": str(publication.get("publish_status") or "not_published"),
+        "public_url": str(publication.get("public_url") or ""),
+        "live_build_id": str(publication.get("build_id") or ""),
         "repairs": repairs[:6],
         "blocker": blocker,
     }
@@ -12003,6 +12041,17 @@ class TakyonStore:
         contract = dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
         contract.pop("theme", None)
         contract.pop("constraints", None)
+        publication = _surface_live_publication_state(contract, business=slug)
+        contract.update(
+            {
+                "publish_status": publication["publish_status"],
+                "public_url": publication["public_url"],
+                "published_at": publication["published_at"],
+                "live_build_id": publication["build_id"],
+                "live_probe_status": publication["probe"],
+                "live_probe_detail": publication["probe_detail"],
+            }
+        )
         return contract
 
     def _app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
@@ -12016,6 +12065,7 @@ class TakyonStore:
 
         surface = surface if isinstance(surface, dict) else self._app_surface_contract(conn, slug)
         source_path = str(surface.get("source_path") or "").strip()
+        source_revision = self._canonical_workspace_revision(slug)
         product_workflow = _surface_product_workflow_shape(surface)
         inventory = _product_inventory(self._business_root(slug), source_path, surface=surface) if source_path else {}
         if isinstance(inventory, dict):
@@ -12040,6 +12090,7 @@ class TakyonStore:
         )
         root = self._business_root(slug) / source_path if source_path else None
         has_source_files = bool(root and root.exists() and root.is_dir() and _product_source_files(root, limit=1))
+        live_truth = _live_truth_snapshot(surface, business=slug)
         local_work: list[str] = []
         if not source_path:
             local_work.append("missing product source path")
@@ -12047,6 +12098,10 @@ class TakyonStore:
             local_work.append("missing product source files")
         elif str(surface.get("publish_status") or "").strip().lower() != "published":
             local_work.append(str(surface.get("publish_blocker") or "product source has not been published"))
+        elif str(live_truth.get("probe") or "").strip().lower() not in {"", "ok", "unknown"}:
+            local_work.append(
+                str(live_truth.get("probe_detail") or "recorded live build is not serving cleanly").strip()
+            )
         risk_issues = {
             str(item.get("issue") or "")
             for item in (inventory.get("risk_markers") or [])
@@ -12055,15 +12110,16 @@ class TakyonStore:
         if risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired", "scaffold_visible_shell"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
         source_truth = self._workspace_truth(slug)
-        live_truth = _live_truth_snapshot(surface, business=slug)
         return {
             "surface_status": str(surface.get("status") or "missing"),
             "publish_status": str(surface.get("publish_status") or ""),
             "public_url": str(surface.get("public_url") or ""),
             "source_path": source_path,
+            "source_revision": int(source_revision or 0),
             "has_source_files": has_source_files,
             "latest_receipt_path": str(surface.get("publish_receipt_path") or ""),
             "publish_blocker": str(surface.get("publish_blocker") or ""),
+            "live_build_id": str(surface.get("live_build_id") or ""),
             "inventory": inventory or {},
             "operational_facts": operational_facts,
             "action_invocations": action_invocations,
@@ -12167,13 +12223,13 @@ class TakyonStore:
         )
         surface_lines.extend(
             [
-            f"- Publish status: {surface.get('publish_status') or 'not_published'}",
-            f"- Public URL: {surface.get('public_url') or 'not published'}",
-            f"- Published at: {surface.get('published_at') or 'not published'}",
-            f"- Live build id: {surface.get('live_build_id') or 'not set'}",
-            f"- Live probe: {surface.get('live_probe_status') or 'unknown'}",
+            f"- Publish status: {surface_evidence.get('publish_status') or 'not_published'}",
+            f"- Public URL: {surface_evidence.get('public_url') or 'not published'}",
+            f"- Published at: {(surface_evidence.get('live_truth') or {}).get('published_at') or 'not published'}",
+            f"- Live build id: {(surface_evidence.get('live_truth') or {}).get('build_id') or 'not set'}",
+            f"- Live probe: {(surface_evidence.get('live_truth') or {}).get('probe') or 'unknown'}",
             f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
-            f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
+            f"- Publish blocker: {surface_evidence.get('publish_blocker') or 'none'}",
             ]
         )
         action_invocations = surface_evidence.get("action_invocations") if isinstance(surface_evidence.get("action_invocations"), list) else []

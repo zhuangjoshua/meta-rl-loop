@@ -751,3 +751,23 @@ def test_recorded_live_truth_metadata_labels_intended_live_state():
     assert truth["publish_status"] == "published"
     assert truth["public_url"] == "https://latexflow.fourmanifold.com/"
     assert truth["probe"] == "unknown"
+
+
+def test_recorded_live_truth_metadata_prefers_live_build_pointer_over_stale_status():
+    truth = takyon_core._recorded_live_truth_metadata(
+        {
+            "publish_status": "blocked",
+            "publish_target": "https://latexflow.fourmanifold.com/",
+            "public_url": "",
+            "published_at": "",
+            "live_build_id": "build-123",
+            "publish_blocker": "old timeout",
+        },
+        business="latexflow",
+    )
+
+    assert truth["surface"] == "recorded_live"
+    assert truth["committed"] is True
+    assert truth["publish_status"] == "published"
+    assert truth["build_id"] == "build-123"
+    assert truth["public_url"] == "https://latexflow.fourmanifold.com/"

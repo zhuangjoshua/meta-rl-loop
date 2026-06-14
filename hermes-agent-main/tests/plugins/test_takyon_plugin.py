@@ -816,6 +816,67 @@ def test_publish_result_preserves_existing_live_state_on_blocked_republish(tmp_p
     assert surface["metadata"]["takyon_publish_last_attempt"]["status"] == "blocked"
 
 
+def test_product_surface_reads_live_pointer_over_stale_publish_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    publish_target = "https://latexflow.fourmanifold.com/"
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-live-pointer-over-stale-status",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "active",
+                "source_path": "product/site",
+                "routes": ["/"],
+                "publish_target": publish_target,
+            }
+        ],
+        "surface-live-pointer-over-stale-status",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "blocked",
+                "publish_target": publish_target,
+                "public_url": "",
+                "published_at": "",
+                "live_build_id": "build-123",
+                "receipt_path": "metrics/receipts/product-surface/blocked.json",
+                "publish_source_path": "product/site",
+                "blocker": "stale status should not outrank live pointer",
+            }
+        ],
+        "publish-blocked-with-live-pointer",
+    )
+
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
+
+    assert app["surface_contract"]["publish_status"] == "published"
+    assert app["surface_contract"]["public_url"] == publish_target
+    assert app["surface_contract"]["live_build_id"] == "build-123"
+    assert app["truth"]["live"]["publish_status"] == "published"
+    assert app["product_surface"]["publish_status"] == "published"
+    assert "- Publish status: published" in surface_md
+    assert "- Live build id: build-123" in surface_md
+
+
 def test_artifact_write_refreshes_surface_contract_mirror_when_product_source_changes(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
