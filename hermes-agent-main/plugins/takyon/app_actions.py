@@ -126,6 +126,12 @@ def is_service_email(value: Any) -> bool:
     return email.endswith(_SERVICE_EMAIL_SUFFIX)
 
 
+def _row_value(row: Any, key: str, index: int) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key)
+    return row[index]
+
+
 def normalize_outbound_hosts(raw_hosts: Any) -> list[str]:
     values = raw_hosts if isinstance(raw_hosts, list) else []
     seen: set[str] = set()
@@ -364,14 +370,16 @@ def summarize_action_invocations(conn: Any, business_slug: str, actions: Any) ->
                 }
             )
             continue
-        raw_status = str(row[0] or "").strip().lower()
+        raw_status = str(_row_value(row, "status", 0) or "").strip().lower()
         summaries.append(
             {
                 "name": action_name,
                 "trigger": str(spec.get("trigger") or "").strip(),
                 "last_status": "ok" if raw_status == "completed" else "failed",
-                "last_invoked_at": str(row[3] or row[2] or "").strip(),
-                "last_error": str(row[1] or "").strip(),
+                "last_invoked_at": str(
+                    _row_value(row, "completed_at", 3) or _row_value(row, "created_at", 2) or ""
+                ).strip(),
+                "last_error": str(_row_value(row, "error", 1) or "").strip(),
             }
         )
     return summaries
@@ -462,8 +470,9 @@ def get_or_create_service_principal(store: Any, conn: Any, business_slug: str) -
         return existing
     now = _now()
     app_user_id = uuid.uuid4().hex
+    metadata_column = "metadata" if _is_pg_conn(conn) else "metadata_json"
     conn.execute(
-        "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) "
+        f"INSERT INTO app_users (id, business_slug, email, name, status, tier, {metadata_column}, created_at, updated_at) "
         "VALUES (?, ?, ?, ?, 'active', 'service', ?, ?, ?)",
         (
             app_user_id,
@@ -484,6 +493,37 @@ def get_or_create_service_principal(store: Any, conn: Any, business_slug: str) -
     if not created:
         raise AppActionError("failed to create service principal")
     return created
+
+
+def _resolve_pg_action_usage_limit(
+    store: Any,
+    conn: Any,
+    *,
+    business_slug: str,
+    app_user_id: str | None,
+    app_user_tier: str | None,
+) -> tuple[str | None, int | None]:
+    resolved_user_tier = str(app_user_tier or "").strip() or None
+    if not app_user_id or str(app_user_tier or "").strip().lower() == "service":
+        return resolved_user_tier, None
+
+    leaves = store._app_leaves()
+    with store._leaf_conn(conn) as raw:
+        app_user = leaves["identity"].get_app_user(raw, business_slug, app_user_id=app_user_id)
+        if app_user is not None:
+            resolved_user_tier = resolved_user_tier or str(getattr(app_user, "tier", "") or "").strip() or None
+        entitlement = leaves["entitlements"].get_active_entitlement(raw, business_slug, app_user_id)
+        plan = None
+        if entitlement is not None and getattr(entitlement, "plan_key", None):
+            plan = leaves["entitlements"].get_plan_policy(raw, business_slug, entitlement.plan_key)
+        if plan is None and resolved_user_tier:
+            for candidate in leaves["entitlements"].list_plan_policies(raw, business_slug):
+                if str(getattr(candidate, "tier", "") or "") == resolved_user_tier:
+                    plan = candidate
+                    break
+        if plan is not None and str(getattr(plan, "tier", "free") or "free") != "free":
+            return resolved_user_tier, max(0, int(getattr(plan, "included_ai_budget_microusd", 0) or 0))
+    return resolved_user_tier, 0
 
 
 def reconcile_action_schedules(conn: Any, business_slug: str, workflow: Mapping[str, Any] | None) -> None:
@@ -869,17 +909,26 @@ def _reserve_usage(
         with store._connect() as conn:
             if isinstance(conn, _PGConn):
                 try:
-                    app_usage.reserve_usage(
+                    resolved_user_tier, user_monthly_limit_microusd = _resolve_pg_action_usage_limit(
+                        store,
                         conn,
-                        business_slug,
-                        estimated_cost_microusd=estimate_microusd,
-                        reservation_key=reservation_key,
+                        business_slug=business_slug,
                         app_user_id=app_user_id,
                         app_user_tier=app_user_tier,
-                        purpose=purpose,
-                        route=route,
-                        metadata=dict(metadata),
                     )
+                    with store._leaf_conn(conn) as raw:
+                        app_usage.reserve_usage(
+                            raw,
+                            business_slug,
+                            estimated_cost_microusd=estimate_microusd,
+                            reservation_key=reservation_key,
+                            app_user_id=app_user_id,
+                            user_monthly_limit_microusd=user_monthly_limit_microusd,
+                            app_user_tier=resolved_user_tier,
+                            purpose=purpose,
+                            route=route,
+                            metadata=dict(metadata),
+                        )
                 except (app_usage.AppBudgetExceeded, app_usage.AppUserBudgetExceeded) as exc:
                     raise ActionBudgetExceeded(str(exc)) from exc
             else:
@@ -942,13 +991,14 @@ def _settle_usage(
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
-            app_usage.settle_usage(
-                conn,
-                business_slug,
-                reservation_key,
-                actual_cost_microusd=actual_microusd,
-                metadata=dict(metadata),
-            )
+            with store._leaf_conn(conn) as raw:
+                app_usage.settle_usage(
+                    raw,
+                    business_slug,
+                    reservation_key,
+                    actual_cost_microusd=actual_microusd,
+                    metadata=dict(metadata),
+                )
         else:
             conn.execute(
                 "UPDATE app_usage_events SET status = 'completed', actual_cost_microusd = ?, metadata_json = ?, completed_at = ? "
@@ -975,13 +1025,14 @@ def _release_usage(
     try:
         with store._connect() as conn:
             if isinstance(conn, _PGConn):
-                app_usage.release_usage(
-                    conn,
-                    business_slug,
-                    reservation_key,
-                    error=error,
-                    metadata=dict(metadata),
-                )
+                with store._leaf_conn(conn) as raw:
+                    app_usage.release_usage(
+                        raw,
+                        business_slug,
+                        reservation_key,
+                        error=error,
+                        metadata=dict(metadata),
+                    )
             else:
                 conn.execute(
                     "UPDATE app_usage_events SET status = 'failed', actual_cost_microusd = 0, error = ?, metadata_json = ?, completed_at = ? "

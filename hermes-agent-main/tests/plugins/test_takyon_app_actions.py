@@ -161,6 +161,86 @@ def test_summarize_action_invocations_reports_ok_failed_and_never():
     ]
 
 
+def test_summarize_action_invocations_supports_pg_mapping_rows(monkeypatch):
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Conn:
+        def execute(self, query, params):
+            assert "purpose = 'action_invoke'" in query
+            assert params == ("mathflow", "/api/takyon/apps/mathflow/actions/sync")
+            return _Cursor(
+                {
+                    "status": "completed",
+                    "error": "",
+                    "created_at": "2026-06-14T19:00:00+00:00",
+                    "completed_at": "2026-06-14T19:01:00+00:00",
+                }
+            )
+
+    monkeypatch.setattr(app_actions, "_is_pg_conn", lambda conn: True)
+
+    summary = app_actions.summarize_action_invocations(
+        _Conn(),
+        "mathflow",
+        [{"name": "sync", "trigger": "http"}],
+    )
+
+    assert summary == [
+        {
+            "name": "sync",
+            "trigger": "http",
+            "last_status": "ok",
+            "last_invoked_at": "2026-06-14T19:01:00+00:00",
+            "last_error": "",
+        }
+    ]
+
+
+def test_get_or_create_service_principal_uses_pg_metadata_column(monkeypatch):
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    queries: list[str] = []
+
+    class _Conn:
+        def execute(self, sql, params):
+            queries.append(sql)
+            if "WHERE business_slug = ? AND email = ?" in sql:
+                return _Cursor(None)
+            if "WHERE business_slug = ? AND id = ?" in sql:
+                return _Cursor(
+                    {
+                        "id": params[1],
+                        "business_slug": params[0],
+                        "email": f"scheduler@service.{params[0]}.takyon.invalid",
+                        "tier": "service",
+                    }
+                )
+            return _Cursor(None)
+
+    class _Store:
+        def _row_to_dict(self, row):
+            return row
+
+    monkeypatch.setattr(app_actions, "_is_pg_conn", lambda conn: True)
+
+    principal = app_actions.get_or_create_service_principal(_Store(), _Conn(), "mathflow")
+
+    assert principal["tier"] == "service"
+    insert_sql = next(sql for sql in queries if sql.startswith("INSERT INTO app_users"))
+    assert " metadata, " in insert_sql
+    assert "metadata_json" not in insert_sql
+
+
 def test_dispatch_due_action_schedules_advances_sqlite_cursor():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -248,6 +328,142 @@ def test_handle_business_invoke_app_action_reaches_runner_without_actions_declar
     assert payload["success"] is True
     assert captured["business_slug"] == "mathflow"
     assert captured["action_name"] == "sync"
+
+
+def test_reserve_usage_pg_uses_leaf_conn_and_plan_limit(monkeypatch):
+    from plugins.takyon import app_usage as takyon_app_usage
+
+    class FakePGConn:
+        pass
+
+    raw_conn = object()
+    captured: dict[str, object] = {}
+
+    class _Store:
+        @contextmanager
+        def _connect(self):
+            yield FakePGConn()
+
+        @contextmanager
+        def _leaf_conn(self, conn):
+            assert isinstance(conn, FakePGConn)
+            yield raw_conn
+
+        def _app_leaves(self):
+            return {
+                "identity": SimpleNamespace(
+                    get_app_user=lambda raw, business_slug, app_user_id: SimpleNamespace(
+                        id=app_user_id,
+                        tier="paid",
+                    )
+                ),
+                "entitlements": SimpleNamespace(
+                    get_active_entitlement=lambda raw, business_slug, app_user_id: SimpleNamespace(plan_key="monthly"),
+                    get_plan_policy=lambda raw, business_slug, plan_key: SimpleNamespace(
+                        tier="paid",
+                        included_ai_budget_microusd=5_000_000,
+                    ),
+                    list_plan_policies=lambda raw, business_slug: [],
+                ),
+            }
+
+    def _fake_reserve(conn, business_slug, **kwargs):
+        captured["conn"] = conn
+        captured["business_slug"] = business_slug
+        captured.update(kwargs)
+
+    monkeypatch.setattr(takyon_core, "_PGConn", FakePGConn)
+    monkeypatch.setattr(takyon_app_usage, "reserve_usage", _fake_reserve)
+
+    app_actions._reserve_usage(
+        _Store(),
+        "mathflow",
+        reservation_key="idem_123",
+        app_user_id="u_123",
+        app_user_tier="paid",
+        estimate_microusd=2_000,
+        route="/api/takyon/apps/mathflow/actions/coach",
+        metadata={"trigger": "http"},
+    )
+
+    assert captured["conn"] is raw_conn
+    assert captured["business_slug"] == "mathflow"
+    assert captured["user_monthly_limit_microusd"] == 5_000_000
+    assert captured["app_user_tier"] == "paid"
+
+
+def test_settle_and_release_usage_pg_use_leaf_conn(monkeypatch):
+    from plugins.takyon import app_usage as takyon_app_usage
+
+    class FakePGConn:
+        pass
+
+    raw_conn = object()
+    calls: list[tuple[str, object, dict[str, object]]] = []
+
+    class _Store:
+        @contextmanager
+        def _connect(self):
+            yield FakePGConn()
+
+        @contextmanager
+        def _leaf_conn(self, conn):
+            assert isinstance(conn, FakePGConn)
+            yield raw_conn
+
+    monkeypatch.setattr(takyon_core, "_PGConn", FakePGConn)
+    monkeypatch.setattr(
+        takyon_app_usage,
+        "settle_usage",
+        lambda conn, business_slug, reservation_key, **kwargs: calls.append(
+            ("settle", conn, {"business_slug": business_slug, "reservation_key": reservation_key, **kwargs})
+        ),
+    )
+    monkeypatch.setattr(
+        takyon_app_usage,
+        "release_usage",
+        lambda conn, business_slug, reservation_key, **kwargs: calls.append(
+            ("release", conn, {"business_slug": business_slug, "reservation_key": reservation_key, **kwargs})
+        ),
+    )
+
+    app_actions._settle_usage(
+        _Store(),
+        "mathflow",
+        reservation_key="idem_123",
+        actual_microusd=2_000,
+        metadata={"action": "coach"},
+    )
+    app_actions._release_usage(
+        _Store(),
+        "mathflow",
+        reservation_key="idem_123",
+        error="boom",
+        metadata={"action": "coach"},
+    )
+
+    assert calls == [
+        (
+            "settle",
+            raw_conn,
+            {
+                "business_slug": "mathflow",
+                "reservation_key": "idem_123",
+                "actual_cost_microusd": 2_000,
+                "metadata": {"action": "coach"},
+            },
+        ),
+        (
+            "release",
+            raw_conn,
+            {
+                "business_slug": "mathflow",
+                "reservation_key": "idem_123",
+                "error": "boom",
+                "metadata": {"action": "coach"},
+            },
+        ),
+    ]
 
 
 def test_handle_business_invoke_app_action_rejects_during_bootstrap_before_runner(monkeypatch):
