@@ -5,37 +5,29 @@ from pathlib import Path
 from plugins.takyon import core as takyon_core
 
 
-def test_publish_product_surface_static_swap_is_atomic_and_preserves_runtime_overlay(tmp_path, monkeypatch):
+def test_publish_product_surface_writes_immutable_build_and_flips_current_pointer(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
-    site.mkdir(parents=True)
-    (site / "index.html").write_text("<html><body>new site</body></html>\n", encoding="utf-8")
-    (site / "assets").mkdir()
-    (site / "assets" / "app.css").write_text("body{color:#123456}\n", encoding="utf-8")
+    dist = site / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>new site</body></html>\n", encoding="utf-8")
+    (dist / "assets").mkdir()
+    (dist / "assets" / "app.css").write_text("body{color:#123456}\n", encoding="utf-8")
 
     publish_root = tmp_path / "product-sites"
     storage_root = tmp_path / "storage"
-    live_root = publish_root / "plannerly"
-    (live_root / "_takyon").mkdir(parents=True)
-    (live_root / "_takyon" / "runtime.json").write_text('{"ok":true}\n', encoding="utf-8")
-    (live_root / "index.html").write_text("<html><body>old site</body></html>\n", encoding="utf-8")
-
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
-    monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9000/site")
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(storage_root))
-    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
 
     observed: dict[str, object] = {}
     real_copytree = takyon_core.shutil.copytree
 
     def _recording_copytree(src, dst, *args, **kwargs):
         src_path = Path(src).resolve()
-        if src_path == site.resolve() and "publish_copy_target" not in observed:
+        if src_path == dist.resolve() and "publish_copy_target" not in observed:
             observed["publish_copy_target"] = Path(dst)
-            observed["live_target_exists_during_copy"] = live_root.exists()
-            observed["live_target_html_during_copy"] = (live_root / "index.html").read_text(encoding="utf-8")
         return real_copytree(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(takyon_core.shutil, "copytree", _recording_copytree)
@@ -48,12 +40,15 @@ def test_publish_product_surface_static_swap_is_atomic_and_preserves_runtime_ove
     )
 
     assert result["status"] == "published"
-    assert observed["live_target_exists_during_copy"] is True
-    assert observed["live_target_html_during_copy"] == "<html><body>old site</body></html>\n"
-    assert observed["publish_copy_target"] != live_root
-    assert (live_root / "index.html").read_text(encoding="utf-8") == "<html><body>new site</body></html>\n"
-    assert (live_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#123456}\n"
-    assert (live_root / "_takyon" / "runtime.json").read_text(encoding="utf-8") == '{"ok":true}\n'
+    live_root = publish_root / "plannerly"
+    current_root = live_root / "current"
+    build_root = live_root / "builds" / result["live_build_id"]
+    assert Path(observed["publish_copy_target"]).name == build_root.name
+    assert Path(observed["publish_copy_target"]).parent.name.startswith(".takyon-stage-")
+    assert current_root.is_symlink()
+    assert current_root.resolve() == build_root.resolve()
+    assert (current_root / "index.html").read_text(encoding="utf-8") == "<html><body>new site</body></html>\n"
+    assert (current_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#123456}\n"
 
 
 def test_publish_product_surface_prefers_dist_over_source_root_when_both_exist(tmp_path, monkeypatch):
@@ -70,10 +65,8 @@ def test_publish_product_surface_prefers_dist_over_source_root_when_both_exist(t
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
-    monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9000/site")
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(storage_root))
-    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
 
     result = takyon_core._publish_product_surface_path(
         business_root=business_root,
@@ -85,8 +78,8 @@ def test_publish_product_surface_prefers_dist_over_source_root_when_both_exist(t
     live_root = publish_root / "plannerly"
     assert result["status"] == "published"
     assert result["publish_source_path"] == "product/site/dist"
-    assert (live_root / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
-    assert (live_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#abcdef}\n"
+    assert (live_root / "current" / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
+    assert (live_root / "current" / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#abcdef}\n"
 
 
 def test_publish_product_surface_blocks_package_managed_source_without_built_output(tmp_path, monkeypatch):
@@ -124,7 +117,44 @@ def test_publish_product_surface_blocks_package_managed_source_without_built_out
     assert "source/index.html" not in result["blocker"]
 
 
-def test_publish_product_surface_syncs_built_workspace_to_canonical_storage_before_declaring_published(tmp_path, monkeypatch):
+def test_publish_product_surface_blocks_next_build_shape(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    site = business_root / "product" / "site"
+    site.mkdir(parents=True)
+    (site / ".next").mkdir()
+    (site / ".next" / "BUILD_ID").write_text("build-1\n", encoding="utf-8")
+    (site / ".next" / "build-manifest.json").write_text("{}\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        """
+        {
+          "name": "plannerly",
+          "private": true,
+          "scripts": {
+            "build": "next build",
+            "start": "next start"
+          },
+          "dependencies": {
+            "next": "15.4.0"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "blocked"
+    assert "dist/index.html" in result["blocker"]
+
+
+def test_publish_product_surface_writes_build_artifact_and_returns_live_pointer(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
     dist = site / "dist"
@@ -138,10 +168,8 @@ def test_publish_product_surface_syncs_built_workspace_to_canonical_storage_befo
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
-    monkeypatch.setenv("TAKYON_PRODUCT_LOCAL_BASE_URL", "http://127.0.0.1:9000/site")
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(storage_root))
-    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
 
     result = takyon_core._publish_product_surface_path(
         business_root=business_root,
@@ -150,17 +178,17 @@ def test_publish_product_surface_syncs_built_workspace_to_canonical_storage_befo
         publish_target="https://plannerly.fourmanifold.com/",
     )
 
-    stored_dist_root = storage_root / "plannerly" / "product" / "site" / "dist"
+    stored_dist_root = storage_root / "plannerly" / "__takyon" / "builds" / result["live_build_id"]
     assert result["status"] == "published"
-    assert result["publish_root"] == str(publish_root / "plannerly")
-    assert result["publish_mode"] == "local_static"
-    assert result["public_url"] == "http://127.0.0.1:9000/site/plannerly/"
+    assert result["publish_root"] == str(publish_root / "plannerly" / "current")
+    assert result["publish_mode"] == "pointer_static"
+    assert result["public_url"] == "https://plannerly.fourmanifold.com/"
     assert result["activation_target"] == ""
     assert (stored_dist_root / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
     assert (stored_dist_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#fedcba}\n"
 
 
-def test_publish_product_surface_requires_public_probe_even_without_caddyfile(tmp_path, monkeypatch):
+def test_publish_product_surface_records_probe_as_unknown_until_reconciled(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
     dist = site / "dist"
@@ -176,16 +204,6 @@ def test_publish_product_surface_requires_public_probe_even_without_caddyfile(tm
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(storage_root))
     monkeypatch.delenv("TAKYON_PRODUCT_LOCAL_BASE_URL", raising=False)
-    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
-    monkeypatch.setattr(
-        takyon_core,
-        "_probe_product_public_url_with_token",
-        lambda _url, *, publish_probe_token="": (
-            False,
-            "public URL probe failed for https://plannerly.fourmanifold.com/: served raw source entry instead of built assets",
-        ),
-    )
-
     result = takyon_core._publish_product_surface_path(
         business_root=business_root,
         slug="plannerly",
@@ -193,11 +211,12 @@ def test_publish_product_surface_requires_public_probe_even_without_caddyfile(tm
         publish_target="https://plannerly.fourmanifold.com/",
     )
 
-    assert result["status"] == "blocked"
-    assert "raw source entry" in result["blocker"]
+    assert result["status"] == "published"
+    assert result["live_probe_status"] == "unknown"
+    assert result["live_probe_detail"] == ""
 
 
-def test_publish_product_surface_blocks_when_probe_marker_cleanup_cannot_sync(tmp_path, monkeypatch):
+def test_publish_product_surface_reuses_the_same_build_id_for_identical_output(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
     dist = site / "dist"
@@ -209,35 +228,23 @@ def test_publish_product_surface_blocks_when_probe_marker_cleanup_cannot_sync(tm
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
-    monkeypatch.delenv("TAKYON_PRODUCT_LOCAL_BASE_URL", raising=False)
-    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
-    monkeypatch.setattr(
-        takyon_core,
-        "_probe_product_public_url_with_token",
-        lambda _url, *, publish_probe_token="": (True, ""),
-    )
-
-    sync_statuses = iter(
-        [
-            {"status": "synced", "backend_name": "local", "blocker": ""},
-            {"status": "blocked", "backend_name": "local", "blocker": "cleanup sync failed"},
-        ]
-    )
-    monkeypatch.setattr(
-        takyon_core,
-        "_sync_published_business_workspace_to_storage",
-        lambda **_: next(sync_statuses),
-    )
-
-    result = takyon_core._publish_product_surface_path(
+    first = takyon_core._publish_product_surface_path(
         business_root=business_root,
         slug="plannerly",
         source_path="product/site",
         publish_target="https://plannerly.fourmanifold.com/",
     )
 
-    assert result["status"] == "blocked"
-    assert result["blocker"] == "cleanup sync failed"
+    second = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert first["status"] == "published"
+    assert second["status"] == "published"
+    assert first["live_build_id"] == second["live_build_id"]
 
 
 def test_refresh_product_surface_builds_package_managed_vite_app_instead_of_short_circuiting_to_source(

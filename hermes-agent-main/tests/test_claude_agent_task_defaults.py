@@ -23,7 +23,10 @@ class _FakeStore:
         self.root = root
         self._workspace_root_override = None
         self._workspace_sync_cache: set[str] = set()
+        self._workspace_revision_cache: dict[str, int] = {}
+        self._workspace_base_revision: dict[str, int] = {}
         self._workspace_storage_backend_override = None
+        self._head_revision_by_slug: dict[str, int] = {}
         self._surface_contract = {
             "source_path": "product/site",
             "publish_policy": "publish_after_refresh",
@@ -60,16 +63,37 @@ class _FakeStore:
             return self._workspace_storage_backend_override
         return takyon_storage.LocalStorageBackend(self.root / "storage")
 
+    def _business_head_revision(self, business: str):
+        return int(self._head_revision_by_slug.get(business, 0) or 0)
+
+    def _canonical_workspace_revision(self, business: str):
+        if self._workspace_root_override is not None:
+            return int(self._workspace_base_revision.get(business, 0) or 0)
+        return int(self._workspace_revision_cache.get(business, self._business_head_revision(business)) or 0)
+
     def _sync_business_workspace_remote(self, business: str):
         workspace = self._business_root(business)
         if not workspace.exists():
             return "skipped_missing_workspace"
         backend = self._workspace_storage_backend()
-        target = Path(getattr(backend, "root")) / takyon_storage.object_prefix(business)
-        if target.exists():
-            shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(workspace, target)
+        current_head = self._business_head_revision(business)
+        next_revision = current_head + 1
+        current_files = {}
+        if current_head > 0:
+            current_files = (
+                takyon_storage.read_workspace_manifest(backend, business, current_head).get("files") or {}
+            )
+        candidate_files = takyon_storage.workspace_source_digests(workspace)
+        if current_files == candidate_files:
+            self._workspace_revision_cache[business] = current_head
+            if self._workspace_root_override is not None:
+                self._workspace_base_revision[business] = current_head
+            return "synced"
+        takyon_storage.write_workspace_revision(backend, business, next_revision, workspace)
+        self._head_revision_by_slug[business] = next_revision
+        self._workspace_revision_cache[business] = next_revision
+        if self._workspace_root_override is not None:
+            self._workspace_base_revision[business] = next_revision
         return "synced"
 
     def commit(self, **_kwargs):
@@ -475,15 +499,8 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
     workspace.mkdir(parents=True, exist_ok=True)
     captured: dict[str, object] = {}
-    mounted_calls: list[dict[str, object]] = []
     store = _FakeStore(outer_home)
     store._workspace_root_override = outer_home
-
-    real_mounted_business_workspace = takyon_storage.mounted_business_workspace
-
-    def record_mount(*args, **kwargs):
-        mounted_calls.append({"args": args, "kwargs": kwargs})
-        return real_mounted_business_workspace(*args, **kwargs)
 
     def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
         captured["docker_workspace_path"] = workspace_path
@@ -526,7 +543,6 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
-    monkeypatch.setattr(takyon_storage, "mounted_business_workspace", record_mount)
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -545,7 +561,6 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     assert captured["payload"]["cwd"] == str(workspace)
     assert result["workspace_sync_status"] == "synced"
     assert result["workspace_durability"]["matched"] is True
-    assert len(mounted_calls) == 1
 
 
 def test_scoped_workspace_store_uses_workspace_root_override_for_mounted_takyon_homes(tmp_path, monkeypatch):
@@ -563,30 +578,31 @@ def test_scoped_workspace_store_uses_workspace_root_override_for_mounted_takyon_
     assert scoped._business_root("ledgerleaf", sync=False) == mounted_home / "businesses" / "ledgerleaf"
 
 
-def test_replace_business_workspace_cache_overwrites_stale_operator_cache_with_verified_tree(tmp_path, monkeypatch):
+def test_commit_business_workspace_revision_is_noop_when_source_tree_is_unchanged(tmp_path, monkeypatch, pg_store_dsn):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
-    store = takyon_core.TakyonStore(root=tmp_path / "outer-home", operator_user_id="user-123")
-    monkeypatch.setattr(store, "_workspace_storage_backend_kind", lambda: "supabase_s3")
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(root=tmp_path / "outer-home", operator_user_id="user-123", database_url=pg_store_dsn)
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
 
-    stale_root = store._business_root("ledgerleaf", sync=False)
-    stale_landing = stale_root / "product" / "site" / "src" / "screens" / "landing.tsx"
-    stale_landing.parent.mkdir(parents=True, exist_ok=True)
-    stale_landing.write_text(
-        "export function LandingScreen() {\n  return <main aria-hidden=\"true\" data-takyon-scaffold=\"landing\" />;\n}\n",
-        encoding="utf-8",
-    )
+    with store._connect() as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO businesses (slug, name, mode, goal, status, work_focus, budget_json, created_at, updated_at) VALUES (?, ?, 'live', '', 'active', 'all', ?, ?, ?)",
+                ("ledgerleaf", "Ledgerleaf", "{}", takyon_core._now(), takyon_core._now()),
+            )
 
-    verified_root = tmp_path / "verified-tree"
-    verified_landing = verified_root / "product" / "site" / "src" / "screens" / "landing.tsx"
-    verified_landing.parent.mkdir(parents=True, exist_ok=True)
-    verified_landing.write_text(
-        "export function LandingScreen() {\n  return <main>verified worker landing</main>;\n}\n",
-        encoding="utf-8",
-    )
+    root = store._business_root("ledgerleaf", sync=False)
+    landing = root / "product" / "site" / "src" / "screens" / "landing.tsx"
+    landing.parent.mkdir(parents=True, exist_ok=True)
+    landing.write_text("export function LandingScreen(){return <main>one</main>;}\n", encoding="utf-8")
 
-    store._replace_business_workspace_cache("ledgerleaf", verified_root)
+    assert store._sync_business_workspace_remote("ledgerleaf") == "synced"
+    first_revision = store._business_head_revision("ledgerleaf")
+    assert first_revision == 1
 
-    assert stale_landing.read_text(encoding="utf-8") == verified_landing.read_text(encoding="utf-8")
+    assert store._sync_business_workspace_remote("ledgerleaf") == "synced"
+    assert store._business_head_revision("ledgerleaf") == first_revision
 
 
 def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_diverges(tmp_path, monkeypatch):
@@ -598,18 +614,19 @@ def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_di
     store._workspace_root_override = outer_home
 
     def fake_sync(_business: str):
+        status = _FakeStore._sync_business_workspace_remote(store, _business)
         backend = store._workspace_storage_backend()
-        target = Path(getattr(backend, "root")) / takyon_storage.object_prefix("latexflow")
-        if target.exists():
-            shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(outer_home / "businesses" / "latexflow", target)
-        canonical_landing = target / "product" / "site" / "src" / "screens" / "landing.tsx"
+        head_revision = store._business_head_revision("latexflow")
+        mounted = tmp_path / "mounted-canonical"
+        takyon_storage.materialize_workspace_revision(backend, "latexflow", head_revision, mounted, delete_local=True)
+        canonical_landing = mounted / "product" / "site" / "src" / "screens" / "landing.tsx"
         canonical_landing.write_text(
             "export function LandingScreen() {\n  return <main aria-hidden=\"true\" data-takyon-scaffold=\"landing\" />;\n}\n",
             encoding="utf-8",
         )
-        return "synced"
+        takyon_storage.write_workspace_revision(backend, "latexflow", head_revision + 1, mounted)
+        store._head_revision_by_slug["latexflow"] = head_revision + 1
+        return status
 
     store._sync_business_workspace_remote = fake_sync
 
@@ -1016,6 +1033,7 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
                 "idempotency_key": "workspace-product-turn-cap-retry",
                 "install": False,
                 "max_turns": 20,
+                "refresh_surface": False,
             }
         )
     )

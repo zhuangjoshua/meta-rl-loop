@@ -142,7 +142,7 @@ def test_no_fleet_resume_via_operator_store_on_postgres(pg_store_dsn, tmp_path, 
     #     local disk. That materialization comes purely from PG, with no Storage round-trip; on a
     #     fresh host it is the ONLY file present before we touch Storage.
     surface = biz_b / "product" / "surface.md"
-    assert surface.is_file() and surface.read_text().startswith("# App Surface Contract")
+    assert surface.is_file() and surface.read_text().startswith("# Product Surface")
     assert _tree(biz_b) == {"product/surface.md": surface.read_bytes()}  # PG plane only, so far
 
     #   * Storage plane — sync_down reconstructs the workspace blobs byte-for-byte (default

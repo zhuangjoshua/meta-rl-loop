@@ -460,14 +460,76 @@ def test_business_read_file_truth_metadata_marks_commentary_vs_authoritative(tmp
     assert summary["document_role"] == "summary"
     assert summary["proof_level"] == "commentary"
     assert "Do not use this file by itself as proof" in summary["proof_guidance"]
+    assert summary["truth_surface"] == "canonical"
+    assert "committed canonical workspace" in summary["truth_guidance"]
 
     assert source["document_role"] == "implementation_source"
-    assert source["proof_level"] == "authoritative"
-    assert "judge current website or app behavior and wiring" in source["proof_guidance"]
+    assert source["proof_level"] == "mixed"
+    assert "hydrated local workspace cache" in source["proof_guidance"]
+    assert source["truth_surface"] == "canonical"
 
     assert receipt["document_role"] == "receipt"
     assert receipt["proof_level"] == "authoritative"
     assert "Machine-generated receipt" in receipt["proof_guidance"]
+    assert receipt["truth_surface"] == "canonical"
+
+
+def test_business_read_file_labels_active_session_workspace_as_working(tmp_path):
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:probe",
+        [{"action": "business.upsert", "business": "probe", "name": "Probe"}],
+        "init-probe-working-read-meta",
+    )
+    store._workspace_root_override = tmp_path / "session-home"
+    business_root = store._business_root("probe", sync=False)
+    (business_root / "product" / "site").mkdir(parents=True, exist_ok=True)
+    (business_root / "product" / "site" / "index.html").write_text("<h1>Probe</h1>\n", encoding="utf-8")
+
+    source = store.read(scope="business:probe", query="read_file", path="product/site/index.html")
+
+    assert source["truth_surface"] == "working"
+    assert source["proof_level"] == "authoritative"
+    assert "active session workspace" in source["proof_guidance"]
+
+
+def test_business_summary_and_app_surface_label_workspace_vs_recorded_live_truth(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-summary-truth-labels",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]}],
+        "surface-summary-truth-labels",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    handle_business_refresh_product_surface(
+        {
+            "business": "latexflow",
+            "source_path": "product/site",
+            "install": False,
+            "idempotency_key": "verify-summary-truth-labels",
+        }
+    )
+
+    summary = store.read(scope="business:latexflow", query="summary", include=["app"])
+
+    assert summary["truth"]["source"]["surface"] == "canonical"
+    assert summary["truth"]["live"]["surface"] == "recorded_live"
+    assert summary["app"]["truth"]["source"]["surface"] == "canonical"
+    assert summary["app"]["truth"]["live"]["publish_status"] == "published"
+    assert summary["app"]["product_surface"]["source_truth"]["surface"] == "canonical"
+    assert summary["app"]["product_surface"]["live_truth"]["surface"] == "recorded_live"
 
 
 def test_business_pulse_is_read_only_baseline(tmp_path):
@@ -511,6 +573,21 @@ def test_business_upsert_seeds_only_canonical_roots(tmp_path):
     assert not (root / "metrics" / "summary.md").exists()
     assert not (root / "product" / "design-brief.md").exists()
     assert not (root / "distribution" / "campaign").exists()
+
+
+def test_business_upsert_rejects_dirty_fresh_workspace_root(tmp_path):
+    store = TakyonStore(tmp_path)
+    root = tmp_path / "businesses" / "latexflow"
+    root.mkdir(parents=True)
+    (root / "legacy.txt").write_text("stale workspace\n", encoding="utf-8")
+
+    with pytest.raises(TakyonError, match=r"workspace root already exists and is non-empty"):
+        _commit(
+            store,
+            "business:latexflow",
+            [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Build PDFs"}],
+            "reject-dirty-root",
+        )
 
 
 def test_pulse_file_write_records_snapshot_event(tmp_path):
@@ -1538,7 +1615,7 @@ def test_landing_only_surface_does_not_force_app_route():
     assert shape["required_routes"] == ["/"]
 
 
-def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp_path, monkeypatch):
+def test_bootstrap_app_surface_seed_ignores_burned_shape_args(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1569,12 +1646,14 @@ def test_bootstrap_app_surface_seed_canonicalizes_minimal_monthly_site_shape(tmp
     shape = _surface_customer_experience_shape(surface)
 
     assert surface["source_path"] == "product/site"
-    assert shape["conversion_model"] == "monthly subscription"
+    assert shape["conversion_model"] == ""
     assert shape["required_routes"] == ["/", "/app"]
     assert shape["required_app_tabs"] == []
+    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
+    assert "customer_experience" not in (surface.get("metadata") or {})
 
 
-def test_bootstrap_ai_shell_keeps_ai_identity_without_requiring_actions_spec_yet(tmp_path, monkeypatch):
+def test_bootstrap_app_surface_seed_ignores_burned_workflow_args(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -1606,10 +1685,9 @@ def test_bootstrap_ai_shell_keeps_ai_identity_without_requiring_actions_spec_yet
     surface = app["surface_contract"]
     workflow = _surface_product_workflow_shape(surface)
 
-    # Bootstrap no longer persists shell rails onto the contract. The stored contract
-    # stays empty until workflow declares the real rails, while the effective runtime
-    # shell still exposes the pinned bootstrap set.
-    assert _surface_runtime_features(surface) == []
+    # Fresh bootstrap shells persist the fixed auth/account/profile/checkout shell
+    # directly onto the contract so the published /app shell is truthful immediately.
+    assert _surface_runtime_features(surface) == ["auth", "account", "profile", "checkout"]
     assert takyon_core._surface_effective_runtime_features(surface) == [  # type: ignore[attr-defined]
         "auth",
         "account",
@@ -1617,9 +1695,9 @@ def test_bootstrap_ai_shell_keeps_ai_identity_without_requiring_actions_spec_yet
         "checkout",
     ]
     assert _surface_is_bootstrap_access_shell(surface) is True
-    assert workflow["primary_job"] == "Get compilable LaTeX from a plain English equation description"
-    assert surface["routes"] == [{"path": "/"}, {"path": "/app"}]
-    assert surface["runtime_features"] == []
+    assert workflow == {}
+    assert surface["routes"] == [{"path": route} for route in takyon_core.DEFAULT_SUBUSER_APP_ROUTES]  # type: ignore[attr-defined]
+    assert surface["runtime_features"] == ["auth", "account", "profile", "checkout"]
     assert "DEBUG/blocked" not in str(surface.get("notes") or "")
     assert len(app["plans"]) == 1
     plan = app["plans"][0]
@@ -1663,11 +1741,6 @@ def test_existing_source_can_select_actions_before_named_actions_exist(tmp_path,
                 "business": "longer",
                 "source_path": "product/site",
                 "runtime_features": ["auth", "account", "actions"],
-                "product_workflow": {
-                    "primary_user": "subscriber",
-                    "primary_job": "complete the product workflow",
-                    "success_moment": "the user reaches a real saved outcome",
-                },
                 "idempotency_key": "existing-source-actions-no-specs",
             }
         )
@@ -1676,10 +1749,8 @@ def test_existing_source_can_select_actions_before_named_actions_exist(tmp_path,
     assert result["success"] is True
     app = store.read(scope="business:longer", query="summary", include=["app"])["app"]
     surface = app["surface_contract"]
-    workflow = _surface_product_workflow_shape(surface)
 
     assert _surface_runtime_features(surface) == ["auth", "account", "actions"]
-    assert "actions" not in workflow
 
 
 def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp_path, monkeypatch):
@@ -1701,50 +1772,7 @@ def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp
             {
                 "business": "longer",
                 "source_path": "product/site",
-                "runtime_features": ["generate"],
-                "product_workflow": {
-                    "primary_user": "subscriber",
-                    "workspace_model": "single private account",
-                    "primary_job": "follow a private coaching workflow",
-                    "core_loop": {
-                        "input": "user enters data",
-                        "action": "app generates guidance",
-                        "result": "user receives a saved routine",
-                        "save_record": True,
-                        "return_to_record_later": True,
-                    },
-                    "scope_rules": {
-                        "no_teams": True,
-                        "no_roles": True,
-                        "no_invites": True,
-                        "no_sharing": True,
-                        "no_public_pages": True,
-                        "no_admin_console": True,
-                    },
-                    "persistence_rules": {
-                        "requires_server_state": True,
-                        "persistence_rail": "records",
-                        "survives_sign_out": True,
-                        "truthful_empty_state": True,
-                        "reopenable_history": True,
-                        "no_local_only_state": True,
-                    },
-                    "product_budget": {
-                        "screens": {"max": 4},
-                        "entity_types": {"max": 3},
-                        "backend_actions": {"max": 4},
-                        "ai_flows": {"max": 2},
-                    },
-                    "first_run": {
-                        "strategy": "ask a few intake questions",
-                        "empty_state_required": True,
-                        "pending_state_required": True,
-                        "error_state_required": True,
-                    },
-                    "success_moment": "first routine saved",
-                    "acceptance_tests": ["user can save a routine"],
-                    "not_now": ["community features"],
-                },
+                "runtime_features": ["auth"],
                 "idempotency_key": "existing-source-shape",
             }
         )
@@ -2050,12 +2078,29 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
         "init",
     )
 
+    bootstrap = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "routes": [{"path": "/"}],
+                "idempotency_key": "surface-bootstrap",
+            }
+        )
+    )
+
+    assert bootstrap["success"] is True
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+
     result = json.loads(
         handle_business_upsert_app_surface_contract(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["auth", "checkout", "generate"],
+                "runtime_features": ["auth", "checkout", "records"],
+                "routes": [{"path": "/"}, {"path": "/app"}],
                 "idempotency_key": "surface-runtime-features",
             }
         )
@@ -2063,9 +2108,9 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
 
     assert result["success"] is True
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["runtime_features"] == ["auth", "account", "checkout", "generate"]
+    assert app["surface_contract"]["runtime_features"] == ["auth", "account", "records", "checkout"]
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
-    assert "Runtime features: auth, account, checkout, generate" in surface_md
+    assert "Runtime rails: auth, account, records, checkout" in surface_md
 
 
 def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, monkeypatch):
@@ -2084,19 +2129,16 @@ def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, mon
                 "business": "latexflow",
                 "source_path": "product/site",
                 "runtime_features": ["generate"],
-                "product_workflow": {
-                    "primary_job": "Convert English descriptions into LaTeX.",
-                },
                 "idempotency_key": "vite-ai-generate-reject",
             }
         )
     )
 
     assert result["success"] is False
-    assert "generate is not a declarable rail on the vite_react_ts lane" in result["error"]
+    assert "generate is not a declarable rail on the pinned Vite scaffold" in result["error"]
 
 
-def test_app_surface_contract_records_product_workflow_in_contract_render_and_context(tmp_path, monkeypatch):
+def test_app_surface_contract_omits_burned_surface_theory_from_context_and_projection(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2106,62 +2148,17 @@ def test_app_surface_contract_records_product_workflow_in_contract_render_and_co
         "init-product-workflow",
     )
 
-    product_workflow = {
-        "primary_user": "signed-in product subuser",
-        "workspace_model": "one user = one workspace",
-        "primary_job": "A founder opens the app to turn rough notes into a saved investor update.",
-        "scope_rules": {
-            "no_teams": True,
-            "no_roles": True,
-            "no_invites": True,
-            "no_sharing": True,
-            "no_public_pages": True,
-            "no_admin_console": True,
-        },
-        "core_loop": {
-            "input": "paste rough company notes",
-            "action": "generate a cleaned investor update draft",
-            "result": "show the finished update on screen",
-            "save_record": True,
-            "return_to_record_later": True,
-        },
-        "persistence_rules": {
-            "requires_server_state": True,
-            "persistence_rail": "records",
-            "survives_sign_out": True,
-            "truthful_empty_state": True,
-            "reopenable_history": True,
-            "no_local_only_state": True,
-        },
-        "product_budget": {
-            "screens": {"min": 2, "max": 5},
-            "entity_types": {"min": 3, "max": 6},
-            "backend_actions": {"min": 5, "max": 10},
-            "ai_flows": {"min": 0, "max": 2},
-        },
-        "first_run": {
-            "strategy": "guided_first_run",
-            "empty_state_required": True,
-            "pending_state_required": True,
-            "error_state_required": True,
-        },
-        "success_moment": "user pastes notes, clicks Generate, sees the polished update, and finds it in history",
-        "acceptance_tests": [
-            "new user sees a truthful first-run state",
-            "completed loop creates a saved record",
-            "saved record appears in history",
-            "sign out and back in preserves the record",
-        ],
-        "not_now": ["team collaboration", "sharing", "admin tools"],
-    }
-
     result = json.loads(
         handle_business_upsert_app_surface_contract(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["records", "generate"],
-                "product_workflow": product_workflow,
+                "runtime_features": ["records"],
+                "required_routes": ["/", "/app", "/workspace"],
+                "surface_goal": "Turn rough notes into a saved investor update.",
+                "product_workflow": {
+                    "primary_job": "A founder opens the app to turn rough notes into a saved investor update.",
+                },
                 "idempotency_key": "surface-product-workflow",
             }
         )
@@ -2169,30 +2166,17 @@ def test_app_surface_contract_records_product_workflow_in_contract_render_and_co
 
     assert result["success"] is True
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    shape = _surface_product_workflow_shape(app["surface_contract"])
-    assert shape["primary_user"] == "signed-in product subuser"
-    assert shape["workspace_model"] == "one user = one workspace"
-    assert shape["core_loop"]["save_record"] is True
-    assert shape["persistence_rules"]["persistence_rail"] == "records"
-    assert shape["product_budget"]["backend_actions"] == {"min": 5, "max": 10}
-    assert shape["first_run"]["strategy"] == "guided_first_run"
-
     context_payload = _subuser_surface_context_payload(app["surface_contract"], slug="latexflow")
-    assert context_payload["productWorkflow"]["primaryUser"] == "signed-in product subuser"
-    assert context_payload["productWorkflow"]["persistenceRules"]["persistenceRail"] == "records"
-    assert context_payload["productWorkflow"]["complexityTarget"]["entityTypes"] == {"min": 3, "max": 6}
-    assert "saved record" in context_payload["productWorkflow"]["successMoment"]
+    assert "customerExperience" not in context_payload
+    assert "productWorkflow" not in context_payload
+    assert context_payload["runtimeFeatures"] == ["records"]
 
     surface_md = (tmp_path / "businesses" / "latexflow" / "product" / "surface.md").read_text(encoding="utf-8")
-    assert "## Product Workflow" in surface_md
-    assert "Primary user: signed-in product subuser" in surface_md
-    assert "Closed loop: paste rough company notes -> generate a cleaned investor update draft -> show the finished update on screen -> save a real record -> return to it later" in surface_md
-    assert "Scope guardrails: no teams, no roles, no invites, no sharing, no public pages, no admin console" in surface_md
-    assert "Persistence requirements: persistence rail `records`, server-side state, survives sign-out/sign-in, truthful empty state, reopenable history, no local-only pretend state" in surface_md
-    assert "Complexity target: screens 2-5; entity types 3-6; backend actions 5-10; AI flows 0-2" in surface_md
-    assert "First-run requirements: strategy `guided_first_run`, truthful empty state, pending states, error states" in surface_md
-    assert "Acceptance tests: 4 recorded" in surface_md
-    assert "Not now: team collaboration, sharing, admin tools" in surface_md
+    assert surface_md.startswith("# Product Surface")
+    assert "## Shell Record" in surface_md
+    assert "## Product Workflow" not in surface_md
+    assert "## Theme Source" not in surface_md
+    assert "## Constraints" not in surface_md
 
 
 def test_app_records_rail_persists_lists_reads_and_deletes_records(tmp_path, monkeypatch):
@@ -2291,7 +2275,7 @@ def test_app_records_rail_persists_lists_reads_and_deletes_records(tmp_path, mon
     assert listed_after_delete["count"] == 0
 
 
-def test_app_surface_contract_derives_runtime_features_from_product_workflow_persistence_rail(tmp_path, monkeypatch):
+def test_app_surface_contract_ignores_burned_product_workflow_input(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2306,6 +2290,8 @@ def test_app_surface_contract_derives_runtime_features_from_product_workflow_per
             {
                 "business": "latexflow",
                 "source_path": "product/site",
+                "routes": ["/"],
+                "runtime_features": [],
                 "product_workflow": {
                     "primary_job": "Turn notes into a saved update.",
                     "persistence_rules": {
@@ -2320,10 +2306,12 @@ def test_app_surface_contract_derives_runtime_features_from_product_workflow_per
 
     assert result["success"] is True
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
-    assert app["surface_contract"]["runtime_features"] == ["records"]
+    assert app["surface_contract"]["runtime_features"] == []
+    assert _surface_product_workflow_shape(app["surface_contract"]) == {}
+    assert "productWorkflow" not in _subuser_surface_context_payload(app["surface_contract"], slug="latexflow")
 
 
-def test_app_surface_contract_rejects_landing_only_product_workflow_contradiction(tmp_path, monkeypatch):
+def test_app_surface_contract_ignores_burned_constraints_and_workflow_input(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2338,7 +2326,8 @@ def test_app_surface_contract_rejects_landing_only_product_workflow_contradictio
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["records"],
+                "routes": ["/"],
+                "runtime_features": [],
                 "constraints": {"landing_page_only": True},
                 "product_workflow": {
                     "primary_job": "Save customer work.",
@@ -2349,11 +2338,13 @@ def test_app_surface_contract_rejects_landing_only_product_workflow_contradictio
         )
     )
 
-    assert result["success"] is False
-    assert "landing_page_only surfaces cannot also declare product_workflow" in result["error"]
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert "constraints" not in app["surface_contract"]
+    assert _surface_product_workflow_shape(app["surface_contract"]) == {}
 
 
-def test_app_surface_contract_rejects_product_workflow_screen_budget_contradiction(tmp_path, monkeypatch):
+def test_app_surface_contract_ignores_burned_customer_tabs_and_workflow_budget_input(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2362,16 +2353,13 @@ def test_app_surface_contract_rejects_product_workflow_screen_budget_contradicti
         [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
         "init-product-workflow-screen-budget",
     )
-    site = tmp_path / "businesses" / "latexflow" / "product" / "site" / "app"
-    site.mkdir(parents=True, exist_ok=True)
-    (site / "page.tsx").write_text("export default function Page() { return null; }\n", encoding="utf-8")
-
     result = json.loads(
         handle_business_upsert_app_surface_contract(
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["records"],
+                "routes": ["/"],
+                "runtime_features": [],
                 "required_app_tabs": ["workspace", "history", "detail"],
                 "product_workflow": {
                     "primary_job": "Save customer work.",
@@ -2383,11 +2371,14 @@ def test_app_surface_contract_rejects_product_workflow_screen_budget_contradicti
         )
     )
 
-    assert result["success"] is False
-    assert "product_workflow.product_budget.screens max is contradicted" in result["error"]
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    metadata = app["surface_contract"].get("metadata") or {}
+    assert "customer_experience" not in metadata
+    assert "product_workflow" not in metadata
 
 
-def test_app_surface_contract_rejects_invalid_product_workflow_range(tmp_path, monkeypatch):
+def test_app_surface_contract_ignores_burned_product_workflow_range_input(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -2402,7 +2393,8 @@ def test_app_surface_contract_rejects_invalid_product_workflow_range(tmp_path, m
             {
                 "business": "latexflow",
                 "source_path": "product/site",
-                "runtime_features": ["records"],
+                "routes": ["/"],
+                "runtime_features": [],
                 "product_workflow": {
                     "primary_job": "Save customer work.",
                     "persistence_rules": {"persistence_rail": "records"},
@@ -2413,8 +2405,9 @@ def test_app_surface_contract_rejects_invalid_product_workflow_range(tmp_path, m
         )
     )
 
-    assert result["success"] is False
-    assert "product_workflow.product_budget.screens min cannot exceed max" in result["error"]
+    assert result["success"] is True
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert _surface_product_workflow_shape(app["surface_contract"]) == {}
 
 
 def test_app_surface_contract_normalizes_legacy_billing_to_account_and_checkout(tmp_path, monkeypatch):
@@ -3121,7 +3114,7 @@ def test_product_inventory_is_nonfatal_for_unreadable_source_file(tmp_path, monk
     assert verification["inventory"]["files_skipped"] >= 1
 
 
-def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, monkeypatch):
+def test_next_product_publish_is_blocked_without_vite_dist_output(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "latexflow"
     site = business_root / "product" / "site"
     site.mkdir(parents=True)
@@ -3147,17 +3140,6 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "1")
-    monkeypatch.setenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "1")
-    monkeypatch.setenv("TAKYON_PRODUCT_SYSTEMD_DIR", str(tmp_path / "systemd"))
-    monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
-    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
-    monkeypatch.setattr(
-        takyon_core,
-        "_javascript_package_manager_command",
-        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
-    )
-
     result = takyon_core._publish_product_surface_path(
         business_root=business_root,
         slug="latexflow",
@@ -3165,30 +3147,11 @@ def test_next_product_publish_uses_service_rail_without_static_index(tmp_path, m
         publish_target="https://latexflow.fourmanifold.com/",
     )
 
-    assert result["status"] == "published"
-    assert result["deploy_kind"] == "next_systemd_caddy"
-    assert result["public_url"] == "https://latexflow.fourmanifold.com/"
-    assert result["publish_source_path"] == "product/site"
-    service_root = tmp_path / "product-services" / "latexflow"
-    assert result["publish_root"] == str(service_root)
-    assert (service_root / ".next" / "BUILD_ID").read_text(encoding="utf-8").strip() == "build-1"
-    assert (service_root / "package.json").is_file()
-    assert os.access(service_root / "node_modules" / ".bin" / "next", os.X_OK)
-    assert (service_root / "node_modules" / ".bin" / "next").is_symlink()
-    service = tmp_path / "systemd" / "takyon-product-latexflow.service"
-    service_text = service.read_text(encoding="utf-8")
-    assert "ExecStart=/usr/bin/npm run start -- -H 127.0.0.1 -p" in service_text
-    assert "/bin/bash -lc" not in service_text
-    assert str(service_root) in service_text
-    caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
-    assert "latexflow.fourmanifold.com" in caddyfile
-    assert f"root * {service_root}" in caddyfile
-    assert f"root * {service_root / '_takyon' / 'assets'}" not in caddyfile
-    assert "@takyon_app_runtime path /api/* /auth/request /auth/verify /session /account /profile /records /records/* /checkout /usage /generate" in caddyfile
-    assert "reverse_proxy 127.0.0.1:9119" in caddyfile
+    assert result["status"] == "blocked"
+    assert "dist/index.html" in result["blocker"]
 
 
-def test_next_product_publish_handoffs_to_activation_host_and_prunes_local_build_artifacts(tmp_path, monkeypatch):
+def test_next_product_publish_does_not_handoff_to_activation_host(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "latexflow"
     site = business_root / "product" / "site"
     site.mkdir(parents=True)
@@ -3212,31 +3175,6 @@ def test_next_product_publish_handoffs_to_activation_host_and_prunes_local_build
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("TAKYON_NODE_NAME", "worker-b")
-    monkeypatch.setenv("TAKYON_PRODUCT_ACTIVATION_NODE", "argon-alpha-14")
-    monkeypatch.setattr(
-        takyon_core,
-        "_javascript_package_manager_command",
-        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
-    )
-
-    captured: dict[str, Path] = {}
-
-    def _fake_handoff(*, source_root: Path, slug: str, publish_target: str):
-        captured["source_root"] = source_root
-        return {
-            "status": "published",
-            "deploy_kind": "next_systemd_caddy",
-            "public_url": publish_target,
-            "publish_root": f"/opt/takyon/.takyon/product-services/{slug}",
-            "publish_source_path": source_root.name,
-            "published_at": "2026-06-06T20:00:00+00:00",
-            "service_name": f"takyon-product-{slug}",
-            "activation_mode": "remote_ssh",
-        }
-
-    monkeypatch.setattr(takyon_core, "_handoff_next_product_service_to_activation_host", _fake_handoff)
-
     result = takyon_core._publish_product_surface_path(
         business_root=business_root,
         slug="latexflow",
@@ -3244,32 +3182,10 @@ def test_next_product_publish_handoffs_to_activation_host_and_prunes_local_build
         publish_target="https://latexflow.fourmanifold.com/",
     )
 
-    assert captured["source_root"] == site
-    assert result["status"] == "published"
-    assert result["activation_mode"] == "remote_ssh"
-    assert not (site / "node_modules").exists()
-    assert not (site / ".next").exists()
-
-
-def test_product_service_working_directory_guard_rejects_tmp_and_business_roots(tmp_path, monkeypatch):
-    takyon_home = tmp_path / ".takyon"
-    monkeypatch.setenv("TAKYON_HOME", str(takyon_home))
-    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(takyon_home / "product-services"))
-
-    business_root = takyon_home / "businesses" / "clipbook" / "product" / "site"
-    business_root.mkdir(parents=True)
-    assert "business mirror" in takyon_core._product_service_working_directory_blocker(business_root)
-
-    scratch_parent = Path(tempfile.gettempdir()) / "takyon-workspaces"
-    scratch_parent.mkdir(parents=True, exist_ok=True)
-    tmp_root = Path(tempfile.mkdtemp(prefix="takyon-product-unit-", dir=str(scratch_parent)))
-    try:
-        assert "temporary workspace" in takyon_core._product_service_working_directory_blocker(tmp_root)
-    finally:
-        if tmp_root.exists():
-            import shutil
-
-            shutil.rmtree(tmp_root, ignore_errors=True)
+    assert result["status"] == "blocked"
+    assert "dist/index.html" in result["blocker"]
+    assert (site / ".next").exists()
+    assert (site / "node_modules").exists()
 
 def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "inboxpilot"
@@ -3293,12 +3209,11 @@ def test_static_site_with_noop_package_manifest_does_not_require_npm(tmp_path, m
 
     verification = _refresh_product_surface_path(business_root, "product/site", install=True)
 
-    assert verification["status"] == "passed"
-    assert verification["kind"] == "static_source_present"
-    assert verification["checks"] == []
+    assert verification["status"] == "blocked"
+    assert "pinned Vite scaffold" in verification["error"]
 
 
-def test_refresh_next_product_with_static_export_still_runs_build(tmp_path, monkeypatch):
+def test_refresh_next_product_is_blocked(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "feedbackpilot"
     site = business_root / "product" / "site"
     site.mkdir(parents=True)
@@ -3317,21 +3232,10 @@ def test_refresh_next_product_with_static_export_still_runs_build(tmp_path, monk
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        takyon_core,
-        "_javascript_package_manager_command",
-        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
-    )
-    monkeypatch.setattr(
-        takyon_core,
-        "_run_surface_command",
-        lambda command, **kwargs: {"command": command, "status": "passed"},
-    )
-
     verification = _refresh_product_surface_path(business_root, "product/site", install=True)
 
-    assert verification["status"] == "passed"
-    assert verification["kind"] == "node_build"
+    assert verification["status"] == "blocked"
+    assert "Next/AppKit product trees are unsupported" in verification["error"]
     assert [check["command"] for check in verification["checks"]] == [
         ["/usr/bin/npm", "install", "--ignore-scripts"],
         ["/usr/bin/npm", "run", "build"],
@@ -3897,6 +3801,7 @@ def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch)
     assert checkout["success"] is True
     assert checkout["mode"] == "test"
     assert checkout["checkout_url"].startswith("local://takyon/checkout/checkoutrail/")
+    assert checkout["url"] == checkout["checkout_url"]
 
 
 def test_monthly_plan_upsert_rejects_included_ai_budget_above_price(tmp_path, monkeypatch):
@@ -4041,6 +3946,7 @@ def test_pg_test_mode_checkout_uses_same_origin_receipt_url_when_origin_present(
         "https://checkoutrailweb.example.com/api/takyon/apps/checkoutrailweb/checkout"
         f"?checkout_intent_id={checkout['checkout_intent_id']}&mode=test"
     )
+    assert checkout["url"] == checkout["checkout_url"]
 
 
 def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
@@ -6731,12 +6637,11 @@ def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_publi
     assert asset_receipt["blocker"] == "dns-miss"
 
 
-def test_stage_business_public_asset_mirrors_into_product_service_publish_root(tmp_path, monkeypatch):
+def test_stage_business_public_asset_mirrors_into_static_publish_root_only(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
-    monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
     publish_target = "https://clipbook.fourmanifold.com/"
     publish_receipt_rel = "metrics/receipts/product-surface/test.json"
-    service_root = tmp_path / "product-services" / "clipbook"
+    publish_root = tmp_path / "product-sites" / "clipbook"
     receipt_abs = tmp_path / "businesses" / "clipbook" / publish_receipt_rel
     receipt_abs.parent.mkdir(parents=True, exist_ok=True)
     receipt_abs.write_text(
@@ -6744,8 +6649,8 @@ def test_stage_business_public_asset_mirrors_into_product_service_publish_root(t
             {
                 "publish": {
                     "status": "published",
-                    "deploy_kind": "next_systemd_caddy",
-                    "publish_root": str(service_root),
+                    "publish_mode": "local_static",
+                    "publish_root": str(publish_root),
                     "public_url": publish_target,
                 }
             },
@@ -6795,10 +6700,8 @@ def test_stage_business_public_asset_mirrors_into_product_service_publish_root(t
     )
 
     shared_asset = tmp_path / "product-sites" / "clipbook" / "_takyon" / "assets" / "demo-reddit-image" / "banner.png"
-    service_asset = service_root / "_takyon" / "assets" / "demo-reddit-image" / "banner.png"
     assert shared_asset.is_file()
-    assert service_asset.is_file()
-    assert str(service_root) in staged["publish_roots"]
+    assert staged["publish_roots"] == [str(publish_root)]
 
 
 def test_make_product_publish_path_traversable_opens_takyon_home_for_asset_serving(tmp_path, monkeypatch):

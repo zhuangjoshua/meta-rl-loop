@@ -131,8 +131,6 @@ app = FastAPI(title="Takyon Agent", version=__version__)
 _SESSION_TOKEN_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN"
 _SESSION_TOKEN_FILE_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN_FILE"
 _SESSION_TOKEN_FILE_NAME = "dashboard_session_token"
-_PRODUCT_PUBLISH_PROBE_PARAM = "__takyon_publish_probe"
-_PRODUCT_PUBLISH_PROBE_STATE_RELPATH = "product/.takyon-publish-probe.json"
 _TAKYON_DIRECT_FILE_READ_BYTES = 512 * 1024
 _TAKYON_DIRECT_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_DIRECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -1049,7 +1047,7 @@ def _auth0_public_path(path: str) -> bool:
         return True
     if path == "/api/product-tls/ask":
         return True
-    if path in {"/", "/chat", "/index.html", "/favicon.ico", "/robots.txt"}:
+    if path in {"/", "/chat", "/skill-lab", "/index.html", "/favicon.ico", "/robots.txt"}:
         return True
     return path.startswith((
         "/assets/",
@@ -1213,7 +1211,6 @@ _HOST_ROLE_ALIASES = {
 }
 _APP_PLANE_PATH_PREFIXES: tuple[str, ...] = (
     "/api/takyon/apps/",
-    "/api/generated-apps/",
     "/site/",
 )
 _APP_PLANE_EXACT_PATHS: frozenset[str] = frozenset({
@@ -1250,11 +1247,11 @@ def _http_path_allowed_for_host_role(*, role: str, host: str, path: str) -> bool
         if product_business:
             if not path.startswith("/api/"):
                 return True
-            return _normalize_product_rail_route(path) is not None
+            return path.startswith("/api/takyon/apps/")
         return False
     if role == _HOST_ROLE_OPERATOR:
         if product_business:
-            return _normalize_product_rail_route(path) is not None or _is_app_plane_path(path)
+            return _is_app_plane_path(path)
         if path == "/api/product-tls/ask":
             return True
         if _is_app_plane_path(path):
@@ -1267,7 +1264,6 @@ def _is_public_api_path(path: str) -> bool:
         return True
     return path.startswith((
         "/api/takyon/apps/",
-        "/api/generated-apps/",
         "/api/webhooks/stripe",
     ))
 
@@ -1442,36 +1438,6 @@ async def auth0_middleware(request: Request, call_next):
             content={"detail": "Auth0 login required"},
         )
     return RedirectResponse(_auth0_login_path(request), status_code=302)
-
-
-@app.middleware("http")
-async def product_app_rail_middleware(request: Request, call_next):
-    """Resolve product-app rail calls to the host's business.
-
-    On a product host the business is identified by the hostname, so any
-    recognised rail request (bare, ``/api/``-prefixed, or with an embedded
-    slug) is dispatched to the canonical shared-runtime handler for that
-    business. This prevents "rail not wired" 404s when a generated front-end
-    guesses the wrong API base, and scopes every rail call to the host's
-    business so a product page cannot reach another business's rails.
-
-    Defined last so it runs outermost: a matched rail short-circuits before
-    the dashboard auth gates, which otherwise 401 bare ``/api/`` paths that
-    are not in the public allowlist.
-    """
-    business = _business_slug_from_product_host(
-        _host_without_port(request.headers.get("host", ""))
-    )
-    if business:
-        route = _normalize_product_rail_route(request.url.path)
-        if route:
-            if request.method == "GET":
-                return await _takyon_app_get(request, business, route)
-            if request.method == "POST":
-                return await _takyon_app_post(request, business, route)
-            if request.method == "DELETE":
-                return await _takyon_app_delete(request, business, route)
-    return await call_next(request)
 
 
 @app.middleware("http")
@@ -2343,61 +2309,6 @@ def _takyon_app_broker_generate(
         conn.close()
 
 
-# Canonical product-app rail sub-routes served by the shared Hermes app
-# runtime. On a product host (<slug>.<company-base-domain>) the business is
-# fixed by the hostname, so a generated front-end can call these rails at any
-# reasonable path — bare ("/auth/request"), "/api/"-prefixed, or with an
-# embedded slug ("/api/takyon/apps/<slug>/...") — and the runtime resolves
-# them to the host's business. This removes the recurring "rail not wired"
-# 404 when a generated site guesses the wrong API base. See CLAUDE.md: the
-# shared app runtime owns auth/session/account/profile/directory/records/connections/checkout/usage/generate.
-_PRODUCT_APP_RAIL_ROUTES: frozenset = frozenset({
-    "auth/request",
-    "auth/verify",
-    "session",
-    "account",
-    "profile",
-    "directory",
-    "records",
-    "connections",
-    "checkout",
-    "usage",
-    "generate",
-    "actions",
-    "media",
-    "email/send",
-})
-
-
-def _normalize_product_rail_route(path: str) -> Optional[str]:
-    """Map any reasonable product-app rail path to its canonical sub-route.
-
-    Returns the canonical rail route (e.g. ``auth/request``) when ``path`` is
-    a recognised rail call, else ``None``. Strips an optional ``api/`` prefix
-    and an optional ``takyon/apps/<slug>/`` or ``generated-apps/<slug>/``
-    segment so the embedded slug (if any) is ignored in favour of the host.
-    """
-    candidate = (path or "").strip("/").lower()
-    if candidate.startswith("api/"):
-        candidate = candidate[len("api/"):]
-    for prefix in ("takyon/apps/", "generated-apps/"):
-        if candidate.startswith(prefix):
-            _slug, _, tail = candidate[len(prefix):].partition("/")
-            candidate = tail
-            break
-    if candidate in _PRODUCT_APP_RAIL_ROUTES:
-        return candidate
-    if candidate == "directory" or candidate.startswith("directory/"):
-        return candidate
-    if candidate == "records" or candidate.startswith("records/"):
-        return candidate
-    if candidate == "actions" or candidate.startswith("actions/"):
-        return candidate
-    if candidate == "media" or candidate.startswith("media/"):
-        return candidate
-    return None
-
-
 def _takyon_media_status_payload(
     status: int,
     payload: dict[str, Any],
@@ -2937,33 +2848,33 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
 
+def _product_host_business_mismatch(request: Request, business: str) -> bool:
+    host_business = _business_slug_from_product_host(
+        _host_without_port(request.headers.get("host", ""))
+    )
+    if not host_business:
+        return False
+    return _safe_product_slug(business) != host_business
+
+
 @app.get("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_get(request: Request, business: str, route: str):
+    if _product_host_business_mismatch(request, business):
+        return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
     return await _takyon_app_get(request, business, route)
 
 
 @app.post("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_post(request: Request, business: str, route: str):
-    return await _takyon_app_post(request, business, route)
-
-
-@app.get("/api/generated-apps/{business}/{route:path}")
-async def takyon_generated_app_api_get(request: Request, business: str, route: str):
-    return await _takyon_app_get(request, business, route)
-
-
-@app.post("/api/generated-apps/{business}/{route:path}")
-async def takyon_generated_app_api_post(request: Request, business: str, route: str):
+    if _product_host_business_mismatch(request, business):
+        return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
     return await _takyon_app_post(request, business, route)
 
 
 @app.delete("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_delete(request: Request, business: str, route: str):
-    return await _takyon_app_delete(request, business, route)
-
-
-@app.delete("/api/generated-apps/{business}/{route:path}")
-async def takyon_generated_app_api_delete(request: Request, business: str, route: str):
+    if _product_host_business_mismatch(request, business):
+        return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
     return await _takyon_app_delete(request, business, route)
 
 
@@ -8039,89 +7950,20 @@ def _safe_product_slug(value: str) -> str:
     return slug
 
 
-def _product_publish_probe_token(request: Request | None) -> str:
-    if request is None:
-        return ""
-    query_token = str(request.query_params.get(_PRODUCT_PUBLISH_PROBE_PARAM) or "").strip()
-    if query_token:
-        return query_token
-    return str(request.headers.get("X-Takyon-Publish-Probe") or "").strip()
-
-
-def _product_publish_probe_authorized(
-    *,
-    business_root: Path,
-    business: str,
-    publish_target: str,
-    source_path: str,
-    publish_probe_token: str,
-) -> bool:
-    token = str(publish_probe_token or "").strip()
-    if not token:
-        return False
-    marker_path = (business_root / _PRODUCT_PUBLISH_PROBE_STATE_RELPATH).resolve()
-    if business_root.resolve() not in (marker_path, *marker_path.parents) or not marker_path.is_file():
-        return False
-    try:
-        payload = json.loads(marker_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    marker_token = str(payload.get("token") or "").strip()
-    if not marker_token or not hmac.compare_digest(marker_token.encode(), token.encode()):
-        return False
-    marker_business = str(payload.get("business") or "").strip().lower()
-    marker_target = str(payload.get("publish_target") or "").strip()
-    marker_source_path = str(payload.get("source_path") or "").strip()
-    return (
-        marker_business == _safe_product_slug(business)
-        and marker_target == str(publish_target or "").strip()
-        and marker_source_path == str(source_path or "").strip()
-    )
-
-
-def _local_product_site_tree_looks_built(site_root: Path) -> bool:
-    index_path = (site_root / "index.html").resolve()
-    if site_root.resolve() not in (index_path, *index_path.parents) or not index_path.is_file():
-        return False
-    try:
-        body = index_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    if re.search(
-        r"<script[^>]+src=['\"](/src/[^'\"]+)['\"][^>]*>",
-        body,
-        re.IGNORECASE,
-    ):
-        return False
-    if re.search(r"['\"](/assets/[^'\"]+)['\"]", body, re.IGNORECASE):
-        return True
-    assets_root = (site_root / "assets").resolve()
-    if site_root.resolve() not in (assets_root, *assets_root.parents) or not assets_root.is_dir():
-        return False
-    try:
-        return any(child.is_file() for child in assets_root.iterdir())
-    except OSError:
-        return False
-
-
-def _materialize_product_site_from_storage(business: str, *, publish_probe_token: str = "") -> Path | None:
+def _materialize_product_site_from_storage(business: str) -> Path | None:
     slug = _safe_product_slug(business)
     publish_root = _dashboard_product_site_root().resolve()
-    target_root = (publish_root / slug).resolve()
-    if publish_root not in (target_root, *target_root.parents):
-        return None
     materialize_lock = _product_site_materialize_lock_for_slug(slug)
 
     with materialize_lock:
         try:
             from plugins.takyon.core import (
                 TakyonStore,
-                _product_static_publish_source,
-                _replace_directory_tree_atomic,
+                _product_live_build_root,
+                _product_live_current_root,
+                _replace_symlink_atomic,
             )
-            from plugins.takyon.storage import get_storage_backend, sync_down
+            from plugins.takyon.storage import get_storage_backend, materialize_build_artifact
         except Exception as exc:
             _log.warning("product site materialize imports failed for %s: %s", slug, exc)
             return None
@@ -8140,22 +7982,19 @@ def _materialize_product_site_from_storage(business: str, *, publish_probe_token
             return None
 
         surface = app.get("surface_contract") or {}
-        publish_status = str(surface.get("publish_status") or "").strip().lower()
-        publish_target = str(surface.get("publish_target") or "").strip()
-        published_at = str(surface.get("published_at") or "").strip()
-        source_path = str(surface.get("source_path") or "product/site").strip()
-        rel = Path(source_path.replace("\\", "/"))
-        if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
-            _log.warning("product site source path is unsafe for %s: %r", slug, source_path)
+        live_build_id = str(surface.get("live_build_id") or "").strip().lower()
+        if not live_build_id:
             return None
-
-        marker = target_root / ".takyon-published-at"
-        if target_root.is_dir() and published_at:
+        build_root = _product_live_build_root(slug, live_build_id)
+        current_root = _product_live_current_root(slug)
+        if publish_root not in (build_root, *build_root.parents):
+            return None
+        if build_root.is_dir() and (build_root / "index.html").is_file():
             try:
-                if marker.read_text(encoding="utf-8").strip() == published_at:
-                    return target_root
-            except OSError:
+                _replace_symlink_atomic(current_root, build_root)
+            except Exception:
                 pass
+            return current_root if current_root.exists() else build_root
 
         try:
             backend = get_storage_backend()
@@ -8163,63 +8002,45 @@ def _materialize_product_site_from_storage(business: str, *, publish_probe_token
             _log.warning("product site backend unavailable for %s: %s", slug, exc)
             return None
 
-        with tempfile.TemporaryDirectory(prefix=f"takyon-product-site-{slug}-") as tmp_dir:
-            business_root = Path(tmp_dir) / "businesses" / slug
-            try:
-                sync_down(backend, slug, business_root, delete_local=True)
-            except Exception as exc:
-                _log.warning("product site sync_down failed for %s: %s", slug, exc)
-                return None
-            if publish_status != "published" and not _product_publish_probe_authorized(
-                business_root=business_root,
-                business=slug,
-                publish_target=publish_target,
-                source_path=source_path,
-                publish_probe_token=publish_probe_token,
-            ):
-                return None
-            source_root = (business_root / rel).resolve()
-            if business_root.resolve() not in (source_root, *source_root.parents):
-                _log.warning("product site source escaped business root for %s: %s", slug, source_root)
-                return None
-            publish_source, _publish_label = _product_static_publish_source(source_root)
-            if publish_source is None:
-                return None
+        publish_root.mkdir(parents=True, exist_ok=True)
+        try:
+            materialize_build_artifact(
+                backend,
+                slug,
+                live_build_id,
+                build_root,
+                delete_local=True,
+            )
+        except Exception as exc:
+            _log.warning("product site build materialize failed for %s build %s: %s", slug, live_build_id, exc)
+            return None
+        try:
+            _replace_symlink_atomic(current_root, build_root)
+        except Exception as exc:
+            _log.warning("product site pointer update failed for %s build %s: %s", slug, live_build_id, exc)
+            return build_root
 
-            publish_root.mkdir(parents=True, exist_ok=True)
-
-            def ignore(_directory: str, names: list[str]) -> set[str]:
-                return {
-                    name
-                    for name in names
-                    if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
-                    or name.endswith(".pyc")
-                }
-
-            _replace_directory_tree_atomic(publish_source, target_root, ignore=ignore)
-            if published_at:
-                marker.write_text(published_at + "\n", encoding="utf-8")
-
-    return target_root if target_root.is_dir() else None
+    if current_root.is_dir() and (current_root / "index.html").is_file():
+        return current_root
+    return build_root if build_root.is_dir() else None
 
 
 async def _serve_product_site_file(business: str, full_path: str = "", *, request: Request | None = None) -> Response:
     slug = _safe_product_slug(business)
-    publish_probe_token = _product_publish_probe_token(request)
     root = _dashboard_product_site_root().resolve()
     rel = full_path.strip("/") or "index.html"
-    site_root = (root / slug).resolve()
-    marker = site_root / ".takyon-published-at"
-    materialized_root: Path | None = None
-    local_tree_ready = site_root.is_dir() and (marker.is_file() or _local_product_site_tree_looks_built(site_root))
-    if site_root.is_dir() and not local_tree_ready:
-        materialized_root = await asyncio.to_thread(
-            _materialize_product_site_from_storage,
-            slug,
-            publish_probe_token=publish_probe_token,
-        )
-        if materialized_root is not None:
-            site_root = materialized_root
+    site_root = await asyncio.to_thread(
+        _materialize_product_site_from_storage,
+        slug,
+    )
+    if site_root is None:
+        detail = {
+            "error": "product site file not found",
+            "business": slug,
+            "requested_path": rel,
+            "site_root": str((root / slug).resolve()),
+        }
+        return JSONResponse(detail, status_code=404, headers={"Cache-Control": "no-store"})
     target = (site_root / rel).resolve()
     if target.is_dir():
         target = target / "index.html"
@@ -8230,25 +8051,9 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
             candidate = candidate.resolve()
             if root in (candidate, *candidate.parents) and candidate.is_file():
                 return FileResponse(candidate)
-    # Lazy publish hydrate can hit object storage. Keep that sync path off the
-    # main server loop so one cold product host cannot wedge the whole runtime.
-    if materialized_root is None:
-        materialized_root = await asyncio.to_thread(
-            _materialize_product_site_from_storage,
-            slug,
-            publish_probe_token=publish_probe_token,
-        )
-    if materialized_root is not None:
-        target = (materialized_root / rel).resolve()
-        if target.is_dir():
-            target = target / "index.html"
-        if materialized_root in (target, *target.parents) and target.is_file():
-            return FileResponse(target)
-        if not Path(rel).suffix:
-            for candidate in (target / "index.html", target.with_suffix(".html")):
-                candidate = candidate.resolve()
-                if materialized_root in (candidate, *candidate.parents) and candidate.is_file():
-                    return FileResponse(candidate)
+        spa_index = (site_root / "index.html").resolve()
+        if root in (spa_index, *spa_index.parents) and spa_index.is_file():
+            return FileResponse(spa_index)
     detail = {
         "error": "product site file not found",
         "business": slug,

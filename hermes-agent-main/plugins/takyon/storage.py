@@ -43,6 +43,7 @@ adds a bucket↔table two-write drift hazard.)
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -51,7 +52,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Protocol, runtime_checkable
+from typing import Iterable, Iterator, Protocol, runtime_checkable
 
 from takyon_cli.config import load_env
 
@@ -63,6 +64,11 @@ _MAX_KEY_DEPTH = 48
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_LOCAL_DIRNAME = "storage"
 _EXCLUDED_DIGEST = "<excluded>"
+_TAKYON_INTERNAL_PREFIX = "__takyon"
+_WORKSPACE_INTERNAL_PREFIX = f"{_TAKYON_INTERNAL_PREFIX}/workspace"
+_WORKSPACE_CAS_PREFIX = f"{_WORKSPACE_INTERNAL_PREFIX}/cas"
+_WORKSPACE_MANIFESTS_PREFIX = f"{_WORKSPACE_INTERNAL_PREFIX}/manifests"
+_BUILD_INTERNAL_PREFIX = f"{_TAKYON_INTERNAL_PREFIX}/builds"
 _SYNC_EXCLUDED_SEGMENTS: frozenset[str] = frozenset({
     ".cache",
     ".git",
@@ -78,6 +84,11 @@ _SYNC_EXCLUDED_SUFFIXES: frozenset[str] = frozenset({
     ".pyc",
     ".pyo",
 })
+_SOURCE_REVISION_EXCLUDED_PREFIXES: tuple[str, ...] = (
+    "product/site/dist",
+    "product/site/build",
+    "product/site/out",
+)
 _SUPABASE_STORAGE_CONFIG_KEYS: tuple[str, ...] = (
     "SUPABASE_S3_ENDPOINT",
     "SUPABASE_S3_REGION",
@@ -263,6 +274,21 @@ def _sync_path_excluded(rel: str) -> bool:
     return Path(safe).suffix.lower() in _SYNC_EXCLUDED_SUFFIXES
 
 
+def _normalize_sync_prefixes(prefixes: Iterable[str] | None) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for prefix in prefixes or ():
+        text = str(prefix or "").strip().strip("/")
+        if not text:
+            continue
+        normalized.add(_safe_rel(text, field="sync prefix"))
+    return tuple(sorted(normalized))
+
+
+def _sync_rel_matches_prefix(rel: str, prefixes: tuple[str, ...]) -> bool:
+    safe = _safe_rel(rel)
+    return any(safe == prefix or safe.startswith(f"{prefix}/") for prefix in prefixes)
+
+
 def _walk_local_digests(root: Path, *, include_excluded: bool = False) -> dict[str, str]:
     """Map every regular file under ``root`` to its sha256, keyed by POSIX path relative to ``root``.
     Symlinks and atomic-write temp files are skipped; an unsafe relative path raises."""
@@ -296,6 +322,198 @@ def _walk_local_digests(root: Path, *, include_excluded: bool = False) -> dict[s
                 # not wedge the whole sync_down/auth/runtime path.
                 continue
     return out
+
+
+def workspace_file_digests(root: str | os.PathLike[str]) -> dict[str, str]:
+    """Digest the canonical business workspace view for commit/build operations."""
+    return _walk_local_digests(Path(root).expanduser())
+
+
+def workspace_source_digests(root: str | os.PathLike[str]) -> dict[str, str]:
+    """Digest the committed source view of a business workspace.
+
+    Product build outputs are live artifacts, not canonical source. Keep them
+    out of source revisions so a build never mutates the committed source tree.
+    """
+    digests = workspace_file_digests(root)
+    return {
+        rel: digest
+        for rel, digest in digests.items()
+        if not _sync_rel_matches_prefix(rel, _SOURCE_REVISION_EXCLUDED_PREFIXES)
+    }
+
+
+def workspace_cas_key(slug: str, digest: str) -> str:
+    safe_digest = str(digest or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", safe_digest):
+        raise UnsafePath(f"unsafe workspace digest: {digest!r}")
+    return f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/{safe_digest}"
+
+
+def workspace_manifest_key(slug: str, revision: int) -> str:
+    safe_revision = int(revision)
+    if safe_revision < 0:
+        raise UnsafePath(f"unsafe workspace revision: {revision!r}")
+    return f"{object_prefix(slug)}{_WORKSPACE_MANIFESTS_PREFIX}/{safe_revision}.json"
+
+
+def build_object_prefix(slug: str, build_id: str) -> str:
+    safe_build_id = str(build_id or "").strip().lower()
+    if not safe_build_id or not re.fullmatch(r"[0-9a-f]{16,64}", safe_build_id):
+        raise UnsafePath(f"unsafe build id: {build_id!r}")
+    return f"{object_prefix(slug)}{_BUILD_INTERNAL_PREFIX}/{safe_build_id}/"
+
+
+def build_object_key(slug: str, build_id: str, rel: str) -> str:
+    return build_object_prefix(slug, build_id) + _safe_rel(rel, field="build path")
+
+
+def read_workspace_manifest(
+    backend: StorageBackend,
+    slug: str,
+    revision: int,
+) -> dict[str, object]:
+    raw = backend.get(workspace_manifest_key(slug, revision))
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # pragma: no cover - corruption path
+        raise StorageError(f"workspace manifest is not valid JSON for {slug}@{revision}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise StorageError(f"workspace manifest is not an object for {slug}@{revision}")
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        raise StorageError(f"workspace manifest files are invalid for {slug}@{revision}")
+    return payload
+
+
+def write_workspace_revision(
+    backend: StorageBackend,
+    slug: str,
+    revision: int,
+    root: str | os.PathLike[str],
+    *,
+    parent_revision: int = 0,
+    created_at: str = "",
+) -> dict[str, object]:
+    workspace_root = Path(root).expanduser().resolve()
+    digests = workspace_source_digests(workspace_root)
+    for rel, digest in sorted(digests.items()):
+        backend.put(
+            workspace_cas_key(slug, digest),
+            _read_file_bytes(workspace_root / rel),
+            digest=digest,
+        )
+    manifest: dict[str, object] = {
+        "slug": _safe_slug(slug),
+        "revision": int(revision),
+        "parent_revision": int(parent_revision),
+        "created_at": str(created_at or "").strip(),
+        "files": digests,
+    }
+    body = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    backend.put(
+        workspace_manifest_key(slug, revision),
+        body,
+        digest=digest_bytes(body),
+    )
+    manifest["manifest_sha256"] = digest_bytes(body)
+    return manifest
+
+
+def materialize_workspace_revision(
+    backend: StorageBackend,
+    slug: str,
+    revision: int,
+    dest_dir: str | os.PathLike[str],
+    *,
+    delete_local: bool = True,
+) -> SyncReport:
+    manifest = read_workspace_manifest(backend, slug, revision)
+    dest = Path(dest_dir).expanduser()
+    manifest_files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    if not isinstance(manifest_files, dict):
+        raise StorageError(f"workspace manifest files are invalid for {slug}@{revision}")
+    downloaded: list[str] = []
+    skipped: list[str] = []
+    local = _walk_local_digests(dest)
+    seen: set[str] = set()
+    for rel, dg in sorted(manifest_files.items()):
+        rel_text = _safe_rel(str(rel), field="workspace path")
+        digest_text = str(dg or "").strip().lower()
+        seen.add(rel_text)
+        if local.get(rel_text) == digest_text:
+            skipped.append(rel_text)
+            continue
+        data = backend.get(workspace_cas_key(slug, digest_text))
+        actual = digest_bytes(data)
+        if actual != digest_text:
+            raise StorageError(
+                f"integrity check failed for workspace blob {slug}@{revision}:{rel_text}: expected {digest_text}, got {actual}"
+            )
+        _atomic_write_bytes(dest / rel_text, data)
+        downloaded.append(rel_text)
+    deleted: list[str] = []
+    if delete_local:
+        for rel in sorted(local):
+            if rel not in seen:
+                (dest / rel).unlink(missing_ok=True)
+                deleted.append(rel)
+    return SyncReport((), tuple(downloaded), tuple(deleted), tuple(skipped))
+
+
+def write_build_artifact(
+    backend: StorageBackend,
+    slug: str,
+    build_id: str,
+    root: str | os.PathLike[str],
+) -> dict[str, str]:
+    build_root = Path(root).expanduser().resolve()
+    digests = workspace_file_digests(build_root)
+    for rel, digest in sorted(digests.items()):
+        backend.put(
+            build_object_key(slug, build_id, rel),
+            _read_file_bytes(build_root / rel),
+            digest=digest,
+        )
+    return digests
+
+
+def materialize_build_artifact(
+    backend: StorageBackend,
+    slug: str,
+    build_id: str,
+    dest_dir: str | os.PathLike[str],
+    *,
+    delete_local: bool = True,
+) -> SyncReport:
+    prefix = build_object_prefix(slug, build_id)
+    remote = backend.list_digests(prefix)
+    dest = Path(dest_dir).expanduser()
+    local = _walk_local_digests(dest)
+    downloaded: list[str] = []
+    skipped: list[str] = []
+    seen: set[str] = set()
+    for full, dg in sorted(remote.items()):
+        rel = _safe_rel(full[len(prefix):], field="build path")
+        seen.add(rel)
+        if local.get(rel) == dg:
+            skipped.append(rel)
+            continue
+        data = backend.get(full)
+        actual = digest_bytes(data)
+        if actual != dg:
+            raise StorageError(
+                f"integrity check failed for build blob {slug}:{build_id}:{rel}: expected {dg}, got {actual}"
+            )
+        _atomic_write_bytes(dest / rel, data)
+        downloaded.append(rel)
+    deleted: list[str] = []
+    if delete_local:
+        for rel in sorted(local):
+            if rel not in seen:
+                (dest / rel).unlink(missing_ok=True)
+                deleted.append(rel)
+    return SyncReport((), tuple(downloaded), tuple(deleted), tuple(skipped))
 
 
 # ── backend seam ───────────────────────────────────────────────────────────────────────────────
@@ -508,7 +726,12 @@ class SyncReport:
 
 
 def sync_up(
-    backend: StorageBackend, slug: str, src_dir: str | os.PathLike[str], *, delete_remote: bool = False
+    backend: StorageBackend,
+    slug: str,
+    src_dir: str | os.PathLike[str],
+    *,
+    delete_remote: bool = False,
+    exclude_prefixes: Iterable[str] | None = None,
 ) -> SyncReport:
     """Push the local workspace ``src_dir`` to the backend under the business prefix. Digest-incremental
     (an unchanged file is skipped). ``delete_remote=True`` mirrors local deletions to the store — only
@@ -518,10 +741,14 @@ def sync_up(
     src = Path(src_dir).expanduser()
     remote = backend.list_digests(prefix)  # {fullkey: digest}
     local = _walk_local_digests(src)  # {rel: digest}
+    excluded = _normalize_sync_prefixes(exclude_prefixes)
 
     uploaded: list[str] = []
     skipped: list[str] = []
     for rel, dg in sorted(local.items()):
+        if excluded and _sync_rel_matches_prefix(rel, excluded):
+            skipped.append(rel)
+            continue
         full = prefix + rel
         if remote.get(full) == dg:
             skipped.append(rel)
@@ -531,11 +758,18 @@ def sync_up(
 
     deleted: list[str] = []
     if delete_remote:
-        local_full = {prefix + rel for rel in local}
+        local_full = {
+            prefix + rel
+            for rel in local
+            if not (excluded and _sync_rel_matches_prefix(rel, excluded))
+        }
         for full in sorted(remote):
+            rel = full[len(prefix):]
+            if excluded and _sync_rel_matches_prefix(rel, excluded):
+                continue
             if full not in local_full:
                 backend.delete(full)
-                deleted.append(full[len(prefix):])
+                deleted.append(rel)
     return SyncReport(tuple(uploaded), (), tuple(deleted), tuple(skipped))
 
 

@@ -171,16 +171,11 @@ def test_appkit_contract_block_preserves_canonical_rail_helpers():
     )
 
     assert "AppKit-owned rail helpers are canonical behavior, not inspiration." in block
-    assert "client.requestAuth(...)" in block
-    assert "client.session()" in block
-    assert "client.profile()" in block
-    assert "client.listRecords(...)" in block
-    assert "client.createActionRunner(name)" in block
-    assert "useSession()" in block
-    assert "useRecords(type)" in block
-    assert "useActionRunner(name)" in block
     assert "src/lib/takyon.ts" in block and "src/lib/hooks.ts" in block
+    assert "shared client/hooks" in block
     assert "do not spend bootstrap/design time" in block.lower()
+    assert "createActionRunner" not in block
+    assert "useActionRunner" not in block
 
 
 def test_appkit_contract_block_uses_vite_scaffold_surface_when_frontend_stack_is_pinned():
@@ -199,11 +194,12 @@ def test_appkit_contract_block_uses_vite_scaffold_surface_when_frontend_stack_is
     )
 
     assert "src/lib/hooks.ts" in block
-    assert "useActionRunner(name)" in block
     assert "src/screens/support.tsx" in block
     assert "src/screens/app-layout.tsx" in block
     assert "starter-context.js" not in block
     assert "src/app/app/(product)/root.js" not in block
+    assert "createActionRunner" not in block
+    assert "useActionRunner" not in block
 
 
 def test_worker_contract_block_states_positive_obligation_and_facts():
@@ -223,13 +219,14 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
 
     # The minimized worker contract is a short positive obligation, not a fear wall.
     assert "Your overriding obligation is that the product's primary job works for real." in block
-    assert "Use the shared rails and real action files for backend behavior" in block
+    assert "Use the shared runtime client and the declared shared rails already present in this workspace." in block
     assert "fail truthfully with the exact blocker" in block
     # Factual contract context is still injected.
     assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in block
     assert "src/screens/" in block
     assert "Support-route screens live in `src/screens/support.tsx`" in block
-    assert "Product-specific backend work goes through action files" in block
+    assert "createActionRunner" not in block
+    assert "actions/<name>.ts" not in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block
     assert "Subscription style:" not in block
@@ -257,6 +254,8 @@ def test_worker_contract_block_uses_vite_lane_guidance():
     assert "src/screens/support.tsx" in block
     assert "next.config.js" not in block
     assert "src/app/app/(product)/" not in block
+    assert "createActionRunner" not in block
+    assert "actions/<name>.ts" not in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

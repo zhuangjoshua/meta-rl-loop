@@ -893,16 +893,15 @@ def _business_workspace_execution_context(
     operator_user_id: str | None = None,
     sync_on_exception: bool = False,
 ):
-    from . import storage
+    from .core import TakyonStore, _mounted_canonical_business_workspace
 
     load_takyon_env()
-    backend = storage.get_storage_backend()
-    with storage.isolated_business_workspace(
-        backend,
+    store = TakyonStore(operator_user_id=operator_user_id)
+    with _mounted_canonical_business_workspace(
+        store,
         slug,
         owner_label=str(operator_user_id or slug),
-        sync_on_exception=sync_on_exception,
-    ) as workspace_home:
+    ) as (workspace_home, _backend, _base_revision):
         yield workspace_home
 
 
@@ -1237,8 +1236,8 @@ def _business_bootstrap_instruction(
         "",
         "### 2. Product surface + site build",
         "Call business_upsert_app_surface_contract with:",
-        "- name, description, customer shape from research",
         "- source_path: product/site",
+        "- runtime_features: auth, account, profile, checkout",
         "- routes: / (landing page), /app (sign-in + subscription gate), and /app/profile (account page)",
         "",
         "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before the site worker runs so the existing checkout rail has a real plan object to use.",
@@ -1248,16 +1247,16 @@ def _business_bootstrap_instruction(
         "",
         "Then call business_claude_agent_task with:",
         "- workspace: product/site",
-        "- instruction: Use the Hermes app kit materialized in the workspace as the runtime rail base for /app and /app/profile, while making / business-specific. Choose one coherent visual direction from the brief and the provided style packs, then follow it consistently without blending packs.",
+        "- instruction: Use the pinned Vite scaffold materialized in the workspace as the runtime rail base. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts` while making the landing and access screens business-specific. Choose one coherent visual direction from the brief and the provided style packs, then follow it consistently without blending packs.",
         '- guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"] so the delegated site worker receives the shared design method plus the available shared style packs.',
         "",
         "Build the landing page at / now.",
         "Execution order inside product/site:",
-        "- First customize `/` so `src/app/page.js` is a truthful branded landing page.",
-        "- Second make `/app` a thin sign-in/subscription access gate on the existing Hermes/Takyon auth + checkout rails.",
-        "- Third make `/app/profile` the truthful account/subscription page on the existing account + profile rails.",
-        "- Do not spend bootstrap time editing the preset `/privacy`, `/terms`, `/faq`, and `/articles` support pages unless explicitly asked.",
-        "- Leave `src/app/app/(product)/` deferred unless a small route guard or placeholder is required for correctness.",
+        "- First customize `/` so `src/screens/landing.tsx` is a truthful branded landing page.",
+        "- Second make `/app` a thin sign-in/subscription access gate by refining `src/screens/app-layout.tsx` and `src/screens/app-home.tsx` on the existing Hermes/Takyon auth + checkout rails.",
+        "- Third make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
+        "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
+        "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",
         "- Stop once `/`, `/app`, and `/app/profile` are truthful and publishable; do not spend first-pass time inventing the real product workflow.",
         "",
         "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell.",
@@ -1281,7 +1280,7 @@ def _business_bootstrap_instruction(
         "",
         "Implementation bias:",
         "- Edit the seeded thin access/account surfaces in place first.",
-        "- Preserve `_takyon/*`, `starter-context.js`, and the existing runtime rail behavior.",
+        "- Preserve `_takyon/*`, `src/lib/takyon.ts`, `src/lib/hooks.ts`, and the existing runtime rail behavior.",
         "- Prefer upgrading the existing auth/account/profile shell over creating a new app architecture.",
         "",
         "Constraints:",
@@ -2188,8 +2187,12 @@ def _read_shell_line(current_business: str | None, entries: list[dict[str, Any]]
 
 
 def _business_exists(store: TakyonStore, slug: str) -> bool:
-    data = store.read(scope="global", query="list_businesses", limit=200)
-    return any(item.get("slug") == slug for item in data.get("businesses", []))
+    try:
+        data = store.read(scope=_scope_for_business(slug), query="summary")
+    except TakyonError:
+        return False
+    business = (data.get("business") or {}) if isinstance(data, dict) else {}
+    return str(business.get("slug") or "").strip() == _slugify(slug)
 
 
 def _require_current_business(current_business: str | None) -> str:
@@ -3381,6 +3384,10 @@ def run_takyon_command(
             usage=f'usage: takyon {command} [--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
+        if _business_exists(store, slug):
+            raise SystemExit(
+                f"business:{slug} already exists. /{command} requires a fresh slug and will not reuse an existing business."
+            )
         config = _read_model_config(store)
         if auto_start and not no_auto:
             _require_agent_model_config(config, model_override=model)

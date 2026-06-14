@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.takyon import app_actions, core as takyon_core, worker as takyon_worker
+from plugins.takyon import app_actions, core as takyon_core, storage as takyon_storage, worker as takyon_worker
 
 
 class _SQLiteStore:
@@ -661,3 +661,93 @@ def test_sync_status_no_backend_is_truthful():
 
     status = takyon_core.TakyonStore._sync_business_workspace_remote(_Store(), "biz")
     assert status == "skipped_no_backend"
+
+
+def test_operator_cache_sync_excludes_product_site_prefix(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(tmp_path, database_url=pg_store_dsn)
+    with store._connect() as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO businesses (slug, name, mode, goal, status, work_focus, budget_json, created_at, updated_at) VALUES (?, ?, 'live', '', 'active', 'all', ?, ?, ?)",
+                ("biz", "Biz", "{}", takyon_core._now(), takyon_core._now()),
+            )
+    workspace = store._business_root("biz", sync=False)
+    (workspace / "research").mkdir(parents=True, exist_ok=True)
+    (workspace / "research" / "strategy.md").write_text("# Strategy\n", encoding="utf-8")
+    (workspace / "product" / "site" / "dist").mkdir(parents=True, exist_ok=True)
+    (workspace / "product" / "site" / "dist" / "index.html").write_text("<main>build</main>\n", encoding="utf-8")
+
+    status = store._sync_business_workspace_remote("biz")
+    backend = store._workspace_storage_backend()
+    manifest = takyon_storage.read_workspace_manifest(backend, "biz", store._business_head_revision("biz"))
+
+    assert status == "synced"
+    assert "research/strategy.md" in manifest["files"]
+    assert "product/site/dist/index.html" not in manifest["files"]
+
+
+def test_scoped_worker_sync_keeps_product_site_authority(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(tmp_path, database_url=pg_store_dsn)
+    scoped_root = tmp_path / "scratch-home"
+    store._workspace_root_override = scoped_root
+    store._workspace_base_revision["biz"] = 0
+    with store._connect() as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO businesses (slug, name, mode, goal, status, work_focus, budget_json, created_at, updated_at) VALUES (?, ?, 'live', '', 'active', 'all', ?, ?, ?)",
+                ("biz", "Biz", "{}", takyon_core._now(), takyon_core._now()),
+            )
+    workspace = scoped_root / "businesses" / "biz"
+    (workspace / "product" / "site").mkdir(parents=True, exist_ok=True)
+    (workspace / "product" / "site" / "index.html").write_text("<h1>Live</h1>\n", encoding="utf-8")
+
+    status = store._sync_business_workspace_remote("biz")
+    backend = store._workspace_storage_backend()
+    manifest = takyon_storage.read_workspace_manifest(backend, "biz", 1)
+
+    assert status == "synced"
+    assert "product/site/index.html" in manifest["files"]
+
+
+def test_business_file_truth_metadata_labels_canonical_vs_working_product_source():
+    cached = takyon_core._business_file_truth_metadata(
+        "product/site/index.html",
+        session_scoped=False,
+    )
+    working = takyon_core._business_file_truth_metadata(
+        "product/site/index.html",
+        session_scoped=True,
+    )
+
+    assert cached["truth_surface"] == "canonical"
+    assert cached["proof_level"] == "mixed"
+    assert "committed canonical workspace" in cached["truth_guidance"]
+
+    assert working["truth_surface"] == "working"
+    assert working["proof_level"] == "authoritative"
+    assert "active session workspace" in working["proof_guidance"]
+
+
+def test_recorded_live_truth_metadata_labels_intended_live_state():
+    truth = takyon_core._recorded_live_truth_metadata(
+        {
+            "publish_status": "published",
+            "public_url": "https://latexflow.fourmanifold.com/",
+            "published_at": "2026-06-14T06:00:00+00:00",
+        },
+        business="latexflow",
+    )
+
+    assert truth["surface"] == "recorded_live"
+    assert truth["live"] is True
+    assert truth["publish_status"] == "published"
+    assert truth["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert truth["probe"] == "unknown"

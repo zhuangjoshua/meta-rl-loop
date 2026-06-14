@@ -15,7 +15,7 @@ from plugins.takyon.core import (
 
 
 def test_worker_capability_contract_keeps_runtime_namespace_boundary():
-    assert "The path namespace `/api/takyon/apps/` (and `generated-apps`) is platform-reserved" in WORKER_CAPABILITY_CONTRACT
+    assert "The path namespace `/api/takyon/apps/` is platform-reserved" in WORKER_CAPABILITY_CONTRACT
     assert "worker-surface-contract.json" not in WORKER_CAPABILITY_CONTRACT
 
 
@@ -122,6 +122,11 @@ def test_refresh_blocks_forbidden_product_backend_shims_with_exact_blockers(tmp_
     route_dir = site / "src" / "app" / "api" / "takyon" / "apps" / "latexflow" / "generate"
     route_dir.mkdir(parents=True)
     (site / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        '{"name":"latexflow","private":true,"scripts":{"build":"vite build"},"devDependencies":{"vite":"5.4.21"}}\n',
+        encoding="utf-8",
+    )
+    (site / "vite.config.ts").write_text("export default {};\n", encoding="utf-8")
     (route_dir / "route.js").write_text(
         "const base = process.env.TAKYON_OPENAI_BASE_URL || 'https://api.openai.com/v1';\n"
         "export async function POST() { return fetch(base, { headers: { Authorization: process.env.OPENAI_API_KEY } }); }\n",
@@ -134,7 +139,7 @@ def test_refresh_blocks_forbidden_product_backend_shims_with_exact_blockers(tmp_
     assert verification["blockers"] == [
         "product source calls an AI provider directly at src/app/api/takyon/apps/latexflow/generate/route.js:1; runtime AI must go through the generate rail (or a declared action)",
         "product source reads provider credentials or base URLs directly at src/app/api/takyon/apps/latexflow/generate/route.js:2; runtime AI must go through the generate rail (or a declared action)",
-        "product source defines a server route handler on the static vite_react_ts lane at src/app/api/takyon/apps/latexflow/generate/route.js:1; declared frontend_stack vite_react_ts is static-only — move server logic into a declared action and rebuild as a static Vite app",
+        "product source defines a server route handler on the pinned static Vite scaffold at src/app/api/takyon/apps/latexflow/generate/route.js:1; the pinned Vite scaffold is static-only — move server logic into a declared action and rebuild as a static Vite app",
         "product source defines its own handler under the platform-reserved path /api/takyon/apps/latexflow/generate at src/app/api/takyon/apps/latexflow/generate/route.js; platform rails are served by the Takyon runtime; remove the handler and call the rail from the client or a declared action",
     ]
     assert "product source violates runtime authority boundaries" in verification["error"]
@@ -196,7 +201,7 @@ def test_pinned_stack_scanner_blocks_client_generate_usage(tmp_path):
             "path": "src/screens/app-home.tsx",
             "line": 1,
             "kind": "vite_client_generate",
-            "blocker": "product source calls the shared generate rail directly from vite_react_ts client code",
+            "blocker": "product source calls the shared generate rail directly from pinned Vite client code",
             "snippet": "export function AppHome() { return fetch('/generate', { method: 'POST' }); }",
         }
     ]
@@ -298,12 +303,12 @@ def test_pinned_stack_gate_treats_legacy_alias_as_vite_stack(tmp_path):
 
 def test_server_entrypoint_blocker_text_names_the_static_lane():
     blockers = _format_forbidden_product_source_blockers(
-        [{"path": "next.config.js", "line": 1, "kind": "server_entrypoint", "blocker": "product source carries a Next.js config on the static vite_react_ts lane"}],
+        [{"path": "next.config.js", "line": 1, "kind": "server_entrypoint", "blocker": "product source carries a Next.js config on the pinned static Vite scaffold"}],
         [],
     )
     assert blockers == [
-        "product source carries a Next.js config on the static vite_react_ts lane at next.config.js:1; "
-        "declared frontend_stack vite_react_ts is static-only — move server logic into a declared action "
+        "product source carries a Next.js config on the pinned static Vite scaffold at next.config.js:1; "
+        "the pinned Vite scaffold is static-only — move server logic into a declared action "
         "and rebuild as a static Vite app"
     ]
 
@@ -315,14 +320,14 @@ def test_client_generate_blocker_text_names_actions_requirement():
                 "path": "src/screens/app-home.tsx",
                 "line": 18,
                 "kind": "vite_client_generate",
-                "blocker": "product source calls the shared generate rail directly from vite_react_ts client code",
+                "blocker": "product source calls the shared generate rail directly from pinned Vite client code",
             }
         ],
         [],
     )
     assert blockers == [
-        "product source calls the shared generate rail directly from vite_react_ts client code at "
-        "src/screens/app-home.tsx:18; declared frontend_stack vite_react_ts requires client AI flows "
+        "product source calls the shared generate rail directly from pinned Vite client code at "
+        "src/screens/app-home.tsx:18; the pinned Vite scaffold requires client AI flows "
         "to call a declared action instead of `/generate`"
     ]
 
@@ -373,6 +378,57 @@ def test_scaffold_placeholder_theme_blocks_publish_and_drives_retry():
     # No placeholder marker → no blocker → publish proceeds unchanged.
     clean_refresh = {"status": "passed", "inventory": {"risk_markers": []}}
     assert takyon_core._scaffold_theme_unfinished_blocker(clean_refresh) == ""
+
+
+def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    site = tmp_path / "product" / "site"
+    (site / "src" / "screens").mkdir(parents=True)
+    (site / "src" / "screens" / "landing.tsx").write_text(
+        'export function LandingScreen() { return <main data-takyon-scaffold="landing" />; }\n',
+        encoding="utf-8",
+    )
+    (site / "src" / "screens" / "app-home.tsx").write_text(
+        'export function AppHomeScreen() { return <section data-takyon-scaffold="app-home" />; }\n',
+        encoding="utf-8",
+    )
+    (site / "src" / "screens" / "profile.tsx").write_text(
+        'export function ProfileScreen() { return <section data-takyon-scaffold="profile" />; }\n',
+        encoding="utf-8",
+    )
+
+    markers = takyon_core._scaffold_visible_shell_markers(site)
+
+    assert [marker["path"] for marker in markers] == [
+        "src/screens/landing.tsx",
+        "src/screens/app-home.tsx",
+        "src/screens/profile.tsx",
+    ]
+    assert all(marker["issue"] == "scaffold_visible_shell" for marker in markers)
+
+
+def test_scaffold_visible_shell_blocks_publish():
+    from plugins.takyon import core as takyon_core
+
+    passed_refresh = {
+        "status": "passed",
+        "inventory": {
+            "risk_markers": [
+                {
+                    "path": "src/screens/landing.tsx",
+                    "issue": "scaffold_visible_shell",
+                    "snippet": "screen still carries the scaffold sentinel marker and renders the blank shell",
+                }
+            ]
+        },
+    }
+
+    blocker = takyon_core._scaffold_visible_shell_unfinished_blocker(passed_refresh)
+
+    assert "blank scaffold screen" in blocker
+    assert "src/screens/landing.tsx" in blocker
+    assert "/app/profile" in blocker
 
 
 def test_kit_materialization_excludes_scaffold_and_artifacts(tmp_path):

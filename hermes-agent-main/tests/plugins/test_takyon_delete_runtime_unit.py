@@ -53,6 +53,11 @@ def test_delete_business_removes_product_runtime_surfaces(tmp_path, monkeypatch)
         lambda self, domains, confirm=True: {"provider": "vercel", "candidates": domains, "results": []},
         store,
     )
+    store._workspace_root_override = tmp_path
+    store._business_root = types.MethodType(
+        lambda self, business_slug, sync=True: tmp_path / "businesses" / business_slug,
+        store,
+    )
 
     result = store._delete_business(
         object(),

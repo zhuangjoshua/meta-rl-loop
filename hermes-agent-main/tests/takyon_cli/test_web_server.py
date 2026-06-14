@@ -1798,12 +1798,13 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     from plugins.takyon.core import TakyonStore
 
     site_root = tmp_path / "product-sites"
-    latexflow_site = site_root / "latexflow"
-    latexflow_site.mkdir(parents=True)
-    (latexflow_site / "index.html").write_text(
+    latexflow_build = site_root / "latexflow" / "builds" / "build123"
+    latexflow_build.mkdir(parents=True)
+    (latexflow_build / "index.html").write_text(
         "<!doctype html><title>Latexflow</title><main>Write LaTeX without tickets</main>",
         encoding="utf-8",
     )
+    os.symlink("builds/build123", site_root / "latexflow" / "current")
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|web-server-subdomain")
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
@@ -1815,6 +1816,25 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
         scope="business:latexflow",
         operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
         idempotency_key="product-subdomain-business",
+        reason="test",
+        actor="test",
+    )
+    store.commit(
+        scope="business:latexflow",
+        operations=[
+            {"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]},
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "published",
+                "publish_target": "https://latexflow.fourmanifold.com/",
+                "public_url": "https://latexflow.fourmanifold.com/",
+                "published_at": "2026-06-14T06:00:00+00:00",
+                "live_build_id": "build123",
+                "live_probe_status": "ok",
+            },
+        ],
+        idempotency_key="product-subdomain-publish",
         reason="test",
         actor="test",
     )
@@ -1835,6 +1855,68 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     assert "Write LaTeX without tickets" in local_response.text
     assert missing_response.status_code == 404
     assert missing_response.json()["error"] == "product site file not found"
+
+
+def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypatch, pg_store_dsn):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    site_root = tmp_path / "product-sites"
+    latexflow_site = site_root / "latexflow" / "builds" / "build123"
+    assets_root = latexflow_site / "assets"
+    assets_root.mkdir(parents=True)
+    (latexflow_site / "index.html").write_text(
+        "<!doctype html><title>Latexflow</title><script type=\"module\" src=\"/assets/app.js\"></script>",
+        encoding="utf-8",
+    )
+    (assets_root / "app.js").write_text("console.log('vite app');\n", encoding="utf-8")
+    os.symlink("builds/build123", site_root / "latexflow" / "current")
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|web-server-subdomain")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
+    store.commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "goal": "Overleaf competitor"}],
+        idempotency_key="product-subdomain-spa-route",
+        reason="test",
+        actor="test",
+    )
+    store.commit(
+        scope="business:latexflow",
+        operations=[
+            {"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]},
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "published",
+                "publish_target": "https://latexflow.fourmanifold.com/",
+                "public_url": "https://latexflow.fourmanifold.com/",
+                "published_at": "2026-06-14T06:00:00+00:00",
+                "live_build_id": "build123",
+                "live_probe_status": "ok",
+            },
+        ],
+        idempotency_key="product-subdomain-spa-publish",
+        reason="test",
+        actor="test",
+    )
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get("/app", headers={"Host": "latexflow.fourmanifold.com"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "app.js" in response.text
 
 
 def test_product_subdomain_materializes_published_site_from_storage(tmp_path, monkeypatch):
@@ -1860,23 +1942,25 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
                         "publish_status": "published",
                         "published_at": "2026-06-03T05:37:01.783509+00:00",
                         "source_path": "product/site",
+                        "live_build_id": "build123",
                     }
                 }
             }
 
-    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+    def fake_materialize_build(_backend, slug, build_id, dest_dir, *, delete_local=False):
         assert slug == "latexflow"
-        site = Path(dest_dir) / "product" / "site"
+        assert build_id == "build123"
+        site = Path(dest_dir)
         site.mkdir(parents=True, exist_ok=True)
         (site / "index.html").write_text(
             "<!doctype html><title>Latexflow</title><main>Materialized from storage</main>",
             encoding="utf-8",
         )
-        return takyon_storage.SyncReport(downloaded=("product/site/index.html",))
+        return takyon_storage.SyncReport(downloaded=("index.html",))
 
     monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
-    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
+    monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fake_materialize_build)
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -1888,11 +1972,11 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
 
     assert response.status_code == 200
     assert "Materialized from storage" in response.text
-    assert (site_root / "latexflow" / "index.html").exists()
-    assert (site_root / "latexflow" / ".takyon-published-at").exists()
+    assert (site_root / "latexflow" / "builds" / "build123" / "index.html").exists()
+    assert (site_root / "latexflow" / "current").is_symlink()
 
 
-def test_product_subdomain_probe_token_materializes_pending_publish_from_storage(tmp_path, monkeypatch):
+def test_product_subdomain_without_live_build_pointer_returns_404(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
     import plugins.takyon.core as takyon_core
@@ -1913,83 +1997,71 @@ def test_product_subdomain_probe_token_materializes_pending_publish_from_storage
                 "app": {
                     "surface_contract": {
                         "publish_status": "blocked",
-                        "publish_target": "https://latexflow.fourmanifold.com/",
                         "published_at": "",
                         "source_path": "product/site",
                     }
                 }
             }
 
-    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
-        assert slug == "latexflow"
-        site = Path(dest_dir) / "product" / "site"
-        dist = site / "dist"
-        dist.mkdir(parents=True, exist_ok=True)
-        (dist / "index.html").write_text(
-            "<!doctype html><title>Latexflow</title><main>Materialized from pending publish</main>",
-            encoding="utf-8",
-        )
-        (site.parent / ".takyon-publish-probe.json").write_text(
-            json.dumps(
-                {
-                    "business": "latexflow",
-                    "publish_target": "https://latexflow.fourmanifold.com/",
-                    "source_path": "product/site",
-                    "token": "probe-token-123",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return takyon_storage.SyncReport(downloaded=("product/site/dist/index.html",))
-
     monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
-    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
         blocked = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
-        allowed = client.get(
-            "/?__takyon_publish_probe=probe-token-123",
-            headers={"Host": "latexflow.fourmanifold.com"},
-        )
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
 
     assert blocked.status_code == 404
-    assert allowed.status_code == 200
-    assert "Materialized from pending publish" in allowed.text
-    assert (site_root / "latexflow" / "index.html").exists()
 
 
-def test_product_subdomain_serves_existing_unmarked_local_build_without_rehydrate(tmp_path, monkeypatch):
+def test_product_subdomain_serves_existing_current_pointer_without_materialize(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
+    import plugins.takyon.core as takyon_core
     import plugins.takyon.storage as takyon_storage
     import takyon_cli.web_server as web_server
 
     site_root = tmp_path / "product-sites"
-    local_root = site_root / "latexflow"
-    assets_root = local_root / "assets"
+    build_root = site_root / "latexflow" / "builds" / "build123"
+    assets_root = build_root / "assets"
     assets_root.mkdir(parents=True)
-    (local_root / "index.html").write_text(
+    (build_root / "index.html").write_text(
         "<!doctype html><title>Latexflow</title><script type=\"module\" crossorigin src=\"/assets/index-built.js\"></script>",
         encoding="utf-8",
     )
     (assets_root / "index-built.js").write_text("console.log('built');\n", encoding="utf-8")
+    os.symlink("builds/build123", site_root / "latexflow" / "current")
 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
 
-    def fail_sync_down(_backend, slug, dest_dir, *, delete_local=False):
-        raise AssertionError("sync_down should not run when a built local site tree already exists")
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
 
+        def read(self, **_kwargs):
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "published",
+                        "published_at": "2026-06-14T06:00:00+00:00",
+                        "source_path": "product/site",
+                        "live_build_id": "build123",
+                    }
+                }
+            }
+
+    def fail_materialize(_backend, slug, build_id, dest_dir, *, delete_local=False):
+        raise AssertionError("materialize_build_artifact should not run when the current build already exists locally")
+
+    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
-    monkeypatch.setattr(takyon_storage, "sync_down", fail_sync_down)
+    monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fail_materialize)
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2003,7 +2075,7 @@ def test_product_subdomain_serves_existing_unmarked_local_build_without_rehydrat
     assert "index-built.js" in response.text
 
 
-def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_path, monkeypatch):
+def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
     import plugins.takyon.core as takyon_core
@@ -2011,13 +2083,6 @@ def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_pa
     import takyon_cli.web_server as web_server
 
     site_root = tmp_path / "product-sites"
-    stale_root = site_root / "latexflow"
-    stale_root.mkdir(parents=True)
-    (stale_root / "index.html").write_text(
-        "<!doctype html><title>Latexflow</title><main>Stale local source tree</main>",
-        encoding="utf-8",
-    )
-
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
     monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
@@ -2033,23 +2098,25 @@ def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_pa
                         "publish_status": "published",
                         "published_at": "2026-06-13T22:05:00+00:00",
                         "source_path": "product/site",
+                        "live_build_id": "build123",
                     }
                 }
             }
 
-    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+    def fake_materialize_build(_backend, slug, build_id, dest_dir, *, delete_local=False):
         assert slug == "latexflow"
-        dist = Path(dest_dir) / "product" / "site" / "dist"
+        assert build_id == "build123"
+        dist = Path(dest_dir)
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "index.html").write_text(
             "<!doctype html><title>Latexflow</title><main>Rehydrated published build</main>",
             encoding="utf-8",
         )
-        return takyon_storage.SyncReport(downloaded=("product/site/dist/index.html",))
+        return takyon_storage.SyncReport(downloaded=("index.html",))
 
     monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
     monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
-    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
+    monkeypatch.setattr(takyon_storage, "materialize_build_artifact", fake_materialize_build)
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2061,39 +2128,7 @@ def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_pa
 
     assert response.status_code == 200
     assert "Rehydrated published build" in response.text
-    assert (site_root / "latexflow" / ".takyon-published-at").exists()
-
-
-def test_normalize_product_rail_route_handles_path_variants():
-    import takyon_cli.web_server as web_server
-
-    norm = web_server._normalize_product_rail_route
-    # Bare, /api/-prefixed, and slug-embedded forms all map to the canonical rail.
-    assert norm("/auth/request") == "auth/request"
-    assert norm("/api/auth/request") == "auth/request"
-    assert norm("/api/takyon/apps/mathflow/auth/request") == "auth/request"
-    assert norm("/api/generated-apps/mathflow/auth/verify") == "auth/verify"
-    assert norm("/api/takyon/apps/otherslug/generate") == "generate"
-    assert norm("/api/takyon/apps/otherslug/directory/u_123") == "directory/u_123"
-    assert norm("/api/takyon/apps/otherslug/records/draft/abc123") == "records/draft/abc123"
-    assert norm("session") == "session"
-    assert norm("/account") == "account"
-    assert norm("/profile") == "profile"
-    assert norm("/directory") == "directory"
-    assert norm("/directory/me") == "directory/me"
-    assert norm("/directory/u_123") == "directory/u_123"
-    assert norm("/records") == "records"
-    assert norm("/records/draft/abc123") == "records/draft/abc123"
-    assert norm("/connections") == "connections"
-    assert norm("/checkout") == "checkout"
-    assert norm("/usage") == "usage"
-    assert norm("/actions/send-email") == "actions/send-email"
-    assert norm("/api/takyon/apps/otherslug/actions/send-email") == "actions/send-email"
-    # Non-rail paths and static pages must not be claimed.
-    assert norm("/") is None
-    assert norm("/pricing") is None
-    assert norm("/api/status") is None
-    assert norm("/auth/login") is None
+    assert (site_root / "latexflow" / "current").is_symlink()
 
 
 def test_reserved_public_host_does_not_resolve_as_product_business():
@@ -2185,10 +2220,7 @@ def test_auth0_logout_uses_request_host_for_skill_lab_return_to(monkeypatch):
     web_server._clear_auth0_config_cache()
 
 
-def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monkeypatch):
-    """A generated front-end that calls a bare/short rail path on a product
-    host resolves to the host's business instead of 404'ing ("rail not
-    wired"). The embedded slug, if any, is ignored in favour of the host."""
+def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
     from starlette.responses import JSONResponse
 
@@ -2210,24 +2242,20 @@ def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monk
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        # Bare POST on the product host — previously 404 "rail not wired".
-        bare = client.post(
-            "/auth/request",
+        canonical = client.post(
+            "/api/takyon/apps/mathflow/auth/request",
             json={"email": "a@b.com"},
             headers={"Host": "mathflow.fourmanifold.com"},
         )
-        # /api/-prefixed bare rail (would otherwise be 401'd by the auth gate).
-        api_pref = client.post(
-            "/api/generate",
-            json={"prompt": "hi"},
-            headers={"Host": "mathflow.fourmanifold.com"},
-        )
-        # Wrong embedded slug is overridden by the host business.
         wrong_slug = client.get(
             "/api/takyon/apps/someoneelse/account",
             headers={"Host": "mathflow.fourmanifold.com"},
         )
-        # Dashboard host must NOT be treated as a rail call.
+        bare = client.post(
+            "/auth/request",
+            json={"prompt": "hi"},
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
         dash = client.post(
             "/auth/request",
             json={"email": "a@b.com"},
@@ -2237,16 +2265,11 @@ def test_product_host_dispatches_bare_rail_calls_to_host_business(tmp_path, monk
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
 
-    assert bare.status_code == 200
-    assert bare.json() == {"ok": True, "business": "mathflow", "route": "auth/request"}
-    assert api_pref.json()["business"] == "mathflow"
-    assert api_pref.json()["route"] == "generate"
-    assert wrong_slug.json()["business"] == "mathflow"
-    assert wrong_slug.json()["route"] == "account"
+    assert canonical.status_code == 200
+    assert canonical.json() == {"ok": True, "business": "mathflow", "route": "auth/request"}
+    assert wrong_slug.status_code == 404
+    assert bare.status_code == 405
     assert ("POST", "mathflow", "auth/request") in calls
-    assert ("POST", "mathflow", "generate") in calls
-    assert ("GET", "mathflow", "account") in calls
-    # The dashboard host did not dispatch to a product rail.
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
 
 
@@ -2748,7 +2771,7 @@ def test_http_path_allowed_for_host_roles():
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_SUBUSER,
         host="app.fourmanifold.com",
-        path="/api/generated-apps/latexflow/account",
+        path="/api/takyon/apps/latexflow/account",
     ) is True
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_SUBUSER,
@@ -2779,7 +2802,7 @@ def test_http_path_allowed_for_host_roles():
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.fourmanifold.com",
         path="/api/checkout",
-    ) is True
+    ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.fourmanifold.com",
@@ -2789,7 +2812,7 @@ def test_http_path_allowed_for_host_roles():
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.fourmanifold.com",
         path="/checkout",
-    ) is True
+    ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.fourmanifold.com",
@@ -2957,12 +2980,14 @@ def test_product_host_assets_route_serves_published_product_assets(monkeypatch, 
     import takyon_cli.web_server as web_server
 
     publish_root = tmp_path / "product-sites"
-    site_root = publish_root / "plannerly"
-    assets_root = site_root / "assets"
+    build_root = publish_root / "plannerly" / "builds" / "build123"
+    assets_root = build_root / "assets"
     assets_root.mkdir(parents=True, exist_ok=True)
     (assets_root / "app.js").write_text("console.log('plannerly');\n", encoding="utf-8")
+    os.symlink("builds/build123", publish_root / "plannerly" / "current")
 
     monkeypatch.setattr(web_server, "_dashboard_product_site_root", lambda: publish_root)
+    monkeypatch.setattr(web_server, "_materialize_product_site_from_storage", lambda business: publish_root / business / "current")
 
     client = TestClient(web_server.app)
     response = client.get("/assets/app.js", headers={"Host": "plannerly.fourmanifold.com"})
@@ -3120,6 +3145,7 @@ class TestWebServerEndpoints:
             }
 
         monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+        monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _ctx: False)
         monkeypatch.setattr(
             "tui_gateway.server.handle_request",
             fake_handle_request,

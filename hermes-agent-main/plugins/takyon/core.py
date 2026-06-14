@@ -15,12 +15,10 @@ import re
 import signal
 import shlex
 import shutil
-import socket
 import stat
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -201,23 +199,22 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 """
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI through the shared runtime client, not browser-only authority state.
-- On product hosts, same-origin bare rails such as `/session`, `/checkout`, or `/actions/<name>` resolve to the shared runtime.
-- Off-host or in preview/local, use the prefixed runtime API base from `./_takyon/surface-context.js`.
+- Use the canonical prefixed runtime API base from `./_takyon/surface-context.js`.
 """
 SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - You are building a customer-facing product app for the shared Takyon app plane, not the operator dashboard, admin surface, or authority tool UI; never put operator/admin routes or `tk_`/`tkg_` operator tokens in product code.
 - Customer identity and all account/session/entitlement/checkout/usage truth come only from the declared app runtime rails, never from browser-only state.
 """
 SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
-- For product apps, the supported target today is the pinned Vite static app scaffold; treat any surviving Next/AppKit tree as upgrade input, not a target shape to extend.
-- Match that scaffold consistently across package.json scripts, source layout, and publishable output.
+- For product apps, the only supported target is the pinned Vite static app scaffold.
+- Match that scaffold consistently across package.json scripts, source layout, and publishable `dist/` output.
 """
 WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - You may edit files only inside the current workspace.
 - The delegated worker does not own operator/admin authority, publishing, or deploys; do the local source/build/test/install work available inside this workspace.
 - For `product/site` work in the Docker lane, you may use Bash only for local build/test/install/cleanup inside the isolated workspace.
 - If a task needs unsupported external execution or authority actions, finish the local source work you can do and report the blocker in your final summary.
-- The path namespace `/api/takyon/apps/` (and `generated-apps`) is platform-reserved and served by the runtime, so product source must not define custom handlers under it.
+- The path namespace `/api/takyon/apps/` is platform-reserved and served by the runtime, so product source must not define custom handlers under it.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -512,7 +509,6 @@ DEFAULT_SUBUSER_APP_ROUTES = (
     "/app/profile",
 )
 SUBUSER_FRONTEND_STACK_CHOICES = frozenset({"vite_react_ts"})
-_LEGACY_FRONTEND_STACK_ALIASES = {"legacy": "vite_react_ts"}
 DEFAULT_SUBUSER_FRONTEND_STACK = "vite_react_ts"
 
 
@@ -530,15 +526,14 @@ def _normalize_frontend_stack_choice(value: Any) -> str:
     text = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
     if not text:
         return ""
-    normalized = _LEGACY_FRONTEND_STACK_ALIASES.get(text, text)
-    if normalized not in SUBUSER_FRONTEND_STACK_CHOICES:
+    if text not in SUBUSER_FRONTEND_STACK_CHOICES:
         return ""
-    return normalized
+    return text
 
 
 SUBUSER_RAIL_STATE_CHOICES = frozenset({"live", "declared", "blocked", "broken"})
 _LEGACY_SUBUSER_RAIL_STATE_ALIASES = {"unverified": "declared", "unknown": "declared"}
-SUBUSER_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback"
+SUBUSER_FRONTEND_API_MODE = "prefixed_runtime_api"
 SUBUSER_KIT_DIRNAME = "_takyon"
 DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES = ("research/strategy.md",)
 
@@ -670,7 +665,6 @@ _DEFAULT_PRODUCT_DONE_GATE = "business_refresh_product_surface:published_or_exac
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
 _PRODUCT_SERVICE_PORT_MIN = 9200
 _PRODUCT_SERVICE_PORT_MAX = 9799
-_PRODUCT_PUBLISH_PROBE_STATE_RELPATH = "product/.takyon-publish-probe.json"
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -684,25 +678,94 @@ _COMMENTARY_BUSINESS_PATHS = {
 }
 
 
-def _business_file_truth_metadata(path: str) -> dict[str, str]:
+def _workspace_truth_surface_name(*, session_scoped: bool) -> str:
+    return "working" if session_scoped else "canonical"
+
+
+def _workspace_truth_metadata(*, session_scoped: bool) -> dict[str, Any]:
+    surface = _workspace_truth_surface_name(session_scoped=session_scoped)
+    if session_scoped:
+        return {
+            "surface": surface,
+            "committed": False,
+            "live": False,
+            "guidance": "This result comes from the active session workspace. Treat it as in-progress working state until a later commit/publish records canonical or live truth.",
+        }
+    return {
+        "surface": surface,
+        "committed": True,
+        "live": False,
+        "guidance": "This result comes from the committed canonical workspace hydrated from durable storage.",
+    }
+
+
+def _recorded_live_truth_metadata(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
+    payload = surface if isinstance(surface, dict) else {}
+    public_url = str(payload.get("public_url") or payload.get("publish_target") or _product_publish_target(business)).strip()
+    publish_status = str(payload.get("publish_status") or "not_published").strip() or "not_published"
+    return {
+        "surface": "recorded_live",
+        "committed": bool(str(payload.get("live_build_id") or "").strip()),
+        "live": True,
+        "build_id": str(payload.get("live_build_id") or "").strip(),
+        "publish_status": publish_status,
+        "public_url": public_url,
+        "published_at": str(payload.get("published_at") or "").strip(),
+        "probe": str(payload.get("live_probe_status") or "unknown").strip() or "unknown",
+        "probe_detail": str(payload.get("live_probe_detail") or "").strip(),
+        "guidance": "This is the recorded live/public state from the app surface contract and live build pointer. Probe status reports whether the public host matched that intended live build the last time publish checked it.",
+    }
+
+
+def _live_truth_snapshot(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
+    truth = _recorded_live_truth_metadata(surface, business=business)
+    if truth.get("build_id") and str(truth.get("publish_status") or "").strip().lower() == "published":
+        probe_status, probe_detail = _probe_product_public_url_status(str(truth.get("public_url") or ""))
+        if probe_status:
+            truth["probe"] = probe_status
+        if probe_detail:
+            truth["probe_detail"] = probe_detail
+    return truth
+
+
+def _business_file_truth_metadata(path: str, *, session_scoped: bool, revision: int = 0) -> dict[str, Any]:
     rel = _safe_relpath(path or ".", field="path").as_posix()
+    workspace_truth = _workspace_truth_metadata(session_scoped=session_scoped)
+    revision_payload = (
+        {"base_revision": int(revision or 0)}
+        if session_scoped
+        else {"revision": int(revision or 0)}
+    )
     if rel.startswith("metrics/receipts/"):
         return {
             "document_role": "receipt",
             "proof_level": "authoritative",
             "proof_guidance": "Machine-generated receipt. Use this as proof of the recorded operation or verified result.",
+            "truth_surface": workspace_truth["surface"],
+            "truth_guidance": workspace_truth["guidance"],
+            **revision_payload,
         }
     if rel.startswith("product/site/"):
         return {
             "document_role": "implementation_source",
-            "proof_level": "authoritative",
-            "proof_guidance": "Implementation source. Use this to judge current website or app behavior and wiring.",
+            "proof_level": "authoritative" if session_scoped else "mixed",
+            "proof_guidance": (
+                "Implementation source from the active session workspace. Use this to judge in-progress product edits."
+                if session_scoped
+                else "Implementation source from the committed canonical workspace. Use this for committed product source; cross-check live state separately."
+            ),
+            "truth_surface": workspace_truth["surface"],
+            "truth_guidance": workspace_truth["guidance"],
+            **revision_payload,
         }
     if rel.startswith("distribution/local-published/"):
         return {
             "document_role": "published_artifact",
             "proof_level": "authoritative",
             "proof_guidance": "Published outreach artifact. Use this as proof of a published outreach item.",
+            "truth_surface": workspace_truth["surface"],
+            "truth_guidance": workspace_truth["guidance"],
+            **revision_payload,
         }
     if (
         rel in _COMMENTARY_BUSINESS_PATHS
@@ -713,11 +776,17 @@ def _business_file_truth_metadata(path: str) -> dict[str, str]:
             "document_role": "summary",
             "proof_level": "commentary",
             "proof_guidance": "Commentary and planning state only. Do not use this file by itself as proof that implementation, runtime wiring, or live behavior is present.",
+            "truth_surface": workspace_truth["surface"],
+            "truth_guidance": workspace_truth["guidance"],
+            **revision_payload,
         }
     return {
         "document_role": "artifact",
         "proof_level": "mixed",
         "proof_guidance": "Business artifact. For implementation-state questions, cross-check with implementation source files or receipts.",
+        "truth_surface": workspace_truth["surface"],
+        "truth_guidance": workspace_truth["guidance"],
+        **revision_payload,
     }
 
 # Guardrail aliases only. Agents can always pass explicit env names through
@@ -1117,14 +1186,11 @@ def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]
         payload.get("rail_state"),
         declared_rails=runtime_features,
     )
-    frontend_api_mode = str(payload.get("frontend_api_mode") or SUBUSER_FRONTEND_API_MODE).strip()
-    if not frontend_api_mode:
-        frontend_api_mode = SUBUSER_FRONTEND_API_MODE
     kit_path = str(payload.get("kit_path") or SUBUSER_KIT_DIRNAME).strip() or SUBUSER_KIT_DIRNAME
     # frontend_stack is hidden internal platform state (the scaffold key),
     # not an operator-authored field; it always resolves to the pinned scaffold.
     return {
-        "frontend_api_mode": frontend_api_mode,
+        "frontend_api_mode": SUBUSER_FRONTEND_API_MODE,
         "frontend_stack": _normalize_frontend_stack_choice(payload.get("frontend_stack")) or DEFAULT_SUBUSER_FRONTEND_STACK,
         "kit_path": kit_path,
         "rail_state": rail_state,
@@ -1797,10 +1863,10 @@ def _subuser_surface_context_payload(
     effective_runtime_features = _surface_effective_runtime_features(surface)
     return {
         "business": slug,
-        "frontendApiMode": shape.get("frontend_api_mode") or SUBUSER_FRONTEND_API_MODE,
+        "frontendApiMode": SUBUSER_FRONTEND_API_MODE,
         "kitPath": shape.get("kit_path") or SUBUSER_KIT_DIRNAME,
         "frontendStack": shape.get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK,
-        "runtimeApiBase": str((surface or {}).get("runtime_api_base") or f"/api/takyon/apps/{slug}"),
+        "runtimeApiBase": f"/api/takyon/apps/{slug}",
         "runtimeFeatures": effective_runtime_features,
         "railState": shape.get("rail_state") or {},
         "plans": _starter_plan_shape_payload(plans),
@@ -5634,8 +5700,7 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     elif runtime_features:
         lines.append("- Runtime-backed features available in this shell: " + ", ".join(runtime_features))
     if runtime_api_base:
-        lines.append(f"- Runtime API base fallback: {runtime_api_base}")
-    lines.append("- Product-host rail mode: same-origin bare rails on subuser product hosts, prefixed fallback off-host.")
+        lines.append(f"- Runtime API base: {runtime_api_base}")
     lines.extend(["", "Selected runtime rails:"])
     for rail in runtime_features:
         spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
@@ -5683,9 +5748,8 @@ def _subuser_app_worker_contract_block(
             "- Your overriding obligation is that the product's primary job works for real.",
             "- Flesh this product out for real inside the current Vite workspace.",
             "- Keep `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile` as the route skeleton unless the instruction explicitly changes routes.",
-            "- Use the shared runtime client for auth, account, checkout, profile, and actions.",
-            "- Use the shared rails and real action files for backend behavior; if something cannot be made real here, fail truthfully with the exact blocker.",
-            "- Put product-specific backend behavior in `product/site/actions/<name>.ts` and call it from the UI with `createActionRunner(name)` or `invokeAction(name)`.",
+            "- Use the shared runtime client and the declared shared rails already present in this workspace.",
+            "- If something cannot be made real through the declared shared rails here, fail truthfully with the exact blocker.",
             "- Do not invent product-side server code in this scaffold.",
             "",
         ]
@@ -5702,13 +5766,11 @@ def _subuser_app_worker_contract_block(
         if rail_state:
             lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'declared'}" for rail in runtime_features))
     if runtime_api_base:
-        lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
+        lines.append(f"- Public runtime API base: {runtime_api_base}")
     lines.append("- This contract uses the pinned static Vite+React+TS scaffold. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
     if _surface_requires_app_shell(surface, runtime_features=runtime_features, required_routes=routes):
         lines.append("- Keep `/app` as the single routed entrypoint: the shared shell is `src/screens/app-layout.tsx`, the main product view is `src/screens/app-home.tsx`, and `/app/profile` is `src/screens/profile.tsx`.")
     lines.append("- Support-route screens live in `src/screens/support.tsx`; replace their content if needed, but keep the route skeleton intact unless the instruction explicitly changes it.")
-    if "actions" in runtime_features:
-        lines.append("- Product-specific backend work goes through action files: client code uses `createActionRunner(name)` / `useActionRunner(name)`, and action files call the shared rails via ctx.")
     return "\n".join(lines).strip()
 
 
@@ -5720,12 +5782,12 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Managed kit files are available under `./_takyon/` in this workspace.",
         "- `./_takyon/surface-context.js` exports the current app truth for this business, including routes and runtime rails.",
         "- `./_takyon/surface-context.js` also exports any configured starter plan shape, including `priceCents` and `includedAiBudgetMicrousd` for the canonical monthly plan when present.",
-        "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` with same-origin product-host rails and prefixed fallback off-host.",
+        "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` against the canonical `/api/takyon/apps/<slug>/...` runtime namespace.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
-        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts` (for example `client.requestAuth(...)`, `client.session()`, `client.profile()`, `client.listRecords(...)`, `client.createActionRunner(name)`, `useSession()`, `useRecords(type)`, and `useActionRunner(name)`) and build your own product pages around those calls unless you are intentionally changing that rail's logic.",
+        "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
         "- Any starter source already present in `src/` is just route and runtime plumbing. Replace or flesh out the screens themselves.",
-        "- Do not spend bootstrap/design time rebuilding auth, paywall, profile, or action-client plumbing that the kit already wires.",
+        "- Do not spend bootstrap/design time rebuilding runtime plumbing that the kit already wires.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Put business-specific UI outside `./{kit_path}/` unless you are intentionally updating the shared kit. Reuse the seeded auth/paywall/account rail wrappers instead of reinventing them.",
         "- The route skeleton is already wired in `src/main.tsx` for `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`.",
@@ -7560,7 +7622,6 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _RESERVED_PRODUCT_RUNTIME_ROUTE_PREFIXES: tuple[str, ...] = (
     "/api/takyon/apps/",
-    "/api/generated-apps/",
 )
 _FORBIDDEN_PROVIDER_HOSTS: tuple[str, ...] = (
     "api.openai.com",
@@ -7613,20 +7674,18 @@ _FORBIDDEN_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "product source imports or constructs an AI provider SDK directly",
     ),
 )
-# On subuser product hosts, bare same-origin rails resolve to the shared runtime.
-# Off-host, the canonical prefixed runtime base remains the fallback.
-_RUNTIME_BASE_PREFIX = r"/api/(?:takyon/apps|generated-apps)/[^'\"`\s)]+/"
-_PRODUCT_HOST_RAIL_PREFIX = r"(?:/api/(?:takyon/apps|generated-apps)/[^'\"`\s)]+/)?"
+# Product apps use the canonical prefixed runtime base only.
+_RUNTIME_BASE_PREFIX = r"/api/takyon/apps/[^'\"`\s)]+/"
 _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("runtime_api", re.compile(r"/api/takyon/apps/|/api/generated-apps/|\bcreateSubuserRuntimeClient\s*\(|_takyon/runtime-client", re.IGNORECASE)),
-    ("auth", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"auth/(?:request|verify)\b|\.\s*requestAuth\s*\(", re.IGNORECASE)),
-    ("session", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
-    ("account", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
-    ("profile", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"profile\b|\.\s*profile\s*\(|\.\s*updateProfile\s*\(", re.IGNORECASE)),
-    ("actions", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"actions(?:/|\\b)|\.\s*invokeAction\s*\(|\.\s*createActionRunner\s*\(|\buseActionRunner\s*\(", re.IGNORECASE)),
-    ("checkout", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"checkout\b|\.\s*checkout\s*\(", re.IGNORECASE)),
-    ("usage", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"usage\b|\.\s*recordUsage\s*\(", re.IGNORECASE)),
-    ("generate", re.compile(_PRODUCT_HOST_RAIL_PREFIX + r"generate\b|\.\s*generate\s*\(", re.IGNORECASE)),
+    ("runtime_api", re.compile(r"/api/takyon/apps/|\bcreateSubuserRuntimeClient\s*\(|_takyon/runtime-client", re.IGNORECASE)),
+    ("auth", re.compile(_RUNTIME_BASE_PREFIX + r"auth/(?:request|verify)\b|\.\s*requestAuth\s*\(", re.IGNORECASE)),
+    ("session", re.compile(_RUNTIME_BASE_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
+    ("account", re.compile(_RUNTIME_BASE_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
+    ("profile", re.compile(_RUNTIME_BASE_PREFIX + r"profile\b|\.\s*profile\s*\(|\.\s*updateProfile\s*\(", re.IGNORECASE)),
+    ("actions", re.compile(_RUNTIME_BASE_PREFIX + r"actions(?:/|\\b)|\.\s*invokeAction\s*\(|\.\s*createActionRunner\s*\(|\buseActionRunner\s*\(", re.IGNORECASE)),
+    ("checkout", re.compile(_RUNTIME_BASE_PREFIX + r"checkout\b|\.\s*checkout\s*\(", re.IGNORECASE)),
+    ("usage", re.compile(_RUNTIME_BASE_PREFIX + r"usage\b|\.\s*recordUsage\s*\(", re.IGNORECASE)),
+    ("generate", re.compile(_RUNTIME_BASE_PREFIX + r"generate\b|\.\s*generate\s*\(", re.IGNORECASE)),
 )
 _PRODUCT_WORKFLOW_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("form", re.compile(r"<form\b", re.IGNORECASE)),
@@ -7921,7 +7980,7 @@ _PINNED_STACK_SERVER_IMPORT_PATTERN = re.compile(
 _PINNED_STACK_ROUTE_FILE_PATTERN = re.compile(r"(?:^|/)(?:src/)?app/.+/route\.(?:js|jsx|ts|tsx)$")
 _PINNED_STACK_DIRECT_GENERATE_PATTERN = re.compile(
     r"""
-    /api/(?:takyon/apps|generated-apps)/[^'"`\s)]+/generate\b
+    /api/takyon/apps/[^'"`\s)]+/generate\b
     |/generate\b
     |\.\s*generate\s*\(
     |\b(?:routeUrl|runtimeUrl)\s*\(\s*['"]generate['"]\s*\)
@@ -8714,205 +8773,6 @@ def _normalize_supported_product_build_shape(
     scripts: dict[str, Any],
     deps: dict[str, Any],
 ) -> dict[str, Any]:
-    def _normalize_newlines(value: str) -> str:
-        return str(value or "").replace("\r\n", "\n")
-
-    def _subuser_app_starter_legacy_app_page_variants() -> set[str]:
-        current = _normalize_newlines(_subuser_app_starter_app_page_js())
-        legacy_with_search = current.replace(
-            'import ProductRoot from "./(product)/root";\n', ""
-        ).replace(
-            '  if (initialAppState?.access?.state === "ready") {\n'
-            '    return <ProductRoot initialAppState={initialAppState} searchParams={searchParams} />;\n'
-            '  }\n',
-            "",
-        )
-        legacy_without_search = legacy_with_search.replace(
-            "export default async function AppPage({ searchParams }) {",
-            "export default async function AppPage() {",
-        )
-        return {legacy_with_search, legacy_without_search}
-
-    def _rewrite_legacy_appkit_helper_imports(source_text: str) -> tuple[str, bool]:
-        updated = _normalize_newlines(source_text)
-        rewrites = (
-            ('"../../../../components/', '"../../../components/'),
-            ("'../../../../components/", "'../../../components/"),
-            ('"../../../../_takyon/', '"../../../_takyon/'),
-            ("'../../../../_takyon/", "'../../../_takyon/"),
-        )
-        changed = False
-        for old, new in rewrites:
-            if old in updated:
-                updated = updated.replace(old, new)
-                changed = True
-        if "useStarterApp" in updated and "components/starter-context" in updated:
-            updated = updated.replace("components/starter-context", "components/starter-primitives")
-            changed = True
-        return updated, changed
-
-    def _merge_normalizations(*results: dict[str, Any]) -> dict[str, Any]:
-        repairs: list[dict[str, Any]] = []
-        warnings: list[str] = []
-        for item in results:
-            repairs.extend(list(item.get("repairs") or []))
-            warnings.extend(str(entry).strip() for entry in (item.get("warnings") or []) if str(entry).strip())
-            if item.get("blocked"):
-                return {
-                    "repairs": repairs,
-                    "warnings": warnings,
-                    "blocked": True,
-                    "error": str(item.get("error") or "unsupported build shape requires manual repair"),
-                }
-        return {"repairs": repairs, "warnings": warnings}
-
-    def _normalize_appkit_starter_primitives(root: Path) -> dict[str, Any]:
-        starter_primitives = root / "src" / "components" / "starter-primitives.js"
-        if not starter_primitives.is_file():
-            return {"repairs": [], "warnings": []}
-        try:
-            existing = _normalize_newlines(starter_primitives.read_text(encoding="utf-8"))
-        except Exception as exc:
-            return {
-                "repairs": [],
-                "warnings": [],
-                "blocked": True,
-                "error": f"AppKit starter-primitives.js could not be read for normalization: {exc}",
-            }
-        canonical = _normalize_newlines(_subuser_app_starter_primitives_js())
-        if existing == canonical:
-            return {"repairs": [], "warnings": []}
-
-        looks_starter_managed = all(
-            marker in existing
-            for marker in (
-                'from "./starter-context.js"',
-                "StarterAppStateProvider",
-                "StarterAuthCard",
-            )
-        )
-        missing_compat_exports = (
-            "export function useStarterApp()" not in existing
-            or "starterCanGenerate" not in existing
-            or "starterGenerate" not in existing
-        )
-        if not looks_starter_managed or not missing_compat_exports:
-            return {"repairs": [], "warnings": []}
-
-        starter_primitives.write_text(canonical, encoding="utf-8")
-        return {
-            "repairs": [
-                {
-                    "kind": "appkit_starter_primitives_normalize",
-                    "from": "src/components/starter-primitives.js",
-                    "to": "src/components/starter-primitives.js",
-                    "message": "Updated the AppKit-owned starter primitives helper to the canonical runtime helper contract so legacy product roots can keep using the shared starter rails after refresh/publish.",
-                }
-            ],
-            "warnings": [],
-        }
-
-    def _normalize_appkit_product_root_route(root: Path) -> dict[str, Any]:
-        app_root = root / "src" / "app" / "app"
-        legacy_route = app_root / "(product)" / "page.js"
-        canonical_root = app_root / "(product)" / "root.js"
-        app_page = app_root / "page.js"
-        if not legacy_route.is_file():
-            return {"repairs": [], "warnings": []}
-
-        try:
-            legacy_text = legacy_route.read_text(encoding="utf-8")
-        except Exception as exc:
-            return {
-                "repairs": [],
-                "warnings": [],
-                "blocked": True,
-                "error": f"legacy AppKit product root route could not be read for normalization: {exc}",
-            }
-
-        repairs: list[dict[str, Any]] = []
-        warnings: list[str] = []
-        normalized_legacy_text, legacy_imports_rewritten = _rewrite_legacy_appkit_helper_imports(legacy_text)
-        if canonical_root.exists():
-            try:
-                canonical_text = canonical_root.read_text(encoding="utf-8")
-            except Exception as exc:
-                return {
-                    "repairs": repairs,
-                    "warnings": warnings,
-                    "blocked": True,
-                    "error": f"canonical AppKit product root could not be read for normalization: {exc}",
-                }
-            if _normalize_newlines(canonical_text) != normalized_legacy_text:
-                return {
-                    "repairs": repairs,
-                    "warnings": warnings,
-                    "blocked": True,
-                    "error": (
-                        "both src/app/app/(product)/page.js and src/app/app/(product)/root.js exist with "
-                        "different contents; remove the legacy route page or merge it into root.js before refreshing"
-                    ),
-                }
-            legacy_route.unlink()
-            repairs.append(
-                {
-                    "kind": "appkit_product_root_route_normalize",
-                    "from": "src/app/app/(product)/page.js",
-                    "to": "src/app/app/(product)/root.js",
-                    "message": "Removed the legacy /app product route file after confirming root.js already carries the same product root.",
-                }
-            )
-        else:
-            canonical_root.parent.mkdir(parents=True, exist_ok=True)
-            canonical_root.write_text(normalized_legacy_text, encoding="utf-8")
-            legacy_route.unlink()
-            repairs.append(
-                {
-                    "kind": "appkit_product_root_route_normalize",
-                    "from": "src/app/app/(product)/page.js",
-                    "to": "src/app/app/(product)/root.js",
-                    "message": "Moved the legacy /app product route into the shared AppKit product-root module so /app stays the single routed entrypoint.",
-                }
-            )
-        if legacy_imports_rewritten:
-            repairs.append(
-                {
-                    "kind": "appkit_product_root_imports_normalize",
-                    "from": "src/app/app/(product)/page.js",
-                    "to": "src/app/app/(product)/root.js",
-                    "message": "Rewrote legacy AppKit starter-helper imports so the migrated product-root module resolves the shared starter rails from src/components and src/_takyon correctly.",
-                }
-            )
-
-        if app_page.exists():
-            try:
-                app_page_text = _normalize_newlines(app_page.read_text(encoding="utf-8"))
-            except Exception as exc:
-                return {
-                    "repairs": repairs,
-                    "warnings": warnings,
-                    "blocked": True,
-                    "error": f"AppKit /app entry page could not be read for normalization: {exc}",
-                }
-            legacy_variants = _subuser_app_starter_legacy_app_page_variants()
-            new_template = _normalize_newlines(_subuser_app_starter_app_page_js())
-            if app_page_text in legacy_variants:
-                app_page.write_text(new_template, encoding="utf-8")
-                repairs.append(
-                    {
-                        "kind": "appkit_app_entry_normalize",
-                        "from": "src/app/app/page.js",
-                        "to": "src/app/app/page.js",
-                        "message": "Updated the seeded /app entry page so it renders the shared product-root module whenever access is ready.",
-                    }
-                )
-            elif app_page_text != new_template:
-                warnings.append(
-                    "Legacy AppKit product root route was moved to src/app/app/(product)/root.js. "
-                    "If /app is a custom page, make sure it renders that product-root module when access is ready."
-                )
-        return {"repairs": repairs, "warnings": warnings}
-
     looks_next = (
         "next" in deps
         or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
@@ -8921,11 +8781,15 @@ def _normalize_supported_product_build_shape(
         or "next start" in str(scripts.get("start") or "")
     )
     if looks_next:
-        return _merge_normalizations(
-            _normalize_next_config_typescript(root),
-            _normalize_appkit_starter_primitives(root),
-            _normalize_appkit_product_root_route(root),
-        )
+        return {
+            "repairs": [],
+            "warnings": [],
+            "blocked": True,
+            "error": (
+                "Next/AppKit product trees are unsupported. Rebuild this workspace on the pinned "
+                "Vite scaffold and publish the built dist/index.html output."
+            ),
+        }
     return {"repairs": [], "warnings": []}
 
 
@@ -9162,35 +9026,15 @@ def _static_surface_can_skip_package_manager(root: Path, scripts: dict[str, Any]
     return bool(re.match(r"^(?::|true|echo\b|printf\b|exit\s+0\b)", build))
 
 
-def _product_allows_unbuilt_static_publish(source_root: Path) -> bool:
-    package_json = source_root / "package.json"
-    if not package_json.exists():
-        return True
-    try:
-        package_data = json.loads(package_json.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(package_data, dict):
-        return False
-    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
-    return _static_surface_can_skip_package_manager(source_root, scripts)
-
-
 def _product_publish_output_requirements(source_root: Path) -> str:
-    requirements = ["dist/index.html", "out/index.html", "build/index.html"]
-    if _product_allows_unbuilt_static_publish(source_root):
-        requirements.insert(0, "index.html at the source root")
-    return ", ".join(requirements[:-1]) + f", or {requirements[-1]}, or a supported Next.js service app"
+    return "dist/index.html from the pinned Vite build"
 
 
 def _product_publish_readiness_blocker(source_root: Path) -> str:
     static_publish_source, _static_publish_label = _product_static_publish_source(source_root)
     if static_publish_source is not None:
         return ""
-    next_metadata, next_blocker = _product_next_service_metadata(source_root)
-    if next_metadata is not None:
-        return ""
-    detail = str(next_blocker or "").strip() or "no publishable output exists after the refresh/build step"
+    detail = "refresh/build finished, but dist/index.html is missing from the pinned Vite output"
     return (
         "refresh/build finished, but no publishable output exists; "
         f"{detail}; {_product_publish_output_requirements(source_root)}"
@@ -9242,24 +9086,13 @@ def _refresh_product_surface_path(
 
     package_json = root / "package.json"
     if not package_json.exists():
-        inventory = result.get("inventory") if isinstance(result.get("inventory"), dict) else {}
-        forbidden_findings = inventory.get("forbidden_findings") if isinstance(inventory.get("forbidden_findings"), list) else []
-        reserved_namespace_routes = inventory.get("reserved_namespace_routes") if isinstance(inventory.get("reserved_namespace_routes"), list) else []
-        blockers = _format_forbidden_product_source_blockers(forbidden_findings, reserved_namespace_routes)
-        if blockers:
-            result.update(
-                {
-                    "status": "blocked",
-                    "error": "product source violates runtime authority boundaries:\n- " + "\n- ".join(blockers),
-                    "blockers": blockers,
-                }
-            )
-            return result
-        static_publish_source, _static_publish_label = _product_static_publish_source(root)
-        if static_publish_source is not None:
-            result.update({"status": "passed", "kind": "static_source_present"})
-            return result
-        result.update({"status": "passed", "kind": "source_present"})
+        result.update({
+            "status": "blocked",
+            "error": (
+                "product app must use the pinned Vite scaffold with a package.json, a build script, "
+                "and publishable dist/index.html output"
+            ),
+        })
         return result
 
     try:
@@ -9276,13 +9109,30 @@ def _refresh_product_surface_path(
         or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
         or (root / ".next").is_dir()
     )
-    if "next" in deps:
-        next_value = str(deps.get("next") or "")
-        if re.search(r"\b14\.2\.5\b", next_value):
-            result["warnings"].append("next@14.2.5 is known deprecated/vulnerable; update before publication")
+    if looks_next:
+        result.update({
+            "status": "blocked",
+            "error": (
+                "Next/AppKit product trees are unsupported. Rebuild this workspace on the pinned "
+                "Vite scaffold and publish dist/index.html."
+            ),
+        })
+        return result
+    is_vite = "vite" in deps or any((root / name).exists() for name in ("vite.config.js", "vite.config.ts"))
+    if not is_vite:
+        result.update({
+            "status": "blocked",
+            "error": (
+                "unsupported product build shape; expected the pinned Vite scaffold with a Vite "
+                "build that writes dist/index.html"
+            ),
+        })
+        return result
     if _static_surface_can_skip_package_manager(root, scripts):
-        result["warnings"].append("package.json is present, but this surface is static and has no package-managed build requirement")
-        result.update({"status": "passed", "kind": "static_source_present"})
+        result.update({
+            "status": "blocked",
+            "error": "raw static product sites are unsupported; use the pinned Vite scaffold and publish dist/index.html",
+        })
         return result
     package_manager_name = _javascript_package_manager_name(root, package_data)
     package_manager = _javascript_package_manager_command(package_manager_name)
@@ -9347,11 +9197,10 @@ def _refresh_product_surface_path(
         else:
             result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
     if "build" not in scripts:
-        publish_blocker = _product_publish_readiness_blocker(root)
-        if publish_blocker:
-            result.update({"status": "blocked", "error": publish_blocker})
-            return result
-        result.update({"status": "passed", "kind": "source_present"})
+        result.update({
+            "status": "blocked",
+            "error": "package.json is missing the required build script for the pinned Vite scaffold",
+        })
         return result
     build_command = _javascript_run_script_command(package_manager, "build", root=root)
     if not build_command:
@@ -9692,6 +9541,18 @@ def _product_public_asset_site_root(slug: str) -> Path:
     return (_product_publish_root() / _slugify(slug)).resolve()
 
 
+def _product_live_root(slug: str) -> Path:
+    return (_product_publish_root() / _slugify(slug)).resolve()
+
+
+def _product_live_build_root(slug: str, build_id: str) -> Path:
+    return (_product_live_root(slug) / "builds" / str(build_id or "").strip().lower()).resolve()
+
+
+def _product_live_current_root(slug: str) -> Path:
+    return _product_live_root(slug) / "current"
+
+
 def _product_public_asset_site_relpath(asset_slug: str, filename: str) -> str:
     safe_slug = _file_slug(asset_slug, "asset")
     safe_name = _safe_relpath(filename, field="filename").name
@@ -9727,25 +9588,9 @@ def _product_public_asset_publish_roots(store: "TakyonStore", business: str) -> 
     publish_receipt_path = str(surface.get("publish_receipt_path") or "").strip()
     publish_receipt = _read_product_surface_receipt(store._business_root(slug), publish_receipt_path)
     publish = publish_receipt.get("publish") if isinstance(publish_receipt.get("publish"), dict) else {}
-    publish_mode = str(publish.get("publish_mode") or publish.get("deploy_kind") or "").strip().lower()
     publish_root_text = str(publish.get("publish_root") or "").strip()
     if publish_root_text:
         add(Path(publish_root_text))
-    elif publish_mode == "next_systemd_caddy":
-        try:
-            add(_product_service_publish_root(slug))
-        except Exception:
-            pass
-
-    # Some older live businesses still have their publish receipt mirrored
-    # incompletely. If the product-service root already exists on disk, mirror
-    # assets there too so public probes hit the actually served rail.
-    try:
-        service_root = _product_service_publish_root(slug)
-    except Exception:
-        service_root = None
-    if service_root is not None and service_root.exists():
-        add(service_root)
 
     return roots
 
@@ -9801,42 +9646,25 @@ def _replace_directory_tree_atomic(
         shutil.rmtree(stage_root, ignore_errors=True)
 
 
-def _rewrite_product_service_build_paths(*, source_root: Path, target_root: Path) -> None:
-    original_root = str(source_root.resolve())
-    published_root = str(target_root.resolve())
-    if not original_root or original_root == published_root:
-        return
-
-    next_root = target_root / ".next"
-    if not next_root.exists():
-        return
-
-    rewrite_files: list[Path] = []
-    for candidate in (next_root / "required-server-files.json", next_root / "trace"):
-        if candidate.is_file():
-            rewrite_files.append(candidate)
-    for candidate_root in (next_root / "server", next_root / "types"):
-        if not candidate_root.exists():
-            continue
-        rewrite_files.extend(
-            path
-            for path in candidate_root.rglob("*")
-            if path.is_file() and not path.is_symlink()
+def _replace_symlink_atomic(link_path: Path, target: Path) -> None:
+    requested = Path(link_path).expanduser()
+    parent = requested.parent.resolve()
+    link = parent / requested.name
+    target_path = Path(target).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".takyon-link-{link.name}-",
+            dir=str(parent),
         )
-
-    seen: set[Path] = set()
-    for path in rewrite_files:
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if original_root not in content:
-            continue
-        path.write_text(content.replace(original_root, published_root), encoding="utf-8")
+    ).resolve()
+    staged_link = stage_root / link.name
+    relative_target = os.path.relpath(target_path, start=parent)
+    try:
+        os.symlink(relative_target, staged_link)
+        os.replace(staged_link, link)
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
 
 
 def _probe_public_asset_url(url: str) -> tuple[bool, str]:
@@ -10139,21 +9967,9 @@ def _reddit_stage_launch_args(
 
 
 def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]:
-    candidates = [
-        ("dist", source_root / "dist"),
-        ("out", source_root / "out"),
-        ("build", source_root / "build"),
-    ]
-    if _product_allows_unbuilt_static_publish(source_root):
-        candidates.extend(
-            [
-                ("source", source_root),
-                ("public", source_root / "public"),
-            ]
-        )
-    for label, candidate in candidates:
-        if candidate.is_dir() and (candidate / "index.html").is_file():
-            return candidate.resolve(), label
+    candidate = (source_root / "dist").resolve()
+    if candidate.is_dir() and (candidate / "index.html").is_file():
+        return candidate, "dist"
     return None, ""
 
 
@@ -10186,153 +10002,6 @@ def _product_service_publish_root(slug: str) -> Path:
     return target
 
 
-def _product_activation_node() -> str:
-    return str(os.getenv("TAKYON_PRODUCT_ACTIVATION_NODE", "") or "").strip().lower()
-
-
-def _current_product_node_name() -> str:
-    return str(
-        os.getenv("TAKYON_NODE_NAME")
-        or os.getenv("HOSTNAME")
-        or socket.gethostname()
-        or ""
-    ).strip().lower()
-
-
-def _is_current_product_activation_node() -> bool:
-    activation_node = _product_activation_node()
-    if not activation_node:
-        return True
-    return activation_node == _current_product_node_name()
-
-
-def _product_activation_ssh_target() -> str:
-    return str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_TARGET", "") or "").strip()
-
-
-def _product_activation_remote_runtime() -> Path:
-    raw = os.getenv("TAKYON_PRODUCT_ACTIVATION_REMOTE_RUNTIME", "").strip()
-    return Path(raw).expanduser().resolve() if raw else Path("/opt/takyon/hermes-agent-main")
-
-
-def _product_activation_remote_home() -> Path:
-    raw = os.getenv("TAKYON_PRODUCT_ACTIVATION_REMOTE_HOME", "").strip()
-    return Path(raw).expanduser().resolve() if raw else Path("/opt/takyon/.takyon")
-
-
-def _sync_published_business_workspace_to_storage(*, business_root: Path, slug: str) -> dict[str, Any]:
-    try:
-        from . import storage
-    except Exception:
-        from plugins.takyon import storage
-
-    result: dict[str, Any] = {
-        "status": "synced",
-        "backend_name": "",
-        "blocker": "",
-    }
-    try:
-        backend = storage.get_storage_backend()
-    except Exception as exc:
-        result["status"] = "blocked"
-        result["blocker"] = f"product publish could not resolve the canonical workspace storage backend: {exc}"
-        return result
-
-    backend_name = str(getattr(backend, "name", "") or "").strip().lower()
-    result["backend_name"] = backend_name
-    if backend_name not in {"supabase_s3", "local"}:
-        result["status"] = "blocked"
-        result["blocker"] = f"product publish does not support workspace storage backend: {backend_name or 'unknown'}"
-        return result
-    if not _remote_workspace_sync_allowed(backend_name):
-        result["status"] = "blocked"
-        result["blocker"] = (
-            "product publish could not persist the built workspace to canonical storage on this host "
-            f"(backend={backend_name or 'unknown'} is not allowed here)"
-        )
-        return result
-    workspace_root = Path(business_root).resolve()
-    if not workspace_root.exists():
-        result["status"] = "blocked"
-        result["blocker"] = "product publish could not persist the built workspace because the business root is missing"
-        return result
-    try:
-        storage.sync_up(backend, _slugify(slug), workspace_root, delete_remote=True)
-    except Exception as exc:
-        result["status"] = "blocked"
-        result["blocker"] = f"product publish could not persist the built workspace to canonical storage: {exc}"
-        return result
-    return result
-
-
-def _write_product_publish_probe_state(
-    *,
-    business_root: Path,
-    slug: str,
-    publish_target: str,
-    source_path: str,
-    token: str,
-) -> Path:
-    marker_rel = Path(_PRODUCT_PUBLISH_PROBE_STATE_RELPATH)
-    marker_abs = (Path(business_root).resolve() / marker_rel).resolve()
-    business_root_resolved = Path(business_root).resolve()
-    if business_root_resolved not in (marker_abs, *marker_abs.parents):
-        raise TakyonError("product publish probe state escaped business root")
-    marker_abs.parent.mkdir(parents=True, exist_ok=True)
-    marker_abs.write_text(
-        json.dumps(
-            {
-                "business": _slugify(slug),
-                "publish_target": str(publish_target or "").strip(),
-                "source_path": str(source_path or "").strip(),
-                "token": str(token or "").strip(),
-                "created_at": _now(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return marker_abs
-
-
-def _remove_product_publish_probe_state(*, business_root: Path) -> None:
-    marker_abs = (Path(business_root).resolve() / _PRODUCT_PUBLISH_PROBE_STATE_RELPATH).resolve()
-    business_root_resolved = Path(business_root).resolve()
-    if business_root_resolved not in (marker_abs, *marker_abs.parents):
-        return
-    try:
-        marker_abs.unlink(missing_ok=True)
-    except OSError:
-        return
-
-
-def _product_service_working_directory_blocker(root: Path) -> str:
-    resolved = Path(root).resolve()
-    publish_base = _product_service_publish_base()
-    if publish_base in (resolved, *resolved.parents):
-        return ""
-    scratch_root = (Path(tempfile.gettempdir()) / "takyon-workspaces").resolve()
-    if resolved == scratch_root or scratch_root in resolved.parents:
-        return f"refusing to install product service from temporary workspace: {resolved}"
-    businesses_root = (get_takyon_home() / "businesses").resolve()
-    cache_businesses_root = (get_takyon_home() / "cache" / "businesses").resolve()
-    if (
-        resolved == businesses_root
-        or businesses_root in resolved.parents
-        or resolved == cache_businesses_root
-        or cache_businesses_root in resolved.parents
-    ):
-        return f"refusing to install product service from business mirror instead of product-services: {resolved}"
-    if publish_base not in (resolved, *resolved.parents):
-        return (
-            "refusing to install product service outside the durable product-services root: "
-            f"{resolved}"
-        )
-    return ""
-
-
 def _product_service_systemd_dir() -> Path:
     raw = os.getenv("TAKYON_PRODUCT_SYSTEMD_DIR", "").strip()
     return Path(raw).expanduser().resolve() if raw else Path("/etc/systemd/system")
@@ -10343,171 +10012,12 @@ def _product_service_caddyfile() -> Path:
     return Path(raw).expanduser().resolve() if raw else Path("/etc/caddy/Caddyfile")
 
 
-def _product_activation_surfaces_writable() -> bool:
-    if _product_deploy_dry_run():
-        return True
-    systemd_dir = _product_service_systemd_dir()
-    caddy_dir = _product_service_caddyfile().parent
-    for path in (systemd_dir, caddy_dir):
-        if not path.exists():
-            return False
-        if not os.access(path, os.W_OK):
-            return False
-    return True
-
-
 def _product_deploy_dry_run() -> bool:
     return str(os.getenv("TAKYON_PRODUCT_DEPLOY_DRY_RUN", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _product_public_probe_enabled() -> bool:
     return str(os.getenv("TAKYON_PRODUCT_SKIP_PUBLIC_PROBE", "")).strip().lower() not in {"1", "true", "yes", "on"}
-
-
-def _product_runtime_caddy_paths() -> str:
-    return " ".join([
-        "/api/*",
-        "/auth/request",
-        "/auth/verify",
-        "/session",
-        "/account",
-        "/profile",
-        "/directory",
-        "/directory/*",
-        "/records",
-        "/records/*",
-        "/connections",
-        "/checkout",
-        "/usage",
-        "/generate",
-    ])
-
-
-def _read_product_package(source_root: Path) -> tuple[dict[str, Any] | None, str]:
-    package_json = source_root / "package.json"
-    if not package_json.exists():
-        return None, "package.json is missing"
-    try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return None, f"package.json is not valid JSON: {exc}"
-    if not isinstance(data, dict):
-        return None, "package.json must be an object"
-    return data, ""
-
-
-def _product_next_service_metadata(source_root: Path) -> tuple[dict[str, Any] | None, str]:
-    package_data, error = _read_product_package(source_root)
-    if package_data is None:
-        return None, error
-    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
-    dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}
-    dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}
-    deps = {**dependencies, **dev_dependencies}
-    looks_next = (
-        "next" in deps
-        or (source_root / ".next").is_dir()
-        or any((source_root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
-    )
-    if not looks_next:
-        return None, "product source is not a Next.js app and no static publish directory exists"
-    if "start" not in scripts:
-        return None, "Next.js product source has no package.json start script for production serving"
-    next_root = source_root / ".next"
-    if not next_root.exists():
-        return None, "Next.js build output .next is missing after the refresh/build step"
-    required_markers = (
-        next_root / "BUILD_ID",
-        next_root / "build-manifest.json",
-    )
-    if any(not marker.exists() for marker in required_markers):
-        return None, (
-            "Next.js build output .next is incomplete after the refresh/build step; "
-            "wait for BUILD_ID and build-manifest.json before publishing"
-        )
-    manager_name = _javascript_package_manager_name(source_root, package_data)
-    manager = _javascript_package_manager_command(manager_name)
-    start_command = _javascript_run_script_command(manager, "start", root=source_root)
-    if not start_command:
-        return None, f"no available runtime command for {manager_name} start script"
-    return {
-        "kind": "next_systemd_caddy",
-        "package_manager": manager_name,
-        "start_command": [*start_command, "--", "-H", "127.0.0.1", "-p"],
-    }, ""
-
-
-def _extract_reverse_proxy_ports(text: str) -> set[int]:
-    ports: set[int] = set()
-    for match in re.finditer(r"\b127\.0\.0\.1:(\d{2,5})\b", text):
-        try:
-            ports.add(int(match.group(1)))
-        except ValueError:
-            continue
-    return ports
-
-
-def _existing_product_service_port(slug: str, *, systemd_dir: Path | None = None, caddyfile: Path | None = None) -> int | None:
-    service_file = (systemd_dir or _product_service_systemd_dir()) / f"{_product_service_name(slug)}.service"
-    if service_file.exists():
-        try:
-            text = service_file.read_text(encoding="utf-8")
-        except OSError:
-            text = ""
-        match = re.search(r"\bPORT=(\d{2,5})\b|\s-p\s+(\d{2,5})\b", text)
-        if match:
-            return int(next(group for group in match.groups() if group))
-    host = urllib.parse.urlparse(_product_publish_target(slug)).netloc
-    caddy_path = caddyfile or _product_service_caddyfile()
-    if caddy_path.exists():
-        try:
-            text = caddy_path.read_text(encoding="utf-8")
-        except OSError:
-            text = ""
-        pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{(?P<body>.*?)^\}}\s*")
-        match = pattern.search(text)
-        if match:
-            ports = _extract_reverse_proxy_ports(match.group("body"))
-            if ports:
-                return sorted(ports)[0]
-    return None
-
-
-def _product_service_port(slug: str, *, systemd_dir: Path | None = None, caddyfile: Path | None = None) -> int:
-    business = _slugify(slug)
-    env_key = f"TAKYON_PRODUCT_PORT_{re.sub(r'[^A-Z0-9]', '_', business.upper())}"
-    configured = os.getenv(env_key, "").strip() or os.getenv("TAKYON_PRODUCT_PORT", "").strip()
-    if configured:
-        port = int(configured)
-        if not (_PRODUCT_SERVICE_PORT_MIN <= port <= 65535):
-            raise TakyonError(f"{env_key} must be a TCP port >= {_PRODUCT_SERVICE_PORT_MIN}")
-        return port
-    existing = _existing_product_service_port(business, systemd_dir=systemd_dir, caddyfile=caddyfile)
-    if existing:
-        return existing
-    caddy_path = caddyfile or _product_service_caddyfile()
-    used: set[int] = set()
-    if caddy_path.exists():
-        try:
-            used.update(_extract_reverse_proxy_ports(caddy_path.read_text(encoding="utf-8")))
-        except OSError:
-            pass
-    service_dir = systemd_dir or _product_service_systemd_dir()
-    if service_dir.exists():
-        for service_file in service_dir.glob("takyon-product-*.service"):
-            if service_file.name == f"{_product_service_name(business)}.service":
-                continue
-            try:
-                used.update(_extract_reverse_proxy_ports(service_file.read_text(encoding="utf-8")))
-            except OSError:
-                continue
-    spread = _PRODUCT_SERVICE_PORT_MAX - _PRODUCT_SERVICE_PORT_MIN + 1
-    start = _PRODUCT_SERVICE_PORT_MIN + (int(hashlib.sha256(business.encode("utf-8")).hexdigest()[:8], 16) % spread)
-    for offset in range(spread):
-        port = _PRODUCT_SERVICE_PORT_MIN + ((start - _PRODUCT_SERVICE_PORT_MIN + offset) % spread)
-        if port not in used:
-            return port
-    raise TakyonError("no free Takyon product service port is available")
 
 
 def _run_product_admin_command(command: list[str], *, timeout_seconds: int = 30) -> tuple[bool, str]:
@@ -10525,201 +10035,6 @@ def _run_product_admin_command(command: list[str], *, timeout_seconds: int = 30)
         return False, str(exc)
     output = "\n".join(part for part in (proc.stdout.strip(), proc.stderr.strip()) if part)
     return proc.returncode == 0, _truncate_text(output, 4000)
-
-
-def _write_product_service_file(*, slug: str, source_root: Path, port: int, metadata: dict[str, Any]) -> tuple[Path | None, str]:
-    systemd_dir = _product_service_systemd_dir()
-    service_name = _product_service_name(slug)
-    blocker = _product_service_working_directory_blocker(source_root)
-    if blocker:
-        return None, blocker
-    if not _product_deploy_dry_run():
-        systemctl = shutil.which("systemctl")
-        if not systemctl:
-            return None, "systemctl is unavailable; cannot install product service"
-        if not systemd_dir.exists():
-            return None, f"systemd unit directory does not exist: {systemd_dir}"
-    systemd_dir.mkdir(parents=True, exist_ok=True)
-    start_command = [*list(metadata.get("start_command") or []), str(port)]
-    if not start_command:
-        return None, "missing product service start command"
-    path_value = _runtime_env().get("PATH", os.getenv("PATH", ""))
-    command_line = shlex.join(start_command)
-    unit = "\n".join(
-        [
-            "[Unit]",
-            f"Description=Takyon Product - {_slugify(slug)}",
-            "After=network.target",
-            "",
-            "[Service]",
-            "Type=simple",
-            f"WorkingDirectory={source_root}",
-            "Environment=NODE_ENV=production",
-            f"Environment=PORT={port}",
-            "Environment=HOSTNAME=127.0.0.1",
-            f"Environment=PATH={path_value}",
-            f"ExecStart={command_line}",
-            "Restart=always",
-            "RestartSec=3",
-            "",
-            "[Install]",
-            "WantedBy=multi-user.target",
-            "",
-        ]
-    )
-    service_file = systemd_dir / f"{service_name}.service"
-    service_file.write_text(unit, encoding="utf-8")
-    if _product_deploy_dry_run():
-        return service_file, ""
-    systemctl = shutil.which("systemctl") or "systemctl"
-    for command in (
-        [systemctl, "daemon-reload"],
-        [systemctl, "enable", "--now", service_name],
-        [systemctl, "restart", service_name],
-    ):
-        ok, output = _run_product_admin_command(command, timeout_seconds=60)
-        if not ok:
-            return service_file, f"{' '.join(command)} failed: {output}"
-    ok, output = _run_product_admin_command([systemctl, "is-active", service_name], timeout_seconds=20)
-    if not ok:
-        return service_file, f"{service_name} is not active: {output}"
-    return service_file, ""
-
-
-def _copy_product_service_tree(*, source_root: Path, target_root: Path) -> Path:
-    target_root.parent.mkdir(parents=True, exist_ok=True)
-
-    def ignore(_directory: str, names: list[str]) -> set[str]:
-        return {
-            name
-            for name in names
-            if name in {".git", ".cache", "__pycache__"} or name.endswith(".pyc")
-        }
-
-    _replace_directory_tree_atomic(source_root, target_root, ignore=ignore)
-    _rewrite_product_service_build_paths(source_root=source_root, target_root=target_root)
-    _make_static_publish_tree_readable(target_root)
-    _make_product_publish_path_traversable(target_root)
-    return target_root
-
-
-def _stage_product_service_tree(*, slug: str, source_root: Path) -> Path:
-    return _copy_product_service_tree(
-        source_root=source_root,
-        target_root=_product_service_publish_root(slug),
-    )
-
-
-def _ensure_product_caddy_route(*, slug: str, publish_target: str, port: int, publish_root: Path | None = None) -> tuple[Path | None, str]:
-    caddyfile = _product_service_caddyfile()
-    host = urllib.parse.urlparse(publish_target).netloc
-    publish_root = (publish_root or _product_public_asset_site_root(slug)).resolve()
-    if not host:
-        return None, "publish target has no host"
-    if not _product_deploy_dry_run():
-        if not caddyfile.exists():
-            return None, f"Caddyfile does not exist: {caddyfile}"
-        if not shutil.which("caddy"):
-            return None, "caddy is unavailable; cannot validate product route"
-    caddyfile.parent.mkdir(parents=True, exist_ok=True)
-    existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
-    # Reserve both the /api/* namespace and the bare shared runtime rails on
-    # product hosts. Existing generated apps still call bare paths like
-    # /checkout or /auth/request on same-origin product hosts, while newer
-    # surfaces may choose /api/*.
-    block = (
-        f"{host} {{\n"
-        f"    @takyon_public_assets path /_takyon/assets/*\n"
-        f"    handle @takyon_public_assets {{\n"
-        f"        root * {publish_root}\n"
-        "        file_server\n"
-        "    }\n"
-        f"    @takyon_app_runtime path {_product_runtime_caddy_paths()}\n"
-        "    handle @takyon_app_runtime {\n"
-        "        reverse_proxy 127.0.0.1:9119 {\n"
-        "            header_up Host {host}\n"
-        "            header_up X-Forwarded-Proto https\n"
-        "        }\n"
-        "    }\n"
-        "    handle {\n"
-        f"        reverse_proxy 127.0.0.1:{port}\n"
-        "    }\n"
-        "}\n"
-    )
-    pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
-    if pattern.search(existing):
-        updated = pattern.sub(block + "\n", existing).rstrip() + "\n"
-    else:
-        updated = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
-    if updated != existing:
-        if caddyfile.exists():
-            backup = caddyfile.with_name(f"{caddyfile.name}.takyon-backup")
-            backup.write_text(existing, encoding="utf-8")
-        caddyfile.write_text(updated, encoding="utf-8")
-    if _product_deploy_dry_run():
-        return caddyfile, ""
-    caddy = shutil.which("caddy") or "caddy"
-    ok, output = _run_product_admin_command([caddy, "validate", "--config", str(caddyfile)], timeout_seconds=30)
-    if not ok:
-        return caddyfile, f"caddy validate failed: {output}"
-    systemctl = shutil.which("systemctl") or "systemctl"
-    ok, output = _run_product_admin_command([systemctl, "reload", "caddy"], timeout_seconds=30)
-    if not ok:
-        return caddyfile, f"systemctl reload caddy failed: {output}"
-    return caddyfile, ""
-
-
-def _ensure_product_static_caddy_route(*, slug: str, publish_target: str, static_root: Path) -> tuple[Path | None, str]:
-    if not os.getenv("TAKYON_PRODUCT_CADDYFILE", "").strip() and not _product_deploy_dry_run():
-        return None, ""
-    caddyfile = _product_service_caddyfile()
-    host = urllib.parse.urlparse(publish_target).netloc
-    if not host:
-        return None, "publish target has no host"
-    if not _product_deploy_dry_run():
-        if not caddyfile.exists():
-            return None, ""
-        if not shutil.which("caddy"):
-            return None, "caddy is unavailable; cannot validate product static route"
-    caddyfile.parent.mkdir(parents=True, exist_ok=True)
-    existing = caddyfile.read_text(encoding="utf-8") if caddyfile.exists() else ""
-    block = (
-        f"{host} {{\n"
-        f"    @takyon_app_runtime path {_product_runtime_caddy_paths()}\n"
-        "    handle @takyon_app_runtime {\n"
-        "        reverse_proxy 127.0.0.1:9119 {\n"
-        "            header_up Host {host}\n"
-        "            header_up X-Forwarded-Proto https\n"
-        "        }\n"
-        "    }\n"
-        "    handle {\n"
-        f"        root * {static_root}\n"
-        "        try_files {path} {path}/ /index.html\n"
-        "        file_server\n"
-        "    }\n"
-        "}\n"
-    )
-    pattern = re.compile(rf"(?ms)^{re.escape(host)}\s*\{{.*?^\}}\s*")
-    if pattern.search(existing):
-        updated = pattern.sub(block + "\n", existing).rstrip() + "\n"
-    else:
-        updated = existing.rstrip() + ("\n\n" if existing.strip() else "") + block
-    if updated != existing:
-        if caddyfile.exists():
-            backup = caddyfile.with_name(f"{caddyfile.name}.takyon-backup")
-            backup.write_text(existing, encoding="utf-8")
-        caddyfile.write_text(updated, encoding="utf-8")
-    if _product_deploy_dry_run():
-        return caddyfile, ""
-    caddy = shutil.which("caddy") or "caddy"
-    ok, output = _run_product_admin_command([caddy, "validate", "--config", str(caddyfile)], timeout_seconds=30)
-    if not ok:
-        return caddyfile, f"caddy validate failed: {output}"
-    systemctl = shutil.which("systemctl") or "systemctl"
-    ok, output = _run_product_admin_command([systemctl, "reload", "caddy"], timeout_seconds=30)
-    if not ok:
-        return caddyfile, f"systemctl reload caddy failed: {output}"
-    return caddyfile, ""
 
 
 def _remove_product_caddy_route(*, publish_target: str) -> tuple[Path | None, str, bool]:
@@ -10824,6 +10139,37 @@ def _probe_product_public_url(url: str) -> tuple[bool, str]:
     return _probe_product_public_url_with_token(url)
 
 
+def _probe_product_public_url_status(url: str) -> tuple[str, str]:
+    probe_url = str(url or "").strip()
+    if not probe_url or _product_deploy_dry_run() or not _product_public_probe_enabled():
+        return "unknown", ""
+    try:
+        request = urllib.request.Request(
+            probe_url,
+            headers={"User-Agent": "Takyon live probe"},
+        )
+        with urllib.request.urlopen(request, timeout=4) as response:
+            status = int(getattr(response, "status", 0) or 0)
+            body = ""
+            try:
+                raw_body = response.read(4096)
+            except Exception:
+                raw_body = b""
+            if isinstance(raw_body, bytes):
+                body = raw_body.decode("utf-8", errors="ignore")
+            elif isinstance(raw_body, str):
+                body = raw_body
+            if 200 <= status < 500 and not re.search(
+                r"<script[^>]+src=['\"](/src/[^'\"]+)['\"][^>]*>",
+                body,
+                re.IGNORECASE,
+            ):
+                return "ok", ""
+            return "drift", f"HTTP {status}"
+    except Exception as exc:
+        return "drift", str(exc)
+
+
 def _probe_product_public_url_with_token(url: str, *, publish_probe_token: str = "") -> tuple[bool, str]:
     if _product_deploy_dry_run() or not _product_public_probe_enabled():
         return True, ""
@@ -10898,336 +10244,6 @@ def _prune_product_source_build_artifacts(source_root: Path) -> None:
             shutil.rmtree(target, ignore_errors=True)
 
 
-@contextmanager
-def _product_activation_ssh_key_file() -> Iterable[Path]:
-    raw_path = str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_KEY", "") or "").strip()
-    if raw_path:
-        path = Path(raw_path).expanduser()
-        if not path.exists():
-            raise TakyonError(f"activation ssh key not found: {path}")
-        yield path
-        return
-    raw_key = (
-        str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_KEY_B64", "") or "").strip()
-        or str(os.getenv("TAKYON_PRODUCT_ACTIVATION_SSH_PRIVATE_KEY_B64", "") or "").strip()
-    )
-    if not raw_key:
-        raise TakyonError(
-            "product activation requires TAKYON_PRODUCT_ACTIVATION_SSH_KEY or "
-            "TAKYON_PRODUCT_ACTIVATION_SSH_KEY_B64 on non-activation nodes"
-        )
-    try:
-        decoded = base64.b64decode(raw_key.encode("utf-8"), validate=True)
-    except Exception:
-        decoded = raw_key.encode("utf-8")
-    fd, tmp_path = tempfile.mkstemp(prefix="takyon-product-activate-", suffix=".key")
-    try:
-        os.close(fd)
-        key_path = Path(tmp_path)
-        key_path.write_bytes(decoded.replace(b"\r\n", b"\n"))
-        key_path.chmod(0o600)
-        yield key_path
-    finally:
-        try:
-            Path(tmp_path).unlink()
-        except OSError:
-            pass
-
-
-def _publish_next_product_service_prepared(
-    *,
-    source_root: Path,
-    slug: str,
-    publish_target: str,
-    metadata: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "status": "blocked",
-        "publish_target": publish_target,
-        "public_url": "",
-        "published_at": "",
-        "publish_root": "",
-        "publish_source_path": "",
-        "blocker": "",
-        "deploy_kind": "next_systemd_caddy",
-        "service_name": _product_service_name(slug),
-    }
-    blocker = ""
-    metadata_payload = dict(metadata or {})
-    if not metadata_payload:
-        metadata_payload, blocker = _product_next_service_metadata(source_root)
-    if not metadata_payload:
-        result["blocker"] = blocker or "missing Next.js product service metadata"
-        return result
-    try:
-        port = _product_service_port(slug)
-    except Exception as exc:
-        result["blocker"] = str(exc)
-        return result
-    try:
-        service_root = _stage_product_service_tree(slug=slug, source_root=source_root)
-    except Exception as exc:
-        result["blocker"] = f"failed to stage durable product service tree: {exc}"
-        return result
-    service_file, blocker = _write_product_service_file(slug=slug, source_root=service_root, port=port, metadata=metadata_payload)
-    result.update({"port": port, "service_file": str(service_file or "")})
-    if blocker:
-        result["blocker"] = blocker
-        return result
-    caddyfile, blocker = _ensure_product_caddy_route(
-        slug=slug,
-        publish_target=publish_target,
-        port=port,
-        publish_root=service_root,
-    )
-    result["caddyfile"] = str(caddyfile or "")
-    if blocker:
-        result["blocker"] = blocker
-        return result
-    ok, blocker = _probe_product_public_url(publish_target)
-    if not ok:
-        result["blocker"] = blocker
-        return result
-    result.update(
-        {
-            "status": "published",
-            "public_url": publish_target,
-            "published_at": _now(),
-            "publish_root": str(service_root),
-            "publish_source_path": str(source_root.name),
-            "blocker": "",
-        }
-    )
-    if _product_deploy_dry_run():
-        result["dry_run"] = True
-    return result
-
-
-def _handoff_next_product_service_to_activation_host(
-    *,
-    source_root: Path,
-    slug: str,
-    publish_target: str,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "status": "blocked",
-        "publish_target": publish_target,
-        "public_url": "",
-        "published_at": "",
-        "publish_root": "",
-        "publish_source_path": "",
-        "blocker": "",
-        "deploy_kind": "next_systemd_caddy",
-        "service_name": _product_service_name(slug),
-    }
-    ssh_target = _product_activation_ssh_target()
-    if not ssh_target:
-        result["blocker"] = (
-            "product publish must activate on "
-            f"{_product_activation_node() or 'the configured activation node'}, but "
-            "TAKYON_PRODUCT_ACTIVATION_SSH_TARGET is not set on this node"
-        )
-        return result
-    remote_runtime = _product_activation_remote_runtime()
-    remote_home = _product_activation_remote_home()
-    remote_python = remote_runtime / ".venv" / "bin" / "python"
-    source_basename = source_root.name
-    with tempfile.TemporaryDirectory(prefix=f"takyon-product-handoff-{_slugify(slug)}-") as tmpdir:
-        tar_path = Path(tmpdir) / "artifact.tar"
-        remote_tar = f"/tmp/takyon-product-activate-{_slugify(slug)}-{uuid.uuid4().hex}.tar"
-        with tarfile.open(tar_path, "w") as archive:
-            archive.add(
-                source_root,
-                arcname=source_basename,
-                filter=lambda info: None
-                if (
-                    info.name.endswith("/.git")
-                    or "/.git/" in info.name
-                    or info.name.endswith("/.cache")
-                    or "/.cache/" in info.name
-                    or info.name.endswith("/__pycache__")
-                    or "/__pycache__/" in info.name
-                    or info.name.endswith(".pyc")
-                )
-                else info,
-            )
-        remote_script = dedent(
-            f"""
-            set -euo pipefail
-            cd {shlex.quote(str(remote_runtime))}
-            runuser -u takyon -- env TAKYON_HOME={shlex.quote(str(remote_home))} HOME=/opt/takyon PYTHONUNBUFFERED=1 \\
-              TAKYON_REMOTE_ARTIFACT={shlex.quote(remote_tar)} \\
-              TAKYON_REMOTE_ARTIFACT_ROOT={shlex.quote(source_basename)} \\
-              TAKYON_REMOTE_ARTIFACT_SLUG={shlex.quote(_slugify(slug))} \\
-              TAKYON_REMOTE_PUBLISH_TARGET={shlex.quote(publish_target)} \\
-              {shlex.quote(str(remote_python))} - <<'PY'
-            import json
-            import os
-            import shutil
-            import tarfile
-            import tempfile
-            from pathlib import Path
-
-            from plugins.takyon import core as takyon_core
-
-            tar_path = Path(os.environ["TAKYON_REMOTE_ARTIFACT"])
-            source_basename = os.environ["TAKYON_REMOTE_ARTIFACT_ROOT"]
-            slug = os.environ["TAKYON_REMOTE_ARTIFACT_SLUG"]
-            publish_target = os.environ["TAKYON_REMOTE_PUBLISH_TARGET"]
-            extract_root = Path(tempfile.mkdtemp(prefix=f"takyon-product-activate-{{slug}}-"))
-            try:
-                with tarfile.open(tar_path) as archive:
-                    members = archive.getmembers()
-                    for member in members:
-                        member_path = (extract_root / member.name).resolve()
-                        if extract_root.resolve() not in (member_path, *member_path.parents):
-                            raise RuntimeError(f"artifact escaped activation temp root: {{member.name}}")
-                    archive.extractall(extract_root)
-                result = takyon_core._publish_next_product_service_prepared(
-                    source_root=extract_root / source_basename,
-                    slug=slug,
-                    publish_target=publish_target,
-                )
-                print(json.dumps(result))
-            finally:
-                shutil.rmtree(extract_root, ignore_errors=True)
-                try:
-                    tar_path.unlink()
-                except OSError:
-                    pass
-            PY
-            """
-        ).strip()
-        try:
-            with _product_activation_ssh_key_file() as key_path:
-                scp = subprocess.run(
-                    [
-                        "scp",
-                        "-i",
-                        str(key_path),
-                        "-o",
-                        "IdentitiesOnly=yes",
-                        "-o",
-                        "StrictHostKeyChecking=accept-new",
-                        str(tar_path),
-                        f"{ssh_target}:{remote_tar}",
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=300,
-                )
-                if scp.returncode != 0:
-                    result["blocker"] = _truncate_text(
-                        "\n".join(part for part in (scp.stdout.strip(), scp.stderr.strip()) if part)
-                        or "scp handoff failed",
-                        4000,
-                    )
-                    return result
-                ssh = subprocess.run(
-                    [
-                        "ssh",
-                        "-i",
-                        str(key_path),
-                        "-o",
-                        "IdentitiesOnly=yes",
-                        "-o",
-                        "StrictHostKeyChecking=accept-new",
-                        ssh_target,
-                        remote_script,
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=600,
-                )
-        except Exception as exc:
-            result["blocker"] = f"failed to hand off product activation to {ssh_target}: {exc}"
-            return result
-    if ssh.returncode != 0:
-        result["blocker"] = _truncate_text(
-            "\n".join(part for part in (ssh.stdout.strip(), ssh.stderr.strip()) if part)
-            or f"activation handoff to {ssh_target} failed",
-            4000,
-        )
-        return result
-    lines = [line.strip() for line in ssh.stdout.splitlines() if line.strip()]
-    if not lines:
-        result["blocker"] = f"activation handoff to {ssh_target} returned no result"
-        return result
-    try:
-        remote_result = json.loads(lines[-1])
-    except Exception as exc:
-        result["blocker"] = f"activation handoff to {ssh_target} returned invalid JSON: {exc}"
-        return result
-    if isinstance(remote_result, dict):
-        remote_result.setdefault("activation_mode", "remote_ssh")
-        remote_result.setdefault("activation_target", ssh_target)
-        return remote_result
-    result["blocker"] = f"activation handoff to {ssh_target} returned unexpected payload"
-    return result
-
-
-def _publish_next_product_service(*, source_root: Path, slug: str, publish_target: str, source_path: str = "") -> dict[str, Any]:
-    metadata, blocker = _product_next_service_metadata(source_root)
-    if metadata is None:
-        return {
-            "status": "blocked",
-            "publish_target": publish_target,
-            "public_url": "",
-            "published_at": "",
-            "publish_root": "",
-            "publish_source_path": "",
-            "blocker": (
-            "product surface source exists, but no publishable static output with index.html exists; "
-            f"{blocker}; {_product_publish_output_requirements(source_root)}"
-            ),
-            "deploy_kind": "next_systemd_caddy",
-            "service_name": _product_service_name(slug),
-        }
-    if _is_current_product_activation_node() and not _product_activation_surfaces_writable():
-        from plugins.takyon import product_activation_broker
-
-        if product_activation_broker.broker_enabled():
-            result = product_activation_broker.publish_next_product_service(
-                source_root=source_root,
-                slug=slug,
-                publish_target=publish_target,
-                source_path=source_path or source_root.name,
-            )
-            if result.get("status") == "published":
-                _prune_product_source_build_artifacts(source_root)
-            return result
-        return {
-            "status": "blocked",
-            "publish_target": publish_target,
-            "public_url": "",
-            "published_at": "",
-            "publish_root": "",
-            "publish_source_path": "",
-            "blocker": (
-                "product activation requires brokered host authority on this node, but "
-                "TAKYON_PRODUCT_ACTIVATION_BROKER_URL is not configured"
-            ),
-            "deploy_kind": "next_systemd_caddy",
-            "service_name": _product_service_name(slug),
-        }
-    if _is_current_product_activation_node():
-        result = _publish_next_product_service_prepared(
-            source_root=source_root,
-            slug=slug,
-            publish_target=publish_target,
-            metadata=metadata,
-        )
-    else:
-        result = _handoff_next_product_service_to_activation_host(
-            source_root=source_root,
-            slug=slug,
-            publish_target=publish_target,
-        )
-    if result.get("status") == "published":
-        _prune_product_source_build_artifacts(source_root)
-    return result
-
-
 def _canonical_product_url(store: "TakyonStore", conn: sqlite3.Connection, business: str) -> str:
     surface = store._app_surface_contract(conn, business)
     return str(surface.get("public_url") or surface.get("publish_target") or _product_publish_target(business)).strip()
@@ -11260,7 +10276,10 @@ def _publish_product_surface_path(
     slug: str,
     source_path: str,
     publish_target: str,
+    source_revision: int = 0,
 ) -> dict[str, Any]:
+    from . import storage
+
     result: dict[str, Any] = {
         "status": "blocked",
         "publish_target": publish_target,
@@ -11270,7 +10289,6 @@ def _publish_product_surface_path(
         "publish_source_path": "",
         "blocker": "",
     }
-    cleanup_blocker = ""
     rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
     source_root = (business_root / rel).resolve()
     if business_root.resolve() not in (source_root, *source_root.parents):
@@ -11278,59 +10296,29 @@ def _publish_product_surface_path(
         return result
     publish_source, publish_source_label = _product_static_publish_source(source_root)
     if publish_source is None:
-        service_result = _publish_next_product_service(
-            source_root=source_root,
-            slug=slug,
-            publish_target=publish_target,
-            source_path=rel,
-        )
-        if service_result.get("publish_source_path") == source_root.name:
-            service_result["publish_source_path"] = rel
-        return service_result
-
-    next_service_metadata, _next_service_blocker = _product_next_service_metadata(source_root)
-    if next_service_metadata is not None:
-        service_result = _publish_next_product_service(
-            source_root=source_root,
-            slug=slug,
-            publish_target=publish_target,
-            source_path=rel,
-        )
-        if service_result.get("publish_source_path") == source_root.name:
-            service_result["publish_source_path"] = rel
-        if service_result.get("status") == "published":
-            return service_result
-
-    publish_root = _product_publish_root()
-    if publish_root is None:
-        service_result = _publish_next_product_service(
-            source_root=source_root,
-            slug=slug,
-            publish_target=publish_target,
-            source_path=rel,
-        )
-        if service_result.get("publish_source_path") == source_root.name:
-            service_result["publish_source_path"] = rel
-        if service_result.get("status") == "published":
-            return service_result
-        result["blocker"] = (
-            "product surface has static output, but no static hosting root is configured; "
-            "set TAKYON_PRODUCT_SITE_ROOT to the directory served for business subdomains, "
-            f"or fix the service deploy rail: {service_result.get('blocker') or 'unknown service deploy blocker'}"
-        )
+        result["blocker"] = _product_publish_readiness_blocker(source_root)
         return result
+    publish_root = _product_publish_root()
+    backend = storage.get_storage_backend()
+    build_digests = storage.workspace_file_digests(publish_source)
+    build_id = hashlib.sha256(
+        _json_dumps(
+            {
+                "slug": _slugify(slug),
+                "source_revision": int(source_revision or 0),
+                "files": build_digests,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:32]
+    artifact_prefix = storage.build_object_prefix(slug, build_id)
+    storage.write_build_artifact(backend, slug, build_id, publish_source)
 
-    target_dir = (publish_root / _slugify(slug)).resolve()
-    if publish_root not in (target_dir, *target_dir.parents):
+    build_root = _product_live_build_root(slug, build_id)
+    current_root = _product_live_current_root(slug)
+    if publish_root not in (build_root, *build_root.parents):
         result["blocker"] = "publish target escaped TAKYON_PRODUCT_SITE_ROOT"
         return result
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    preserved_runtime_dir = None
-    if target_dir.exists():
-        runtime_dir = target_dir / "_takyon"
-        if runtime_dir.exists():
-            preserved_runtime_dir = Path(tempfile.mkdtemp(prefix=f"takyon-product-runtime-{_slugify(slug)}-"))
-            shutil.copytree(runtime_dir, preserved_runtime_dir / "_takyon")
+    build_root.parent.mkdir(parents=True, exist_ok=True)
 
     def ignore(_directory: str, names: list[str]) -> set[str]:
         return {
@@ -11339,81 +10327,28 @@ def _publish_product_surface_path(
             if name in {"node_modules", ".git", ".next", ".cache", "__pycache__"}
             or name.endswith(".pyc")
         }
-
-    overlay_paths: list[tuple[Path, str]] = []
-    if preserved_runtime_dir is not None:
-        restored_runtime_dir = preserved_runtime_dir / "_takyon"
-        if restored_runtime_dir.exists():
-            overlay_paths.append((restored_runtime_dir, "_takyon"))
     _replace_directory_tree_atomic(
         publish_source,
-        target_dir,
+        build_root,
         ignore=ignore,
-        overlay_paths=overlay_paths,
     )
-    if preserved_runtime_dir is not None:
-        shutil.rmtree(preserved_runtime_dir, ignore_errors=True)
-    _make_static_publish_tree_readable(target_dir)
-    caddyfile, blocker = _ensure_product_static_caddy_route(slug=slug, publish_target=publish_target, static_root=target_dir)
-    result["caddyfile"] = str(caddyfile or "")
-    if blocker:
-        result["blocker"] = blocker
-        return result
-    publish_probe_token = uuid.uuid4().hex
-    _write_product_publish_probe_state(
-        business_root=business_root,
-        slug=slug,
-        publish_target=publish_target,
-        source_path=rel,
-        token=publish_probe_token,
-    )
-    storage_sync = _sync_published_business_workspace_to_storage(
-        business_root=business_root,
-        slug=slug,
-    )
-    if storage_sync.get("status") == "blocked":
-        _remove_product_publish_probe_state(business_root=business_root)
-        result["blocker"] = str(storage_sync.get("blocker") or "product workspace storage sync failed")
-        result["publish_root"] = str(target_dir)
-        return result
-    local_url = _product_local_public_url(slug)
-    try:
-        if not local_url:
-            ok, blocker = _probe_product_public_url_with_token(
-                publish_target,
-                publish_probe_token=publish_probe_token,
-            )
-            if not ok:
-                result["blocker"] = blocker
-                return result
-    finally:
-        _remove_product_publish_probe_state(business_root=business_root)
-        cleanup_sync = _sync_published_business_workspace_to_storage(
-            business_root=business_root,
-            slug=slug,
-        )
-        if cleanup_sync.get("status") == "blocked":
-            cleanup_blocker = str(
-                cleanup_sync.get("blocker")
-                or "product workspace storage cleanup failed after publish probe"
-            )
-    if cleanup_blocker and not result.get("blocker"):
-        result["blocker"] = cleanup_blocker
-        result["publish_root"] = str(target_dir)
-        return result
-    effective_publish_root = str(target_dir)
-    effective_publish_mode = "local_static" if local_url else "public_static"
-    effective_public_url = local_url or publish_target
+    _make_static_publish_tree_readable(build_root)
+    _replace_symlink_atomic(current_root, build_root)
     result.update(
         {
             "status": "published",
-            "public_url": effective_public_url,
-            "local_url": local_url,
+            "public_url": publish_target,
             "published_at": _now(),
-            "publish_root": effective_publish_root,
+            "publish_root": str(current_root),
+            "publish_build_root": str(build_root),
             "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
-            "publish_mode": effective_publish_mode,
+            "publish_mode": "pointer_static",
             "activation_target": "",
+            "live_build_id": build_id,
+            "live_probe_status": "unknown",
+            "live_probe_detail": "",
+            "artifact_prefix": artifact_prefix,
+            "source_revision": int(source_revision or 0),
             "blocker": "",
         }
     )
@@ -11746,6 +10681,8 @@ class TakyonStore:
             else None
         )
         self._workspace_sync_cache: set[str] = set()
+        self._workspace_revision_cache: dict[str, int] = {}
+        self._workspace_base_revision: dict[str, int] = {}
 
     def _workspace_storage_backend_kind(self) -> str:
         load_takyon_env()
@@ -11951,6 +10888,7 @@ class TakyonStore:
               status TEXT NOT NULL DEFAULT 'active',
               mode TEXT NOT NULL DEFAULT 'live',
               work_focus TEXT NOT NULL DEFAULT 'all',
+              head_revision INTEGER NOT NULL DEFAULT 0,
               budget_json TEXT,
               metadata_json TEXT,
               created_at TEXT NOT NULL,
@@ -12051,6 +10989,17 @@ class TakyonStore:
               result_json TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS business_revisions (
+              business_slug TEXT NOT NULL,
+              revision INTEGER NOT NULL,
+              parent_revision INTEGER NOT NULL DEFAULT 0,
+              manifest_sha TEXT NOT NULL,
+              actor TEXT NOT NULL DEFAULT '',
+              reason TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, revision),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS app_budgets (
               business_slug TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'active',
@@ -12099,12 +11048,24 @@ class TakyonStore:
               public_url TEXT,
               publish_status TEXT NOT NULL DEFAULT 'not_published',
               published_at TEXT,
+              live_build_id TEXT,
+              live_probe_status TEXT NOT NULL DEFAULT 'unknown',
+              live_probe_detail TEXT,
               publish_receipt_path TEXT,
               publish_blocker TEXT,
               notes TEXT,
               metadata_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS product_builds (
+              build_id TEXT PRIMARY KEY,
+              business_slug TEXT NOT NULL,
+              source_revision INTEGER NOT NULL,
+              artifact_prefix TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'built',
+              created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS app_users (
@@ -12357,11 +11318,28 @@ class TakyonStore:
             conn.execute("UPDATE businesses SET work_focus = 'all' WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product')")
         elif conn.execute("SELECT 1 FROM businesses WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product') LIMIT 1").fetchone():
             conn.execute("UPDATE businesses SET work_focus = 'all' WHERE work_focus IS NULL OR work_focus NOT IN ('all', 'marketing', 'product')")
+        if "head_revision" not in business_columns:
+            conn.execute("ALTER TABLE businesses ADD COLUMN head_revision INTEGER NOT NULL DEFAULT 0")
         indexes = {row["name"] for row in conn.execute("PRAGMA index_list(businesses)").fetchall()}
         if "businesses_mode_idx" not in indexes:
             conn.execute("CREATE INDEX businesses_mode_idx ON businesses(mode, updated_at DESC)")
         if "businesses_work_focus_idx" not in indexes:
             conn.execute("CREATE INDEX businesses_work_focus_idx ON businesses(work_focus, updated_at DESC)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS business_revisions (
+              business_slug TEXT NOT NULL,
+              revision INTEGER NOT NULL,
+              parent_revision INTEGER NOT NULL DEFAULT 0,
+              manifest_sha TEXT NOT NULL,
+              actor TEXT NOT NULL DEFAULT '',
+              reason TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (business_slug, revision),
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            )
+            """
+        )
         surface_columns = {row["name"] for row in conn.execute("PRAGMA table_info(app_surface_contracts)").fetchall()}
         surface_additions = {
             "runtime_features_json": "TEXT",
@@ -12372,6 +11350,9 @@ class TakyonStore:
             "public_url": "TEXT",
             "publish_status": "TEXT NOT NULL DEFAULT 'not_published'",
             "published_at": "TEXT",
+            "live_build_id": "TEXT",
+            "live_probe_status": "TEXT NOT NULL DEFAULT 'unknown'",
+            "live_probe_detail": "TEXT",
             "publish_receipt_path": "TEXT",
             "publish_blocker": "TEXT",
         }
@@ -12498,25 +11479,64 @@ class TakyonStore:
             """,
             (_DEFAULT_PRODUCT_DONE_GATE, _now()),
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_builds (
+              build_id TEXT PRIMARY KEY,
+              business_slug TEXT NOT NULL,
+              source_revision INTEGER NOT NULL,
+              artifact_prefix TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'built',
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
+            )
+            """
+        )
+
+    def _business_head_revision_from_conn(self, conn: sqlite3.Connection, slug: str) -> int:
+        row = conn.execute(
+            "SELECT head_revision FROM businesses WHERE slug = ?",
+            (_slugify(slug),),
+        ).fetchone()
+        try:
+            return int((row or {}).get("head_revision") or 0)
+        except Exception:
+            return 0
+
+    def _business_head_revision(self, slug: str) -> int:
+        with self._connect() as conn:
+            return self._business_head_revision_from_conn(conn, slug)
 
     def _sync_business_workspace_cache(self, slug: str, root: Path) -> None:
         if self._workspace_root_override is not None:
             return
         normalized = _slugify(slug)
-        if normalized in self._workspace_sync_cache:
-            return
         from . import storage
 
         backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
             return
-        # Refresh from the durable backend once per store instance. A scope read fans out through
-        # multiple helpers (`summary`, `list_files`, pulse, product surface reads), and each one may
-        # resolve the business root repeatedly. Re-syncing for every nested helper call turns one
-        # dashboard hydrate into many full storage downloads and regularly times out the UI.
-        storage.sync_down(backend, normalized, root, delete_local=True)
+        head_revision = self._business_head_revision(normalized)
+        if (
+            normalized in self._workspace_sync_cache
+            and self._workspace_revision_cache.get(normalized) == head_revision
+        ):
+            return
+        if head_revision <= 0:
+            root.mkdir(parents=True, exist_ok=True)
+            self._workspace_sync_cache.add(normalized)
+            self._workspace_revision_cache[normalized] = 0
+            return
+        storage.materialize_workspace_revision(
+            backend,
+            normalized,
+            head_revision,
+            root,
+            delete_local=True,
+        )
         self._workspace_sync_cache.add(normalized)
+        self._workspace_revision_cache[normalized] = head_revision
 
     def _workspace_storage_backend(self) -> Any:
         from . import storage
@@ -12530,49 +11550,125 @@ class TakyonStore:
             local_root = self.root / "storage"
         return storage.get_storage_backend(root=local_root)
 
-    def _sync_business_workspace_remote(self, slug: str) -> str:
-        """Push the durable business workspace to the configured backend.
+    def _canonical_workspace_revision(self, slug: str) -> int:
+        normalized = _slugify(slug)
+        if self._workspace_root_override is not None:
+            return int(self._workspace_base_revision.get(normalized, 0) or 0)
+        return int(self._workspace_revision_cache.get(normalized, self._business_head_revision(normalized)) or 0)
 
-        Returns a truthful status so callers that REQUIRE durable persistence (the worker
-        copy-back path) can fail closed instead of reporting success while nothing
-        materialized. Most callers ignore the return — only success-critical paths gate on
-        it. Statuses: ``synced``, ``skipped_no_backend``, ``skipped_disallowed``,
-        ``skipped_missing_workspace``.
-        """
+    def _workspace_truth(self, business: str | None = None) -> dict[str, Any]:
+        normalized = _slugify(business) if business else ""
+        if self._workspace_root_override is not None:
+            return {
+                "surface": "working",
+                "committed": False,
+                "live": False,
+                "base_revision": int(self._workspace_base_revision.get(normalized, 0) or 0),
+                "guidance": "This result comes from the active session workspace. Treat it as in-progress working state until a later commit/publish records canonical or live truth.",
+            }
+        return {
+            "surface": "canonical",
+            "committed": True,
+            "live": False,
+            "revision": self._canonical_workspace_revision(normalized) if normalized else 0,
+            "guidance": "This result comes from the committed canonical workspace hydrated from durable storage.",
+        }
+
+    def _commit_business_workspace_revision(
+        self,
+        conn: sqlite3.Connection,
+        slug: str,
+        *,
+        actor: str,
+        reason: str,
+        expected_base_revision: int | None = None,
+    ) -> int:
         from . import storage
 
+        normalized = _slugify(slug)
+        backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if backend_name not in {"supabase_s3", "local"}:
+            raise TakyonError("workspace storage backend is unavailable for canonical commit")
+        if not _remote_workspace_sync_allowed(backend_name):
+            raise TakyonError(
+                "workspace commits are disallowed for the configured backend on this host"
+            )
+        workspace = self._business_root(normalized, sync=False)
+        workspace.mkdir(parents=True, exist_ok=True)
+        current_head = self._business_head_revision_from_conn(conn, normalized)
+        base_revision = current_head if expected_base_revision is None else int(expected_base_revision)
+        if base_revision != current_head:
+            raise TakyonError(
+                f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to r{base_revision}; re-hydrate before committing"
+            )
+        candidate_files = storage.workspace_source_digests(workspace)
+        if current_head > 0:
+            try:
+                current_manifest = storage.read_workspace_manifest(backend, normalized, current_head)
+            except Exception:
+                current_manifest = {}
+            current_files = current_manifest.get("files") if isinstance(current_manifest.get("files"), dict) else {}
+            if current_files == candidate_files:
+                self._workspace_sync_cache.add(normalized)
+                self._workspace_revision_cache[normalized] = current_head
+                if self._workspace_root_override is not None:
+                    self._workspace_base_revision[normalized] = current_head
+                return current_head
+        next_revision = current_head + 1
+        manifest = storage.write_workspace_revision(
+            backend,
+            normalized,
+            next_revision,
+            workspace,
+            parent_revision=current_head,
+            created_at=_now(),
+        )
+        conn.execute(
+            """
+            INSERT INTO business_revisions (
+              business_slug, revision, parent_revision, manifest_sha, actor, reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized,
+                next_revision,
+                current_head,
+                str(manifest.get("manifest_sha256") or ""),
+                str(actor or ""),
+                str(reason or ""),
+                _now(),
+            ),
+        )
+        conn.execute(
+            "UPDATE businesses SET head_revision = ?, updated_at = ? WHERE slug = ?",
+            (next_revision, _now(), normalized),
+        )
+        self._workspace_sync_cache.add(normalized)
+        self._workspace_revision_cache[normalized] = next_revision
+        if self._workspace_root_override is not None:
+            self._workspace_base_revision[normalized] = next_revision
+        return next_revision
+
+    def _sync_business_workspace_remote(self, slug: str) -> str:
+        """Commit the current local business workspace into canonical durable storage."""
+        normalized = _slugify(slug)
         backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
             return "skipped_no_backend"
         if not _remote_workspace_sync_allowed(backend_name):
             return "skipped_disallowed"
-        workspace = self._business_root(slug, sync=False)
-        if not workspace.exists():
-            return "skipped_missing_workspace"
-        storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
+        with self._connect() as conn:
+            with conn:
+                self._commit_business_workspace_revision(
+                    conn,
+                    normalized,
+                    actor=self._operator_user_id or "system",
+                    reason="canonical workspace commit",
+                    expected_base_revision=self._canonical_workspace_revision(normalized),
+                )
         return "synced"
-
-    def _replace_business_workspace_cache(self, slug: str, source_root: str | os.PathLike[str]) -> None:
-        """Refresh this store's local cache for one business from a verified source tree.
-
-        The operator-plane store for ``supabase_s3`` roots business files under
-        ``$TAKYON_HOME/cache/businesses/<slug>``. Docker product-site work, however, runs in a
-        scoped scratch store whose local business root lives elsewhere. After a successful scoped
-        worker run, later same-process operator writes must see the verified worker tree rather than
-        a stale pre-worker cache copy, or the next ``artifact.patch``/``artifact.write`` can sync a
-        stale tree back to canonical storage and clobber the real product source. This helper
-        atomically replaces the local cache copy so the next operator write starts from truthful
-        local state.
-        """
-        if self._workspace_root_override is not None:
-            return
-        source = Path(source_root).expanduser().resolve()
-        if not source.is_dir():
-            raise TakyonError(f"verified workspace source is missing: {source}")
-        target = self._business_root(slug, sync=False)
-        _replace_directory_tree_atomic(source, target)
-        self._workspace_sync_cache.add(_slugify(slug))
 
     def _delete_business_workspace_remote(self, slug: str) -> None:
         from . import storage
@@ -12887,6 +11983,9 @@ class TakyonStore:
             "public_url": "",
             "publish_status": "not_published",
             "published_at": "",
+            "live_build_id": "",
+            "live_probe_status": "unknown",
+            "live_probe_detail": "",
             "publish_receipt_path": "",
             "publish_blocker": "",
             "notes": "No product surface contract has been recorded yet.",
@@ -12955,6 +12054,8 @@ class TakyonStore:
         }
         if risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired", "scaffold_visible_shell"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
+        source_truth = self._workspace_truth(slug)
+        live_truth = _live_truth_snapshot(surface, business=slug)
         return {
             "surface_status": str(surface.get("status") or "missing"),
             "publish_status": str(surface.get("publish_status") or ""),
@@ -12967,6 +12068,8 @@ class TakyonStore:
             "operational_facts": operational_facts,
             "action_invocations": action_invocations,
             "local_continuable_work": local_work[:8],
+            "source_truth": source_truth,
+            "live_truth": live_truth,
         }
 
     def _surface_status_for_upsert(
@@ -13067,6 +12170,8 @@ class TakyonStore:
             f"- Publish status: {surface.get('publish_status') or 'not_published'}",
             f"- Public URL: {surface.get('public_url') or 'not published'}",
             f"- Published at: {surface.get('published_at') or 'not published'}",
+            f"- Live build id: {surface.get('live_build_id') or 'not set'}",
+            f"- Live probe: {surface.get('live_probe_status') or 'unknown'}",
             f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
             f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             ]
@@ -13236,6 +12341,7 @@ class TakyonStore:
             "latest_receipt": latest_file(receipt_root, suffixes=(".json",)),
             "latest_publish_job": latest_publish_job or {},
             "unresolved_replies": unresolved_replies,
+            "source_truth": self._workspace_truth(slug),
         }
 
     def _rewrite_distribution_files(self, conn: sqlite3.Connection, slug: str) -> None:
@@ -13319,6 +12425,10 @@ class TakyonStore:
         ).fetchone()
         return {
             "budget": budget,
+            "truth": {
+                "source": self._workspace_truth(slug),
+                "live": _live_truth_snapshot(surface, business=slug),
+            },
             "surface_contract": surface,
             "product_surface": surface_evidence,
             "product_inventory": surface_evidence.get("inventory") or {},
@@ -14310,7 +13420,11 @@ class TakyonStore:
                     "success": True,
                     "scope": scope,
                     "path": path,
-                    **_business_file_truth_metadata(path),
+                    **_business_file_truth_metadata(
+                        path,
+                        session_scoped=self._workspace_root_override is not None,
+                        revision=self._canonical_workspace_revision(slug),
+                    ),
                     "content": _read_text_limited(file_path),
                 }
 
@@ -14449,6 +13563,9 @@ class TakyonStore:
                 "success": True,
                 "scope": scope,
                 "business": business,
+                "truth": {
+                    "source": self._workspace_truth(slug),
+                },
                 "workspaces": workspaces,
                 "controls": controls,
                 "brain_index": brain_index,
@@ -14465,6 +13582,7 @@ class TakyonStore:
             if query in {"app", "summary"} or "app" in include_set:
                 self._rewrite_app_files(conn, slug)
                 response["app"] = self._app_summary(conn, slug, limit)
+                response["truth"]["live"] = response["app"]["truth"]["live"]
             return response
 
     def commit(
@@ -14486,7 +13604,7 @@ class TakyonStore:
             raise TakyonError("operations must be a non-empty list")
         parsed = _scope_parts(scope)
         op_hash = _hash_operation({"scope": scope, "operations": operations, "reason": reason, "actor": actor})
-        warmed_workspaces: set[str] = set()
+        touched_workspaces: dict[str, int] = {}
 
         with self._connect() as conn:
             prior = conn.execute("SELECT * FROM idempotency_keys WHERE key = ?", (idempotency_key,)).fetchone()
@@ -14502,16 +13620,34 @@ class TakyonStore:
                 for item in staged:
                     result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                     results.append(result)
-                    if item.get("action") in {"artifact.write", "artifact.patch", "memory.write", "workspace.upsert"}:
+                    action_name = str(item.get("action") or "").strip()
+                    if action_name.startswith("app.") or action_name in {
+                        "artifact.write",
+                        "artifact.patch",
+                        "memory.write",
+                        "workspace.upsert",
+                        "business.upsert",
+                    }:
                         slug = str(item.get("business_slug") or "").strip()
                         if slug:
-                            warmed_workspaces.add(_slugify(slug))
+                            normalized = _slugify(slug)
+                            touched_workspaces.setdefault(
+                                normalized,
+                                self._canonical_workspace_revision(normalized),
+                            )
+                for slug, base_revision in sorted(touched_workspaces.items()):
+                    self._commit_business_workspace_revision(
+                        conn,
+                        slug,
+                        actor=actor,
+                        reason=reason or "Takyon durable commit",
+                        expected_base_revision=base_revision,
+                    )
                 final = {"success": True, "scope": str(parsed["raw"]), "results": results}
                 conn.execute(
                     "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
                     (idempotency_key, op_hash, _json_dumps(final), _now()),
                 )
-            self._workspace_sync_cache.update(warmed_workspaces)
             return final
 
     def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any]) -> dict[str, Any]:
@@ -14685,7 +13821,6 @@ class TakyonStore:
             strategy = root / "research" / "strategy.md"
             if not strategy.exists():
                 _atomic_write_text(strategy, f"# {name}\n\nGoal: {goal or 'Unspecified'}\n")
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type="business.upsert", payload={"reason": reason, "actor": actor})
             return {"action": action, "business": slug, "path": str(root)}
 
@@ -14771,7 +13906,6 @@ class TakyonStore:
                     (amount, status, now, slug),
                 )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"hard_limit_microusd": amount, "reason": reason, "actor": actor})
             return {"action": action, "business": slug, "hard_limit_microusd": amount}
 
@@ -14997,7 +14131,6 @@ class TakyonStore:
                 _surface_product_workflow_shape({"metadata": metadata}),
             )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             event_surface = {"metadata": metadata, "runtime_features": runtime_features}
             self._record_event(
                 conn,
@@ -15043,18 +14176,29 @@ class TakyonStore:
             public_url = str(op.get("public_url") or "").strip()
             publish_target = _product_publish_target(slug, op.get("publish_target"))
             published_at = str(op.get("published_at") or "").strip()
+            live_build_id = str(op.get("live_build_id") or "").strip()
+            live_probe_status = str(op.get("live_probe_status") or ("ok" if publish_status == "published" else "unknown")).strip().lower() or "unknown"
+            live_probe_detail = str(op.get("live_probe_detail") or "").strip()
             receipt_path = None
             if op.get("receipt_path"):
                 receipt_path = _safe_relpath(str(op.get("receipt_path")), field="receipt_path").as_posix()
             publish_source_path = None
             if op.get("publish_source_path"):
                 publish_source_path = _safe_relpath(str(op.get("publish_source_path")), field="publish_source_path").as_posix()
+            artifact_prefix = str(op.get("artifact_prefix") or "").strip()
+            try:
+                source_revision = int(op.get("source_revision") or 0)
+            except (TypeError, ValueError):
+                source_revision = 0
             blocker = str(op.get("blocker") or "")
             existing = self._stored_app_surface_contract(conn, slug)
             existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
             existing_publish_status = str(existing.get("publish_status") or "").strip().lower()
             existing_public_url = str(existing.get("public_url") or "").strip()
             existing_published_at = str(existing.get("published_at") or "").strip()
+            existing_live_build_id = str(existing.get("live_build_id") or "").strip()
+            existing_live_probe_status = str(existing.get("live_probe_status") or "unknown").strip() or "unknown"
+            existing_live_probe_detail = str(existing.get("live_probe_detail") or "").strip()
             preserve_live_state = (
                 publish_status == "blocked"
                 and existing_publish_status == "published"
@@ -15063,13 +14207,20 @@ class TakyonStore:
             effective_publish_status = existing_publish_status if preserve_live_state else publish_status
             effective_public_url = existing_public_url if preserve_live_state else public_url
             effective_published_at = existing_published_at if preserve_live_state else published_at
+            effective_live_build_id = existing_live_build_id if preserve_live_state else live_build_id
+            effective_live_probe_status = existing_live_probe_status if preserve_live_state else live_probe_status
+            effective_live_probe_detail = existing_live_probe_detail if preserve_live_state else live_probe_detail
             last_attempt = {
                 "status": publish_status,
                 "public_url": public_url,
                 "publish_target": publish_target,
                 "published_at": published_at,
+                "live_build_id": live_build_id,
+                "live_probe_status": live_probe_status,
+                "live_probe_detail": live_probe_detail,
                 "receipt_path": receipt_path,
                 "publish_source_path": publish_source_path,
+                "artifact_prefix": artifact_prefix,
                 "blocker": blocker,
             }
             metadata = {
@@ -15079,8 +14230,12 @@ class TakyonStore:
                     "public_url": effective_public_url,
                     "publish_target": publish_target,
                     "published_at": effective_published_at,
+                    "live_build_id": effective_live_build_id,
+                    "live_probe_status": effective_live_probe_status,
+                    "live_probe_detail": effective_live_probe_detail,
                     "receipt_path": receipt_path,
                     "publish_source_path": publish_source_path,
+                    "artifact_prefix": artifact_prefix,
                     "blocker": blocker,
                     "preserved_live_state": preserve_live_state,
                 },
@@ -15090,7 +14245,9 @@ class TakyonStore:
                 """
                 UPDATE app_surface_contracts
                 SET publish_target = ?, public_url = NULLIF(?, ''), publish_status = ?,
-                    published_at = NULLIF(?, ''), publish_receipt_path = ?, publish_blocker = NULLIF(?, ''),
+                    published_at = NULLIF(?, ''), live_build_id = NULLIF(?, ''),
+                    live_probe_status = ?, live_probe_detail = NULLIF(?, ''),
+                    publish_receipt_path = ?, publish_blocker = NULLIF(?, ''),
                     metadata_json = ?, updated_at = ?
                 WHERE business_slug = ?
                 """,
@@ -15099,6 +14256,9 @@ class TakyonStore:
                     effective_public_url,
                     effective_publish_status,
                     effective_published_at,
+                    effective_live_build_id,
+                    effective_live_probe_status,
+                    effective_live_probe_detail,
                     receipt_path,
                     blocker,
                     _json_dumps(metadata),
@@ -15106,8 +14266,26 @@ class TakyonStore:
                     slug,
                 ),
             )
+            if effective_live_build_id:
+                conn.execute(
+                    """
+                    INSERT INTO product_builds (build_id, business_slug, source_revision, artifact_prefix, status, created_at)
+                    VALUES (?, ?, ?, ?, 'built', ?)
+                    ON CONFLICT(build_id) DO UPDATE SET
+                      business_slug = excluded.business_slug,
+                      source_revision = excluded.source_revision,
+                      artifact_prefix = excluded.artifact_prefix,
+                      status = excluded.status
+                    """,
+                    (
+                        effective_live_build_id,
+                        slug,
+                        max(0, int(source_revision)),
+                        artifact_prefix,
+                        _now(),
+                    ),
+                )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(
                 conn,
                 scope=f"business:{slug}/app",
@@ -15118,6 +14296,8 @@ class TakyonStore:
                     "effective_publish_status": effective_publish_status,
                     "effective_public_url": effective_public_url,
                     "effective_published_at": effective_published_at,
+                    "effective_live_build_id": effective_live_build_id,
+                    "effective_live_probe_status": effective_live_probe_status,
                     "preserved_live_state": preserve_live_state,
                 },
             )
@@ -15127,6 +14307,8 @@ class TakyonStore:
                 "publish_status": effective_publish_status,
                 "public_url": effective_public_url,
                 "publish_target": publish_target,
+                "live_build_id": effective_live_build_id,
+                "live_probe_status": effective_live_probe_status,
                 "receipt_path": receipt_path,
                 "blocker": blocker,
                 "attempted_publish_status": publish_status,
@@ -15270,7 +14452,6 @@ class TakyonStore:
                     ),
                 )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"plan_key": plan_key, "price_cents": price_cents})
             return {"action": action, "business": slug, "plan_key": plan_key}
 
@@ -15337,7 +14518,6 @@ class TakyonStore:
                     display_name=row.get("name"),
                 )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": app_user_id, "email": email})
             return {"action": action, "business": slug, "app_user_id": app_user_id, "email": email}
 
@@ -15494,7 +14674,6 @@ class TakyonStore:
                     "updated_at": now,
                 }
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(
                 conn,
                 scope=f"business:{slug}/app",
@@ -16132,7 +15311,6 @@ class TakyonStore:
                 )
                 tier = self._sync_user_tier(conn, slug, user_id)
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"app_user_id": user_id, "tier": tier, "source": source_value})
             return {"action": action, "business": slug, "app_user_id": user_id, "entitlement": entitlement_id, "tier": tier}
 
@@ -16249,7 +15427,6 @@ class TakyonStore:
                     ),
                 )
             self._rewrite_app_files(conn, slug)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"usage_event": event_id, "actual_cost_microusd": actual})
             return {"action": action, "business": slug, "usage_event": event_id, "actual_cost_microusd": actual}
 
@@ -16273,7 +15450,6 @@ class TakyonStore:
             )
             (self._business_root(slug) / rel).mkdir(parents=True, exist_ok=True)
             self._refresh_surface_projection_files_for_path(conn, slug, path_text)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=f"business:{slug}/workspace:{path_text}", business_slug=slug, event_type=action, payload={"reason": reason, "actor": actor, "metadata": metadata})
             return {"action": action, "business": slug, "workspace": path_text}
 
@@ -16298,7 +15474,6 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, content)
             _atomic_write_text(file_path, content)
             self._refresh_surface_projection_files_for_path(conn, slug, rel)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":
                 self._record_event(
@@ -16336,7 +15511,6 @@ class TakyonStore:
             _validate_brain_index_completion_gate(rel, updated_content)
             _atomic_write_text(file_path, updated_content)
             self._refresh_surface_projection_files_for_path(conn, slug, rel)
-            self._sync_business_workspace_remote(slug)
             self._record_event(conn, scope=target_scope, business_slug=slug, event_type=action, payload={"path": rel, "reason": reason, "actor": actor})
             if rel == "metrics/summary.md":
                 self._record_event(
@@ -17445,6 +16619,7 @@ def _finalize_product_surface_refresh(
             slug=business,
             source_path=str(refresh.get("source_path") or source_path),
             publish_target=publish_target,
+            source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
         )
     else:
         publish = {
@@ -17547,8 +16722,13 @@ def _product_surface_refresh_operations(
                 "publish_target": publish_target,
                 "public_url": publish.get("public_url") or "",
                 "published_at": publish.get("published_at") or "",
+                "live_build_id": publish.get("live_build_id") or "",
+                "live_probe_status": publish.get("live_probe_status") or "unknown",
+                "live_probe_detail": publish.get("live_probe_detail") or "",
                 "receipt_path": surface_refresh.get("receipt_path"),
                 "publish_source_path": publish.get("publish_source_path") or surface_refresh.get("source_path") or "",
+                "artifact_prefix": publish.get("artifact_prefix") or "",
+                "source_revision": int(publish.get("source_revision") or 0),
                 "blocker": publish_blocker,
             }
         )
@@ -19729,7 +18909,18 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                 }) + "\n")
                 store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "external_side_effects": "suppressed", "receipt": receipt_rel})
                 store._rewrite_app_files(conn, business)
-                return tool_result({"success": True, "business": business, "mode": "test", "plan_key": plan_key, "checkout_intent_id": intent_id, "stripe_checkout_session_id": None, "checkout_url": checkout_url, "client_reference_id": client_reference_id, "external_side_effects": "suppressed"})
+                return tool_result({
+                    "success": True,
+                    "business": business,
+                    "mode": "test",
+                    "plan_key": plan_key,
+                    "checkout_intent_id": intent_id,
+                    "stripe_checkout_session_id": None,
+                    "checkout_url": checkout_url,
+                    "url": checkout_url,
+                    "client_reference_id": client_reference_id,
+                    "external_side_effects": "suppressed",
+                })
             session = _stripe_request("checkout/sessions", params)
             conn.execute(
                 "UPDATE app_checkout_intents SET status = 'pending', stripe_checkout_session_id = ?, checkout_url = ?, updated_at = ? WHERE id = ?",
@@ -19737,7 +18928,16 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             )
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "stripe_checkout_session_id": session.get("id")})
             store._rewrite_app_files(conn, business)
-        return tool_result({"success": True, "business": business, "plan_key": plan_key, "checkout_intent_id": intent_id, "stripe_checkout_session_id": session.get("id"), "checkout_url": session.get("url"), "client_reference_id": client_reference_id})
+        return tool_result({
+            "success": True,
+            "business": business,
+            "plan_key": plan_key,
+            "checkout_intent_id": intent_id,
+            "stripe_checkout_session_id": session.get("id"),
+            "checkout_url": session.get("url"),
+            "url": session.get("url"),
+            "client_reference_id": client_reference_id,
+        })
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -26338,8 +25538,6 @@ def _plan_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, busines
     actions: list[str] = []
     if schema_version < CURRENT_BUSINESS_SCHEMA_VERSION or capability_version < CURRENT_BUSINESS_CAPABILITY_VERSION:
         actions.append("set_business_versions")
-    if product_site and surface_row is None:
-        actions.append("record_legacy_product_surface")
     if distribution_mappings and not receipt_exists:
         actions.append("map_legacy_distribution_files")
     if existing_assets and not receipt_exists:
@@ -26393,32 +25591,6 @@ def _apply_business_upgrade(conn: sqlite3.Connection, store: TakyonStore, plan: 
     )
 
     product_site = str((plan.get("detected") or {}).get("product_site") or "")
-    if product_site and "record_legacy_product_surface" in actions:
-        site_root = root / product_site
-        conn.execute(
-            """
-            INSERT INTO app_surface_contracts (
-              business_slug, status, source_path, runtime_api_base,
-              routes_json, theme_json, constraints_json, notes, metadata_json, created_at, updated_at
-            )
-            VALUES (?, 'legacy_detected', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(business_slug) DO NOTHING
-            """,
-            (
-                slug,
-                product_site,
-                f"/api/takyon/apps/{slug}",
-                _json_dumps(_legacy_surface_routes(site_root)),
-                _json_dumps({"source": "legacy product site"}),
-                _json_dumps({"no_hardcoded_product_ui": True, "backend_runtime_only": True}),
-                "Detected by Takyon business upgrade v1 from existing product source. Not a deploy or surface-refresh receipt.",
-                _json_dumps({"takyon_upgrade": "takyon-business-upgrade-v1", "legacy_detected": True}),
-                now,
-                now,
-            ),
-        )
-        store._rewrite_app_files(conn, slug)
-
     receipt = {
         "schema": "takyon.business_upgrade.v1",
         "business": slug,
@@ -26808,6 +25980,7 @@ def _scoped_workspace_store(
     root: Path,
     operator_user_id: str | None = None,
     backend_override: Any | None = None,
+    base_revision_by_slug: Mapping[str, int] | None = None,
 ) -> Any:
     scoped_root = Path(root).expanduser().resolve()
     scoped: Any
@@ -26834,9 +26007,51 @@ def _scoped_workspace_store(
         setattr(scoped, "_workspace_root_override", scoped_root)
     if not hasattr(scoped, "_workspace_sync_cache"):
         scoped._workspace_sync_cache = set()
+    if hasattr(scoped, "_workspace_base_revision"):
+        scoped._workspace_base_revision = {
+            _slugify(str(key)): int(value or 0)
+            for key, value in (dict(base_revision_by_slug or {})).items()
+        }
     if backend_override is not None:
         setattr(scoped, "_workspace_storage_backend_override", backend_override)
     return scoped
+
+
+@contextmanager
+def _mounted_canonical_business_workspace(
+    store: "TakyonStore",
+    business: str,
+    *,
+    owner_label: str = "",
+):
+    from . import storage
+
+    backend = store._workspace_storage_backend()
+    slug = _slugify(business)
+    parent = storage._workspace_scratch_parent(None)
+    prefix = f"takyon-{storage._safe_owner_label(owner_label or slug)}-{slug}-"
+    home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
+    try:
+        try:
+            os.chmod(home, 0o700)
+        except OSError:
+            pass
+        workspace = home / "businesses" / slug
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        head_revision = store._business_head_revision(slug)
+        if head_revision > 0:
+            storage.materialize_workspace_revision(
+                backend,
+                slug,
+                head_revision,
+                workspace,
+                delete_local=True,
+            )
+        else:
+            workspace.mkdir(parents=True, exist_ok=True)
+        yield home, backend, head_revision
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def _workspace_durability_file_hashes(root: Path) -> dict[str, str]:
@@ -26985,12 +26200,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         )
         workspace_context = nullcontext(None)
         workspace_backend = None
+        mounted_base_revision = 0
         if docker_isolated_worker and not reuse_session_workspace:
-            from . import storage
-
-            workspace_backend = store._workspace_storage_backend()
-            workspace_context = storage.mounted_business_workspace(
-                workspace_backend,
+            workspace_context = _mounted_canonical_business_workspace(
+                store,
                 business,
                 owner_label=str(operator_user_id or business),
             )
@@ -27067,16 +26280,20 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         active_max_turns = max_turns
         turn_cap_retries: list[dict[str, int]] = []
         agent_record: dict[str, Any] | None = None
-        with workspace_context as mounted_home, ExitStack() as scoped_workspaces:
+        with workspace_context as mounted_context, ExitStack() as scoped_workspaces:
             active_store = store
-            if docker_isolated_worker and mounted_home is not None:
+            mounted_home = None
+            if docker_isolated_worker and mounted_context is not None:
+                mounted_home, workspace_backend, mounted_base_revision = mounted_context
                 active_store = _scoped_workspace_store(
                     store,
                     root=mounted_home,
                     operator_user_id=operator_user_id or None,
                     backend_override=workspace_backend,
+                    base_revision_by_slug={business: mounted_base_revision},
                 )
                 active_store._workspace_sync_cache.add(_slugify(business))
+                active_store._workspace_revision_cache[_slugify(business)] = mounted_base_revision
 
             app_summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
             app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
@@ -27288,99 +26505,79 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # scratch tree (and its real edits) is discarded on exit.
                     sync_status = active_store._sync_business_workspace_remote(business)
                     sdk_result = {**sdk_result, "workspace_sync_status": sync_status}
-                    if sync_status == "skipped_disallowed":
+                    if sync_status != "synced":
+                        blocker = "workspace_sync_skipped" if str(sync_status).startswith("skipped_") else "workspace_sync_failed"
                         sdk_result = {
                             **sdk_result,
                             "success": False,
                             "error": (
-                                "workspace_sync_skipped: worker edits could not be persisted to durable "
-                                "business state on this host (remote workspace sync is disallowed for the "
-                                "configured backend outside the approved VPS). The scratch build is "
-                                "discarded. Set TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1 for dev, "
-                                "use the local storage backend, or run on the approved host."
+                                f"{blocker}: worker edits could not be persisted to durable business state "
+                                f"(sync returned {sync_status!r}). The scratch build is discarded."
                             ),
-                            "blocker": "workspace_sync_skipped",
+                            "blocker": blocker,
                             "workspace_sync_status": sync_status,
                         }
                         _record_claude_agent_runtime_event(
                             business=business,
                             workspace_rel=workspace_rel,
                             status="failed",
-                            detail="workspace_sync_skipped: durable persistence unavailable on this host",
-                            line="workspace_sync_skipped",
+                            detail=f"{blocker}: durable persistence unavailable ({sync_status})",
+                            line=blocker,
                         )
                     elif docker_isolated_worker and customer_facing_product_workspace:
-                        if sync_status != "synced":
+                        if workspace_backend is None:
+                            workspace_backend = store._workspace_storage_backend()
+                        readback_home, _readback_backend, readback_revision = scoped_workspaces.enter_context(
+                            _mounted_canonical_business_workspace(
+                                store,
+                                business,
+                                owner_label=f"{operator_user_id or business}-readback",
+                            )
+                        )
+                        readback_store = _scoped_workspace_store(
+                            store,
+                            root=readback_home,
+                            operator_user_id=operator_user_id or None,
+                            backend_override=workspace_backend,
+                            base_revision_by_slug={business: readback_revision},
+                        )
+                        readback_store._workspace_sync_cache.add(_slugify(business))
+                        readback_store._workspace_revision_cache[_slugify(business)] = readback_revision
+                        canonical_workspace_path = readback_store._resolve_business_file(
+                            business,
+                            workspace_rel,
+                            require_output_root=True,
+                            field="workspace",
+                        ).resolve()
+                        durability = _verify_workspace_durable_readback(
+                            worker_root=workspace_path,
+                            canonical_root=canonical_workspace_path,
+                        )
+                        sdk_result = {
+                            **sdk_result,
+                            "workspace_durability": durability,
+                        }
+                        active_store = readback_store
+                        if not durability.get("matched"):
+                            mismatch_summary = _workspace_durability_mismatch_summary(durability)
+                            error_text = "worker_source_not_durable: Claude's product workspace edits diverged after canonical read-back"
+                            if mismatch_summary:
+                                error_text = f"{error_text}: {mismatch_summary}"
                             sdk_result = {
                                 **sdk_result,
                                 "success": False,
-                                "error": (
-                                    "worker_source_not_durable: Claude's product workspace edits could not be "
-                                    f"read back from canonical storage because sync returned {sync_status!r}"
-                                ),
+                                "error": error_text,
                                 "blocker": "worker_source_not_durable",
                             }
                             _record_claude_agent_runtime_event(
                                 business=business,
                                 workspace_rel=workspace_rel,
                                 status="failed",
-                                detail=f"worker_source_not_durable: sync returned {sync_status}",
+                                detail="worker_source_not_durable: canonical read-back diverged from worker source",
                                 line="worker_source_not_durable",
                             )
                         else:
-                            from . import storage
-
-                            if workspace_backend is None:
-                                workspace_backend = store._workspace_storage_backend()
-                            readback_home = scoped_workspaces.enter_context(
-                                storage.mounted_business_workspace(
-                                    workspace_backend,
-                                    business,
-                                    owner_label=f"{operator_user_id or business}-readback",
-                                )
-                            )
-                            readback_store = _scoped_workspace_store(
-                                store,
-                                root=readback_home,
-                                operator_user_id=operator_user_id or None,
-                                backend_override=workspace_backend,
-                            )
-                            readback_store._workspace_sync_cache.add(_slugify(business))
-                            canonical_workspace_path = readback_store._resolve_business_file(
-                                business,
-                                workspace_rel,
-                                require_output_root=True,
-                                field="workspace",
-                            ).resolve()
-                            durability = _verify_workspace_durable_readback(
-                                worker_root=workspace_path,
-                                canonical_root=canonical_workspace_path,
-                            )
-                            sdk_result = {
-                                **sdk_result,
-                                "workspace_durability": durability,
-                            }
-                            active_store = readback_store
-                            if not durability.get("matched"):
-                                mismatch_summary = _workspace_durability_mismatch_summary(durability)
-                                error_text = "worker_source_not_durable: Claude's product workspace edits diverged after canonical read-back"
-                                if mismatch_summary:
-                                    error_text = f"{error_text}: {mismatch_summary}"
-                                sdk_result = {
-                                    **sdk_result,
-                                    "success": False,
-                                    "error": error_text,
-                                    "blocker": "worker_source_not_durable",
-                                }
-                                _record_claude_agent_runtime_event(
-                                    business=business,
-                                    workspace_rel=workspace_rel,
-                                    status="failed",
-                                    detail="worker_source_not_durable: canonical read-back diverged from worker source",
-                                    line="worker_source_not_durable",
-                                )
-                            else:
-                                workspace_path = canonical_workspace_path
+                            workspace_path = canonical_workspace_path
                 surface_refresh = None
                 if sdk_result.get("success") and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -27505,11 +26702,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 reason=args.get("reason") or "Claude Agent SDK task record",
                 actor=args.get("actor") or "agent",
             )
-            if active_store is not store and hasattr(store, "_replace_business_workspace_cache"):
-                store._replace_business_workspace_cache(
-                    business,
-                    active_store._business_root(business, sync=False),
-                )
         operator_budget = _finalize_operator_task_budget(
             operator_user_id=operator_user_id,
             reservation_key=str(operator_budget.get("reservation_key") or ""),
@@ -27589,20 +26781,20 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_business",
-        "description": "Read one business summary, research and metrics indexes, workspaces, controls, ledger, jobs, and events.",
+        "description": "Read one business summary, research and metrics indexes, workspaces, controls, ledger, jobs, and events. Results label workspace-backed versus recorded-live truth so committed/live questions do not silently fall back to a local workspace copy.",
         "handler": handle_business_read_business,
         "schema": _schema(
             "business_read_business",
-            "Read one business.",
+            "Read one business. Source sections are labeled as canonical or working; recorded live state appears separately when available.",
             {"business": _BUSINESS_PROP, "query": {"type": "string"}, "include": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer"}},
             ["business"],
         ),
     },
     {
         "name": "business_read_file",
-        "description": "Read a file inside a business scope.",
+        "description": "Read a file inside a business scope. The result labels whether the bytes came from committed canonical source or an active working workspace.",
         "handler": handle_business_read_file,
-        "schema": _schema("business_read_file", "Read a business-scoped file.", {"business": _BUSINESS_PROP, "path": {"type": "string"}}, ["business", "path"]),
+        "schema": _schema("business_read_file", "Read a business-scoped file. Source-backed files are labeled as canonical or working; this read does not by itself prove live serving state.", {"business": _BUSINESS_PROP, "path": {"type": "string"}}, ["business", "path"]),
     },
     {
         "name": "business_calculate_pulse",

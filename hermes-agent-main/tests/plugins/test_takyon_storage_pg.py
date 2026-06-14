@@ -23,6 +23,7 @@ business. The module skips entirely unless psycopg is importable.
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from pathlib import Path
 import sys
@@ -50,7 +51,7 @@ def _seed_workspace(root: Path) -> None:
     (root / "research").mkdir(parents=True, exist_ok=True)
     (root / "research" / "strategy.md").write_text("# Acme\nGoal: win the market\n")
     (root / "product").mkdir(parents=True, exist_ok=True)
-    (root / "product" / "surface.md").write_text("# App Surface Contract\n\n- Status: draft\n")
+    (root / "product" / "surface.md").write_text("# Product Surface\n\n- Source path: product/site\n")
     (root / "metrics" / "receipts").mkdir(parents=True, exist_ok=True)
     (root / "metrics" / "receipts" / "r1.json").write_bytes(b"\x00\x01\x02 binary receipt")
 
@@ -201,7 +202,31 @@ def test_additive_sync_up_default_does_not_delete(tmp_path):
     (src / "product" / "surface.md").unlink()
     report = storage.sync_up(backend, "biz-x", src)  # default: additive
     assert report.deleted == ()
-    assert backend.get("biz-x/product/surface.md") == b"# App Surface Contract\n\n- Status: draft\n"  # still there
+    assert backend.get("biz-x/product/surface.md") == b"# Product Surface\n\n- Source path: product/site\n"  # still there
+
+
+def test_sync_up_excluded_prefixes_preserve_remote_product_site_even_with_delete_remote(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    _seed_workspace(src)
+    (src / "product" / "site").mkdir(parents=True, exist_ok=True)
+    (src / "product" / "site" / "index.html").write_text("<h1>Fresh build</h1>\n", encoding="utf-8")
+    storage.sync_up(backend, "biz-x", src)
+
+    # Simulate an operator cache that does not own product/site: it still has the rest of the
+    # workspace, but its local product/site tree is stale or absent. The exclusion must preserve
+    # the canonical product/site bytes even when the sync uses delete_remote mirror semantics.
+    shutil.rmtree(src / "product" / "site")
+    report = storage.sync_up(
+        backend,
+        "biz-x",
+        src,
+        delete_remote=True,
+        exclude_prefixes=("product/site",),
+    )
+
+    assert "product/site/index.html" not in report.deleted
+    assert backend.get("biz-x/product/site/index.html") == b"<h1>Fresh build</h1>\n"
 
 
 # ── path containment ───────────────────────────────────────────────────────────────────────────
