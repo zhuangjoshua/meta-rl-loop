@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import pytest
@@ -209,6 +210,23 @@ def test_workspace_root_flows_into_takyon_store(monkeypatch, tmp_path):
         clear_session_vars(tokens)
 
 
+def test_workspace_base_revision_state_flows_into_fresh_takyon_store(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch-home"
+    monkeypatch.delenv("TAKYON_SESSION_WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("TAKYON_SESSION_BUSINESS_SLUG", raising=False)
+
+    takyon_core._write_workspace_base_revisions(scratch, {"acme": 7})
+
+    tokens = set_session_vars(workspace_root=str(scratch), business_slug="acme")
+    try:
+        store = TakyonStore(root=home)
+        assert store._workspace_base_revision["acme"] == 7
+        assert store._workspace_truth("acme")["base_revision"] == 7
+    finally:
+        clear_session_vars(tokens)
+
+
 def test_business_slug_contextvar_round_trips(monkeypatch):
     monkeypatch.delenv("TAKYON_SESSION_BUSINESS_SLUG", raising=False)
 
@@ -344,6 +362,60 @@ def test_store_syncs_scratch_writes_outward_with_default_local_backend(monkeypat
     reader = TakyonStore(root=home, database_url=pg_store_dsn)
     result = reader.read(scope="business:acme", query="file", path="research/plan.md")
     assert result["content"] == "ship\n"
+
+
+def test_session_workspace_base_revision_persists_across_fresh_tool_stores(monkeypatch, tmp_path, pg_store_dsn):
+    bucket = tmp_path / "bucket"
+    home = tmp_path / "home"
+    scratch = tmp_path / "scratch-home"
+
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(bucket))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|session-env-base-revision")
+
+    admin = TakyonStore(root=home, database_url=pg_store_dsn)
+    admin.seed_platform_owner()
+    admin.commit(
+        scope="global",
+        operations=[{"action": "business.upsert", "business": "acme", "name": "Acme"}],
+        idempotency_key="test:session-base:business-upsert",
+    )
+    takyon_core._write_workspace_base_revisions(scratch, {"acme": 0})
+
+    tokens = set_session_vars(workspace_root=str(scratch), business_slug="acme")
+    try:
+        first = json.loads(
+            takyon_core.handle_business_write_file(
+                {
+                    "business": "acme",
+                    "path": "research/market.md",
+                    "content": "alpha\n",
+                    "idempotency_key": "test:session-base:first",
+                }
+            )
+        )
+        second = json.loads(
+            takyon_core.handle_business_write_file(
+                {
+                    "business": "acme",
+                    "path": "research/strategy.md",
+                    "content": "beta\n",
+                    "idempotency_key": "test:session-base:second",
+                }
+            )
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert TakyonStore(root=home, database_url=pg_store_dsn).read(
+        scope="business:acme",
+        query="file",
+        path="research/strategy.md",
+    )["content"] == "beta\n"
+    assert takyon_core._read_workspace_base_revisions(scratch)["acme"] == 2
 
 
 def test_set_session_env_includes_session_key():

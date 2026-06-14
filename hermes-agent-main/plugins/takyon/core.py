@@ -699,6 +699,47 @@ def _workspace_truth_metadata(*, session_scoped: bool) -> dict[str, Any]:
     }
 
 
+def _workspace_base_revision_state_path(workspace_root: Path) -> Path:
+    return Path(workspace_root).expanduser().resolve() / ".takyon-workspace-base-revisions.json"
+
+
+def _read_workspace_base_revisions(workspace_root: Path | None) -> dict[str, int]:
+    if workspace_root is None:
+        return {}
+    path = _workspace_base_revision_state_path(workspace_root)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    revisions: dict[str, int] = {}
+    for key, value in payload.items():
+        normalized = _slugify(str(key or ""))
+        if not normalized:
+            continue
+        try:
+            revisions[normalized] = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    return revisions
+
+
+def _write_workspace_base_revisions(workspace_root: Path | None, revisions: Mapping[str, Any]) -> None:
+    if workspace_root is None:
+        return
+    path = _workspace_base_revision_state_path(workspace_root)
+    payload = {
+        _slugify(str(key or "")): max(0, int(value or 0))
+        for key, value in dict(revisions or {}).items()
+        if _slugify(str(key or ""))
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, _json_dumps(payload) + "\n")
+
+
 def _surface_live_publication_state(surface: dict[str, Any] | None, *, business: str) -> dict[str, Any]:
     payload = surface if isinstance(surface, dict) else {}
     build_id = str(payload.get("live_build_id") or "").strip()
@@ -10720,7 +10761,7 @@ class TakyonStore:
         )
         self._workspace_sync_cache: set[str] = set()
         self._workspace_revision_cache: dict[str, int] = {}
-        self._workspace_base_revision: dict[str, int] = {}
+        self._workspace_base_revision: dict[str, int] = _read_workspace_base_revisions(self._workspace_root_override)
 
     def _workspace_storage_backend_kind(self) -> str:
         load_takyon_env()
@@ -11652,6 +11693,10 @@ class TakyonStore:
                 self._workspace_revision_cache[normalized] = current_head
                 if self._workspace_root_override is not None:
                     self._workspace_base_revision[normalized] = current_head
+                    _write_workspace_base_revisions(
+                        self._workspace_root_override,
+                        self._workspace_base_revision,
+                    )
                 return current_head
         next_revision = current_head + 1
         manifest = storage.write_workspace_revision(
@@ -11686,6 +11731,10 @@ class TakyonStore:
         self._workspace_revision_cache[normalized] = next_revision
         if self._workspace_root_override is not None:
             self._workspace_base_revision[normalized] = next_revision
+            _write_workspace_base_revisions(
+                self._workspace_root_override,
+                self._workspace_base_revision,
+            )
         return next_revision
 
     def _sync_business_workspace_remote(self, slug: str) -> str:
@@ -26068,6 +26117,11 @@ def _scoped_workspace_store(
             _slugify(str(key)): int(value or 0)
             for key, value in (dict(base_revision_by_slug or {})).items()
         }
+        if getattr(scoped, "_workspace_root_override", None) is not None and scoped._workspace_base_revision:
+            _write_workspace_base_revisions(
+                getattr(scoped, "_workspace_root_override"),
+                scoped._workspace_base_revision,
+            )
     if backend_override is not None:
         setattr(scoped, "_workspace_storage_backend_override", backend_override)
     return scoped
@@ -26095,6 +26149,7 @@ def _mounted_canonical_business_workspace(
         workspace = home / "businesses" / slug
         workspace.parent.mkdir(parents=True, exist_ok=True)
         head_revision = store._business_head_revision(slug)
+        _write_workspace_base_revisions(home, {slug: head_revision})
         if head_revision > 0:
             storage.materialize_workspace_revision(
                 backend,
