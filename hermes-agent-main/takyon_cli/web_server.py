@@ -8081,6 +8081,31 @@ def _product_publish_probe_authorized(
     )
 
 
+def _local_product_site_tree_looks_built(site_root: Path) -> bool:
+    index_path = (site_root / "index.html").resolve()
+    if site_root.resolve() not in (index_path, *index_path.parents) or not index_path.is_file():
+        return False
+    try:
+        body = index_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if re.search(
+        r"<script[^>]+src=['\"](/src/[^'\"]+)['\"][^>]*>",
+        body,
+        re.IGNORECASE,
+    ):
+        return False
+    if re.search(r"['\"](/assets/[^'\"]+)['\"]", body, re.IGNORECASE):
+        return True
+    assets_root = (site_root / "assets").resolve()
+    if site_root.resolve() not in (assets_root, *assets_root.parents) or not assets_root.is_dir():
+        return False
+    try:
+        return any(child.is_file() for child in assets_root.iterdir())
+    except OSError:
+        return False
+
+
 def _materialize_product_site_from_storage(business: str, *, publish_probe_token: str = "") -> Path | None:
     slug = _safe_product_slug(business)
     publish_root = _dashboard_product_site_root().resolve()
@@ -8186,7 +8211,8 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
     site_root = (root / slug).resolve()
     marker = site_root / ".takyon-published-at"
     materialized_root: Path | None = None
-    if site_root.is_dir() and not marker.is_file():
+    local_tree_ready = site_root.is_dir() and (marker.is_file() or _local_product_site_tree_looks_built(site_root))
+    if site_root.is_dir() and not local_tree_ready:
         materialized_root = await asyncio.to_thread(
             _materialize_product_site_from_storage,
             slug,

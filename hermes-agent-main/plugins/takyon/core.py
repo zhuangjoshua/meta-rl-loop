@@ -12553,6 +12553,27 @@ class TakyonStore:
         storage.sync_up(backend, _slugify(slug), workspace, delete_remote=True)
         return "synced"
 
+    def _replace_business_workspace_cache(self, slug: str, source_root: str | os.PathLike[str]) -> None:
+        """Refresh this store's local cache for one business from a verified source tree.
+
+        The operator-plane store for ``supabase_s3`` roots business files under
+        ``$TAKYON_HOME/cache/businesses/<slug>``. Docker product-site work, however, runs in a
+        scoped scratch store whose local business root lives elsewhere. After a successful scoped
+        worker run, later same-process operator writes must see the verified worker tree rather than
+        a stale pre-worker cache copy, or the next ``artifact.patch``/``artifact.write`` can sync a
+        stale tree back to canonical storage and clobber the real product source. This helper
+        atomically replaces the local cache copy so the next operator write starts from truthful
+        local state.
+        """
+        if self._workspace_root_override is not None:
+            return
+        source = Path(source_root).expanduser().resolve()
+        if not source.is_dir():
+            raise TakyonError(f"verified workspace source is missing: {source}")
+        target = self._business_root(slug, sync=False)
+        _replace_directory_tree_atomic(source, target)
+        self._workspace_sync_cache.add(_slugify(slug))
+
     def _delete_business_workspace_remote(self, slug: str) -> None:
         from . import storage
 
@@ -27484,6 +27505,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 reason=args.get("reason") or "Claude Agent SDK task record",
                 actor=args.get("actor") or "agent",
             )
+            if active_store is not store and hasattr(store, "_replace_business_workspace_cache"):
+                store._replace_business_workspace_cache(
+                    business,
+                    active_store._business_root(business, sync=False),
+                )
         operator_budget = _finalize_operator_task_budget(
             operator_user_id=operator_user_id,
             reservation_key=str(operator_budget.get("reservation_key") or ""),

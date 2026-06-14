@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import types
 from pathlib import Path
 
@@ -21,6 +22,8 @@ class _FakeStore:
     def __init__(self, root: Path, *, surface_contract: dict[str, object] | None = None):
         self.root = root
         self._workspace_root_override = None
+        self._workspace_sync_cache: set[str] = set()
+        self._workspace_storage_backend_override = None
         self._surface_contract = {
             "source_path": "product/site",
             "publish_policy": "publish_after_refresh",
@@ -52,8 +55,22 @@ class _FakeStore:
     def _resolve_business_file(self, business: str, rel: str, **_kwargs):
         return self._business_root(business) / rel
 
+    def _workspace_storage_backend(self):
+        if self._workspace_storage_backend_override is not None:
+            return self._workspace_storage_backend_override
+        return takyon_storage.LocalStorageBackend(self.root / "storage")
+
     def _sync_business_workspace_remote(self, business: str):
-        return None
+        workspace = self._business_root(business)
+        if not workspace.exists():
+            return "skipped_missing_workspace"
+        backend = self._workspace_storage_backend()
+        target = Path(getattr(backend, "root")) / takyon_storage.object_prefix(business)
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(workspace, target)
+        return "synced"
 
     def commit(self, **_kwargs):
         return {"success": True}
@@ -92,6 +109,7 @@ def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path,
                 "instruction": "Build the first honest product surface.",
                 "idempotency_key": "workspace-faster-defaults",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -139,6 +157,7 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
                 "idempotency_key": "workspace-clamped-turn-budget",
                 "max_turns": 500,
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -190,6 +209,7 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
                 "instruction": "Build the first honest product surface.",
                 "idempotency_key": "workspace-default-guidance",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -252,6 +272,7 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
                 "instruction": "Build the first honest product surface.",
                 "idempotency_key": "workspace-public-landing-composition",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -322,6 +343,7 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
                 "instruction": "Build the first honest product surface.",
                 "idempotency_key": "workspace-vibrant-guidance",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -389,6 +411,7 @@ def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
                 "instruction": "Build the first honest product surface.",
                 "idempotency_key": "workspace-actual-cost",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -438,6 +461,7 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
                 "guidance_skills": [],
                 "idempotency_key": "workspace-explicit-empty-guidance",
                 "install": False,
+                "refresh_surface": False,
             }
         )
     )
@@ -451,11 +475,15 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
     workspace.mkdir(parents=True, exist_ok=True)
     captured: dict[str, object] = {}
+    mounted_calls: list[dict[str, object]] = []
     store = _FakeStore(outer_home)
     store._workspace_root_override = outer_home
 
-    def fail_if_mounted(*args, **kwargs):
-        raise AssertionError("mounted_business_workspace should not be used when a session workspace root is active")
+    real_mounted_business_workspace = takyon_storage.mounted_business_workspace
+
+    def record_mount(*args, **kwargs):
+        mounted_calls.append({"args": args, "kwargs": kwargs})
+        return real_mounted_business_workspace(*args, **kwargs)
 
     def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
         captured["docker_workspace_path"] = workspace_path
@@ -481,10 +509,24 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
         "_finalize_operator_task_budget",
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: {
+            "status": "passed",
+            "source_path": "product/site",
+            "kind": "node_build",
+            "checks": [],
+            "inventory": {},
+            "publish": {"status": "published", "public_url": "https://latexflow.fourmanifold.com/"},
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+        },
+    )
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", lambda **_kwargs: [])
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
-    monkeypatch.setattr(takyon_storage, "mounted_business_workspace", fail_if_mounted)
+    monkeypatch.setattr(takyon_storage, "mounted_business_workspace", record_mount)
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -501,6 +543,215 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     assert result["success"] is True
     assert captured["docker_workspace_path"] == workspace
     assert captured["payload"]["cwd"] == str(workspace)
+    assert result["workspace_sync_status"] == "synced"
+    assert result["workspace_durability"]["matched"] is True
+    assert len(mounted_calls) == 1
+
+
+def test_scoped_workspace_store_uses_workspace_root_override_for_mounted_takyon_homes(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
+    prototype = takyon_core.TakyonStore(root=tmp_path / "outer-home", operator_user_id="user-123")
+    mounted_home = (tmp_path / "mounted-home").resolve()
+    scoped = takyon_core._scoped_workspace_store(
+        prototype,
+        root=mounted_home,
+        operator_user_id="user-123",
+    )
+
+    assert getattr(scoped, "_workspace_root_override", None) == mounted_home
+    assert scoped._business_workspace_base() == mounted_home / "businesses"
+    assert scoped._business_root("ledgerleaf", sync=False) == mounted_home / "businesses" / "ledgerleaf"
+
+
+def test_replace_business_workspace_cache_overwrites_stale_operator_cache_with_verified_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
+    store = takyon_core.TakyonStore(root=tmp_path / "outer-home", operator_user_id="user-123")
+    monkeypatch.setattr(store, "_workspace_storage_backend_kind", lambda: "supabase_s3")
+
+    stale_root = store._business_root("ledgerleaf", sync=False)
+    stale_landing = stale_root / "product" / "site" / "src" / "screens" / "landing.tsx"
+    stale_landing.parent.mkdir(parents=True, exist_ok=True)
+    stale_landing.write_text(
+        "export function LandingScreen() {\n  return <main aria-hidden=\"true\" data-takyon-scaffold=\"landing\" />;\n}\n",
+        encoding="utf-8",
+    )
+
+    verified_root = tmp_path / "verified-tree"
+    verified_landing = verified_root / "product" / "site" / "src" / "screens" / "landing.tsx"
+    verified_landing.parent.mkdir(parents=True, exist_ok=True)
+    verified_landing.write_text(
+        "export function LandingScreen() {\n  return <main>verified worker landing</main>;\n}\n",
+        encoding="utf-8",
+    )
+
+    store._replace_business_workspace_cache("ledgerleaf", verified_root)
+
+    assert stale_landing.read_text(encoding="utf-8") == verified_landing.read_text(encoding="utf-8")
+
+
+def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_diverges(tmp_path, monkeypatch):
+    outer_home = tmp_path / "outer-home"
+    workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
+    screens = workspace / "src" / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
+    store = _FakeStore(outer_home)
+    store._workspace_root_override = outer_home
+
+    def fake_sync(_business: str):
+        backend = store._workspace_storage_backend()
+        target = Path(getattr(backend, "root")) / takyon_storage.object_prefix("latexflow")
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(outer_home / "businesses" / "latexflow", target)
+        canonical_landing = target / "product" / "site" / "src" / "screens" / "landing.tsx"
+        canonical_landing.write_text(
+            "export function LandingScreen() {\n  return <main aria-hidden=\"true\" data-takyon-scaffold=\"landing\" />;\n}\n",
+            encoding="utf-8",
+        )
+        return "synced"
+
+    store._sync_business_workspace_remote = fake_sync
+
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+        return ["docker", "run"], payload, str(tmp_path), {}
+
+    def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
+        landing = Path(str(payload["cwd"])) / "src" / "screens" / "landing.tsx"
+        landing.parent.mkdir(parents=True, exist_ok=True)
+        landing.write_text(
+            "export function LandingScreen() {\n  return <main>worker landing</main>;\n}\n",
+            encoding="utf-8",
+        )
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: True)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("refresh should not run after a durability mismatch")),
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-durable-readback-mismatch",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["workspace_sync_status"] == "synced"
+    assert result["workspace_durability"]["matched"] is False
+    assert "worker_source_not_durable" in (result["error"] or "")
+    durability_paths = " ".join(
+        list(result["workspace_durability"]["changed"])
+        + list(result["workspace_durability"]["worker_only"])
+        + list(result["workspace_durability"]["canonical_only"])
+    )
+    assert "src/screens/landing.tsx" in durability_paths
+
+
+def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback(tmp_path, monkeypatch):
+    outer_home = tmp_path / "outer-home"
+    workspace = outer_home / "businesses" / "latexflow" / "product" / "site"
+    workspace.mkdir(parents=True, exist_ok=True)
+    store = _FakeStore(outer_home)
+    store._workspace_root_override = outer_home
+    refresh_calls: list[dict[str, object]] = []
+
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+        return ["docker", "run"], payload, str(tmp_path), {}
+
+    def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
+        landing = Path(str(payload["cwd"])) / "src" / "screens" / "landing.tsx"
+        landing.parent.mkdir(parents=True, exist_ok=True)
+        landing.write_text(
+            "export function LandingScreen() {\n  return <main>canonical worker landing</main>;\n}\n",
+            encoding="utf-8",
+        )
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    def fake_refresh(*, store, business: str, source_path: str, **kwargs):
+        source_root = store._resolve_business_file(
+            business,
+            source_path,
+            require_output_root=True,
+            field="workspace",
+        )
+        refresh_calls.append(
+            {
+                "store_root": str(store.root),
+                "source_root": str(source_root),
+                "landing": source_root.joinpath("src", "screens", "landing.tsx").read_text(encoding="utf-8"),
+            }
+        )
+        return {
+            "status": "passed",
+            "source_path": source_path,
+            "kind": "node_build",
+            "checks": [],
+            "inventory": {},
+            "publish": {"status": "published", "public_url": "https://latexflow.fourmanifold.com/"},
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+        }
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: True)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", fake_refresh)
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", lambda **_kwargs: [])
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-durable-readback-refresh",
+                "install": False,
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["workspace_sync_status"] == "synced"
+    assert result["workspace_durability"]["matched"] is True
+    assert len(refresh_calls) == 1
+    assert refresh_calls[0]["store_root"] != str(outer_home)
+    assert "canonical worker landing" in refresh_calls[0]["landing"]
 
 
 def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_home(tmp_path, monkeypatch):

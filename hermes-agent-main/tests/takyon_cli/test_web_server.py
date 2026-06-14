@@ -1965,6 +1965,44 @@ def test_product_subdomain_probe_token_materializes_pending_publish_from_storage
     assert (site_root / "latexflow" / "index.html").exists()
 
 
+def test_product_subdomain_serves_existing_unmarked_local_build_without_rehydrate(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.storage as takyon_storage
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    local_root = site_root / "latexflow"
+    assets_root = local_root / "assets"
+    assets_root.mkdir(parents=True)
+    (local_root / "index.html").write_text(
+        "<!doctype html><title>Latexflow</title><script type=\"module\" crossorigin src=\"/assets/index-built.js\"></script>",
+        encoding="utf-8",
+    )
+    (assets_root / "index-built.js").write_text("console.log('built');\n", encoding="utf-8")
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    def fail_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+        raise AssertionError("sync_down should not run when a built local site tree already exists")
+
+    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
+    monkeypatch.setattr(takyon_storage, "sync_down", fail_sync_down)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "index-built.js" in response.text
+
+
 def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
 
