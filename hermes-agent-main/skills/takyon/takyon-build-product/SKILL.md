@@ -72,6 +72,9 @@ This skill does **not** define the whole product workflow. It gets the site and 
   - build the landing page at `/`
   - keep `/app` as the auth/subscription shell
   - keep `/app/profile` as the account/subscription page
+  - keep access/account decisions on the shared helpers in `src/lib/hooks.ts`
+  - treat runtime account truth as `user` plus `entitlements[]`
+  - not hand-roll subscription gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` parsing in the screens
   - preserve the Vite route skeleton
   - not try to finish the full product workflow inside `/app`
 - Follow with `business_refresh_product_surface`.
@@ -101,6 +104,8 @@ This skill does **not** define the whole product workflow. It gets the site and 
 1. Build a real landing page at `/`; do not leave a redirect or fake placeholder.
 2. Keep `/app` and `/app/profile` as the truthful auth/subscription/account shell.
 3. Keep the Vite SPA route skeleton unless the operator explicitly changes routes.
-4. Do not invent deep product workflow doctrine here.
-5. Do not probe actions or fake the post-sign-in product loop here.
-6. Do not ship visible starter/scaffold UI as the product.
+4. Use the shared access/account helpers in `src/lib/hooks.ts` for `/app` and `/app/profile`; treat `user` plus `entitlements[]` as the canonical subscription truth.
+5. Do not reintroduce legacy subscription parsing such as `has_active_subscription`, nested `subscription.status`, or ad hoc screen-local `client.account()` adapters.
+6. Do not invent deep product workflow doctrine here.
+7. Do not probe actions or fake the post-sign-in product loop here.
+8. Do not ship visible starter/scaffold UI as the product.

@@ -59,6 +59,9 @@ This skill should inspect the existing source and flesh out the actual product w
   - inspect the current `/app` shell
   - turn `/app` into the real product
   - keep auth/account/subscription wiring through the shared runtime client
+  - keep access/account decisions on the shared helpers in `src/lib/hooks.ts`
+  - treat runtime account truth as `user` plus `entitlements[]`
+  - not hand-roll subscription gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` parsing in the screens
   - add action files under `product/site/actions/` whenever backend behavior is needed
   - use `createActionRunner(name)` / `invokeAction(name)` from the UI
   - keep landing/support/profile boundaries unless explicitly asked to change them
@@ -83,6 +86,7 @@ This skill should inspect the existing source and flesh out the actual product w
 
 1. Build the real product by inspecting the actual source and business context, not by filling out doctrine fields.
 2. Do not require action declaration before using real action files.
-3. Keep auth/account/subscription behavior on the shared runtime rails.
-4. Keep landing/support/profile boundaries unless explicitly asked to broaden scope.
-5. Do not fake saved state or backend behavior in the browser when an action file should exist.
+3. Keep auth/account/subscription behavior on the shared runtime rails, with `src/lib/hooks.ts` as the canonical access/account helper surface.
+4. Treat the shared account payload as `user` plus `entitlements[]`; do not revive legacy `has_active_subscription`, nested `subscription.status`, or custom screen-local `client.account()` parsing.
+5. Keep landing/support/profile boundaries unless explicitly asked to broaden scope.
+6. Do not fake saved state or backend behavior in the browser when an action file should exist.
