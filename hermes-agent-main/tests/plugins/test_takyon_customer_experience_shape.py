@@ -100,6 +100,25 @@ def test_materialized_subuser_kit_writes_js_context_only(tmp_path: Path):
     assert not (kit_root / "surface-context.md").exists()
 
 
+def test_materialized_subuser_kit_derives_actions_rail_from_workspace_files(tmp_path: Path):
+    workspace_root = tmp_path / "product" / "site"
+    (workspace_root / "actions").mkdir(parents=True)
+    (workspace_root / "actions" / "coach-chat.ts").write_text(
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+
+    takyon_core._materialize_subuser_app_kit(  # type: ignore[attr-defined]
+        workspace_root,
+        slug="plannerly",
+        surface={"runtime_features": ["auth", "account"], "routes": [{"path": "/"}, {"path": "/app"}]},
+    )
+
+    surface_context = (workspace_root / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text(
+        encoding="utf-8"
+    )
+    assert '"actions"' in surface_context
+
 def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_path: Path):
     workspace_root = tmp_path / "product" / "site"
     workspace_root.mkdir(parents=True)
@@ -228,7 +247,7 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
     assert "Use the shared runtime client and the declared shared rails already present in this workspace." in block
     assert "fail truthfully with the exact blocker" in block
     # Factual contract context is still injected.
-    assert "Declared runtime-backed features for this app: auth, account, actions, checkout" in block
+    assert "Declared runtime-backed features for this app: auth, account, checkout" in block
     assert "src/screens/" in block
     assert "Support-route screens live in `src/screens/support.tsx`" in block
     assert "createActionRunner" not in block

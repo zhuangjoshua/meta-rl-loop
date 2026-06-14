@@ -265,19 +265,71 @@ def _referenced_action_names_in_source(site_root: Path, *, limit: int = 300) -> 
     return referenced
 
 
+def _file_backed_action_names(site_root: Path, *, limit: int = 300) -> set[str]:
+    """Action files physically present under product/site/actions."""
+    names: set[str] = set()
+    actions_root = site_root / "actions"
+    if not actions_root.exists():
+        return names
+    scanned = 0
+    for path in sorted(actions_root.glob("*.ts")):
+        if scanned >= limit:
+            break
+        if not path.is_file():
+            continue
+        scanned += 1
+        name = path.stem.strip().lower()
+        if _ACTION_NAME_RE.match(name):
+            names.add(name)
+    return names
+
+
+def site_http_action_names(site_root: Path, surface: Mapping[str, Any]) -> set[str]:
+    """HTTP-runnable action files physically present for a product/site workspace."""
+    file_backed = _file_backed_action_names(site_root)
+    if not file_backed:
+        return set()
+    workflow = surface.get("product_workflow") if isinstance(surface.get("product_workflow"), Mapping) else {}
+    schedule_only = {
+        str(spec.get("name") or "").strip().lower()
+        for spec in normalize_action_specs(workflow.get("actions"))
+        if str(spec.get("trigger") or "").strip().lower() == "schedule"
+    }
+    http_runnable = {name for name in file_backed if name not in schedule_only}
+    if not http_runnable:
+        return set()
+    referenced = _referenced_action_names_in_source(site_root)
+    if referenced:
+        return referenced & http_runnable
+    return http_runnable
+
+
+def surface_http_action_names(
+    *,
+    store: Any,
+    business: str,
+    surface: Mapping[str, Any],
+    source_path: str,
+) -> set[str]:
+    """HTTP-runnable action files that make the actions rail truthfully callable."""
+    business_root = store._business_root(business)
+    site_root = (business_root / source_path) if source_path else (business_root / "product" / "site")
+    return site_http_action_names(site_root, surface)
+
+
 def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, Any], source_path: str) -> str:
     """Minimal action-rail blocker: referenced UI action names must have real files."""
     business_root = store._business_root(business)
     site_root = (business_root / source_path) if source_path else (business_root / "product" / "site")
     referenced = _referenced_action_names_in_source(site_root)
     actions_root = site_root / "actions"
+    file_backed = _file_backed_action_names(site_root)
     if not shutil.which("deno"):
         if referenced or actions_root.exists():
             return "actions rail requires the deno runtime on this host"
         return ""
     for action_name in sorted(referenced):
-        action_path = actions_root / f"{action_name}.ts"
-        if not action_path.exists():
+        if action_name not in file_backed:
             return f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts does not exist"
     return ""
 

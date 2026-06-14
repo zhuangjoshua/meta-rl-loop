@@ -316,6 +316,82 @@ def test_refresh_product_surface_builds_package_managed_vite_app_instead_of_shor
     assert (site / "dist" / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
 
 
+def test_refresh_product_surface_rematerializes_surface_context_before_build(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    site = business_root / "product" / "site"
+    src = site / "src"
+    src.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<!doctype html><html><body><div id='root'></div><script type='module' src='/src/main.tsx'></script></body></html>\n",
+        encoding="utf-8",
+    )
+    (src / "main.tsx").write_text("console.log('hello');\n", encoding="utf-8")
+    (site / "package.json").write_text(
+        """
+        {
+          "name": "plannerly",
+          "private": true,
+          "scripts": {
+            "build": "vite build"
+          },
+          "dependencies": {
+            "react": "18.3.1",
+            "vite": "5.4.21"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    (site / "actions").mkdir(parents=True)
+    (site / "actions" / "coach-chat.ts").write_text(
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+    kit_root = site / takyon_core.SUBUSER_KIT_DIRNAME
+    kit_root.mkdir(parents=True)
+    (kit_root / "surface-context.js").write_text(
+        'export const surfaceContext = {"runtimeFeatures":["auth","account"]};\n'
+        "export default surfaceContext;\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        takyon_core,
+        "_javascript_package_manager_command",
+        lambda name: {"available": True, "name": "npm", "command": ["/usr/bin/npm"], "source": "test"},
+    )
+
+    def fake_run_surface_command(command, *, cwd, timeout_seconds, env):
+        if command == ["/usr/bin/npm", "install", "--ignore-scripts"]:
+            return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
+        if command == ["/usr/bin/npm", "run", "build"]:
+            surface_context = (cwd / takyon_core.SUBUSER_KIT_DIRNAME / "surface-context.js").read_text(
+                encoding="utf-8"
+            )
+            assert '"actions"' in surface_context
+            dist = cwd / "dist"
+            dist.mkdir(parents=True, exist_ok=True)
+            (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+            return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
+        raise AssertionError(f"unexpected surface command: {command}")
+
+    monkeypatch.setattr(takyon_core, "_run_surface_command", fake_run_surface_command)
+
+    result = takyon_core._refresh_product_surface_path(
+        business_root,
+        "product/site",
+        surface={
+            "runtime_features": ["auth", "account"],
+            "routes": [{"path": "/"}, {"path": "/app"}],
+        },
+        install=True,
+    )
+
+    assert result["status"] == "passed"
+    assert '"actions"' in (kit_root / "surface-context.js").read_text(encoding="utf-8")
+
+
 def test_refresh_product_surface_blocks_when_build_produces_no_publishable_output(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"

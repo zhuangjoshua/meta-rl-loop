@@ -1171,11 +1171,16 @@ def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
 def _surface_declared_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     if not isinstance(surface, dict):
         return []
-    direct = _normalize_runtime_features(surface.get("runtime_features"))
-    if direct:
-        return direct
+    direct = [rail for rail in _normalize_runtime_features(surface.get("runtime_features")) if rail != "actions"]
+    file_backed = [
+        rail
+        for rail in _normalize_runtime_features(surface.get("_workspace_file_rails"))
+        if rail == "actions"
+    ]
+    if direct or file_backed:
+        return _normalize_runtime_features([*direct, *file_backed])
     metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
-    return _normalize_runtime_features(metadata.get("runtime_features"))
+    return [rail for rail in _normalize_runtime_features(metadata.get("runtime_features")) if rail != "actions"]
 
 
 def _surface_runtime_features(surface: dict[str, Any] | None) -> list[str]:
@@ -1259,8 +1264,8 @@ def _canonical_runtime_features_for_surface_shape(
                 declared.append(rail)
 
     # `generate` is the only rail with an implicit dependency that is not already
-    # captured by _RUNTIME_FEATURE_DEPENDENCIES; every other rail (including
-    # `actions`) is now declared explicitly during the workflow step.
+    # captured by _RUNTIME_FEATURE_DEPENDENCIES. File-backed HTTP `actions` are
+    # derived at workspace materialization time instead of being stored here.
     if "generate" in declared:
         include(("auth", "account"))
     return _normalize_runtime_features(declared, strict=True)
@@ -1614,14 +1619,6 @@ def _merge_product_workflow_metadata(
     return merged
 
 
-def _product_workflow_declares_actions(product_workflow: dict[str, Any] | None) -> bool:
-    if not isinstance(product_workflow, dict):
-        return False
-    try:
-        from . import app_actions as takyon_app_actions
-    except ImportError:
-        from plugins.takyon import app_actions as takyon_app_actions
-    return bool(takyon_app_actions.normalize_action_specs(product_workflow.get("actions")))
 
 
 def _runtime_features_implied_by_product_workflow(product_workflow: dict[str, Any] | None) -> list[str]:
@@ -1637,8 +1634,6 @@ def _runtime_features_implied_by_product_workflow(product_workflow: dict[str, An
             return
         implied.append(rail)
 
-    if _product_workflow_declares_actions(product_workflow):
-        include("actions")
     persistence_rules = (
         product_workflow.get("persistence_rules")
         if isinstance(product_workflow.get("persistence_rules"), dict)
@@ -2095,6 +2090,32 @@ def _render_runtime_endpoint_hints(
     return ", ".join(rendered)
 
 
+def _materialized_surface_for_workspace(
+    workspace_root: Path,
+    *,
+    surface: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(surface, dict):
+        return surface
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+    surface_with_workflow = {
+        **surface,
+        "product_workflow": _surface_product_workflow_shape(surface),
+    }
+    file_rails = []
+    runtime_features = _surface_runtime_features(surface)
+    if takyon_app_actions.site_http_action_names(workspace_root, surface_with_workflow):
+        file_rails.append("actions")
+    return {
+        **surface_with_workflow,
+        "runtime_features": runtime_features,
+        "_workspace_file_rails": file_rails,
+    }
+
+
 def _materialize_subuser_app_kit(
     workspace_root: Path,
     *,
@@ -2119,14 +2140,15 @@ def _materialize_subuser_app_kit(
             destination = target_root / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
-    context_payload = _subuser_surface_context_payload(surface, slug=slug, plans=plans)
+    materialized_surface = _materialized_surface_for_workspace(workspace_root, surface=surface)
+    context_payload = _subuser_surface_context_payload(materialized_surface, slug=slug, plans=plans)
     (target_root / "surface-context.js").write_text(
         "export const surfaceContext = "
         + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
         + ";\nexport const subuserSurfaceContext = surfaceContext;\nexport default surfaceContext;\n",
         encoding="utf-8",
     )
-    _materialize_subuser_app_starter(workspace_root, slug=slug, surface=surface)
+    _materialize_subuser_app_starter(workspace_root, slug=slug, surface=materialized_surface)
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
@@ -9174,6 +9196,7 @@ def _refresh_product_surface_path(
     source_path: str,
     *,
     surface: dict[str, Any] | None = None,
+    plans: list[dict[str, Any]] | None = None,
     install: bool = True,
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
@@ -9310,6 +9333,19 @@ def _refresh_product_surface_path(
             }
         )
         return result
+    if _workspace_needs_runtime_ui_contract(source_rel):
+        try:
+            # The kit is statically imported into the pinned Vite bundle, so refresh must
+            # rewrite it from the current surface truth before the build runs.
+            _materialize_subuser_app_kit(
+                root,
+                slug=business_root.name,
+                surface=surface,
+                plans=plans,
+            )
+        except Exception as exc:
+            result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
+            return result
     if install:
         if package_manager.get("available"):
             install_check = _run_surface_command(
@@ -12248,8 +12284,16 @@ class TakyonStore:
     def _rewrite_app_files(self, conn: sqlite3.Connection, slug: str) -> None:
         root = self._business_root(slug) / "product"
         surface = self._app_surface_contract(conn, slug)
-        shape = _surface_subuser_app_shape(surface)
-        surface_evidence = self._product_surface_evidence(conn, slug, surface)
+        source_path = str(surface.get("source_path") or "").strip()
+        source_root = None
+        surface_for_files = surface
+        if source_path and _workspace_needs_runtime_ui_contract(source_path):
+            candidate_root = (self._business_root(slug) / source_path).resolve()
+            if self._business_root(slug).resolve() in (candidate_root, *candidate_root.parents):
+                source_root = candidate_root
+                surface_for_files = _materialized_surface_for_workspace(candidate_root, surface=surface)
+        shape = _surface_subuser_app_shape(surface_for_files)
+        surface_evidence = self._product_surface_evidence(conn, slug, surface_for_files)
         inventory = surface_evidence.get("inventory") if isinstance(surface_evidence.get("inventory"), dict) else {}
 
         surface_lines = [
@@ -12265,23 +12309,23 @@ class TakyonStore:
             "",
             "## Shell Record",
             "",
-            f"- Source path: {surface.get('source_path') or 'not set'}",
-            f"- Runtime API base fallback: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
-            f"- Runtime rails: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
+            f"- Source path: {surface_for_files.get('source_path') or 'not set'}",
+            f"- Runtime API base fallback: {surface_for_files.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
+            f"- Runtime rails: {', '.join(_surface_runtime_features(surface_for_files)) or 'none declared'}",
             (
                 "- Bootstrap shell rails available now: "
-                + ", ".join(_surface_effective_runtime_features(surface))
+                + ", ".join(_surface_effective_runtime_features(surface_for_files))
             )
             if (
-                not _surface_runtime_features(surface)
-                and _surface_bootstrap_access_shell_runtime_features(surface)
+                not _surface_runtime_features(surface_for_files)
+                and _surface_bootstrap_access_shell_runtime_features(surface_for_files)
             )
             else "- Bootstrap shell rails available now: not applicable",
-            f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
-            f"- Notes: {surface.get('notes') or 'not set'}",
+            f"- Publish target: {surface_for_files.get('publish_target') or _product_publish_target(slug)}",
+            f"- Notes: {surface_for_files.get('notes') or 'not set'}",
         ]
         surface_lines.extend(["", "## Routes", ""])
-        routes = surface.get("routes") or []
+        routes = surface_for_files.get("routes") or []
         if isinstance(routes, list) and routes:
             for route in routes:
                 if isinstance(route, dict):
@@ -12292,7 +12336,7 @@ class TakyonStore:
                     surface_lines.append(f"- {_markdown_scalar(route)}")
         else:
             surface_lines.append("- No frontend routes recorded.")
-        selected_runtime_rails = _surface_runtime_features(surface)
+        selected_runtime_rails = _surface_runtime_features(surface_for_files)
         surface_lines.extend(["", "## Runtime Rails", ""])
         if not selected_runtime_rails:
             surface_lines.append("- No runtime rails declared.")
@@ -12302,7 +12346,7 @@ class TakyonStore:
                 owner = str(spec.get("owner_skill") or "unknown").strip() or "unknown"
                 surface_lines.append(f"- {rail} — owner: {owner}")
                 endpoints = spec.get("endpoints") or []
-                runtime_api_base = str(surface.get("runtime_api_base") or "").strip().rstrip("/")
+                runtime_api_base = str(surface_for_files.get("runtime_api_base") or "").strip().rstrip("/")
                 if endpoints:
                     rendered = _render_runtime_endpoint_hints(endpoints, runtime_api_base=runtime_api_base)
                     surface_lines.append(f"  - Reachable runtime endpoints: {rendered}")
@@ -12392,14 +12436,12 @@ class TakyonStore:
                         f"- {item.get('path')}:{item.get('line') or '?'} {_markdown_scalar(item.get('snippet'))}"
                     )
         _atomic_write_text(root / "surface.md", "\n".join(surface_lines).rstrip() + "\n")
-        source_path = str(surface.get("source_path") or "").strip()
-        if source_path and _workspace_needs_runtime_ui_contract(source_path):
-            source_root = (self._business_root(slug) / source_path).resolve()
+        if source_root is not None:
             if self._business_root(slug).resolve() in (source_root, *source_root.parents):
                 _materialize_subuser_app_kit(
                     source_root,
                     slug=slug,
-                    surface=surface,
+                    surface=surface_for_files,
                     plans=[
                         self._row_to_dict(row)
                         for row in conn.execute(
@@ -14091,18 +14133,21 @@ class TakyonStore:
                 context="product surface source update",
             )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
-            runtime_features = (
+            requested_runtime_features = (
                 _normalize_runtime_features(op.get("runtime_features"))
                 if op.get("runtime_features") is not None
-                else _surface_runtime_features(existing)
+                else _normalize_runtime_features(existing.get("runtime_features"))
             )
+            runtime_features = list(requested_runtime_features)
             frontend_stack_value = (
                 _frontend_stack_for_contract_upsert(existing, op.get("frontend_stack"))
                 or existing_shape.get("frontend_stack")
                 or DEFAULT_SUBUSER_FRONTEND_STACK
             )
             bootstrap_seed = not existing_has_source_files
-            runtime_features = _canonical_runtime_features_for_surface_shape(runtime_features)
+            runtime_features = _canonical_runtime_features_for_surface_shape(
+                [rail for rail in runtime_features if rail != "actions"]
+            )
             raw_routes = op.get("routes") if op.get("routes") is not None else []
             if isinstance(raw_routes, dict):
                 routes = [raw_routes]
@@ -14114,7 +14159,7 @@ class TakyonStore:
             if bootstrap_seed and not route_paths:
                 route_paths = list(DEFAULT_SUBUSER_APP_ROUTES)
             app_shell_required_seed = _surface_shape_requires_app_shell(
-                runtime_features=runtime_features,
+                runtime_features=requested_runtime_features or runtime_features,
                 required_routes=route_paths,
             )
             runtime_features = _canonical_bootstrap_access_runtime_features(
@@ -16697,6 +16742,7 @@ def _finalize_product_surface_refresh(
     store: "TakyonStore",
     business: str,
     surface: dict[str, Any],
+    plans: list[dict[str, Any]] | None,
     source_path: str,
     publish_target: str,
     requested_publish_policy: str,
@@ -16711,10 +16757,17 @@ def _finalize_product_surface_refresh(
     except Exception:
         from plugins.takyon import app_actions as takyon_app_actions
 
+    surface_with_workflow = {
+        **surface,
+        "product_workflow": _surface_product_workflow_shape(surface),
+        "runtime_features": _surface_runtime_features(surface),
+    }
+
     refresh = _refresh_product_surface_path(
         store._business_root(business),
         source_path,
-        surface=surface,
+        surface=surface_with_workflow,
+        plans=plans,
         install=install,
         timeout_seconds=timeout_seconds,
     )
@@ -16739,10 +16792,7 @@ def _finalize_product_surface_refresh(
     action_blocker = takyon_app_actions.action_refresh_blocker(
         store=store,
         business=business,
-        surface={
-            **surface,
-            "product_workflow": _surface_product_workflow_shape(surface),
-        },
+        surface=surface_with_workflow,
         source_path=source_path,
     )
     if action_blocker:
@@ -16802,6 +16852,7 @@ def _finalize_product_surface_refresh(
         **refresh,
         "business": business,
         "receipt_path": receipt_path,
+        "runtime_features": _surface_runtime_features(surface),
         "publish": publish,
         "inventory": inventory,
         "action_invocations": action_invocations,
@@ -16860,7 +16911,7 @@ def _product_surface_refresh_operations(
                 "status": next_status,
                 "source_path": surface_refresh.get("source_path"),
                 "runtime_api_base": surface.get("runtime_api_base"),
-                "runtime_features": surface.get("runtime_features") or [],
+                "runtime_features": surface_refresh.get("runtime_features") or surface.get("runtime_features") or [],
                 "routes": surface.get("routes") or [],
                 "publish_target": publish_target,
                 "notes": surface.get("notes") or "",
@@ -16906,6 +16957,7 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
         surface = app.get("surface") or app.get("surface_contract") or {}
         if not isinstance(surface, dict):
             surface = {}
+        plans = app.get("plans") if isinstance(app.get("plans"), list) else None
         source_path = _enforce_canonical_product_surface_source_path(
             business=business,
             existing_source_path=str(surface.get("source_path") or "").strip(),
@@ -16923,6 +16975,7 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
             store=store,
             business=business,
             surface=surface,
+            plans=plans,
             source_path=source_path,
             publish_target=publish_target,
             requested_publish_policy=requested_publish_policy,
@@ -26496,8 +26549,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     backend_override=workspace_backend,
                     base_revision_by_slug={business: mounted_base_revision},
                 )
-                active_store._workspace_sync_cache.add(_slugify(business))
-                active_store._workspace_revision_cache[_slugify(business)] = mounted_base_revision
 
             app_summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
             app = app_summary.get("app") if isinstance(app_summary.get("app"), dict) else {}
@@ -26540,6 +26591,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 raise TakyonError(f"workspace is not a directory: {workspace_rel}")
             if business_root not in (workspace_path, *workspace_path.parents):
                 raise TakyonError("workspace escaped business root")
+            if _workspace_needs_runtime_ui_contract(workspace_rel):
+                surface_for_worker = _materialized_surface_for_workspace(
+                    workspace_path,
+                    surface=surface_for_worker,
+                )
 
             script = _repo_root() / "scripts" / "takyon-claude-agent-task.mjs"
             if not script.exists():
@@ -26804,6 +26860,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         store=active_store,
                         business=business,
                         surface=surface,
+                        plans=app.get("plans") if isinstance(app.get("plans"), list) else None,
                         source_path=surface_refresh_source_path,
                         publish_target=_product_publish_target(business, surface.get("publish_target")),
                         requested_publish_policy=requested_publish_policy,

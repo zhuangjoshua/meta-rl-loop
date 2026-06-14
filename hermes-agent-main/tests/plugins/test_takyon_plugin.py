@@ -699,6 +699,88 @@ def test_active_surface_requires_product_refresh_receipt(tmp_path, monkeypatch):
     assert pulse["summary"]["local_continuable_product_work"] == 0
 
 
+def test_product_surface_refresh_keeps_http_actions_out_of_stored_runtime_features(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
+    from plugins.takyon import app_actions as takyon_app_actions
+
+    monkeypatch.setattr(takyon_app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    def fake_refresh(_business_root, _source_path, *, surface, plans, install, timeout_seconds):
+        return {
+            "status": "passed",
+            "kind": "vite_react_ts",
+            "source_path": "product/site",
+            "inventory": {
+                "status": "collected",
+                "routes": ["/", "/app", "/app/profile"],
+            },
+            "warnings": [],
+            "error": "",
+            "local_continuable_work": [],
+        }
+
+    def fake_publish(*, business_root, slug, source_path, publish_target, source_revision):
+        return {
+            "status": "published",
+            "public_url": publish_target,
+            "publish_target": publish_target,
+            "publish_source_path": source_path,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "live_build_id": "test-build",
+            "live_probe_status": "ok",
+            "live_probe_detail": "",
+            "artifact_prefix": "",
+            "source_revision": source_revision,
+        }
+
+    monkeypatch.setattr(takyon_core, "_refresh_product_surface_path", fake_refresh)
+    monkeypatch.setattr(takyon_core, "_publish_product_surface_path", fake_publish)
+
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow", "budget": {"amount": 25}}],
+        "init-refresh-action-promotion",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/", "/app", "/app/profile"]}],
+        "surface-refresh-action-promotion",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    (site / "src" / "screens").mkdir(parents=True)
+    (site / "actions").mkdir(parents=True)
+    (site / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("coach-chat");\n',
+        encoding="utf-8",
+    )
+    (site / "actions" / "coach-chat.ts").write_text(
+        "export default async (payload, ctx) => ({ reply: 'locked in' });\n",
+        encoding="utf-8",
+    )
+
+    result = json.loads(
+        handle_business_refresh_product_surface(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "install": False,
+                "idempotency_key": "refresh-action-promotion",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert "actions" not in result["surface_refresh"]["runtime_features"]
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert "actions" not in app["surface_contract"]["runtime_features"]
+    context_payload = _subuser_surface_context_payload(app["surface_contract"], slug="latexflow")
+    assert "actions" not in context_payload["runtimeFeatures"]
+
+
 def test_product_surface_projection_turns_stale_when_source_changes_after_publish(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
@@ -1811,7 +1893,7 @@ def test_existing_source_can_select_actions_before_named_actions_exist(tmp_path,
     app = store.read(scope="business:longer", query="summary", include=["app"])["app"]
     surface = app["surface_contract"]
 
-    assert _surface_runtime_features(surface) == ["auth", "account", "actions"]
+    assert _surface_runtime_features(surface) == ["auth", "account"]
 
 
 def test_surface_upsert_backfills_monthly_plan_for_existing_app_shell_source(tmp_path, monkeypatch):

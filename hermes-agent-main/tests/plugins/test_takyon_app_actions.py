@@ -349,6 +349,7 @@ def test_finalize_product_surface_refresh_includes_action_invocation_summary(tmp
                 }
             },
         },
+        plans=None,
         source_path="product/site",
         publish_target="https://mathflow.fourmanifold.com/",
         requested_publish_policy="publish_after_refresh",
@@ -586,6 +587,84 @@ def test_action_blocker_flags_missing_ui_action_file(tmp_path):
     )
     assert "product UI invokes action `translate`" in blocker
     assert "product/site/actions/translate.ts does not exist" in blocker
+
+
+def test_surface_http_action_names_detects_referenced_file_backed_http_actions(tmp_path):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("coach-chat");\n', encoding="utf-8"
+    )
+    (base / "actions" / "coach-chat.ts").write_text(
+        "export default async () => ({ ok: true });\n", encoding="utf-8"
+    )
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    names = app_actions.surface_http_action_names(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert names == {"coach-chat"}
+
+
+def test_surface_http_action_names_excludes_schedule_only_action_files(tmp_path):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "actions").mkdir(parents=True)
+    (base / "actions" / "nightly-checkin.ts").write_text(
+        "export default async () => ({ ok: true });\n", encoding="utf-8"
+    )
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    names = app_actions.surface_http_action_names(
+        store=_Store(),
+        business="biz",
+        surface={
+            "runtime_features": ["auth", "account"],
+            "product_workflow": {"actions": [{"name": "nightly-checkin", "trigger": "schedule"}]},
+        },
+        source_path="product/site",
+    )
+    assert names == set()
+
+
+def test_product_surface_refresh_operations_persist_runtime_features_without_http_actions():
+    operations = takyon_core._product_surface_refresh_operations(  # type: ignore[attr-defined]
+        business="biz",
+        surface_refresh={
+            "status": "passed",
+            "receipt_path": "metrics/receipts/product-surface/test.json",
+            "source_path": "product/site",
+            "runtime_features": ["auth", "account"],
+            "publish": {
+                "status": "published",
+                "public_url": "https://biz.fourmanifold.com/",
+                "publish_target": "https://biz.fourmanifold.com/",
+            },
+        },
+        surface={
+            "runtime_api_base": "/api/takyon/apps/biz",
+            "runtime_features": ["auth", "account"],
+            "routes": ["/", "/app"],
+            "notes": "",
+            "metadata": {},
+        },
+        publish_target="https://biz.fourmanifold.com/",
+        publish_policy="publish_after_refresh",
+        requested_publish_policy="publish_after_refresh",
+        activate_on_success=True,
+    )
+
+    upsert = next(op for op in operations if op.get("action") == "app.surface.upsert")
+    assert upsert["runtime_features"] == ["auth", "account"]
 
 
 def test_action_blocker_passes_when_ui_call_matches_declared_spec_and_file(tmp_path, monkeypatch):
