@@ -1892,6 +1892,140 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
     assert (site_root / "latexflow" / ".takyon-published-at").exists()
 
 
+def test_product_subdomain_probe_token_materializes_pending_publish_from_storage(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import plugins.takyon.storage as takyon_storage
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read(self, **_kwargs):
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "blocked",
+                        "publish_target": "https://latexflow.fourmanifold.com/",
+                        "published_at": "",
+                        "source_path": "product/site",
+                    }
+                }
+            }
+
+    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+        assert slug == "latexflow"
+        site = Path(dest_dir) / "product" / "site"
+        dist = site / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text(
+            "<!doctype html><title>Latexflow</title><main>Materialized from pending publish</main>",
+            encoding="utf-8",
+        )
+        (site.parent / ".takyon-publish-probe.json").write_text(
+            json.dumps(
+                {
+                    "business": "latexflow",
+                    "publish_target": "https://latexflow.fourmanifold.com/",
+                    "source_path": "product/site",
+                    "token": "probe-token-123",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return takyon_storage.SyncReport(downloaded=("product/site/dist/index.html",))
+
+    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
+    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        blocked = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        allowed = client.get(
+            "/?__takyon_publish_probe=probe-token-123",
+            headers={"Host": "latexflow.fourmanifold.com"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert blocked.status_code == 404
+    assert allowed.status_code == 200
+    assert "Materialized from pending publish" in allowed.text
+    assert (site_root / "latexflow" / "index.html").exists()
+
+
+def test_product_subdomain_rehydrates_existing_unmarked_site_from_storage(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import plugins.takyon.storage as takyon_storage
+    import takyon_cli.web_server as web_server
+
+    site_root = tmp_path / "product-sites"
+    stale_root = site_root / "latexflow"
+    stale_root.mkdir(parents=True)
+    (stale_root / "index.html").write_text(
+        "<!doctype html><title>Latexflow</title><main>Stale local source tree</main>",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read(self, **_kwargs):
+            return {
+                "app": {
+                    "surface_contract": {
+                        "publish_status": "published",
+                        "published_at": "2026-06-13T22:05:00+00:00",
+                        "source_path": "product/site",
+                    }
+                }
+            }
+
+    def fake_sync_down(_backend, slug, dest_dir, *, delete_local=False):
+        assert slug == "latexflow"
+        dist = Path(dest_dir) / "product" / "site" / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text(
+            "<!doctype html><title>Latexflow</title><main>Rehydrated published build</main>",
+            encoding="utf-8",
+        )
+        return takyon_storage.SyncReport(downloaded=("product/site/dist/index.html",))
+
+    monkeypatch.setattr(takyon_core, "TakyonStore", FakeStore)
+    monkeypatch.setattr(takyon_storage, "get_storage_backend", lambda: object())
+    monkeypatch.setattr(takyon_storage, "sync_down", fake_sync_down)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert "Rehydrated published build" in response.text
+    assert (site_root / "latexflow" / ".takyon-published-at").exists()
+
+
 def test_normalize_product_rail_route_handles_path_variants():
     import takyon_cli.web_server as web_server
 
@@ -2777,6 +2911,26 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
 
     assert status_resp.status_code == 200
     assert elapsed < 0.2
+
+
+def test_product_host_assets_route_serves_published_product_assets(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    publish_root = tmp_path / "product-sites"
+    site_root = publish_root / "plannerly"
+    assets_root = site_root / "assets"
+    assets_root.mkdir(parents=True, exist_ok=True)
+    (assets_root / "app.js").write_text("console.log('plannerly');\n", encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "_dashboard_product_site_root", lambda: publish_root)
+
+    client = TestClient(web_server.app)
+    response = client.get("/assets/app.js", headers={"Host": "plannerly.fourmanifold.com"})
+
+    assert response.status_code == 200
+    assert "plannerly" in response.text
 
 
 def test_operator_root_redirects_to_chat(monkeypatch):

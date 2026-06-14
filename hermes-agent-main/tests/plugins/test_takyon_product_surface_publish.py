@@ -160,6 +160,86 @@ def test_publish_product_surface_syncs_built_workspace_to_canonical_storage_befo
     assert (stored_dist_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#fedcba}\n"
 
 
+def test_publish_product_surface_requires_public_probe_even_without_caddyfile(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    site = business_root / "product" / "site"
+    dist = site / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+    (dist / "assets").mkdir()
+    (dist / "assets" / "app.css").write_text("body{color:#456789}\n", encoding="utf-8")
+
+    publish_root = tmp_path / "product-sites"
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(storage_root))
+    monkeypatch.delenv("TAKYON_PRODUCT_LOCAL_BASE_URL", raising=False)
+    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
+    monkeypatch.setattr(
+        takyon_core,
+        "_probe_product_public_url_with_token",
+        lambda _url, *, publish_probe_token="": (
+            False,
+            "public URL probe failed for https://plannerly.fourmanifold.com/: served raw source entry instead of built assets",
+        ),
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "blocked"
+    assert "raw source entry" in result["blocker"]
+
+
+def test_publish_product_surface_blocks_when_probe_marker_cleanup_cannot_sync(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    site = business_root / "product" / "site"
+    dist = site / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.delenv("TAKYON_PRODUCT_LOCAL_BASE_URL", raising=False)
+    monkeypatch.setattr(takyon_core, "_ensure_product_static_caddy_route", lambda **_: (None, ""))
+    monkeypatch.setattr(
+        takyon_core,
+        "_probe_product_public_url_with_token",
+        lambda _url, *, publish_probe_token="": (True, ""),
+    )
+
+    sync_statuses = iter(
+        [
+            {"status": "synced", "backend_name": "local", "blocker": ""},
+            {"status": "blocked", "backend_name": "local", "blocker": "cleanup sync failed"},
+        ]
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_sync_published_business_workspace_to_storage",
+        lambda **_: next(sync_statuses),
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocker"] == "cleanup sync failed"
+
+
 def test_refresh_product_surface_builds_package_managed_vite_app_instead_of_short_circuiting_to_source(
     tmp_path,
     monkeypatch,

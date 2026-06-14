@@ -28,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -209,8 +209,8 @@ SUBUSER_APP_WORKER_CONTRACT_INTRO = """Hermes sub-user app plane contract:
 - Customer identity and all account/session/entitlement/checkout/usage truth come only from the declared app runtime rails, never from browser-only state.
 """
 SUPPORTED_PRODUCT_BUILD_SHAPES_CONTRACT = """Supported product build shapes:
-- For product apps, the supported target lane today is the pinned Vite static app scaffold; treat any surviving Next/AppKit tree as upgrade input, not a target shape to extend.
-- Match that lane consistently across package.json scripts, source layout, and publishable output.
+- For product apps, the supported target today is the pinned Vite static app scaffold; treat any surviving Next/AppKit tree as upgrade input, not a target shape to extend.
+- Match that scaffold consistently across package.json scripts, source layout, and publishable output.
 """
 WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - You may edit files only inside the current workspace.
@@ -501,7 +501,7 @@ DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD = 5_000_000
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA = 0
-DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout", "actions")
+DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES = ("auth", "account", "profile", "checkout")
 DEFAULT_SUBUSER_APP_ROUTES = (
     "/",
     "/faq",
@@ -511,12 +511,13 @@ DEFAULT_SUBUSER_APP_ROUTES = (
     "/app",
     "/app/profile",
 )
-SUBUSER_FRONTEND_STACK_CHOICES = frozenset({"vite_react_ts", "legacy"})
+SUBUSER_FRONTEND_STACK_CHOICES = frozenset({"vite_react_ts"})
+_LEGACY_FRONTEND_STACK_ALIASES = {"legacy": "vite_react_ts"}
 DEFAULT_SUBUSER_FRONTEND_STACK = "vite_react_ts"
 
 
 def _frontend_stack_for_contract_upsert(existing_surface: Any, requested: Any) -> Any:
-    """All app surfaces now normalize onto the pinned scaffold lane."""
+    """All app surfaces now normalize onto the pinned Vite scaffold."""
     normalized_requested = _normalize_frontend_stack_choice(requested)
     if normalized_requested:
         return normalized_requested
@@ -526,9 +527,12 @@ def _frontend_stack_for_contract_upsert(existing_surface: Any, requested: Any) -
 
 
 def _normalize_frontend_stack_choice(value: Any) -> str:
-    normalized = _normalize_subuser_surface_choice(value, allowed=SUBUSER_FRONTEND_STACK_CHOICES)
-    if normalized == "legacy":
-        return "vite_react_ts"
+    text = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+    if not text:
+        return ""
+    normalized = _LEGACY_FRONTEND_STACK_ALIASES.get(text, text)
+    if normalized not in SUBUSER_FRONTEND_STACK_CHOICES:
+        return ""
     return normalized
 
 
@@ -666,6 +670,7 @@ _DEFAULT_PRODUCT_DONE_GATE = "business_refresh_product_surface:published_or_exac
 _SHARED_RENDERER_PUBLISH_POLICIES = {"shared_renderer", "shared_product_renderer", "shared_page_renderer"}
 _PRODUCT_SERVICE_PORT_MIN = 9200
 _PRODUCT_SERVICE_PORT_MAX = 9799
+_PRODUCT_PUBLISH_PROBE_STATE_RELPATH = "product/.takyon-publish-probe.json"
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -1116,8 +1121,8 @@ def _surface_subuser_app_shape(surface: dict[str, Any] | None) -> dict[str, Any]
     if not frontend_api_mode:
         frontend_api_mode = SUBUSER_FRONTEND_API_MODE
     kit_path = str(payload.get("kit_path") or SUBUSER_KIT_DIRNAME).strip() or SUBUSER_KIT_DIRNAME
-    # frontend_stack is hidden internal platform state (the scaffold lane key),
-    # not an operator-authored field; it always resolves to the pinned lane.
+    # frontend_stack is hidden internal platform state (the scaffold key),
+    # not an operator-authored field; it always resolves to the pinned scaffold.
     return {
         "frontend_api_mode": frontend_api_mode,
         "frontend_stack": _normalize_frontend_stack_choice(payload.get("frontend_stack")) or DEFAULT_SUBUSER_FRONTEND_STACK,
@@ -1194,7 +1199,7 @@ def _validate_frontend_stack_runtime_feature_contract(
         return
     if "generate" in set(runtime_features or []):
         raise TakyonError(
-            "generate is not a declarable rail on the vite_react_ts lane — AI generation must be "
+            "generate is not a declarable rail on the pinned Vite scaffold — AI generation must be "
             "implemented behind a product action file that calls the shared generate broker via ctx"
         )
 
@@ -1788,8 +1793,6 @@ def _subuser_surface_context_payload(
     plans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     shape = _surface_subuser_app_shape(surface)
-    customer_experience = _surface_customer_experience_shape(surface)
-    product_workflow = _surface_product_workflow_shape(surface)
     routes = _surface_routes(surface)
     effective_runtime_features = _surface_effective_runtime_features(surface)
     return {
@@ -1802,57 +1805,6 @@ def _subuser_surface_context_payload(
         "railState": shape.get("rail_state") or {},
         "plans": _starter_plan_shape_payload(plans),
         "routes": routes,
-        "customerExperience": {
-            "surfaceGoal": customer_experience.get("surface_goal") or "",
-            "conversionModel": customer_experience.get("conversion_model") or "",
-            "requiredRoutes": customer_experience.get("required_routes") or [],
-            "requiredSections": customer_experience.get("required_sections") or [],
-            "requiredAppTabs": customer_experience.get("required_app_tabs") or [],
-            "researchSources": customer_experience.get("research_sources") or list(DEFAULT_CUSTOMER_EXPERIENCE_RESEARCH_SOURCES),
-        },
-        "productWorkflow": {
-            "primaryUser": product_workflow.get("primary_user") or "",
-            "workspaceModel": product_workflow.get("workspace_model") or "",
-            "primaryJob": product_workflow.get("primary_job") or "",
-            "coreLoop": {
-                "input": ((product_workflow.get("core_loop") or {}).get("input") or ""),
-                "action": ((product_workflow.get("core_loop") or {}).get("action") or ""),
-                "result": ((product_workflow.get("core_loop") or {}).get("result") or ""),
-                "saveRecord": bool((product_workflow.get("core_loop") or {}).get("save_record")),
-                "returnToRecordLater": bool((product_workflow.get("core_loop") or {}).get("return_to_record_later")),
-            },
-            "scopeRules": {
-                "noTeams": bool((product_workflow.get("scope_rules") or {}).get("no_teams")),
-                "noRoles": bool((product_workflow.get("scope_rules") or {}).get("no_roles")),
-                "noInvites": bool((product_workflow.get("scope_rules") or {}).get("no_invites")),
-                "noSharing": bool((product_workflow.get("scope_rules") or {}).get("no_sharing")),
-                "noPublicPages": bool((product_workflow.get("scope_rules") or {}).get("no_public_pages")),
-                "noAdminConsole": bool((product_workflow.get("scope_rules") or {}).get("no_admin_console")),
-            },
-            "persistenceRules": {
-                "requiresServerState": bool((product_workflow.get("persistence_rules") or {}).get("requires_server_state")),
-                "persistenceRail": ((product_workflow.get("persistence_rules") or {}).get("persistence_rail") or ""),
-                "survivesSignOut": bool((product_workflow.get("persistence_rules") or {}).get("survives_sign_out")),
-                "truthfulEmptyState": bool((product_workflow.get("persistence_rules") or {}).get("truthful_empty_state")),
-                "reopenableHistory": bool((product_workflow.get("persistence_rules") or {}).get("reopenable_history")),
-                "noLocalOnlyState": bool((product_workflow.get("persistence_rules") or {}).get("no_local_only_state")),
-            },
-            "complexityTarget": {
-                "screens": (product_workflow.get("product_budget") or {}).get("screens") or {},
-                "entityTypes": (product_workflow.get("product_budget") or {}).get("entity_types") or {},
-                "backendActions": (product_workflow.get("product_budget") or {}).get("backend_actions") or {},
-                "aiFlows": (product_workflow.get("product_budget") or {}).get("ai_flows") or {},
-            },
-            "firstRun": {
-                "strategy": ((product_workflow.get("first_run") or {}).get("strategy") or ""),
-                "emptyStateRequired": bool((product_workflow.get("first_run") or {}).get("empty_state_required")),
-                "pendingStateRequired": bool((product_workflow.get("first_run") or {}).get("pending_state_required")),
-                "errorStateRequired": bool((product_workflow.get("first_run") or {}).get("error_state_required")),
-            },
-            "successMoment": product_workflow.get("success_moment") or "",
-            "acceptanceTests": product_workflow.get("acceptance_tests") or [],
-            "notNow": product_workflow.get("not_now") or [],
-        },
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
         "notes": str((surface or {}).get("notes") or ""),
@@ -2018,13 +1970,6 @@ def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -
     }
 
 
-def _write_text_if_missing(path: Path, content: str) -> None:
-    if path.exists():
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
 def _subuser_app_starter_root_layout_js() -> str:
     return (
         dedent(
@@ -2123,14 +2068,11 @@ def _subuser_app_starter_metadata_js(
             export const starterRootMetadata = starterPageMetadata();
 
             export function starterPublicRoutes() {
-              const customerRoutes = Array.isArray(surfaceContext.customerExperience?.requiredRoutes)
-                ? surfaceContext.customerExperience.requiredRoutes
-                : [];
               const declaredRoutes = Array.isArray(surfaceContext.routes)
                 ? surfaceContext.routes.map(routeFromSurfaceEntry)
                 : [];
               const unique = new Set();
-              for (const candidate of [...starterDefaultPublicRoutes, ...customerRoutes, ...declaredRoutes]) {
+              for (const candidate of [...starterDefaultPublicRoutes, ...declaredRoutes]) {
                 const normalized = normalizeRoute(candidate);
                 if (!normalized) continue;
                 if (normalized === "/app" || normalized.startsWith("/app/")) continue;
@@ -3306,7 +3248,11 @@ def _subuser_app_starter_context_js(*, title_literal: str) -> str:
               appMode: surfaceContext.appMode,
               subscriptionStyle: surfaceContext.subscriptionStyle,
               apiMode: surfaceContext.apiMode,
-              routes: (surfaceContext.customerExperience?.requiredRoutes || []).map((route) => String(route || "")),
+              routes: Array.isArray(surfaceContext.routes)
+                ? surfaceContext.routes.map((route) =>
+                    typeof route === "string" ? String(route || "") : String(route?.path || route?.pathname || "")
+                  )
+                : [],
             });
             export const starterConfiguredPlans = Array.isArray(surfaceContext.plans)
               ? surfaceContext.plans
@@ -4637,18 +4583,11 @@ def _subuser_app_starter_pages_js() -> str:
             }
 
             function appTabs() {
-              const declared = Array.isArray(starterSurfaceContext.customerExperience?.requiredAppTabs)
-                ? starterSurfaceContext.customerExperience.requiredAppTabs
-                : [];
-              if (declared.length) return declared;
               return ["Membership", "Billing", "Account"];
             }
 
             function featureCards() {
-              const sections = Array.isArray(starterSurfaceContext.customerExperience?.requiredSections)
-                ? starterSurfaceContext.customerExperience.requiredSections
-                : [];
-              const rendered = sections.length ? sections : starterPlan.recommendedSections || [];
+              const rendered = starterPlan.recommendedSections || [];
               const picked = rendered.slice(0, 6);
               if (!picked.length) {
                 return [
@@ -4996,9 +4935,7 @@ def _subuser_app_starter_pages_js() -> str:
                     <div className="starter-wrap starter-hero-grid">
                       <div>
                         <p className="starter-kicker">
-                          {starterSurfaceContext.customerExperience?.surfaceGoal
-                            ? "Membership"
-                            : "Private access"}
+                          Private access
                         </p>
                         <h1 className="starter-headline">Clear pricing. Simple sign-in. A private member area.</h1>
                         <p className="starter-lede">
@@ -5620,84 +5557,6 @@ def _subuser_app_starter_pages_js() -> str:
     )
 
 
-def _subuser_app_starter_files(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
-    copy = _subuser_app_starter_strings(surface, slug=slug)
-    title_literal = json.dumps(copy["title"], ensure_ascii=False)
-    description_literal = json.dumps(copy["description"], ensure_ascii=False)
-    og_alt_literal = json.dumps(copy["og_alt"], ensure_ascii=False)
-    package_name = re.sub(r"[^a-z0-9-]+", "-", str(slug or "workspace").strip().lower()).strip("-") or "workspace"
-    return {
-        "package.json": json.dumps(
-            {
-                "name": package_name,
-                "version": "0.1.0",
-                "private": True,
-                "scripts": {
-                    "dev": "next dev",
-                    "build": "next build",
-                    "start": "next start",
-                },
-                "dependencies": {
-                    "next": "14.2.3",
-                    "react": "^18",
-                    "react-dom": "^18",
-                },
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
-        + "\n",
-        "next.config.js": dedent(
-            """
-            const runtimeProxyOrigin = String(process.env.TAKYON_LOCAL_RUNTIME_PROXY_ORIGIN || "").trim().replace(/\\/+$/, "");
-
-            const nextConfig = runtimeProxyOrigin
-              ? {
-                  async rewrites() {
-                    return [
-                      {
-                        source: "/api/takyon/:path*",
-                        destination: `${runtimeProxyOrigin}/api/takyon/:path*`,
-                      },
-                    ];
-                  },
-                }
-              : {};
-
-            module.exports = nextConfig;
-            """
-        ).strip()
-        + "\n",
-        "src/app/layout.js": _subuser_app_starter_root_layout_js(),
-        "src/app/globals.css": _subuser_app_starter_globals_css(),
-        "src/app/opengraph-image.js": _subuser_app_starter_opengraph_image_js(),
-        "src/app/page.js": _subuser_app_starter_home_page_js(),
-        "src/app/faq/page.js": _subuser_app_starter_faq_page_js(),
-        "src/app/privacy/page.js": _subuser_app_starter_privacy_page_js(),
-        "src/app/robots.js": _subuser_app_starter_robots_js(),
-        "src/app/sitemap.js": _subuser_app_starter_sitemap_js(),
-        "src/app/articles/page.js": _subuser_app_starter_articles_page_js(),
-        "src/app/terms/page.js": _subuser_app_starter_terms_page_js(),
-        "src/app/twitter-image.js": _subuser_app_starter_twitter_image_js(),
-        "src/app/app/layout.js": _subuser_app_starter_app_layout_js(),
-        "src/app/app/page.js": _subuser_app_starter_app_page_js(),
-        "src/app/app/(product)/layout.js": _subuser_app_starter_product_layout_js(),
-        "src/app/app/(product)/root.js": _subuser_app_starter_product_root_js(),
-        "src/app/app/profile/page.js": _subuser_app_starter_profile_page_js(),
-        "src/components/starter-account-page.js": _subuser_app_starter_account_page_js(),
-        "src/components/starter-access-page.js": _subuser_app_starter_access_page_js(),
-        "src/components/starter-context.js": _subuser_app_starter_context_js(title_literal=title_literal),
-        "src/components/starter-metadata.js": _subuser_app_starter_metadata_js(
-            title_literal=title_literal,
-            description_literal=description_literal,
-            og_alt_literal=og_alt_literal,
-        ),
-        "src/components/starter-product-home.js": _subuser_app_starter_product_home_js(),
-        "src/components/starter-primitives.js": _subuser_app_starter_primitives_js(),
-        "src/components/starter-server.js": _subuser_app_starter_server_js(),
-    }
-
-
 _SCAFFOLD_SEED_SKIP_PARTS = frozenset({"_takyon", "node_modules", "dist", ".git"})
 _SCAFFOLD_SEED_TOKEN_SUFFIXES = frozenset({".html", ".ts", ".tsx", ".css", ".md", ".json", ".txt"})
 
@@ -5756,11 +5615,7 @@ def _materialize_subuser_app_starter(
         return
     if _product_source_files(workspace_root, limit=1):
         return
-    if _surface_subuser_app_shape(surface).get("frontend_stack") == "vite_react_ts":
-        _materialize_subuser_app_scaffold(workspace_root, slug=slug, surface=surface)
-        return
-    for rel, content in _subuser_app_starter_files(surface, slug=slug).items():
-        _write_text_if_missing(workspace_root / rel, content)
+    _materialize_subuser_app_scaffold(workspace_root, slug=slug, surface=surface)
 
 
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
@@ -5831,7 +5686,7 @@ def _subuser_app_worker_contract_block(
             "- Use the shared runtime client for auth, account, checkout, profile, and actions.",
             "- Use the shared rails and real action files for backend behavior; if something cannot be made real here, fail truthfully with the exact blocker.",
             "- Put product-specific backend behavior in `product/site/actions/<name>.ts` and call it from the UI with `createActionRunner(name)` or `invokeAction(name)`.",
-            "- Do not invent product-side server code on this lane.",
+            "- Do not invent product-side server code in this scaffold.",
             "",
         ]
     )
@@ -5848,7 +5703,7 @@ def _subuser_app_worker_contract_block(
             lines.append("- Rail state: " + ", ".join(f"{rail}={rail_state.get(rail) or 'declared'}" for rail in runtime_features))
     if runtime_api_base:
         lines.append(f"- Public runtime API base fallback for off-host preview/local: {runtime_api_base}")
-    lines.append("- This contract is on the pinned static Vite+React+TS scaffold lane. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
+    lines.append("- This contract uses the pinned static Vite+React+TS scaffold. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
     if _surface_requires_app_shell(surface, runtime_features=runtime_features, required_routes=routes):
         lines.append("- Keep `/app` as the single routed entrypoint: the shared shell is `src/screens/app-layout.tsx`, the main product view is `src/screens/app-home.tsx`, and `/app/profile` is `src/screens/profile.tsx`.")
     lines.append("- Support-route screens live in `src/screens/support.tsx`; replace their content if needed, but keep the route skeleton intact unless the instruction explicitly changes it.")
@@ -7941,6 +7796,12 @@ def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> 
 
 
 _SCAFFOLD_PLACEHOLDER_TOKENS_PATH = Path(__file__).resolve().parent / "subuser_app_kit" / "scaffold" / "src" / "tokens.css"
+_SCAFFOLD_VISIBLE_SCREEN_PATHS: tuple[str, ...] = (
+    "src/screens/landing.tsx",
+    "src/screens/app-home.tsx",
+    "src/screens/profile.tsx",
+)
+_SCAFFOLD_VISIBLE_SCREEN_SENTINEL = "data-takyon-scaffold"
 
 
 def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
@@ -7958,6 +7819,40 @@ def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
         "issue": "scaffold_placeholder_tokens",
         "snippet": "tokens.css is byte-identical to the scaffold placeholder; theme it from the design brief before publish",
     }
+
+
+def _scaffold_visible_shell_markers(root: Path) -> list[dict[str, Any]]:
+    """Detect untouched customer-visible scaffold screens that should never ship."""
+    scaffold_root = _subuser_app_scaffold_source_dir()
+    markers: list[dict[str, Any]] = []
+    for rel in _SCAFFOLD_VISIBLE_SCREEN_PATHS:
+        product_path = root / rel
+        scaffold_path = scaffold_root / rel
+        try:
+            if not product_path.is_file():
+                continue
+            product_text = product_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        snippet = ""
+        if _SCAFFOLD_VISIBLE_SCREEN_SENTINEL in product_text:
+            snippet = "screen still carries the scaffold sentinel marker and renders the blank shell"
+        else:
+            try:
+                if scaffold_path.is_file() and product_text == scaffold_path.read_text(encoding="utf-8"):
+                    snippet = "screen is byte-identical to the bundled blank scaffold"
+            except OSError:
+                snippet = ""
+        if not snippet:
+            continue
+        markers.append(
+            {
+                "path": rel,
+                "issue": "scaffold_visible_shell",
+                "snippet": snippet,
+            }
+        )
+    return markers
 
 
 def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
@@ -7983,14 +7878,60 @@ def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
     return ""
 
 
+def _scaffold_visible_shell_unfinished_blocker(refresh: dict[str, Any]) -> str:
+    """Do-not-publish gate: core customer-facing routes still ship the blank scaffold."""
+    if not isinstance(refresh, dict):
+        return ""
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    markers = inventory.get("risk_markers") if isinstance(inventory.get("risk_markers"), list) else []
+    for marker in markers:
+        if isinstance(marker, dict) and str(marker.get("issue") or "").strip() == "scaffold_visible_shell":
+            path = str(marker.get("path") or "").strip() or "src/screens/landing.tsx"
+            snippet = str(marker.get("snippet") or "").strip()
+            return (
+                "product still ships the blank scaffold screen at "
+                f"{path}: "
+                + (snippet or "rewrite the core bootstrap routes before publish")
+                + " — rewrite `/`, `/app`, and `/app/profile` into truthful customer-facing UI before publish"
+            )
+    return ""
+
+
+def _merge_surface_refresh_blocker(refresh: dict[str, Any], blocker: str) -> dict[str, Any]:
+    clean = str(blocker or "").strip()
+    if not clean:
+        return refresh
+    existing_error = str(refresh.get("error") or "").strip()
+    if not existing_error:
+        merged = clean
+    elif clean in existing_error:
+        merged = existing_error
+    else:
+        merged = f"{existing_error}; also: {clean}"
+    return {
+        **refresh,
+        "status": "blocked",
+        "error": merged,
+    }
+
+
 _PINNED_STACK_SERVER_IMPORT_PATTERN = re.compile(
     r"""(?:from\s+['"](?:express|fastify|hono|koa)['"]|require\(\s*['"](?:express|fastify|hono|koa)['"]\s*\))"""
 )
 _PINNED_STACK_ROUTE_FILE_PATTERN = re.compile(r"(?:^|/)(?:src/)?app/.+/route\.(?:js|jsx|ts|tsx)$")
+_PINNED_STACK_DIRECT_GENERATE_PATTERN = re.compile(
+    r"""
+    /api/(?:takyon/apps|generated-apps)/[^'"`\s)]+/generate\b
+    |/generate\b
+    |\.\s*generate\s*\(
+    |\b(?:routeUrl|runtimeUrl)\s*\(\s*['"]generate['"]\s*\)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
-    """frontend_stack=vite_react_ts is static-only: any server entrypoint is a finding."""
+    """The pinned Vite scaffold is static-only: any server entrypoint is a finding."""
     findings: list[dict[str, Any]] = []
     if not root.exists():
         return findings
@@ -8003,13 +7944,13 @@ def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) ->
         if path.name.lower().startswith("next.config."):
             findings.append({
                 "path": rel, "line": 1, "kind": "server_entrypoint",
-                "blocker": "product source carries a Next.js config on the static vite_react_ts lane",
+                "blocker": "product source carries a Next.js config on the pinned static Vite scaffold",
             })
             continue
         if _PINNED_STACK_ROUTE_FILE_PATTERN.search(rel) or "/pages/api/" in f"/{rel}" :
             findings.append({
                 "path": rel, "line": 1, "kind": "server_entrypoint",
-                "blocker": "product source defines a server route handler on the static vite_react_ts lane",
+                "blocker": "product source defines a server route handler on the pinned static Vite scaffold",
             })
             continue
         if path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
@@ -8022,18 +7963,17 @@ def _scan_for_pinned_stack_server_entrypoints(root: Path, *, limit: int = 25) ->
             if _PINNED_STACK_SERVER_IMPORT_PATTERN.search(line):
                 findings.append({
                     "path": rel, "line": number, "kind": "server_entrypoint",
-                    "blocker": "product source imports a server framework on the static vite_react_ts lane",
+                    "blocker": "product source imports a server framework on the pinned static Vite scaffold",
                 })
                 break
     return findings
 
 
 def _scan_for_pinned_stack_client_generate_usage(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
-    """frontend_stack=vite_react_ts should call AI through actions, not client-side generate."""
+    """The pinned Vite scaffold should call AI through actions, not client-side generate."""
     findings: list[dict[str, Any]] = []
     if not root.exists():
         return findings
-    pattern = _PRODUCT_RUNTIME_INTEGRATION_PATTERNS[-1][1]
     for path in sorted(root.rglob("*")):
         if len(findings) >= limit:
             break
@@ -8049,13 +7989,13 @@ def _scan_for_pinned_stack_client_generate_usage(root: Path, *, limit: int = 25)
         except UnicodeDecodeError:
             continue
         for number, line in enumerate(lines, start=1):
-            if not pattern.search(line):
+            if not _PINNED_STACK_DIRECT_GENERATE_PATTERN.search(line):
                 continue
             findings.append({
                 "path": rel,
                 "line": number,
                 "kind": "vite_client_generate",
-                "blocker": "product source calls the shared generate rail directly from vite_react_ts client code",
+                "blocker": "product source calls the shared generate rail directly from pinned Vite client code",
                 "snippet": line.strip()[:240],
             })
             break
@@ -8075,14 +8015,14 @@ def _format_forbidden_product_source_blockers(
         if str(finding.get("kind") or "") == "server_entrypoint":
             blockers.append(
                 f"{finding.get('blocker') or 'product source defines a server entrypoint'} at "
-                f"{finding.get('path')}:{finding.get('line')}; declared frontend_stack vite_react_ts is "
+                f"{finding.get('path')}:{finding.get('line')}; the pinned Vite scaffold is "
                 "static-only — move server logic into a declared action and rebuild as a static Vite app"
             )
             continue
         if str(finding.get("kind") or "") == "vite_client_generate":
             blockers.append(
                 f"{finding.get('blocker') or 'product source calls the shared generate rail directly from client code'} at "
-                f"{finding.get('path')}:{finding.get('line')}; declared frontend_stack vite_react_ts requires "
+                f"{finding.get('path')}:{finding.get('line')}; the pinned Vite scaffold requires "
                 "client AI flows to call a declared action instead of `/generate`"
             )
             continue
@@ -8277,6 +8217,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
             placeholder_marker = _scaffold_placeholder_tokens_marker(root)
             if placeholder_marker:
                 risk_markers.append(placeholder_marker)
+            risk_markers.extend(_scaffold_visible_shell_markers(root))
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "stack_gate_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
 
@@ -8483,7 +8424,7 @@ def _surface_text(surface: dict[str, Any] | None) -> str:
     if not isinstance(surface, dict):
         return ""
     parts: list[str] = []
-    for key in ("status", "runtime_api_base", "notes", "publish_policy", "done_gate"):
+    for key in ("status", "runtime_api_base", "notes"):
         value = surface.get(key)
         if value:
             parts.append(str(value))
@@ -8494,7 +8435,7 @@ def _surface_text(surface: dict[str, Any] | None) -> str:
             for key in ("path", "label", "description", "purpose", "type"):
                 if item.get(key):
                     parts.append(str(item.get(key)))
-    for key in ("constraints", "metadata"):
+    for key in ("metadata",):
         value = surface.get(key)
         if isinstance(value, dict):
             parts.extend(f"{nested_key}={nested_value}" for nested_key, nested_value in value.items())
@@ -9298,22 +9239,22 @@ def _refresh_product_surface_path(
     if not files:
         result.update({"status": "missing", "error": "source path contains no recognized product source files"})
         return result
-    inventory = result.get("inventory") if isinstance(result.get("inventory"), dict) else {}
-    forbidden_findings = inventory.get("forbidden_findings") if isinstance(inventory.get("forbidden_findings"), list) else []
-    reserved_namespace_routes = inventory.get("reserved_namespace_routes") if isinstance(inventory.get("reserved_namespace_routes"), list) else []
-    blockers = _format_forbidden_product_source_blockers(forbidden_findings, reserved_namespace_routes)
-    if blockers:
-        result.update(
-            {
-                "status": "blocked",
-                "error": "product source violates runtime authority boundaries:\n- " + "\n- ".join(blockers),
-                "blockers": blockers,
-            }
-        )
-        return result
 
     package_json = root / "package.json"
     if not package_json.exists():
+        inventory = result.get("inventory") if isinstance(result.get("inventory"), dict) else {}
+        forbidden_findings = inventory.get("forbidden_findings") if isinstance(inventory.get("forbidden_findings"), list) else []
+        reserved_namespace_routes = inventory.get("reserved_namespace_routes") if isinstance(inventory.get("reserved_namespace_routes"), list) else []
+        blockers = _format_forbidden_product_source_blockers(forbidden_findings, reserved_namespace_routes)
+        if blockers:
+            result.update(
+                {
+                    "status": "blocked",
+                    "error": "product source violates runtime authority boundaries:\n- " + "\n- ".join(blockers),
+                    "blockers": blockers,
+                }
+            )
+            return result
         static_publish_source, _static_publish_label = _product_static_publish_source(root)
         if static_publish_source is not None:
             result.update({"status": "passed", "kind": "static_source_present"})
@@ -9335,10 +9276,6 @@ def _refresh_product_surface_path(
         or any((root / name).exists() for name in ("next.config.js", "next.config.mjs", "next.config.ts"))
         or (root / ".next").is_dir()
     )
-    static_publish_source, _static_publish_label = _product_static_publish_source(root)
-    if static_publish_source is not None and not looks_next:
-        result.update({"status": "passed", "kind": "static_source_present"})
-        return result
     if "next" in deps:
         next_value = str(deps.get("next") or "")
         if re.search(r"\b14\.2\.5\b", next_value):
@@ -9380,6 +9317,20 @@ def _refresh_product_surface_path(
             "status": "blocked",
             "error": str(normalization.get("error") or "unsupported build shape requires manual repair"),
         })
+        return result
+    inventory = _product_inventory(business_root, source_rel, surface=surface)
+    result["inventory"] = inventory
+    forbidden_findings = inventory.get("forbidden_findings") if isinstance(inventory.get("forbidden_findings"), list) else []
+    reserved_namespace_routes = inventory.get("reserved_namespace_routes") if isinstance(inventory.get("reserved_namespace_routes"), list) else []
+    blockers = _format_forbidden_product_source_blockers(forbidden_findings, reserved_namespace_routes)
+    if blockers:
+        result.update(
+            {
+                "status": "blocked",
+                "error": "product source violates runtime authority boundaries:\n- " + "\n- ".join(blockers),
+                "blockers": blockers,
+            }
+        )
         return result
     if install:
         if package_manager.get("available"):
@@ -10269,6 +10220,94 @@ def _product_activation_remote_home() -> Path:
     return Path(raw).expanduser().resolve() if raw else Path("/opt/takyon/.takyon")
 
 
+def _sync_published_business_workspace_to_storage(*, business_root: Path, slug: str) -> dict[str, Any]:
+    try:
+        from . import storage
+    except Exception:
+        from plugins.takyon import storage
+
+    result: dict[str, Any] = {
+        "status": "synced",
+        "backend_name": "",
+        "blocker": "",
+    }
+    try:
+        backend = storage.get_storage_backend()
+    except Exception as exc:
+        result["status"] = "blocked"
+        result["blocker"] = f"product publish could not resolve the canonical workspace storage backend: {exc}"
+        return result
+
+    backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+    result["backend_name"] = backend_name
+    if backend_name not in {"supabase_s3", "local"}:
+        result["status"] = "blocked"
+        result["blocker"] = f"product publish does not support workspace storage backend: {backend_name or 'unknown'}"
+        return result
+    if not _remote_workspace_sync_allowed(backend_name):
+        result["status"] = "blocked"
+        result["blocker"] = (
+            "product publish could not persist the built workspace to canonical storage on this host "
+            f"(backend={backend_name or 'unknown'} is not allowed here)"
+        )
+        return result
+    workspace_root = Path(business_root).resolve()
+    if not workspace_root.exists():
+        result["status"] = "blocked"
+        result["blocker"] = "product publish could not persist the built workspace because the business root is missing"
+        return result
+    try:
+        storage.sync_up(backend, _slugify(slug), workspace_root, delete_remote=True)
+    except Exception as exc:
+        result["status"] = "blocked"
+        result["blocker"] = f"product publish could not persist the built workspace to canonical storage: {exc}"
+        return result
+    return result
+
+
+def _write_product_publish_probe_state(
+    *,
+    business_root: Path,
+    slug: str,
+    publish_target: str,
+    source_path: str,
+    token: str,
+) -> Path:
+    marker_rel = Path(_PRODUCT_PUBLISH_PROBE_STATE_RELPATH)
+    marker_abs = (Path(business_root).resolve() / marker_rel).resolve()
+    business_root_resolved = Path(business_root).resolve()
+    if business_root_resolved not in (marker_abs, *marker_abs.parents):
+        raise TakyonError("product publish probe state escaped business root")
+    marker_abs.parent.mkdir(parents=True, exist_ok=True)
+    marker_abs.write_text(
+        json.dumps(
+            {
+                "business": _slugify(slug),
+                "publish_target": str(publish_target or "").strip(),
+                "source_path": str(source_path or "").strip(),
+                "token": str(token or "").strip(),
+                "created_at": _now(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return marker_abs
+
+
+def _remove_product_publish_probe_state(*, business_root: Path) -> None:
+    marker_abs = (Path(business_root).resolve() / _PRODUCT_PUBLISH_PROBE_STATE_RELPATH).resolve()
+    business_root_resolved = Path(business_root).resolve()
+    if business_root_resolved not in (marker_abs, *marker_abs.parents):
+        return
+    try:
+        marker_abs.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
 def _product_service_working_directory_blocker(root: Path) -> str:
     resolved = Path(root).resolve()
     publish_base = _product_service_publish_base()
@@ -10782,18 +10821,64 @@ def _make_product_publish_path_traversable(root: Path) -> None:
 
 
 def _probe_product_public_url(url: str) -> tuple[bool, str]:
+    return _probe_product_public_url_with_token(url)
+
+
+def _probe_product_public_url_with_token(url: str, *, publish_probe_token: str = "") -> tuple[bool, str]:
     if _product_deploy_dry_run() or not _product_public_probe_enabled():
         return True, ""
     last_error = ""
     probe_backoff_seconds = (2, 4, 8, 16, 32, 0)
+    probe_url = str(url or "").strip()
+    if publish_probe_token:
+        try:
+            parsed = urllib.parse.urlsplit(probe_url)
+            query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+            query_pairs = [
+                (key, value)
+                for key, value in query_pairs
+                if key != "__takyon_publish_probe"
+            ]
+            query_pairs.append(("__takyon_publish_probe", publish_probe_token))
+            probe_url = urllib.parse.urlunsplit(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    urllib.parse.urlencode(query_pairs),
+                    parsed.fragment,
+                )
+            )
+        except Exception:
+            probe_url = str(url or "").strip()
     for attempt, delay_seconds in enumerate(probe_backoff_seconds):
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "Takyon product publish verifier"})
+            request = urllib.request.Request(probe_url, headers={"User-Agent": "Takyon product publish verifier"})
             with urllib.request.urlopen(request, timeout=12) as response:
                 status = int(getattr(response, "status", 0) or 0)
                 if 200 <= status < 500:
-                    return True, ""
-                last_error = f"HTTP {status}"
+                    body = ""
+                    try:
+                        raw_body = response.read(8192)
+                    except Exception:
+                        raw_body = b""
+                    if isinstance(raw_body, bytes):
+                        body = raw_body.decode("utf-8", errors="ignore")
+                    elif isinstance(raw_body, str):
+                        body = raw_body
+                    if re.search(
+                        r"<script[^>]+src=['\"](/src/[^'\"]+)['\"][^>]*>",
+                        body,
+                        re.IGNORECASE,
+                    ):
+                        last_error = (
+                            f"public URL probe failed for {url}: served raw source entry "
+                            "instead of built assets"
+                        )
+                    else:
+                        return True, ""
+                else:
+                    last_error = f"HTTP {status}"
         except Exception as exc:
             last_error = str(exc)
         if delay_seconds > 0:
@@ -11185,6 +11270,7 @@ def _publish_product_surface_path(
         "publish_source_path": "",
         "blocker": "",
     }
+    cleanup_blocker = ""
     rel = _safe_relpath(source_path or "product/site", field="source_path").as_posix()
     source_root = (business_root / rel).resolve()
     if business_root.resolve() not in (source_root, *source_root.parents):
@@ -11273,21 +11359,61 @@ def _publish_product_surface_path(
     if blocker:
         result["blocker"] = blocker
         return result
-    if caddyfile:
-        ok, blocker = _probe_product_public_url(publish_target)
-        if not ok:
-            result["blocker"] = blocker
-            return result
+    publish_probe_token = uuid.uuid4().hex
+    _write_product_publish_probe_state(
+        business_root=business_root,
+        slug=slug,
+        publish_target=publish_target,
+        source_path=rel,
+        token=publish_probe_token,
+    )
+    storage_sync = _sync_published_business_workspace_to_storage(
+        business_root=business_root,
+        slug=slug,
+    )
+    if storage_sync.get("status") == "blocked":
+        _remove_product_publish_probe_state(business_root=business_root)
+        result["blocker"] = str(storage_sync.get("blocker") or "product workspace storage sync failed")
+        result["publish_root"] = str(target_dir)
+        return result
     local_url = _product_local_public_url(slug)
+    try:
+        if not local_url:
+            ok, blocker = _probe_product_public_url_with_token(
+                publish_target,
+                publish_probe_token=publish_probe_token,
+            )
+            if not ok:
+                result["blocker"] = blocker
+                return result
+    finally:
+        _remove_product_publish_probe_state(business_root=business_root)
+        cleanup_sync = _sync_published_business_workspace_to_storage(
+            business_root=business_root,
+            slug=slug,
+        )
+        if cleanup_sync.get("status") == "blocked":
+            cleanup_blocker = str(
+                cleanup_sync.get("blocker")
+                or "product workspace storage cleanup failed after publish probe"
+            )
+    if cleanup_blocker and not result.get("blocker"):
+        result["blocker"] = cleanup_blocker
+        result["publish_root"] = str(target_dir)
+        return result
+    effective_publish_root = str(target_dir)
+    effective_publish_mode = "local_static" if local_url else "public_static"
+    effective_public_url = local_url or publish_target
     result.update(
         {
             "status": "published",
-            "public_url": local_url or publish_target,
+            "public_url": effective_public_url,
             "local_url": local_url,
             "published_at": _now(),
-            "publish_root": str(target_dir),
+            "publish_root": effective_publish_root,
             "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
-            "publish_mode": "local_static" if local_url else "public_static",
+            "publish_mode": effective_publish_mode,
+            "activation_target": "",
             "blocker": "",
         }
     )
@@ -12395,6 +12521,9 @@ class TakyonStore:
     def _workspace_storage_backend(self) -> Any:
         from . import storage
 
+        backend_override = getattr(self, "_workspace_storage_backend_override", None)
+        if backend_override is not None:
+            return backend_override
         backend_kind = self._workspace_storage_backend_kind()
         local_root = None
         if backend_kind == "local" and not str(os.getenv("TAKYON_STORAGE_LOCAL_DIR") or "").strip():
@@ -12730,11 +12859,6 @@ class TakyonStore:
             "runtime_api_base": f"/api/takyon/apps/{slug}",
             "runtime_features": [],
             "routes": [],
-            "theme": {"source": "business product workspace"},
-            "constraints": {
-                "no_hardcoded_product_ui": True,
-                "backend_runtime_only": True,
-            },
             "publish_target": _product_publish_target(slug),
             "publish_policy": _DEFAULT_PRODUCT_PUBLISH_POLICY,
             "mode_behavior": _DEFAULT_PRODUCT_MODE_BEHAVIOR,
@@ -12756,7 +12880,10 @@ class TakyonStore:
         }
 
     def _reconcile_app_surface_contract(self, conn: sqlite3.Connection, slug: str, surface: dict[str, Any] | None = None) -> dict[str, Any]:
-        return dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
+        contract = dict(surface if isinstance(surface, dict) else self._stored_app_surface_contract(conn, slug))
+        contract.pop("theme", None)
+        contract.pop("constraints", None)
+        return contract
 
     def _app_surface_contract(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any]:
         return self._reconcile_app_surface_contract(conn, slug)
@@ -12805,7 +12932,7 @@ class TakyonStore:
             for item in (inventory.get("risk_markers") or [])
             if isinstance(item, dict)
         }
-        if risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired"}):
+        if risk_issues.intersection({"stub_or_mock", "demo_or_test_state", "browser_storage", "blocked_or_unwired", "scaffold_visible_shell"}):
             local_work.append("product source has advisory stub/demo/unwired markers")
         return {
             "surface_status": str(surface.get("status") or "missing"),
@@ -12827,7 +12954,6 @@ class TakyonStore:
         slug: str,
         requested_status: str,
         source_path: str | None,
-        publish_policy: str,
         metadata: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         status = str(requested_status or "draft").strip().lower()
@@ -12845,44 +12971,35 @@ class TakyonStore:
         root = self._business_root(slug) / "product"
         surface = self._app_surface_contract(conn, slug)
         shape = _surface_subuser_app_shape(surface)
-        customer_experience = _surface_customer_experience_shape(surface)
-        product_workflow = _surface_product_workflow_shape(surface)
         surface_evidence = self._product_surface_evidence(conn, slug, surface)
         inventory = surface_evidence.get("inventory") if isinstance(surface_evidence.get("inventory"), dict) else {}
 
         surface_lines = [
-            "# App Surface Contract",
+            "# Product Surface",
             "",
             f"Business: {slug}",
             "",
-            "The shared Hermes app runtime owns backend rails only: auth, sessions, entitlements, checkout, subscription reconciliation, revenue, usage budgets, and webhooks.",
+            "Generated summary of the current product source, runtime rails, and publication state for this business app.",
             "",
-            "The product's visual design, layout, copy, information architecture, interaction model, and frontend source must come from the recorded customer shape, supporting research, and the business product workspace. Do not use a hardcoded Takyon template as the final customer surface.",
+            "Shared Hermes app runtime owns backend rails only: auth, sessions, entitlements, checkout, subscription reconciliation, revenue, usage budgets, and webhooks.",
             "",
-            "## Contract",
+            "Customer-facing product design, copy, and behavior must come from `product/site/` plus business research, not from this generated summary.",
             "",
-            f"- Status: {surface.get('status') or 'missing'}",
+            "## Shell Record",
+            "",
             f"- Source path: {surface.get('source_path') or 'not set'}",
             f"- Runtime API base fallback: {surface.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
-            f"- Runtime features: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
+            f"- Runtime rails: {', '.join(_surface_runtime_features(surface)) or 'none declared'}",
             (
-                "- Bootstrap access-shell rails available now: "
+                "- Bootstrap shell rails available now: "
                 + ", ".join(_surface_effective_runtime_features(surface))
             )
             if (
                 not _surface_runtime_features(surface)
                 and _surface_bootstrap_access_shell_runtime_features(surface)
             )
-            else "- Bootstrap access-shell rails available now: not applicable",
+            else "- Bootstrap shell rails available now: not applicable",
             f"- Publish target: {surface.get('publish_target') or _product_publish_target(slug)}",
-            f"- Publish policy: {surface.get('publish_policy') or _DEFAULT_PRODUCT_PUBLISH_POLICY}",
-            f"- Mode behavior: {surface.get('mode_behavior') or _DEFAULT_PRODUCT_MODE_BEHAVIOR}",
-            f"- Done gate: {surface.get('done_gate') or _DEFAULT_PRODUCT_DONE_GATE}",
-            f"- Publish status: {surface.get('publish_status') or 'not_published'}",
-            f"- Public URL: {surface.get('public_url') or 'not published'}",
-            f"- Published at: {surface.get('published_at') or 'not published'}",
-            f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
-            f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
             f"- Notes: {surface.get('notes') or 'not set'}",
         ]
         surface_lines.extend(["", "## Routes", ""])
@@ -12897,10 +13014,6 @@ class TakyonStore:
                     surface_lines.append(f"- {_markdown_scalar(route)}")
         else:
             surface_lines.append("- No frontend routes recorded.")
-        surface_lines.extend(["", "## Theme Source", ""])
-        surface_lines.extend(_markdown_kv_lines(surface.get("theme"), empty="business product workspace"))
-        surface_lines.extend(["", "## Constraints", ""])
-        surface_lines.extend(_markdown_kv_lines(surface.get("constraints"), empty="no hardcoded product UI"))
         selected_runtime_rails = _surface_runtime_features(surface)
         surface_lines.extend(["", "## Runtime Rails", ""])
         if not selected_runtime_rails:
@@ -12921,6 +13034,22 @@ class TakyonStore:
             surface_lines.extend(["", "## Rail State", ""])
             for rail in selected_runtime_rails:
                 surface_lines.append(f"- {rail}: {(shape.get('rail_state') or {}).get(rail) or 'declared'}")
+        surface_lines.extend(
+            [
+                "",
+                "## Publication",
+                "",
+            ]
+        )
+        surface_lines.extend(
+            [
+            f"- Publish status: {surface.get('publish_status') or 'not_published'}",
+            f"- Public URL: {surface.get('public_url') or 'not published'}",
+            f"- Published at: {surface.get('published_at') or 'not published'}",
+            f"- Publish receipt: {surface.get('publish_receipt_path') or 'not set'}",
+            f"- Publish blocker: {surface.get('publish_blocker') or 'none'}",
+            ]
+        )
         action_invocations = surface_evidence.get("action_invocations") if isinstance(surface_evidence.get("action_invocations"), list) else []
         if action_invocations:
             summary_parts: list[str] = []
@@ -14483,6 +14612,16 @@ class TakyonStore:
                     (name, goal, resolved_mode, work_focus or "", _json_dumps(budget) if budget is not None else None, _json_dumps(metadata), now, slug),
                 )
             else:
+                root = self._business_root(slug)
+                if root.exists():
+                    try:
+                        root_has_contents = any(root.iterdir())
+                    except OSError:
+                        root_has_contents = True
+                    if root_has_contents:
+                        raise TakyonError(
+                            f"cannot create fresh business:{slug}: workspace root already exists and is non-empty ({root})"
+                        )
                 # PG businesses.owner_user_id is NOT NULL (0001 spine; 0011 enrich). The operator store
                 # has no Auth0/login context, so a single platform owner (control_plane, keyed by
                 # TAKYON_PLATFORM_OWNER_SUB) owns every shell/CEO-created business. Resolve it READ-ONLY
@@ -14643,7 +14782,11 @@ class TakyonStore:
                 context="product surface source update",
             )
             runtime_api_base = str(op.get("runtime_api_base") or f"/api/takyon/apps/{slug}").strip()
-            runtime_features = _surface_runtime_features(existing)
+            runtime_features = (
+                _normalize_runtime_features(op.get("runtime_features"))
+                if op.get("runtime_features") is not None
+                else _surface_runtime_features(existing)
+            )
             frontend_stack_value = (
                 _frontend_stack_for_contract_upsert(existing, op.get("frontend_stack"))
                 or existing_shape.get("frontend_stack")
@@ -14651,35 +14794,30 @@ class TakyonStore:
             )
             bootstrap_seed = not existing_has_source_files
             runtime_features = _canonical_runtime_features_for_surface_shape(runtime_features)
-            bootstrap_access_seed = bootstrap_seed and not runtime_features
-            if bootstrap_access_seed:
-                runtime_features = []
-            routes = op.get("routes") if op.get("routes") is not None else []
-            theme = op.get("theme") if op.get("theme") is not None else (existing.get("theme") or {"source": "business product workspace"})
-            constraints = op.get("constraints") if op.get("constraints") is not None else {}
-            if not isinstance(routes, (list, dict)):
+            raw_routes = op.get("routes") if op.get("routes") is not None else []
+            if isinstance(raw_routes, dict):
+                routes = [raw_routes]
+            elif isinstance(raw_routes, list):
+                routes = raw_routes
+            else:
                 raise TakyonError("surface routes must be an object or list")
-            if not isinstance(theme, dict):
-                raise TakyonError("surface theme must be an object")
-            if not isinstance(constraints, dict):
-                raise TakyonError("surface constraints must be an object")
-            constraints = {
-                **constraints,
-                "no_hardcoded_product_ui": True,
-                "backend_runtime_only": True,
-            }
-            route_paths = _surface_routes({"routes": routes}) if isinstance(routes, list) else []
-            required_route_paths = _normalize_surface_string_list(op.get("required_routes")) or route_paths
-            if bootstrap_seed and not required_route_paths:
-                required_route_paths = list(DEFAULT_SUBUSER_APP_ROUTES)
+            route_paths = _surface_routes({"routes": routes})
+            if bootstrap_seed and not route_paths:
+                route_paths = list(DEFAULT_SUBUSER_APP_ROUTES)
             app_shell_required_seed = _surface_shape_requires_app_shell(
                 runtime_features=runtime_features,
-                required_routes=required_route_paths,
+                required_routes=route_paths,
             )
+            runtime_features = _canonical_bootstrap_access_runtime_features(
+                runtime_features,
+                bootstrap_seed=bootstrap_seed,
+                app_shell_required=app_shell_required_seed,
+            )
+            bootstrap_access_seed = bootstrap_seed and app_shell_required_seed
             publish_target = _product_publish_target(slug, op.get("publish_target"))
-            publish_policy = str(op.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
-            mode_behavior = str(op.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR).strip() or _DEFAULT_PRODUCT_MODE_BEHAVIOR
-            done_gate = str(op.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE).strip() or _DEFAULT_PRODUCT_DONE_GATE
+            publish_policy = _DEFAULT_PRODUCT_PUBLISH_POLICY
+            mode_behavior = _DEFAULT_PRODUCT_MODE_BEHAVIOR
+            done_gate = _DEFAULT_PRODUCT_DONE_GATE
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
@@ -14699,16 +14837,15 @@ class TakyonStore:
             )
             surface_requires_app_shell = _surface_shape_requires_app_shell(
                 runtime_features=runtime_features,
-                required_routes=required_route_paths,
+                required_routes=route_paths,
             )
             if surface_requires_app_shell:
                 source_path = "product/site"
             if bootstrap_access_seed and surface_requires_app_shell:
-                required_route_paths = required_route_paths or list(DEFAULT_SUBUSER_APP_ROUTES)
                 if not routes:
-                    routes = [{"path": route} for route in required_route_paths]
-            elif not routes and required_route_paths:
-                routes = [{"path": route} for route in required_route_paths]
+                    routes = [{"path": route} for route in route_paths]
+            elif not routes and route_paths:
+                routes = [{"path": route} for route in route_paths]
             seeded_bootstrap_monthly_plan = False
             if surface_requires_app_shell:
                 existing_monthly_plan = self._row_to_dict(
@@ -14784,7 +14921,7 @@ class TakyonStore:
                 bootstrap_seed=bootstrap_seed,
                 app_shell_required=surface_requires_app_shell,
             )
-            status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, publish_policy, metadata)
+            status, metadata = self._surface_status_for_upsert(conn, slug, status, source_path, metadata)
             now = _now()
             conn.execute(
                 """
@@ -14817,8 +14954,8 @@ class TakyonStore:
                     runtime_api_base,
                     _json_dumps(runtime_features),
                     _json_dumps(routes),
-                    _json_dumps(theme),
-                    _json_dumps(constraints),
+                    _json_dumps({}),
+                    _json_dumps({}),
                     publish_target,
                     publish_policy,
                     mode_behavior,
@@ -14847,15 +14984,13 @@ class TakyonStore:
                 business_slug=slug,
                 event_type=action,
                 payload={
-                    "status": status,
                     "source_path": source_path,
+                    "runtime_api_base": runtime_api_base,
                     "runtime_features": runtime_features,
+                    "routes": routes,
                     "publish_target": publish_target,
-                    "publish_policy": publish_policy,
-                    "done_gate": done_gate,
                     "rail_state": (_surface_subuser_app_shape(event_surface).get("rail_state") or {}),
-                    "customer_experience": _surface_customer_experience_shape(event_surface),
-                    "product_workflow": _surface_product_workflow_shape(event_surface),
+                    "notes": notes,
                     "metadata": metadata,
                 },
             )
@@ -14871,7 +15006,14 @@ class TakyonStore:
                         "source": "takyon_starter",
                     },
                 )
-            return {"action": action, "business": slug, "status": status, "surface_contract": "product/surface.md", "publish_target": publish_target, "publish_policy": publish_policy}
+            return {
+                "action": action,
+                "business": slug,
+                "surface_contract": "product/surface.md",
+                "source_path": source_path,
+                "runtime_features": runtime_features,
+                "publish_target": publish_target,
+            }
 
         if action == "app.surface.publish_result":
             publish_status = str(op.get("publish_status") or op.get("status") or "").strip().lower()
@@ -17189,18 +17331,12 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     operation = {
         "action": "app.surface.upsert",
         "business": args.get("business"),
-        "status": args.get("status") or "draft",
         "source_path": args.get("source_path"),
         "runtime_api_base": args.get("runtime_api_base"),
+        "runtime_features": args.get("runtime_features"),
         "rail_state": args.get("rail_state"),
-        "required_routes": args.get("required_routes"),
         "routes": args.get("routes") or [],
-        "theme": args.get("theme") or {"source": "business product workspace"},
-        "constraints": args.get("constraints") or {},
         "publish_target": args.get("publish_target"),
-        "publish_policy": args.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY,
-        "mode_behavior": args.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
-        "done_gate": args.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
         "notes": args.get("notes") or "",
         "metadata": args.get("metadata") or {},
     }
@@ -17242,6 +17378,12 @@ def _finalize_product_surface_refresh(
                 "status": "blocked",
                 "error": surface_error,
             }
+    for blocker in (
+        _scaffold_theme_unfinished_blocker(refresh),
+        _scaffold_visible_shell_unfinished_blocker(refresh),
+    ):
+        if blocker:
+            refresh = _merge_surface_refresh_blocker(refresh, blocker)
     # Run the action-consistency blocker UNCONDITIONALLY: an earlier build/surface blocker
     # must not mask a real action-contract inconsistency (declared-spec/UI-call/file drift).
     # When both exist, surface both so the operator sees the full truth, not just the first.
@@ -17368,13 +17510,9 @@ def _product_surface_refresh_operations(
                 "status": next_status,
                 "source_path": surface_refresh.get("source_path"),
                 "runtime_api_base": surface.get("runtime_api_base"),
+                "runtime_features": surface.get("runtime_features") or [],
                 "routes": surface.get("routes") or [],
-                "theme": surface.get("theme") or {"source": "business product workspace"},
-                "constraints": surface.get("constraints") or {},
                 "publish_target": publish_target,
-                "publish_policy": publish_policy,
-                "mode_behavior": surface.get("mode_behavior") or _DEFAULT_PRODUCT_MODE_BEHAVIOR,
-                "done_gate": surface.get("done_gate") or _DEFAULT_PRODUCT_DONE_GATE,
                 "notes": surface.get("notes") or "",
                 "metadata": surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {},
             }
@@ -26624,6 +26762,119 @@ def _defer_product_surface_refresh_to_worker(args: dict) -> str | None:
     )
 
 
+_WORKSPACE_DURABILITY_EXCLUDED_PARTS = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".next",
+        ".pytest_cache",
+        ".turbo",
+        ".venv",
+        "__pycache__",
+        "_takyon",
+        "build",
+        "dist",
+        "node_modules",
+        "out",
+        "venv",
+    }
+)
+
+
+def _scoped_workspace_store(
+    prototype_store: Any,
+    *,
+    root: Path,
+    operator_user_id: str | None = None,
+    backend_override: Any | None = None,
+) -> Any:
+    scoped_root = Path(root).expanduser().resolve()
+    scoped: Any
+    prototype_surface = getattr(prototype_store, "_surface_contract", None)
+    if isinstance(prototype_store, TakyonStore):
+        scoped = TakyonStore(root=scoped_root, operator_user_id=operator_user_id or None)
+    else:
+        scoped = None
+        constructors = []
+        if isinstance(prototype_surface, dict):
+            constructors.append(lambda: prototype_store.__class__(scoped_root, surface_contract=dict(prototype_surface)))
+        constructors.append(lambda: prototype_store.__class__(scoped_root))
+        for builder in constructors:
+            try:
+                scoped = builder()
+                break
+            except TypeError:
+                continue
+        if scoped is None:
+            scoped = TakyonStore(root=scoped_root, operator_user_id=operator_user_id or None)
+        elif isinstance(prototype_surface, dict) and hasattr(scoped, "_surface_contract"):
+            scoped._surface_contract = dict(prototype_surface)
+    if hasattr(scoped, "_workspace_root_override"):
+        setattr(scoped, "_workspace_root_override", scoped_root)
+    if not hasattr(scoped, "_workspace_sync_cache"):
+        scoped._workspace_sync_cache = set()
+    if backend_override is not None:
+        setattr(scoped, "_workspace_storage_backend_override", backend_override)
+    return scoped
+
+
+def _workspace_durability_file_hashes(root: Path) -> dict[str, str]:
+    resolved = Path(root).resolve()
+    if not resolved.exists():
+        return {}
+    hashes: dict[str, str] = {}
+    for path in sorted(resolved.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(resolved)
+        if any(part in _WORKSPACE_DURABILITY_EXCLUDED_PARTS for part in rel.parts):
+            continue
+        try:
+            hashes[rel.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return hashes
+
+
+def _verify_workspace_durable_readback(*, worker_root: Path, canonical_root: Path) -> dict[str, Any]:
+    worker_files = _workspace_durability_file_hashes(worker_root)
+    canonical_files = _workspace_durability_file_hashes(canonical_root)
+    worker_only = sorted(set(worker_files) - set(canonical_files))
+    canonical_only = sorted(set(canonical_files) - set(worker_files))
+    changed = sorted(
+        rel
+        for rel in set(worker_files).intersection(canonical_files)
+        if worker_files[rel] != canonical_files[rel]
+    )
+    matched = not worker_only and not canonical_only and not changed
+    return {
+        "matched": matched,
+        "worker_root": str(Path(worker_root).resolve()),
+        "canonical_root": str(Path(canonical_root).resolve()),
+        "worker_digest": hashlib.sha256(_json_dumps(worker_files).encode("utf-8")).hexdigest(),
+        "canonical_digest": hashlib.sha256(_json_dumps(canonical_files).encode("utf-8")).hexdigest(),
+        "worker_file_count": len(worker_files),
+        "canonical_file_count": len(canonical_files),
+        "worker_only": worker_only[:20],
+        "canonical_only": canonical_only[:20],
+        "changed": changed[:20],
+    }
+
+
+def _workspace_durability_mismatch_summary(verification: Mapping[str, Any]) -> str:
+    issues: list[str] = []
+    changed = [str(item).strip() for item in verification.get("changed") or [] if str(item).strip()]
+    worker_only = [str(item).strip() for item in verification.get("worker_only") or [] if str(item).strip()]
+    canonical_only = [str(item).strip() for item in verification.get("canonical_only") or [] if str(item).strip()]
+    if changed:
+        issues.append("changed files " + ", ".join(changed[:3]))
+    if worker_only:
+        issues.append("missing from canonical " + ", ".join(worker_only[:3]))
+    if canonical_only:
+        issues.append("unexpected in canonical " + ", ".join(canonical_only[:3]))
+    return "; ".join(issues)
+
+
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
     store = _store()
@@ -26712,11 +26963,13 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             and getattr(store, "_workspace_root_override", None) is not None
         )
         workspace_context = nullcontext(None)
+        workspace_backend = None
         if docker_isolated_worker and not reuse_session_workspace:
             from . import storage
 
+            workspace_backend = store._workspace_storage_backend()
             workspace_context = storage.mounted_business_workspace(
-                store._workspace_storage_backend(),
+                workspace_backend,
                 business,
                 owner_label=str(operator_user_id or business),
             )
@@ -26793,10 +27046,15 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         active_max_turns = max_turns
         turn_cap_retries: list[dict[str, int]] = []
         agent_record: dict[str, Any] | None = None
-        with workspace_context as mounted_home:
+        with workspace_context as mounted_home, ExitStack() as scoped_workspaces:
             active_store = store
             if docker_isolated_worker and mounted_home is not None:
-                active_store = TakyonStore(root=mounted_home, operator_user_id=operator_user_id or None)
+                active_store = _scoped_workspace_store(
+                    store,
+                    root=mounted_home,
+                    operator_user_id=operator_user_id or None,
+                    backend_override=workspace_backend,
+                )
                 active_store._workspace_sync_cache.add(_slugify(business))
 
             app_summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"], limit=20)
@@ -27008,6 +27266,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # closed with an exact blocker rather than reporting success while the
                     # scratch tree (and its real edits) is discarded on exit.
                     sync_status = active_store._sync_business_workspace_remote(business)
+                    sdk_result = {**sdk_result, "workspace_sync_status": sync_status}
                     if sync_status == "skipped_disallowed":
                         sdk_result = {
                             **sdk_result,
@@ -27029,8 +27288,78 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             detail="workspace_sync_skipped: durable persistence unavailable on this host",
                             line="workspace_sync_skipped",
                         )
-                    else:
-                        sdk_result = {**sdk_result, "workspace_sync_status": sync_status}
+                    elif docker_isolated_worker and customer_facing_product_workspace:
+                        if sync_status != "synced":
+                            sdk_result = {
+                                **sdk_result,
+                                "success": False,
+                                "error": (
+                                    "worker_source_not_durable: Claude's product workspace edits could not be "
+                                    f"read back from canonical storage because sync returned {sync_status!r}"
+                                ),
+                                "blocker": "worker_source_not_durable",
+                            }
+                            _record_claude_agent_runtime_event(
+                                business=business,
+                                workspace_rel=workspace_rel,
+                                status="failed",
+                                detail=f"worker_source_not_durable: sync returned {sync_status}",
+                                line="worker_source_not_durable",
+                            )
+                        else:
+                            from . import storage
+
+                            if workspace_backend is None:
+                                workspace_backend = store._workspace_storage_backend()
+                            readback_home = scoped_workspaces.enter_context(
+                                storage.mounted_business_workspace(
+                                    workspace_backend,
+                                    business,
+                                    owner_label=f"{operator_user_id or business}-readback",
+                                )
+                            )
+                            readback_store = _scoped_workspace_store(
+                                store,
+                                root=readback_home,
+                                operator_user_id=operator_user_id or None,
+                                backend_override=workspace_backend,
+                            )
+                            readback_store._workspace_sync_cache.add(_slugify(business))
+                            canonical_workspace_path = readback_store._resolve_business_file(
+                                business,
+                                workspace_rel,
+                                require_output_root=True,
+                                field="workspace",
+                            ).resolve()
+                            durability = _verify_workspace_durable_readback(
+                                worker_root=workspace_path,
+                                canonical_root=canonical_workspace_path,
+                            )
+                            sdk_result = {
+                                **sdk_result,
+                                "workspace_durability": durability,
+                            }
+                            active_store = readback_store
+                            if not durability.get("matched"):
+                                mismatch_summary = _workspace_durability_mismatch_summary(durability)
+                                error_text = "worker_source_not_durable: Claude's product workspace edits diverged after canonical read-back"
+                                if mismatch_summary:
+                                    error_text = f"{error_text}: {mismatch_summary}"
+                                sdk_result = {
+                                    **sdk_result,
+                                    "success": False,
+                                    "error": error_text,
+                                    "blocker": "worker_source_not_durable",
+                                }
+                                _record_claude_agent_runtime_event(
+                                    business=business,
+                                    workspace_rel=workspace_rel,
+                                    status="failed",
+                                    detail="worker_source_not_durable: canonical read-back diverged from worker source",
+                                    line="worker_source_not_durable",
+                                )
+                            else:
+                                workspace_path = canonical_workspace_path
                 surface_refresh = None
                 if sdk_result.get("success") and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
@@ -27141,6 +27470,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "raw_stdout": sdk_result.get("raw_stdout"),
                         "worker_attempts": worker_attempts,
                         "turn_cap_retries": turn_cap_retries,
+                        "workspace_sync_status": sdk_result.get("workspace_sync_status"),
+                        "workspace_durability": sdk_result.get("workspace_durability"),
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
                         "surface_refresh": surface_refresh,
                     },
@@ -27178,6 +27509,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "turn_cap_retries": turn_cap_retries,
             "summary": sdk_result.get("summary") or "",
             "actual_cost_cents": worker_actual_cents,
+            "workspace_sync_status": sdk_result.get("workspace_sync_status"),
+            "workspace_durability": sdk_result.get("workspace_durability"),
             "error": sdk_result.get("error"),
             "worker_returncode": sdk_result.get("worker_returncode"),
             "worker_stderr": sdk_result.get("worker_stderr"),
@@ -27411,25 +27744,19 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_app_surface_contract",
-        "description": "Record the business-owned product surface contract: source/routes, theme, publish target, policy, and done gate.",
+        "description": "Record the tiny business-owned product shell record: source path, routes, publish target, and runtime rails.",
         "handler": handle_business_upsert_app_surface_contract,
         "schema": _schema(
             "business_upsert_app_surface_contract",
-            "Create/update product app surface contract.",
+            "Create/update the product shell record.",
             {
                 "business": _BUSINESS_PROP,
-                "status": {"type": "string"},
                 "source_path": {"type": "string"},
                 "runtime_api_base": {"type": "string"},
+                "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared shared backend rails for this app surface. Bootstrap app shells are pinned to auth/account/profile/checkout."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
-                "required_routes": {"type": "array", "items": {"type": "string"}, "description": "Customer-facing routes this product should ship. The default Vite shell routes are `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`."},
                 "routes": {"type": "array", "items": {"type": "object"}},
-                "theme": {"type": "object"},
-                "constraints": {"type": "object"},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
-                "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are accepted only to publish the real source_path and will block if source files are missing."},
-                "mode_behavior": {"type": "string", "description": "Defaults to live_only_hard_fail_missing_gates"},
-                "done_gate": {"type": "string", "description": "Defaults to published, or exact blocker"},
                 "notes": {"type": "string"},
                 "metadata": {"type": "object"},
                 "idempotency_key": _IDEMPOTENCY_PROP,

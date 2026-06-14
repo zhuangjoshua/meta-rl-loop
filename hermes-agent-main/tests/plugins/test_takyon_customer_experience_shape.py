@@ -20,7 +20,7 @@ def test_surface_customer_experience_shape_defaults_strategy_source():
     assert shape["required_sections"] == []
 
 
-def test_merge_customer_experience_metadata_normalizes_worker_contract_fields():
+def test_subuser_surface_context_omits_burned_customer_experience_payload():
     metadata = takyon_core._merge_customer_experience_metadata(  # type: ignore[attr-defined]
         {
             "customer_experience": {
@@ -42,14 +42,8 @@ def test_merge_customer_experience_metadata_normalizes_worker_contract_fields():
         slug="plannerly",
     )
 
-    customer = payload["customerExperience"]
-    assert customer["surfaceGoal"] == "Parents trust the app enough to sign up and start planning"
-    assert customer["conversionModel"] == "self_serve_signup"
-    assert customer["requiredRoutes"] == ["/", "/pricing", "/app"]
-    assert customer["requiredSections"] == ["hero", "sample plan", "pricing"]
-    assert customer["requiredAppTabs"] == ["Planner", "Progress"]
-    assert customer["researchSources"] == ["research/strategy.md", "research/market.md"]
-    assert "experienceNotes" not in customer
+    assert "customerExperience" not in payload
+    assert payload["runtimeFeatures"] == ["auth", "account", "generate"]
 
 
 def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring_new_rail():
@@ -287,12 +281,16 @@ def test_probe_product_public_url_retries_transient_tls_bootstrap(monkeypatch):
 
     class _Response:
         status = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
 
         def __enter__(self):
             return self
 
         def __exit__(self, *_args):
             return False
+
+        def read(self, _size: int = -1):
+            return b"<!doctype html><html><body>ok</body></html>"
 
     def _fake_urlopen(_request, timeout=0):
         attempts["count"] += 1
@@ -311,6 +309,69 @@ def test_probe_product_public_url_retries_transient_tls_bootstrap(monkeypatch):
     assert blocker == ""
     assert attempts["count"] == 3
     assert sleeps == [2, 4]
+
+
+def test_probe_product_public_url_blocks_raw_source_dev_entry(monkeypatch):
+    class _Response:
+        status = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int = -1):
+            return (
+                b"<!doctype html><html><body><div id='root'></div>"
+                b"<script type='module' src='/src/main.tsx'></script></body></html>"
+            )
+
+    monkeypatch.setattr(takyon_core, "_product_deploy_dry_run", lambda: False)
+    monkeypatch.setattr(takyon_core, "_product_public_probe_enabled", lambda: True)
+    monkeypatch.setattr(takyon_core.urllib.request, "urlopen", lambda _request, timeout=0: _Response())
+    monkeypatch.setattr(takyon_core.time, "sleep", lambda _seconds: None)
+
+    ok, blocker = takyon_core._probe_product_public_url("https://example.fourmanifold.com/")  # type: ignore[attr-defined]
+
+    assert ok is False
+    assert "raw source entry" in blocker
+
+
+def test_probe_product_public_url_threads_publish_probe_token(monkeypatch):
+    seen: list[str] = []
+
+    class _Response:
+        status = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int = -1):
+            return b"<!doctype html><html><body>ok</body></html>"
+
+    def _fake_urlopen(request, timeout=0):
+        seen.append(str(getattr(request, "full_url", "")))
+        return _Response()
+
+    monkeypatch.setattr(takyon_core, "_product_deploy_dry_run", lambda: False)
+    monkeypatch.setattr(takyon_core, "_product_public_probe_enabled", lambda: True)
+    monkeypatch.setattr(takyon_core.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(takyon_core.time, "sleep", lambda _seconds: None)
+
+    ok, blocker = takyon_core._probe_product_public_url_with_token(  # type: ignore[attr-defined]
+        "https://example.fourmanifold.com/",
+        publish_probe_token="probe-token-123",
+    )
+
+    assert ok is True
+    assert blocker == ""
+    assert seen == ["https://example.fourmanifold.com/?__takyon_publish_probe=probe-token-123"]
 
 
 def test_merge_subuser_app_metadata_threads_frontend_stack():
@@ -344,13 +405,12 @@ def test_surface_shape_defaults_frontend_stack_to_vite():
 
 def test_bootstrap_default_runtime_features_stay_pinned():
     # The bootstrap access shell must stay pinned to the shared auth/account/profile/
-    # checkout/actions shell so removing the old taxonomy never silently changes it.
+    # checkout shell so removing the old taxonomy never silently changes it.
     assert takyon_core.DEFAULT_BOOTSTRAP_ACCESS_SHELL_RUNTIME_FEATURES == (
         "auth",
         "account",
         "profile",
         "checkout",
-        "actions",
     )
 
 
@@ -370,7 +430,6 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "account",
         "profile",
         "checkout",
-        "actions",
     ]
 
     payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
@@ -382,11 +441,10 @@ def test_bootstrap_access_shell_is_effective_until_workflow_declares_real_rails(
         "account",
         "profile",
         "checkout",
-        "actions",
     ]
 
     block = takyon_core._runtime_ui_contract_block(surface)  # type: ignore[attr-defined]
-    assert "Runtime-backed features available in this shell: auth, account, profile, checkout, actions" in block
+    assert "Runtime-backed features available in this shell: auth, account, profile, checkout" in block
 
 
 def test_product_workflow_actions_survive_shape_normalization():
@@ -468,13 +526,13 @@ def test_app_shell_signal_derived_from_rails_not_taxonomy():
 
 def test_bootstrap_access_shell_seed_forces_canonical_shell_for_real_app_surfaces():
     # On a fresh seed of a real app surface, the access shell normalizes to the pinned
-    # auth/account/profile/checkout/actions set — without any app-shape taxonomy.
+    # auth/account/profile/checkout set — without any app-shape taxonomy.
     forced = takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]
         ["actions"],
         bootstrap_seed=True,
         app_shell_required=True,
     )
-    assert forced == ["auth", "account", "profile", "checkout", "actions"]
+    assert forced == ["auth", "account", "profile", "checkout"]
 
     # Not a fresh seed → declared rails are left untouched.
     assert takyon_core._canonical_bootstrap_access_runtime_features(  # type: ignore[attr-defined]

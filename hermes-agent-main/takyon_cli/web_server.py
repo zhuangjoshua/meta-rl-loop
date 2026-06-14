@@ -131,6 +131,8 @@ app = FastAPI(title="Takyon Agent", version=__version__)
 _SESSION_TOKEN_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN"
 _SESSION_TOKEN_FILE_ENV = "TAKYON_DASHBOARD_SESSION_TOKEN_FILE"
 _SESSION_TOKEN_FILE_NAME = "dashboard_session_token"
+_PRODUCT_PUBLISH_PROBE_PARAM = "__takyon_publish_probe"
+_PRODUCT_PUBLISH_PROBE_STATE_RELPATH = "product/.takyon-publish-probe.json"
 _TAKYON_DIRECT_FILE_READ_BYTES = 512 * 1024
 _TAKYON_DIRECT_VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _TAKYON_DIRECT_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -8037,7 +8039,49 @@ def _safe_product_slug(value: str) -> str:
     return slug
 
 
-def _materialize_product_site_from_storage(business: str) -> Path | None:
+def _product_publish_probe_token(request: Request | None) -> str:
+    if request is None:
+        return ""
+    query_token = str(request.query_params.get(_PRODUCT_PUBLISH_PROBE_PARAM) or "").strip()
+    if query_token:
+        return query_token
+    return str(request.headers.get("X-Takyon-Publish-Probe") or "").strip()
+
+
+def _product_publish_probe_authorized(
+    *,
+    business_root: Path,
+    business: str,
+    publish_target: str,
+    source_path: str,
+    publish_probe_token: str,
+) -> bool:
+    token = str(publish_probe_token or "").strip()
+    if not token:
+        return False
+    marker_path = (business_root / _PRODUCT_PUBLISH_PROBE_STATE_RELPATH).resolve()
+    if business_root.resolve() not in (marker_path, *marker_path.parents) or not marker_path.is_file():
+        return False
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    marker_token = str(payload.get("token") or "").strip()
+    if not marker_token or not hmac.compare_digest(marker_token.encode(), token.encode()):
+        return False
+    marker_business = str(payload.get("business") or "").strip().lower()
+    marker_target = str(payload.get("publish_target") or "").strip()
+    marker_source_path = str(payload.get("source_path") or "").strip()
+    return (
+        marker_business == _safe_product_slug(business)
+        and marker_target == str(publish_target or "").strip()
+        and marker_source_path == str(source_path or "").strip()
+    )
+
+
+def _materialize_product_site_from_storage(business: str, *, publish_probe_token: str = "") -> Path | None:
     slug = _safe_product_slug(business)
     publish_root = _dashboard_product_site_root().resolve()
     target_root = (publish_root / slug).resolve()
@@ -8071,8 +8115,8 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
             return None
 
         surface = app.get("surface_contract") or {}
-        if str(surface.get("publish_status") or "").strip().lower() != "published":
-            return None
+        publish_status = str(surface.get("publish_status") or "").strip().lower()
+        publish_target = str(surface.get("publish_target") or "").strip()
         published_at = str(surface.get("published_at") or "").strip()
         source_path = str(surface.get("source_path") or "product/site").strip()
         rel = Path(source_path.replace("\\", "/"))
@@ -8101,6 +8145,14 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
             except Exception as exc:
                 _log.warning("product site sync_down failed for %s: %s", slug, exc)
                 return None
+            if publish_status != "published" and not _product_publish_probe_authorized(
+                business_root=business_root,
+                business=slug,
+                publish_target=publish_target,
+                source_path=source_path,
+                publish_probe_token=publish_probe_token,
+            ):
+                return None
             source_root = (business_root / rel).resolve()
             if business_root.resolve() not in (source_root, *source_root.parents):
                 _log.warning("product site source escaped business root for %s: %s", slug, source_root)
@@ -8126,11 +8178,22 @@ def _materialize_product_site_from_storage(business: str) -> Path | None:
     return target_root if target_root.is_dir() else None
 
 
-async def _serve_product_site_file(business: str, full_path: str = "") -> Response:
+async def _serve_product_site_file(business: str, full_path: str = "", *, request: Request | None = None) -> Response:
     slug = _safe_product_slug(business)
+    publish_probe_token = _product_publish_probe_token(request)
     root = _dashboard_product_site_root().resolve()
     rel = full_path.strip("/") or "index.html"
     site_root = (root / slug).resolve()
+    marker = site_root / ".takyon-published-at"
+    materialized_root: Path | None = None
+    if site_root.is_dir() and not marker.is_file():
+        materialized_root = await asyncio.to_thread(
+            _materialize_product_site_from_storage,
+            slug,
+            publish_probe_token=publish_probe_token,
+        )
+        if materialized_root is not None:
+            site_root = materialized_root
     target = (site_root / rel).resolve()
     if target.is_dir():
         target = target / "index.html"
@@ -8143,7 +8206,12 @@ async def _serve_product_site_file(business: str, full_path: str = "") -> Respon
                 return FileResponse(candidate)
     # Lazy publish hydrate can hit object storage. Keep that sync path off the
     # main server loop so one cold product host cannot wedge the whole runtime.
-    materialized_root = await asyncio.to_thread(_materialize_product_site_from_storage, slug)
+    if materialized_root is None:
+        materialized_root = await asyncio.to_thread(
+            _materialize_product_site_from_storage,
+            slug,
+            publish_probe_token=publish_probe_token,
+        )
     if materialized_root is not None:
         target = (materialized_root / rel).resolve()
         if target.is_dir():
@@ -8166,13 +8234,13 @@ async def _serve_product_site_file(business: str, full_path: str = "") -> Respon
 
 
 @app.get("/site/{business}")
-async def product_site_index(business: str):
-    return await _serve_product_site_file(business)
+async def product_site_index(business: str, request: Request):
+    return await _serve_product_site_file(business, request=request)
 
 
 @app.get("/site/{business}/{full_path:path}")
-async def product_site_file(business: str, full_path: str):
-    return await _serve_product_site_file(business, full_path)
+async def product_site_file(business: str, full_path: str, request: Request):
+    return await _serve_product_site_file(business, full_path, request=request)
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -8754,7 +8822,7 @@ def mount_spa(application: FastAPI):
                 _host_without_port(request.headers.get("host", ""))
             )
             if product_business:
-                return await _serve_product_site_file(product_business, full_path)
+                return await _serve_product_site_file(product_business, full_path, request=request)
             return JSONResponse(
                 {"error": "Frontend not built. Run: cd web && npm run build"},
                 status_code=404,
@@ -8839,30 +8907,33 @@ def mount_spa(application: FastAPI):
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
 
-    # When served behind a path-prefix proxy, the built CSS contains
-    # absolute ``url(/fonts/...)`` and ``url(/ds-assets/...)`` references.
-    # Browsers resolve those against the document origin, which means
-    # under ``/takyon`` they'd hit ``mission-control.tilos.com/fonts/...``
-    # (the MC Pages app), not the Takyon backend. Intercept CSS asset
-    # requests BEFORE the StaticFiles mount and rewrite the absolute paths
-    # when a prefix is in play.
-    @application.get("/assets/{filename}.css")
-    async def serve_css(filename: str, request: Request):
-        css_path = WEB_DIST / "assets" / f"{filename}.css"
-        if not css_path.is_file() or not css_path.resolve().is_relative_to(
-            WEB_DIST.resolve()
-        ):
-            return JSONResponse({"error": "not found"}, status_code=404)
-        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        css = css_path.read_text()
-        if prefix:
-            for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
-                css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
-                css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
-                css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
-        return Response(content=css, media_type="text/css")
+    # Asset requests need host-aware routing too. Product hosts use the same
+    # `/assets/*` path prefix as the operator dashboard bundle, so resolve the
+    # product host first and only fall back to dashboard assets otherwise.
+    @application.get("/assets/{asset_path:path}")
+    async def serve_assets(asset_path: str, request: Request):
+        product_business = _business_slug_from_product_host(
+            _host_without_port(request.headers.get("host", ""))
+        )
+        if product_business:
+            return await _serve_product_site_file(product_business, f"assets/{asset_path}", request=request)
 
-    application.mount("/assets", StaticFiles(directory=WEB_DIST / "assets"), name="assets")
+        asset_root = (WEB_DIST / "assets").resolve()
+        target = (asset_root / asset_path).resolve()
+        if asset_root not in (target, *target.parents) or not target.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        if target.suffix.lower() == ".css":
+            prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+            css = target.read_text()
+            if prefix:
+                for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
+                    css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
+                    css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
+                    css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
+            return Response(content=css, media_type="text/css")
+
+        return FileResponse(target)
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
@@ -8870,7 +8941,7 @@ def mount_spa(application: FastAPI):
             _host_without_port(request.headers.get("host", ""))
         )
         if product_business:
-            return await _serve_product_site_file(product_business, full_path)
+            return await _serve_product_site_file(product_business, full_path, request=request)
         request_host = _request_host(request.headers)
         skill_lab_host = request_host == _configured_skill_lab_host()
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
