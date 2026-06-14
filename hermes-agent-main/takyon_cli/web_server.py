@@ -2060,7 +2060,13 @@ def _takyon_app_json(status: int | HTTPStatus, payload: dict[str, Any]) -> JSONR
 
 
 def _takyon_app_session_token(request: Request) -> str:
-    return _cookie_value(request.headers.get("cookie", ""), TAKYON_APP_SESSION_COOKIE)
+    cookie_token = _cookie_value(request.headers.get("cookie", ""), TAKYON_APP_SESSION_COOKIE)
+    if cookie_token:
+        return cookie_token
+    auth = str(request.headers.get("authorization", "") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
 
 
 def _takyon_app_rate_limit_directory_lookup(*, business: str, session_token: str) -> None:
