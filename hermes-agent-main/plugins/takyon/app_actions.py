@@ -79,7 +79,32 @@ if (!mod || typeof mod.default !== "function") {
   throw new Error("action module must default export a function");
 }
 
-const result = await mod.default(request.payload ?? {}, request.ctx ?? {});
+const ctx = { ...(request.ctx ?? {}) };
+// Server-side AI rail: action handlers call ctx.generate(payload) instead of importing a
+// provider SDK or calling a provider/`/generate` URL directly. It POSTs the business generate
+// rail using the action's own base_url + session_token and returns the rail JSON unchanged.
+if (typeof ctx.generate !== "function" && ctx.base_url && ctx.session_token) {
+  ctx.generate = async (genPayload = {}) => {
+    const res = await fetch(`${ctx.base_url}/generate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${ctx.session_token}`,
+      },
+      body: JSON.stringify(genPayload ?? {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(String((data && data.error) || `generate_failed:${res.status}`));
+      err.status = res.status;
+      err.payload = data;
+      throw err;
+    }
+    return data;
+  };
+}
+
+const result = await mod.default(request.payload ?? {}, ctx);
 await Deno.stdout.write(new TextEncoder().encode(JSON.stringify({ ok: true, result })));
 """
 

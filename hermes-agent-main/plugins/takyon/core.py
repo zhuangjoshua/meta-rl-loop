@@ -5899,6 +5899,7 @@ def _subuser_app_worker_contract_block(
             "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
             "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
             "- Inside a product action, reach the shared rails over `ctx.base_url` + `ctx.session_token`; there is no filesystem write, no shell, and no hidden provider credential path in product source.",
+            "- For AI generation, call the injected `ctx.generate(payload)` helper (the runner POSTs the business generate rail with `ctx.base_url` + `ctx.session_token` and returns the rail JSON such as `{ text }`); never import a provider SDK or fetch a provider/`/generate` URL directly.",
             "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
