@@ -5922,7 +5922,8 @@ def _subuser_app_worker_contract_block(
     lines.append("- This contract uses the pinned static Vite+React+TS scaffold. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
     if _surface_requires_app_shell(surface, runtime_features=runtime_features, required_routes=routes):
         lines.append("- Keep `/app` as the single routed entrypoint: the shared shell is `src/screens/app-layout.tsx`, the main product view is `src/screens/app-home.tsx`, and `/app/profile` is `src/screens/profile.tsx`.")
-    lines.append("- Support-route screens live in `src/screens/support.tsx`; replace their content if needed, but keep the route skeleton intact unless the instruction explicitly changes it.")
+    lines.append("- Support-route screens live in `src/screens/support.tsx`; rewrite their FAQ/privacy/terms/articles content for this business and keep the route skeleton intact unless the instruction explicitly changes it.")
+    lines.append("- Customer-visible screens and the shared app layout must not return with `data-takyon-scaffold` markers, bundled starter legal/article copy, or future-promissory placeholders like `coming soon` / `being built`.")
     return "\n".join(lines).strip()
 
 

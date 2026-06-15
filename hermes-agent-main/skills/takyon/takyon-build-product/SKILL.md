@@ -72,10 +72,12 @@ This skill does **not** define the whole product workflow. It gets the site and 
   - build the landing page at `/`
   - keep `/app` as the auth/subscription shell
   - keep `/app/profile` as the account/subscription page
+  - rewrite `/faq`, `/privacy`, `/terms`, and `/articles` in `src/screens/support.tsx` so they no longer ship bundled starter copy or scaffold sentinels
   - keep access/account decisions on the shared helpers in `src/lib/hooks.ts`
   - treat runtime account truth as `user` plus `entitlements[]`
   - not hand-roll subscription gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` parsing in the screens
   - preserve the Vite route skeleton
+  - remove any `data-takyon-scaffold` markers and future-promissory `coming soon` / `being built` copy from the landing page, app shell, profile page, shared app layout, and support routes before returning
   - not try to finish the full product workflow inside `/app`
 - Follow with `business_refresh_product_surface`.
 - If the operator asked for the full product from scratch, continue into `takyon-product-workflow` after this shell is real.
@@ -108,4 +110,5 @@ This skill does **not** define the whole product workflow. It gets the site and 
 5. Do not reintroduce legacy subscription parsing such as `has_active_subscription`, nested `subscription.status`, or ad hoc screen-local `client.account()` adapters.
 6. Do not invent deep product workflow doctrine here.
 7. Do not probe actions or fake the post-sign-in product loop here.
-8. Do not ship visible starter/scaffold UI as the product.
+8. Do not ship visible starter/scaffold UI as the product, including bundled support/legal/article starter copy or leftover `data-takyon-scaffold` markers.
+9. Do not leave customer-facing `coming soon`, `being built`, or similar future-promissory copy in the finished shell; keep the shell truthful about what works now.

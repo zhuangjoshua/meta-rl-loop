@@ -253,11 +253,14 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
     assert "Declared runtime-backed features for this app: auth, account, checkout" in block
     assert "src/screens/" in block
     assert "Support-route screens live in `src/screens/support.tsx`" in block
+    assert "rewrite their FAQ/privacy/terms/articles content for this business" in block
     assert "createActionRunner(name)" in block
     assert "product/site/actions/<name>.ts" in block
     assert "default-export async `(payload, ctx) => result`" in block
     assert "ctx.base_url" in block
     assert "Never fake or simulate an action result client-side" in block
+    assert "`data-takyon-scaffold` markers" in block
+    assert "`coming soon` / `being built`" in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block
     assert "Subscription style:" not in block
@@ -288,6 +291,7 @@ def test_worker_contract_block_uses_vite_lane_guidance():
     assert "createActionRunner(name)" in block
     assert "product/site/actions/<name>.ts" in block
     assert "default-export async `(payload, ctx) => result`" in block
+    assert "bundled starter legal/article copy" in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):
