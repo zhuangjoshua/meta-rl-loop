@@ -75,8 +75,22 @@ if (raw.trim()) {
 }
 
 const mod = await import(actionUrl);
-if (!mod || typeof mod.default !== "function") {
-  throw new Error("action module must default export a function");
+// Resolve the handler from the common shapes workers write: `export default fn`,
+// `export default { run | handler }`, or a named `export { run | handler }`. It is always
+// invoked as handler(payload, ctx); the canonical shape is
+// `export default async (payload, ctx) => result` (see the worker action contract).
+let handler = null;
+if (mod) {
+  if (typeof mod.default === "function") handler = mod.default;
+  else if (mod.default && typeof mod.default === "object") {
+    if (typeof mod.default.run === "function") handler = mod.default.run;
+    else if (typeof mod.default.handler === "function") handler = mod.default.handler;
+  }
+  if (!handler && typeof mod.run === "function") handler = mod.run;
+  if (!handler && typeof mod.handler === "function") handler = mod.handler;
+}
+if (typeof handler !== "function") {
+  throw new Error("action module must export a handler: default async (payload, ctx) => result");
 }
 
 const ctx = { ...(request.ctx ?? {}) };
@@ -104,7 +118,7 @@ if (typeof ctx.generate !== "function" && ctx.base_url && ctx.session_token) {
   };
 }
 
-const result = await mod.default(request.payload ?? {}, ctx);
+const result = await handler(request.payload ?? {}, ctx);
 await Deno.stdout.write(new TextEncoder().encode(JSON.stringify({ ok: true, result })));
 """
 

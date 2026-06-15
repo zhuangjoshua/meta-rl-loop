@@ -5897,6 +5897,17 @@ def _subuser_app_worker_contract_block(
             "- Do not invent product-side server code in this scaffold.",
             "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
             "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
+            "- The action file imports NOTHING: no `@takyon/runtime`, no provider SDK, no remote modules, no relative `src/` imports. `ctx` already provides everything, and the deno runner uses `--no-remote` so any import fails. Do not register the handler as `export default { run }` or `export default { handler }` and do not reverse the argument order.",
+            "- Copy this exact handler shape (it is invoked as handler(payload, ctx) — payload FIRST, ctx SECOND):\n"
+            "    export default async function (payload, ctx) {\n"
+            "      const { message } = payload;\n"
+            "      const result = await ctx.generate({\n"
+            "        system: \"You are <the product's assistant>...\",\n"
+            "        messages: [{ role: \"user\", content: message }],\n"
+            "        max_tokens: 1024,\n"
+            "      });\n"
+            "      return { reply: result.text };\n"
+            "    }",
             "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
             "- Inside a product action, reach the shared rails over `ctx.base_url` + `ctx.session_token`; there is no filesystem write, no shell, and no hidden provider credential path in product source.",
             "- For AI generation, call the injected `ctx.generate(payload)` helper (the runner POSTs the business generate rail with `ctx.base_url` + `ctx.session_token` and returns the rail JSON such as `{ text }`); never import a provider SDK or fetch a provider/`/generate` URL directly.",
