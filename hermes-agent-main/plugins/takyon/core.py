@@ -5898,7 +5898,10 @@ def _subuser_app_worker_contract_block(
             "- If something cannot be made real through the declared shared rails here, fail truthfully with the exact blocker.",
             "- Do not invent product-side server code in this scaffold.",
             "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
+            "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
             "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
+            "- Inside a product action, reach the shared rails over `ctx.base_url` + `ctx.session_token`; there is no filesystem write, no shell, and no hidden provider credential path in product source.",
+            "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
         ]

@@ -922,6 +922,32 @@ def test_surface_http_action_names_detects_referenced_file_backed_http_actions(t
     assert names == {"coach-chat"}
 
 
+def test_surface_http_action_names_excludes_stub_action_files(tmp_path):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("save-intake");\n', encoding="utf-8"
+    )
+    (base / "actions" / "save-intake.ts").write_text(
+        'export const action = "save-intake";\n'
+        'export const description = "Save onboarding profile";\n',
+        encoding="utf-8",
+    )
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    names = app_actions.surface_http_action_names(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert names == set()
+
+
 def test_surface_http_action_names_excludes_schedule_only_action_files(tmp_path):
     base = tmp_path / "businesses" / "biz" / "product" / "site"
     (base / "actions").mkdir(parents=True)
@@ -1073,6 +1099,61 @@ def test_action_blocker_flags_schedule_only_ui_action_file(tmp_path, monkeypatch
     )
     assert "schedule-only" in blocker
     assert "nightly-checkin" in blocker
+
+
+def test_action_blocker_flags_stub_action_file_without_default_handler(tmp_path, monkeypatch):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("save-intake");\n', encoding="utf-8"
+    )
+    (base / "actions" / "save-intake.ts").write_text(
+        'export const action = "save-intake";\n'
+        'export const description = "Save onboarding profile";\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    blocker = app_actions.action_refresh_blocker(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert "save-intake" in blocker
+    assert "does not default export a backend handler" in blocker
+
+
+def test_action_blocker_flags_reexport_of_product_src_client_code(tmp_path, monkeypatch):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("coach-message");\n', encoding="utf-8"
+    )
+    (base / "actions" / "coach-message.ts").write_text(
+        'export { default } from "../src/actions/coach-message";\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    blocker = app_actions.action_refresh_blocker(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert "coach-message" in blocker
+    assert "re-exports client code" in blocker
 
 
 def test_action_blocker_allows_actions_rail_without_declared_actions_when_source_has_no_action_usage(tmp_path, monkeypatch):

@@ -255,6 +255,9 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
     assert "Support-route screens live in `src/screens/support.tsx`" in block
     assert "createActionRunner(name)" in block
     assert "product/site/actions/<name>.ts" in block
+    assert "default-export async `(payload, ctx) => result`" in block
+    assert "ctx.base_url" in block
+    assert "Never fake or simulate an action result client-side" in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block
     assert "Subscription style:" not in block
@@ -284,6 +287,7 @@ def test_worker_contract_block_uses_vite_lane_guidance():
     assert "src/app/app/(product)/" not in block
     assert "createActionRunner(name)" in block
     assert "product/site/actions/<name>.ts" in block
+    assert "default-export async `(payload, ctx) => result`" in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

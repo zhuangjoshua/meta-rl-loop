@@ -252,6 +252,10 @@ _ACTION_EXPORT_SCHEDULE_PATTERN = re.compile(
     r"""(?m)^[ \t]*export\s+const\s+schedule(?:\s*:\s*[^=\n]+)?\s*=\s*['"](?P<schedule>[^'"]+)['"]""",
     re.IGNORECASE,
 )
+_ACTION_DEFAULT_EXPORT_PATTERN = re.compile(r"""(?m)^[ \t]*export\s+default\b""")
+_ACTION_DEFAULT_REEXPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*export\s*\{[^}\n]*\bdefault\b[^}\n]*\}\s*from\s*['"](?P<target>[^'"]+)['"]"""
+)
 _ACTION_SCAN_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte"}
 _ACTION_SCAN_SKIP_DIRS = {".git", ".next", "_takyon", "build", "dist", "node_modules", "references"}
 
@@ -296,6 +300,32 @@ def _file_backed_action_names(site_root: Path, *, limit: int = 300) -> set[str]:
         if _ACTION_NAME_RE.match(name):
             names.add(name)
     return names
+
+
+def _reexports_product_client_code(target: str) -> bool:
+    normalized = str(target or "").strip().replace("\\", "/")
+    return (
+        normalized.startswith("src/")
+        or normalized.startswith("./src/")
+        or normalized.startswith("../src/")
+        or "/src/" in normalized
+    )
+
+
+def _action_handler_blocker(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "cannot be read to verify a default-exported backend handler"
+    reexport_match = _ACTION_DEFAULT_REEXPORT_PATTERN.search(text)
+    if reexport_match:
+        target = str(reexport_match.group("target") or "").strip()
+        if _reexports_product_client_code(target):
+            return f"re-exports client code from `{target}`; implement a real backend handler in this file"
+        return ""
+    if _ACTION_DEFAULT_EXPORT_PATTERN.search(text):
+        return ""
+    return "does not default export a backend handler"
 
 
 def _workflow_action_specs_by_name(workflow: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -374,6 +404,7 @@ def site_http_action_names(site_root: Path, surface: Mapping[str, Any]) -> set[s
         str(spec.get("name") or "").strip().lower()
         for spec in file_backed_specs
         if str(spec.get("name") or "").strip()
+        and not _action_handler_blocker(site_root / "actions" / f"{str(spec.get('name') or '').strip().lower()}.ts")
     }
     http_runnable = {name for name in file_backed if name not in schedule_only}
     if not http_runnable:
@@ -398,7 +429,7 @@ def surface_http_action_names(
 
 
 def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, Any], source_path: str) -> str:
-    """Minimal action-rail blocker: referenced UI action names must have real files."""
+    """Minimal action-rail blocker: referenced UI actions must resolve to real backend handlers."""
     business_root = store._business_root(business)
     site_root = (business_root / source_path) if source_path else (business_root / "product" / "site")
     workflow = surface.get("product_workflow") if isinstance(surface.get("product_workflow"), Mapping) else {}
@@ -417,6 +448,12 @@ def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, A
     for action_name in sorted(referenced):
         if action_name not in file_backed:
             return f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts does not exist"
+        handler_blocker = _action_handler_blocker(actions_root / f"{action_name}.ts")
+        if handler_blocker:
+            return (
+                f"product UI invokes action `{action_name}` but "
+                f"product/site/actions/{action_name}.ts {handler_blocker}"
+            )
         if str((specs_by_name.get(action_name) or {}).get("trigger") or "").strip().lower() == "schedule":
             return (
                 f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts "
