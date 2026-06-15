@@ -296,6 +296,93 @@ def test_dispatch_due_action_schedules_advances_sqlite_cursor():
     assert datetime.fromisoformat(updated["next_run_at"]) > now
 
 
+def test_reconcile_action_schedules_uses_provided_site_root_and_workflow_fallback(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_action_schedules ("
+        "business_slug TEXT NOT NULL, "
+        "action_name TEXT NOT NULL, "
+        "cron_schedule TEXT NOT NULL, "
+        "enabled INTEGER NOT NULL, "
+        "next_run_at TEXT NOT NULL, "
+        "last_run_at TEXT, "
+        "last_status TEXT, "
+        "last_error TEXT, "
+        "created_at TEXT, "
+        "updated_at TEXT, "
+        "PRIMARY KEY (business_slug, action_name)"
+        ")"
+    )
+    site_root = tmp_path / "businesses" / "mathflow" / "product" / "longer"
+    (site_root / "actions").mkdir(parents=True)
+    (site_root / "actions" / "nightly-checkin.ts").write_text(
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+
+    app_actions.reconcile_action_schedules(
+        conn,
+        "mathflow",
+        {"actions": [{"name": "nightly-checkin", "trigger": "schedule", "schedule": "*/30 * * * *"}]},
+        site_root=site_root,
+    )
+
+    row = conn.execute(
+        "SELECT cron_schedule, enabled FROM app_action_schedules WHERE business_slug = ? AND action_name = ?",
+        ("mathflow", "nightly-checkin"),
+    ).fetchone()
+
+    assert row["cron_schedule"] == "*/30 * * * *"
+    assert row["enabled"] == 1
+
+
+def test_surface_upsert_registers_schedule_actions_from_custom_source_path(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        idempotency_key="init-custom-schedule-source",
+        reason="test",
+        actor="test",
+    )
+    site = tmp_path / "businesses" / "latexflow" / "product" / "longer" / "actions"
+    site.mkdir(parents=True)
+    (site / "nightly-checkin.ts").write_text(
+        'export const trigger = "schedule";\n'
+        'export const schedule = "*/30 * * * *";\n'
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+
+    store.commit(
+        scope="business:latexflow",
+        operations=[
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "active",
+                "source_path": "product/longer",
+                "routes": ["/"],
+            }
+        ],
+        idempotency_key="surface-custom-schedule-source",
+        reason="test",
+        actor="test",
+    )
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT cron_schedule, enabled FROM app_action_schedules WHERE business_slug = ? AND action_name = ?",
+            ("latexflow", "nightly-checkin"),
+        ).fetchone()
+
+    assert row["cron_schedule"] == "*/30 * * * *"
+    assert str(row["enabled"]).strip().lower() in {"1", "true", "t"}
+
+
 def test_handle_business_invoke_app_action_reaches_runner_without_actions_declared(monkeypatch):
     class _Store:
         @contextmanager
@@ -884,6 +971,21 @@ def test_surface_http_action_names_uses_workflow_schedule_metadata_as_compat_fal
     assert names == set()
 
 
+def test_action_spec_from_file_allows_typed_schedule_exports(tmp_path):
+    action_file = tmp_path / "nightly-checkin.ts"
+    action_file.write_text(
+        'export const trigger: ActionTrigger = "schedule";\n'
+        'export const schedule: string = "*/30 * * * *";\n'
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+
+    spec = app_actions._action_spec_from_file(action_file)
+
+    assert spec["trigger"] == "schedule"
+    assert spec["schedule"] == "*/30 * * * *"
+
+
 def test_product_surface_refresh_operations_persist_runtime_features_without_http_actions():
     operations = takyon_core._product_surface_refresh_operations(  # type: ignore[attr-defined]
         business="biz",
@@ -942,6 +1044,35 @@ def test_action_blocker_passes_when_ui_call_matches_declared_spec_and_file(tmp_p
         source_path="product/site",
     )
     assert blocker == ""
+
+
+def test_action_blocker_flags_schedule_only_ui_action_file(tmp_path, monkeypatch):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("nightly-checkin");\n', encoding="utf-8"
+    )
+    (base / "actions" / "nightly-checkin.ts").write_text(
+        'export const trigger = "schedule";\n'
+        'export const schedule = "*/30 * * * *";\n'
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    blocker = app_actions.action_refresh_blocker(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert "schedule-only" in blocker
+    assert "nightly-checkin" in blocker
 
 
 def test_action_blocker_allows_actions_rail_without_declared_actions_when_source_has_no_action_usage(tmp_path, monkeypatch):

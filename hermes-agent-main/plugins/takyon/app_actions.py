@@ -245,11 +245,11 @@ _ACTION_UI_CALL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ACTION_EXPORT_TRIGGER_PATTERN = re.compile(
-    r"""export\s+const\s+trigger\s*=\s*['"](?P<trigger>http|schedule)['"]""",
+    r"""(?m)^[ \t]*export\s+const\s+trigger(?:\s*:\s*[^=\n]+)?\s*=\s*['"](?P<trigger>http|schedule)['"]""",
     re.IGNORECASE,
 )
 _ACTION_EXPORT_SCHEDULE_PATTERN = re.compile(
-    r"""export\s+const\s+schedule\s*=\s*['"](?P<schedule>[^'"]+)['"]""",
+    r"""(?m)^[ \t]*export\s+const\s+schedule(?:\s*:\s*[^=\n]+)?\s*=\s*['"](?P<schedule>[^'"]+)['"]""",
     re.IGNORECASE,
 )
 _ACTION_SCAN_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte"}
@@ -401,9 +401,15 @@ def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, A
     """Minimal action-rail blocker: referenced UI action names must have real files."""
     business_root = store._business_root(business)
     site_root = (business_root / source_path) if source_path else (business_root / "product" / "site")
+    workflow = surface.get("product_workflow") if isinstance(surface.get("product_workflow"), Mapping) else {}
     referenced = _referenced_action_names_in_source(site_root)
     actions_root = site_root / "actions"
     file_backed = _file_backed_action_names(site_root)
+    specs_by_name = {
+        str(spec.get("name") or "").strip().lower(): spec
+        for spec in file_backed_action_specs(site_root, workflow)
+        if str(spec.get("name") or "").strip()
+    }
     if not shutil.which("deno"):
         if referenced or actions_root.exists():
             return "actions rail requires the deno runtime on this host"
@@ -411,6 +417,11 @@ def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, A
     for action_name in sorted(referenced):
         if action_name not in file_backed:
             return f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts does not exist"
+        if str((specs_by_name.get(action_name) or {}).get("trigger") or "").strip().lower() == "schedule":
+            return (
+                f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts "
+                "is schedule-only; browser-triggered actions must remain HTTP actions"
+            )
     return ""
 
 
@@ -600,18 +611,19 @@ def _resolve_pg_action_usage_limit(
     return resolved_user_tier, 0
 
 
-def reconcile_action_schedules(conn: Any, business_slug: str, workflow: Mapping[str, Any] | None) -> None:
+def reconcile_action_schedules(
+    conn: Any,
+    business_slug: str,
+    workflow: Mapping[str, Any] | None,
+    *,
+    site_root: Path,
+) -> None:
     try:
         from .core import _now
     except Exception:
         from plugins.takyon.core import _now
-    try:
-        from .core import _business_root_path
-    except Exception:
-        from plugins.takyon.core import _business_root_path
 
     workflow = workflow if isinstance(workflow, Mapping) else {}
-    site_root = _business_root_path(business_slug) / "product" / "site"
     schedule_specs = [
         spec for spec in file_backed_action_specs(site_root, workflow)
         if str(spec.get("trigger") or "").strip().lower() == "schedule"

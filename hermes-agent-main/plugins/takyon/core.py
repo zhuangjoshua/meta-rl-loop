@@ -14355,6 +14355,7 @@ class TakyonStore:
                 conn,
                 slug,
                 _surface_product_workflow_shape({"metadata": metadata}),
+                site_root=self._business_root(slug) / source_path,
             )
             self._rewrite_app_files(conn, slug)
             event_surface = {"metadata": metadata, "runtime_features": runtime_features}
