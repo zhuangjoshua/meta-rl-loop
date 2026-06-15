@@ -240,8 +240,8 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    # Customer-facing product surfaces now default to the full design-pack set plus the Takyon
-    # shell-build method guidance so the worker sees the route-specific completion rules.
+    # Customer-facing product surfaces now default to the full design-pack set so the worker
+    # always builds with a coherent visual direction instead of bare layout rules.
     assert result["guidance_skills"] == [
         "claude-design",
         "claude-design-openai",
@@ -249,13 +249,9 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
         "claude-design-superhuman",
         "claude-design-vibrant",
         "claude-design-doodle",
-        "takyon-build-product",
     ]
-    assert result["guidance_selection_reason"] == "auto-selected design packs plus takyon-build-product for customer-facing product surface"
+    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
     assert "[Hermes guidance skill: default-product-site]" in instruction
-    assert "Required completion checklist for this `product/site` run:" in instruction
-    assert "Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx`" in instruction
-    assert "Starter public support page" in instruction
 
 
 def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
@@ -378,8 +374,8 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    # The default is the full design-pack set plus the shared Takyon shell-build method skill, not
-    # a single style pack inferred from brief keywords like "bold consumer".
+    # The default is the FULL pack set (the worker chooses one coherent direction), not a single
+    # pack inferred from brief keywords like "bold consumer".
     assert result["guidance_skills"] == [
         "claude-design",
         "claude-design-openai",
@@ -387,99 +383,9 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
         "claude-design-superhuman",
         "claude-design-vibrant",
         "claude-design-doodle",
-        "takyon-build-product",
     ]
-    assert result["guidance_selection_reason"] == "auto-selected design packs plus takyon-build-product for customer-facing product surface"
+    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
     assert "[Hermes guidance skill: inferred-product-site]" in instruction
-
-
-def test_claude_agent_task_adds_product_workflow_guidance_for_deep_app_instruction(tmp_path, monkeypatch):
-    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    captured: dict[str, object] = {}
-
-    def fake_process(*, payload: dict[str, object], **kwargs):
-        captured["payload"] = payload
-        Path(str(payload["cwd"]), "index.html").write_text("<h1>Coachflow</h1>\n", encoding="utf-8")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
-
-    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
-    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "coachflow")
-    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
-    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
-    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
-    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
-    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
-    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
-    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
-    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
-    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
-    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
-    monkeypatch.setattr(
-        takyon_core,
-        "_finalize_operator_task_budget",
-        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
-    )
-    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        takyon_core,
-        "_compose_worker_guidance_block",
-        lambda skills: (list(skills), "[Hermes guidance skill: workflow-product-site]" if skills else ""),
-    )
-    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
-
-    result = json.loads(
-        handle_business_claude_agent_task(
-            {
-                "business": "coachflow",
-                "workspace": "product/site",
-                "instruction": "Build the MVP product with product-workflow and turn /app into the real main action.",
-                "idempotency_key": "workspace-product-workflow-guidance",
-                "install": False,
-                "refresh_surface": False,
-            }
-        )
-    )
-
-    assert result["success"] is True
-    assert result["guidance_skills"] == [
-        "claude-design",
-        "claude-design-openai",
-        "claude-design-stripe",
-        "claude-design-superhuman",
-        "claude-design-vibrant",
-        "claude-design-doodle",
-        "takyon-build-product",
-        "takyon-product-workflow",
-    ]
-    assert (
-        result["guidance_selection_reason"]
-        == "auto-selected design packs plus Takyon product method guidance for customer-facing product surface"
-    )
-
-
-def test_compose_worker_guidance_block_includes_takyon_build_product_rules(monkeypatch):
-    monkeypatch.setattr(takyon_core, "get_all_skills_dirs", lambda: [takyon_core._repo_root() / "skills"])
-
-    resolved, block = takyon_core._compose_worker_guidance_block(["takyon-build-product"])  # type: ignore[attr-defined]
-
-    assert resolved == ["takyon-build-product"]
-    assert "required Takyon product method for this run" in block
-    assert "rewrite `/faq`, `/privacy`, `/terms`, and `/articles` in `src/screens/support.tsx`" in block
-    assert "remove any `data-takyon-scaffold` markers" in block
-    assert "Do not ship visible starter/scaffold UI as the product" in block
-
-
-def test_subuser_app_required_completion_block_names_scaffold_files():
-    block = takyon_core._subuser_app_required_completion_block(  # type: ignore[attr-defined]
-        {
-            "routes": ["/", "/app", "/app/profile"],
-        }
-    )
-
-    assert "Required completion checklist for this `product/site` run:" in block
-    assert "Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx`" in block
-    assert "Starter public support page" in block
-    assert "Keep `/app` and `/app/profile` truthful about what works now" in block
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):

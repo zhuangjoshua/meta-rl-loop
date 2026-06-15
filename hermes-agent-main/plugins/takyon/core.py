@@ -238,8 +238,6 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
-    "takyon-build-product": ("Overview", "Quick Reference", "How to Run", "Rules"),
-    "takyon-product-workflow": ("Overview", "Quick Reference", "How to Run", "Rules"),
 }
 _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-openai": (
@@ -1104,32 +1102,6 @@ _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
     "claude-design-vibrant",
     "claude-design-doodle",
 )
-_DEFAULT_PRODUCT_METHOD_GUIDANCE_SKILLS: tuple[str, ...] = ("takyon-build-product",)
-_DEFAULT_PRODUCT_WORKFLOW_GUIDANCE_SKILLS: tuple[str, ...] = ("takyon-product-workflow",)
-
-
-def _instruction_requests_product_workflow_guidance(instruction: str) -> bool:
-    lowered = str(instruction or "").lower()
-    if not lowered:
-        return False
-    return any(
-        needle in lowered
-        for needle in (
-            "product-workflow",
-            "product workflow",
-            "workflow under /app",
-            "post-sign-in",
-            "inside /app",
-            "under /app",
-            "real product workflow",
-            "real product experience",
-            "build the mvp product",
-            "main action",
-            "turn /app into",
-        )
-    )
-
-
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
     workspace_raw: str,
@@ -1140,21 +1112,9 @@ def _resolve_worker_guidance_skills(
     if "guidance_skills" in args:
         return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
     # Customer-facing product surfaces default to the full design-pack set so the worker always
-    # builds with a coherent visual direction instead of bare layout rules. Product/site work also
-    # needs the Takyon method guidance that tells the worker which shared shell files must be
-    # rewritten, otherwise delegated builds can keep shipping starter support/scaffold surfaces.
-    # The caller can still narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
-    if _workspace_needs_runtime_ui_contract(workspace_raw):
-        guidance = [
-            *_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS,
-            *_DEFAULT_PRODUCT_METHOD_GUIDANCE_SKILLS,
-        ]
-        reason = "auto-selected design packs plus takyon-build-product for customer-facing product surface"
-        if _instruction_requests_product_workflow_guidance(instruction):
-            guidance.extend(_DEFAULT_PRODUCT_WORKFLOW_GUIDANCE_SKILLS)
-            reason = "auto-selected design packs plus Takyon product method guidance for customer-facing product surface"
-        return guidance, reason
-    if _workspace_needs_customer_ai_copy_contract(workspace_raw):
+    # builds with a coherent visual direction instead of bare layout rules. The caller can still
+    # narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
+    if _workspace_needs_runtime_ui_contract(workspace_raw) or _workspace_needs_customer_ai_copy_contract(workspace_raw):
         return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected design packs for customer-facing product surface"
     return [], ""
 
@@ -5960,25 +5920,7 @@ def _subuser_app_worker_contract_block(
     lines.append("- This contract uses the pinned static Vite+React+TS scaffold. Keep product source in `src/screens/`, `src/components/`, and `src/lib/`; do not introduce product-side server entrypoints.")
     if _surface_requires_app_shell(surface, runtime_features=runtime_features, required_routes=routes):
         lines.append("- Keep `/app` as the single routed entrypoint: the shared shell is `src/screens/app-layout.tsx`, the main product view is `src/screens/app-home.tsx`, and `/app/profile` is `src/screens/profile.tsx`.")
-    lines.append("- Support-route screens live in `src/screens/support.tsx`; rewrite their FAQ/privacy/terms/articles content for this business and keep the route skeleton intact unless the instruction explicitly changes it.")
-    lines.append("- Customer-visible screens and the shared app layout must not return with `data-takyon-scaffold` markers, bundled starter legal/article copy, or future-promissory placeholders like `coming soon` / `being built`.")
-    return "\n".join(lines).strip()
-
-
-def _subuser_app_required_completion_block(surface: dict[str, Any] | None) -> str:
-    routes: list[str] = []
-    if isinstance(surface, dict):
-        raw_routes = surface.get("routes") or []
-        if isinstance(raw_routes, list):
-            routes = [str(route).strip() for route in raw_routes if str(route).strip()]
-    lines = [
-        "Required completion checklist for this `product/site` run:",
-        "- Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx` so none of them ship `data-takyon-scaffold`.",
-        "- Rewrite `src/screens/support.tsx` with business-specific FAQ/privacy/terms/articles content; remove bundled starter phrases like `Starter public support page`, `This seeded terms page`, and `No articles published yet`.",
-        "- Do not leave customer-visible `coming soon`, `being built`, `next release`, or similar future-promissory copy in the finished flow.",
-    ]
-    if "/app" in routes or "/app/profile" in routes:
-        lines.append("- Keep `/app` and `/app/profile` truthful about what works now: use the shared auth/account/subscription rails and do not leave placeholder dashboard promises.")
+    lines.append("- Support-route screens live in `src/screens/support.tsx`; replace their content if needed, but keep the route skeleton intact unless the instruction explicitly changes it.")
     return "\n".join(lines).strip()
 
 
@@ -6549,18 +6491,11 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         resolved_names.append(skill_name)
         section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
         excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
-        lowered_skill_name = skill_name.lower()
-        if lowered_skill_name == "claude-design" or lowered_skill_name.startswith("claude-design-"):
+        if skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
             preamble = (
                 "Treat this guidance as the required design contract for this run. "
                 "Follow its visual direction, component posture, and hard rules unless the business brief explicitly conflicts. "
                 "Do not silently substitute a different aesthetic."
-            )
-        elif lowered_skill_name.startswith("takyon-"):
-            preamble = (
-                "Treat this guidance as the required Takyon product method for this run. "
-                "Follow its execution flow, named file obligations, and hard rules unless the explicit workspace instruction "
-                "narrowly changes scope."
             )
         else:
             preamble = (
@@ -26882,8 +26817,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 )
             def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
                 worker_instruction_parts = [instruction.rstrip()]
-                if _workspace_needs_runtime_ui_contract(workspace_rel):
-                    worker_instruction_parts.append(_subuser_app_required_completion_block(current_surface))
                 if guidance_block:
                     worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):

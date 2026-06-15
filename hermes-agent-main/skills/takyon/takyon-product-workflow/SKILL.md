@@ -64,8 +64,6 @@ This skill should inspect the existing source and flesh out the actual product w
   - not hand-roll subscription gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` parsing in the screens
   - add action files under `product/site/actions/` whenever backend behavior is needed
   - use `createActionRunner(name)` / `invokeAction(name)` from the UI
-  - remove any `data-takyon-scaffold` markers, bundled starter legal/article copy, and other starter leftovers from customer-visible screens and the shared app layout you finalize
-  - do not leave `coming soon`, `being built`, or other future-promissory copy in the core `/app` job flow; either make the job real or surface the blocker
   - keep landing/support/profile boundaries unless explicitly asked to change them
 - Follow with `business_refresh_product_surface`.
 
@@ -92,4 +90,3 @@ This skill should inspect the existing source and flesh out the actual product w
 4. Treat the shared account payload as `user` plus `entitlements[]`; do not revive legacy `has_active_subscription`, nested `subscription.status`, or custom screen-local `client.account()` parsing.
 5. Keep landing/support/profile boundaries unless explicitly asked to broaden scope.
 6. Do not fake saved state or backend behavior in the browser when an action file should exist.
-7. Do not leave customer-visible scaffold sentinels, bundled starter copy, or future-promissory placeholder copy in the finished product.
