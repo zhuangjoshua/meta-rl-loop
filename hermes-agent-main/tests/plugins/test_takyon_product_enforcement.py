@@ -407,6 +407,10 @@ def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
         'export function ProfileScreen() { return <section data-takyon-scaffold="profile" />; }\n',
         encoding="utf-8",
     )
+    (site / "src" / "screens" / "support.tsx").write_text(
+        'export function FaqScreen() { return <main data-takyon-scaffold="support" />; }\n',
+        encoding="utf-8",
+    )
 
     markers = takyon_core._scaffold_visible_shell_markers(site)
 
@@ -414,6 +418,7 @@ def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
         "src/screens/landing.tsx",
         "src/screens/app-home.tsx",
         "src/screens/profile.tsx",
+        "src/screens/support.tsx",
     ]
     assert all(marker["issue"] == "scaffold_visible_shell" for marker in markers)
 
@@ -439,6 +444,7 @@ def test_scaffold_visible_shell_blocks_publish():
     assert "blank scaffold screen" in blocker
     assert "src/screens/landing.tsx" in blocker
     assert "/app/profile" in blocker
+    assert "/privacy" in blocker
 
 
 def test_kit_materialization_excludes_scaffold_and_artifacts(tmp_path):

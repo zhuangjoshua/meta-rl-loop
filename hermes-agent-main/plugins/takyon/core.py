@@ -8009,6 +8009,7 @@ _SCAFFOLD_VISIBLE_SCREEN_PATHS: tuple[str, ...] = (
     "src/screens/landing.tsx",
     "src/screens/app-home.tsx",
     "src/screens/profile.tsx",
+    "src/screens/support.tsx",
 )
 _SCAFFOLD_VISIBLE_SCREEN_SENTINEL = "data-takyon-scaffold"
 
@@ -8101,7 +8102,7 @@ def _scaffold_visible_shell_unfinished_blocker(refresh: dict[str, Any]) -> str:
                 "product still ships the blank scaffold screen at "
                 f"{path}: "
                 + (snippet or "rewrite the core bootstrap routes before publish")
-                + " — rewrite `/`, `/app`, and `/app/profile` into truthful customer-facing UI before publish"
+                + " — rewrite `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile` into truthful customer-facing UI before publish"
             )
     return ""
 

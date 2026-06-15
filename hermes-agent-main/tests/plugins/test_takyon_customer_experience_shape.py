@@ -118,7 +118,6 @@ def test_materialized_subuser_kit_derives_actions_rail_from_workspace_files(tmp_
         encoding="utf-8"
     )
     assert '"actions"' in surface_context
-
 def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_path: Path):
     workspace_root = tmp_path / "product" / "site"
     workspace_root.mkdir(parents=True)
@@ -175,8 +174,12 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert '"auth": "declared"' in surface_context
     assert '"checkout": "declared"' in surface_context
     hooks = (workspace_root / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
+    support_source = (workspace_root / "src" / "screens" / "support.tsx").read_text(encoding="utf-8")
     assert "useViewerAccess" in hooks
     assert "resolveViewerCta" in hooks
+    assert "Frequently asked questions" in support_source
+    assert "Privacy policy" in support_source
+    assert 'aria-hidden="true"' not in support_source
 
 def test_appkit_contract_block_preserves_canonical_rail_helpers():
     block = takyon_core._subuser_app_kit_contract_block(  # type: ignore[attr-defined]
