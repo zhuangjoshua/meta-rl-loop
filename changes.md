@@ -35,3 +35,6 @@
   - default `product/site` guidance now including `takyon-build-product`
   - workflow phrasing adding `takyon-product-workflow`
   - real distilled `takyon-build-product` guidance including the support-route/scaffold-removal rules
+- Started another fresh business `longer-0615161956` after deploying the guidance-selection fix and confirmed the delegated worker still rewrote all five customer-visible screen files into scaffold-shaped output.
+- New root cause found in `hermes-agent-main/plugins/takyon/core.py::_compose_worker_guidance_block`: auto-loaded non-design guidance skills were still framed as optional “use this if it helps” advice.
+- Tightened Takyon-method guidance preamble so `takyon-*` worker skills are treated as required product-method contract guidance, not optional UX suggestions.

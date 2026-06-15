@@ -6532,11 +6532,18 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         resolved_names.append(skill_name)
         section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
         excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
-        if skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
+        lowered_skill_name = skill_name.lower()
+        if lowered_skill_name == "claude-design" or lowered_skill_name.startswith("claude-design-"):
             preamble = (
                 "Treat this guidance as the required design contract for this run. "
                 "Follow its visual direction, component posture, and hard rules unless the business brief explicitly conflicts. "
                 "Do not silently substitute a different aesthetic."
+            )
+        elif lowered_skill_name.startswith("takyon-"):
+            preamble = (
+                "Treat this guidance as the required Takyon product method for this run. "
+                "Follow its execution flow, named file obligations, and hard rules unless the explicit workspace instruction "
+                "narrowly changes scope."
             )
         else:
             preamble = (

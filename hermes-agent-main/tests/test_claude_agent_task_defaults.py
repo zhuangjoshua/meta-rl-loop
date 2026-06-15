@@ -460,6 +460,7 @@ def test_compose_worker_guidance_block_includes_takyon_build_product_rules(monke
     resolved, block = takyon_core._compose_worker_guidance_block(["takyon-build-product"])  # type: ignore[attr-defined]
 
     assert resolved == ["takyon-build-product"]
+    assert "required Takyon product method for this run" in block
     assert "rewrite `/faq`, `/privacy`, `/terms`, and `/articles` in `src/screens/support.tsx`" in block
     assert "remove any `data-takyon-scaffold` markers" in block
     assert "Do not ship visible starter/scaffold UI as the product" in block
