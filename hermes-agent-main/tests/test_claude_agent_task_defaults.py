@@ -253,6 +253,9 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
     ]
     assert result["guidance_selection_reason"] == "auto-selected design packs plus takyon-build-product for customer-facing product surface"
     assert "[Hermes guidance skill: default-product-site]" in instruction
+    assert "Required completion checklist for this `product/site` run:" in instruction
+    assert "Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx`" in instruction
+    assert "Starter public support page" in instruction
 
 
 def test_claude_agent_task_includes_public_landing_composition_contract_for_product_site(tmp_path, monkeypatch):
@@ -464,6 +467,19 @@ def test_compose_worker_guidance_block_includes_takyon_build_product_rules(monke
     assert "rewrite `/faq`, `/privacy`, `/terms`, and `/articles` in `src/screens/support.tsx`" in block
     assert "remove any `data-takyon-scaffold` markers" in block
     assert "Do not ship visible starter/scaffold UI as the product" in block
+
+
+def test_subuser_app_required_completion_block_names_scaffold_files():
+    block = takyon_core._subuser_app_required_completion_block(  # type: ignore[attr-defined]
+        {
+            "routes": ["/", "/app", "/app/profile"],
+        }
+    )
+
+    assert "Required completion checklist for this `product/site` run:" in block
+    assert "Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx`" in block
+    assert "Starter public support page" in block
+    assert "Keep `/app` and `/app/profile` truthful about what works now" in block
 
 
 def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):

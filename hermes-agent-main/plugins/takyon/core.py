@@ -5965,6 +5965,23 @@ def _subuser_app_worker_contract_block(
     return "\n".join(lines).strip()
 
 
+def _subuser_app_required_completion_block(surface: dict[str, Any] | None) -> str:
+    routes: list[str] = []
+    if isinstance(surface, dict):
+        raw_routes = surface.get("routes") or []
+        if isinstance(raw_routes, list):
+            routes = [str(route).strip() for route in raw_routes if str(route).strip()]
+    lines = [
+        "Required completion checklist for this `product/site` run:",
+        "- Rewrite `src/screens/landing.tsx`, `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, `src/screens/profile.tsx`, and `src/screens/support.tsx` so none of them ship `data-takyon-scaffold`.",
+        "- Rewrite `src/screens/support.tsx` with business-specific FAQ/privacy/terms/articles content; remove bundled starter phrases like `Starter public support page`, `This seeded terms page`, and `No articles published yet`.",
+        "- Do not leave customer-visible `coming soon`, `being built`, `next release`, or similar future-promissory copy in the finished flow.",
+    ]
+    if "/app" in routes or "/app/profile" in routes:
+        lines.append("- Keep `/app` and `/app/profile` truthful about what works now: use the shared auth/account/subscription rails and do not leave placeholder dashboard promises.")
+    return "\n".join(lines).strip()
+
+
 def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
     shape = _surface_subuser_app_shape(surface)
     kit_path = shape.get("kit_path") or SUBUSER_KIT_DIRNAME
@@ -26865,6 +26882,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 )
             def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
                 worker_instruction_parts = [instruction.rstrip()]
+                if _workspace_needs_runtime_ui_contract(workspace_rel):
+                    worker_instruction_parts.append(_subuser_app_required_completion_block(current_surface))
                 if guidance_block:
                     worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):

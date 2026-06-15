@@ -38,3 +38,6 @@
 - Started another fresh business `longer-0615161956` after deploying the guidance-selection fix and confirmed the delegated worker still rewrote all five customer-visible screen files into scaffold-shaped output.
 - New root cause found in `hermes-agent-main/plugins/takyon/core.py::_compose_worker_guidance_block`: auto-loaded non-design guidance skills were still framed as optional “use this if it helps” advice.
 - Tightened Takyon-method guidance preamble so `takyon-*` worker skills are treated as required product-method contract guidance, not optional UX suggestions.
+- Started a third fresh business `longer-0615163615` after deploying the required-method preamble and still observed the delegated worker writing scaffold-shaped `landing.tsx`, `app-layout.tsx`, `app-home.tsx`, `profile.tsx`, and `support.tsx` into its live temp workspace.
+- New root cause found in `hermes-agent-main/plugins/takyon/core.py::build_worker_instruction`: the direct worker instruction itself still let the CEO free-author a narrow "build landing/app screens" task, so the named support/sentinel obligations were only present as background guidance.
+- Patched the shared `product/site` worker instruction to prepend an explicit required completion checklist naming the exact screen files and starter phrases that must be rewritten before the worker can return.
