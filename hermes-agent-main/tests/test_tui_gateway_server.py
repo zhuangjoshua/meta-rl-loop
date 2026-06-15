@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sqlite3
 import sys
 import threading
@@ -6295,6 +6296,63 @@ def test_live_state_payload_marks_failed_when_only_stale_running_tasks_remain():
     assert payload["label"] == "CEO turn"
     assert payload["detail"] == "isolated turn exited with code -15"
     assert all(task["status"] != "running" for task in payload["tasks"])
+
+
+def test_run_isolated_gateway_turn_returns_final_even_if_exit_wait_is_slow(monkeypatch):
+    class _FakeStdin:
+        def __init__(self):
+            self.writes: list[str] = []
+            self.closed = False
+
+        def write(self, text: str) -> int:
+            self.writes.append(text)
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdin = _FakeStdin()
+            self.stdout = iter(
+                [
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "result": {"final_response": "ok", "messages": []},
+                            "usage": {},
+                        }
+                    )
+                    + "\n"
+                ]
+            )
+            self.stderr = iter(())
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(["python", "-m", "tui_gateway.isolated_turn_worker"], timeout)
+
+    fake_proc = _FakeProc()
+    monkeypatch.setattr(server, "_build_isolated_turn_payload", lambda *args, **kwargs: {"payload": True})
+    monkeypatch.setattr(server, "_forward_isolated_turn_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_block", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_terminate_isolated_turn_proc", lambda proc: None)
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *args, **kwargs: fake_proc)
+
+    result = server._run_isolated_gateway_turn(
+        "sid-1",
+        {},
+        types.SimpleNamespace(session_id="sid-1", session_estimated_cost_usd=0.0),
+        "hello",
+        [],
+        operator_user_id="user-1",
+        business_slug="biz",
+        streamer=None,
+    )
+
+    assert result["result"]["final_response"] == "ok"
 
 
 def test_historical_outputs_payload_includes_research_files(tmp_path):

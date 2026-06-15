@@ -233,7 +233,7 @@ def test_appkit_contract_block_uses_vite_scaffold_surface_when_frontend_stack_is
 def test_worker_contract_block_states_positive_obligation_and_facts():
     block = takyon_core._subuser_app_worker_contract_block(  # type: ignore[attr-defined]
         {
-            "runtime_features": ["auth", "account", "checkout", "actions"],
+            "runtime_features": ["auth", "account", "checkout"],
             "routes": ["/", "/app"],
             "metadata": {
                 "subuser_app": {},
@@ -253,8 +253,8 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
     assert "Declared runtime-backed features for this app: auth, account, checkout" in block
     assert "src/screens/" in block
     assert "Support-route screens live in `src/screens/support.tsx`" in block
-    assert "createActionRunner" not in block
-    assert "actions/<name>.ts" not in block
+    assert "createActionRunner(name)" in block
+    assert "product/site/actions/<name>.ts" in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block
     assert "Subscription style:" not in block
@@ -282,8 +282,8 @@ def test_worker_contract_block_uses_vite_lane_guidance():
     assert "src/screens/support.tsx" in block
     assert "next.config.js" not in block
     assert "src/app/app/(product)/" not in block
-    assert "createActionRunner" not in block
-    assert "actions/<name>.ts" not in block
+    assert "createActionRunner(name)" in block
+    assert "product/site/actions/<name>.ts" in block
 
 
 def test_default_surface_contract_omits_design_brief(tmp_path: Path):

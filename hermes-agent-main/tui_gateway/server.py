@@ -2349,8 +2349,8 @@ def _run_isolated_gateway_turn(
                 break
             if kind == "error":
                 raise RuntimeError(str(msg.get("message") or "isolated turn failed"))
-        rc = proc.wait(timeout=5.0)
         if final is None:
+            rc = proc.wait(timeout=5.0)
             if session.pop("takyon_turn_interrupted", False):
                 return {
                     "result": {"final_response": "", "messages": history, "interrupted": True},

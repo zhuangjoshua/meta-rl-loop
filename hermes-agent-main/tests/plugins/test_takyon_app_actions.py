@@ -839,6 +839,32 @@ def test_surface_http_action_names_excludes_schedule_only_action_files(tmp_path)
     base = tmp_path / "businesses" / "biz" / "product" / "site"
     (base / "actions").mkdir(parents=True)
     (base / "actions" / "nightly-checkin.ts").write_text(
+        'export const trigger = "schedule";\n'
+        'export const schedule = "*/30 * * * *";\n'
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    names = app_actions.surface_http_action_names(
+        store=_Store(),
+        business="biz",
+        surface={
+            "runtime_features": ["auth", "account"],
+            "product_workflow": {"actions": [{"name": "nightly-checkin", "trigger": "schedule"}]},
+        },
+        source_path="product/site",
+    )
+    assert names == set()
+
+
+def test_surface_http_action_names_uses_workflow_schedule_metadata_as_compat_fallback(tmp_path):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "actions").mkdir(parents=True)
+    (base / "actions" / "nightly-checkin.ts").write_text(
         "export default async () => ({ ok: true });\n", encoding="utf-8"
     )
 

@@ -5897,6 +5897,9 @@ def _subuser_app_worker_contract_block(
             "- Use the shared runtime client and the declared shared rails already present in this workspace.",
             "- If something cannot be made real through the declared shared rails here, fail truthfully with the exact blocker.",
             "- Do not invent product-side server code in this scaffold.",
+            "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
+            "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
+            "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
         ]
     )

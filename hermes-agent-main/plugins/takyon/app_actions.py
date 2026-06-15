@@ -244,6 +244,14 @@ _ACTION_UI_CALL_PATTERN = re.compile(
     r"\b(?:useActionRunner|createActionRunner|invokeAction)\s*\(\s*['\"]([a-z][a-z0-9_-]{0,63})['\"]",
     re.IGNORECASE,
 )
+_ACTION_EXPORT_TRIGGER_PATTERN = re.compile(
+    r"""export\s+const\s+trigger\s*=\s*['"](?P<trigger>http|schedule)['"]""",
+    re.IGNORECASE,
+)
+_ACTION_EXPORT_SCHEDULE_PATTERN = re.compile(
+    r"""export\s+const\s+schedule\s*=\s*['"](?P<schedule>[^'"]+)['"]""",
+    re.IGNORECASE,
+)
 _ACTION_SCAN_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte"}
 _ACTION_SCAN_SKIP_DIRS = {".git", ".next", "_takyon", "build", "dist", "node_modules", "references"}
 
@@ -290,16 +298,82 @@ def _file_backed_action_names(site_root: Path, *, limit: int = 300) -> set[str]:
     return names
 
 
+def _workflow_action_specs_by_name(workflow: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    workflow = workflow if isinstance(workflow, Mapping) else {}
+    return {
+        str(spec.get("name") or "").strip().lower(): dict(spec)
+        for spec in normalize_action_specs(workflow.get("actions"))
+        if str(spec.get("name") or "").strip()
+    }
+
+
+def _action_spec_from_file(path: Path, *, fallback_spec: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    spec: dict[str, Any] = {"name": path.stem.strip().lower()}
+    fallback_trigger = str((fallback_spec or {}).get("trigger") or "").strip().lower()
+    fallback_schedule = str((fallback_spec or {}).get("schedule") or "").strip()
+    fallback_description = str((fallback_spec or {}).get("description") or "").strip()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    trigger_match = _ACTION_EXPORT_TRIGGER_PATTERN.search(text)
+    schedule_match = _ACTION_EXPORT_SCHEDULE_PATTERN.search(text)
+    schedule = str(schedule_match.group("schedule")).strip() if schedule_match else fallback_schedule
+    trigger = (
+        str(trigger_match.group("trigger")).strip().lower()
+        if trigger_match
+        else ("schedule" if schedule else (fallback_trigger or "http"))
+    )
+    if trigger:
+        spec["trigger"] = trigger
+    if schedule:
+        spec["schedule"] = schedule
+    if fallback_description:
+        spec["description"] = fallback_description
+    return spec
+
+
+def file_backed_action_specs(
+    site_root: Path,
+    workflow: Mapping[str, Any] | None = None,
+    *,
+    limit: int = 300,
+) -> list[dict[str, Any]]:
+    """Action specs derived from real files, with workflow metadata only as compatibility fallback."""
+    workflow_specs = _workflow_action_specs_by_name(workflow)
+    actions_root = site_root / "actions"
+    if not actions_root.exists():
+        return []
+    specs: list[dict[str, Any]] = []
+    scanned = 0
+    for path in sorted(actions_root.glob("*.ts")):
+        if scanned >= limit:
+            break
+        if not path.is_file():
+            continue
+        scanned += 1
+        name = path.stem.strip().lower()
+        if not _ACTION_NAME_RE.match(name):
+            continue
+        specs.append(_action_spec_from_file(path, fallback_spec=workflow_specs.get(name)))
+    return specs
+
+
 def site_http_action_names(site_root: Path, surface: Mapping[str, Any]) -> set[str]:
     """HTTP-runnable action files physically present for a product/site workspace."""
-    file_backed = _file_backed_action_names(site_root)
-    if not file_backed:
-        return set()
     workflow = surface.get("product_workflow") if isinstance(surface.get("product_workflow"), Mapping) else {}
+    file_backed_specs = file_backed_action_specs(site_root, workflow)
+    if not file_backed_specs:
+        return set()
     schedule_only = {
         str(spec.get("name") or "").strip().lower()
-        for spec in normalize_action_specs(workflow.get("actions"))
+        for spec in file_backed_specs
         if str(spec.get("trigger") or "").strip().lower() == "schedule"
+    }
+    file_backed = {
+        str(spec.get("name") or "").strip().lower()
+        for spec in file_backed_specs
+        if str(spec.get("name") or "").strip()
     }
     http_runnable = {name for name in file_backed if name not in schedule_only}
     if not http_runnable:
@@ -531,10 +605,15 @@ def reconcile_action_schedules(conn: Any, business_slug: str, workflow: Mapping[
         from .core import _now
     except Exception:
         from plugins.takyon.core import _now
+    try:
+        from .core import _business_root_path
+    except Exception:
+        from plugins.takyon.core import _business_root_path
 
     workflow = workflow if isinstance(workflow, Mapping) else {}
+    site_root = _business_root_path(business_slug) / "product" / "site"
     schedule_specs = [
-        spec for spec in normalize_action_specs(workflow.get("actions"))
+        spec for spec in file_backed_action_specs(site_root, workflow)
         if str(spec.get("trigger") or "").strip().lower() == "schedule"
     ]
     desired = {str(spec["name"]): str(spec["schedule"]) for spec in schedule_specs}
@@ -689,7 +768,7 @@ def invoke_action(
     if not isinstance(surface, Mapping):
         raise ActionContractError("app surface contract is missing")
     workflow = _surface_product_workflow_shape(dict(surface))
-    specs = normalize_action_specs(workflow.get("actions"))
+    specs = file_backed_action_specs(store._business_root(business_slug) / "product" / "site", workflow)
     outbound_hosts = normalize_outbound_hosts(workflow.get("outbound_hosts"))
     validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=list(surface.get("runtime_features") or []))
     spec = next((item for item in specs if str(item.get("name")) == action_name), None)
