@@ -238,6 +238,8 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
+    "takyon-build-product": ("Overview", "Quick Reference", "How to Run", "Rules"),
+    "takyon-product-workflow": ("Overview", "Quick Reference", "How to Run", "Rules"),
 }
 _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-openai": (
@@ -1102,6 +1104,30 @@ _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
     "claude-design-vibrant",
     "claude-design-doodle",
 )
+_DEFAULT_PRODUCT_METHOD_GUIDANCE_SKILLS: tuple[str, ...] = ("takyon-build-product",)
+_DEFAULT_PRODUCT_WORKFLOW_GUIDANCE_SKILLS: tuple[str, ...] = ("takyon-product-workflow",)
+
+
+def _instruction_requests_product_workflow_guidance(instruction: str) -> bool:
+    lowered = str(instruction or "").lower()
+    if not lowered:
+        return False
+    return any(
+        needle in lowered
+        for needle in (
+            "product-workflow",
+            "product workflow",
+            "workflow under /app",
+            "post-sign-in",
+            "inside /app",
+            "under /app",
+            "real product workflow",
+            "real product experience",
+            "build the mvp product",
+            "main action",
+            "turn /app into",
+        )
+    )
 
 
 def _resolve_worker_guidance_skills(
@@ -1114,9 +1140,21 @@ def _resolve_worker_guidance_skills(
     if "guidance_skills" in args:
         return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
     # Customer-facing product surfaces default to the full design-pack set so the worker always
-    # builds with a coherent visual direction instead of bare layout rules. The caller can still
-    # narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
-    if _workspace_needs_runtime_ui_contract(workspace_raw) or _workspace_needs_customer_ai_copy_contract(workspace_raw):
+    # builds with a coherent visual direction instead of bare layout rules. Product/site work also
+    # needs the Takyon method guidance that tells the worker which shared shell files must be
+    # rewritten, otherwise delegated builds can keep shipping starter support/scaffold surfaces.
+    # The caller can still narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
+    if _workspace_needs_runtime_ui_contract(workspace_raw):
+        guidance = [
+            *_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS,
+            *_DEFAULT_PRODUCT_METHOD_GUIDANCE_SKILLS,
+        ]
+        reason = "auto-selected design packs plus takyon-build-product for customer-facing product surface"
+        if _instruction_requests_product_workflow_guidance(instruction):
+            guidance.extend(_DEFAULT_PRODUCT_WORKFLOW_GUIDANCE_SKILLS)
+            reason = "auto-selected design packs plus Takyon product method guidance for customer-facing product surface"
+        return guidance, reason
+    if _workspace_needs_customer_ai_copy_contract(workspace_raw):
         return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected design packs for customer-facing product surface"
     return [], ""
 

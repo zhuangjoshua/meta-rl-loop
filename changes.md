@@ -26,3 +26,12 @@
   - `hermes-agent-main/skills/takyon/takyon-product-workflow/SKILL.md`
 - Added a focused contract regression in:
   - `hermes-agent-main/tests/plugins/test_takyon_customer_experience_shape.py`
+- Deployed that guidance fix canonically to production and restarted the operator runtime through the tracked deploy rail.
+- Started a fresh business rerun `longer-0615155707` after deploy and monitored the live worker temp workspace, logs, and browser activity.
+- Confirmed the new guidance text was live on the VPS, but the delegated worker still generated starter support/legal/article content and left `data-takyon-scaffold` markers in `landing.tsx`, `app-layout.tsx`, `app-home.tsx`, `profile.tsx`, and `support.tsx`.
+- New root cause found in `business_claude_agent_task`: the delegated worker auto-selected only the shared design-pack skills by default, not the Takyon product-method skills that contain the shell/product workflow rules we had just patched.
+- Patched the worker guidance-selection path in `hermes-agent-main/plugins/takyon/core.py` so `product/site` work auto-loads `takyon-build-product`, and explicit deep `/app` workflow instructions auto-load `takyon-product-workflow` too.
+- Added regressions in `hermes-agent-main/tests/test_claude_agent_task_defaults.py` covering:
+  - default `product/site` guidance now including `takyon-build-product`
+  - workflow phrasing adding `takyon-product-workflow`
+  - real distilled `takyon-build-product` guidance including the support-route/scaffold-removal rules
