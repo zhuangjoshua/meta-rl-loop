@@ -845,7 +845,78 @@ def test_run_action_subprocess_executes_local_deno_action(tmp_path):
         "base": "http://127.0.0.1:9119/api/takyon/apps/mathflow",
     }
     assert run["timeout_seconds"] == 30
-    assert run["isolation"] in {"subprocess", "systemd-scope"}
+    assert run["isolation"] in {"subprocess", "subprocess-fallback", "systemd-user-scope"}
+
+
+def test_run_action_subprocess_requires_user_scope_on_operator(monkeypatch, tmp_path):
+    action_path = tmp_path / "sum.ts"
+    action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(app_actions.platform, "system", lambda: "Linux")
+
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def _fake_communicate(command, *, request_bytes, timeout_seconds, env=None):
+        calls.append((list(command), dict(env) if env else None))
+        return 1, b"", b"Failed to start transient scope unit: Interactive authentication required"
+
+    monkeypatch.setattr(app_actions, "_communicate_action_process", _fake_communicate)
+
+    with pytest.raises(app_actions.ActionConfigError, match="user-scoped systemd sandbox"):
+        app_actions._run_action_subprocess(
+            action_path=action_path,
+            base=app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+            outbound_hosts=[],
+            request={"payload": {}, "ctx": {}},
+            timeout_seconds=30,
+            cpu_quota_percent=50,
+            memory_max_mb=256,
+        )
+
+    assert len(calls) == 1
+    command, env = calls[0]
+    assert command[:3] == ["/usr/bin/systemd-run", "--user", "--scope"]
+    assert env is not None
+    assert env["XDG_RUNTIME_DIR"].startswith("/run/user/")
+    assert env["DBUS_SESSION_BUS_ADDRESS"].startswith("unix:path=/run/user/")
+
+
+def test_run_action_subprocess_logs_and_falls_back_on_non_operator(monkeypatch, tmp_path, caplog):
+    action_path = tmp_path / "sum.ts"
+    action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(app_actions.platform, "system", lambda: "Linux")
+
+    calls: list[list[str]] = []
+
+    def _fake_communicate(command, *, request_bytes, timeout_seconds, env=None):
+        calls.append(list(command))
+        if command[0] == "/usr/bin/systemd-run":
+            return 1, b"", b"Failed to start transient scope unit: Interactive authentication required"
+        return 0, json.dumps({"ok": True, "result": {"status": "ok"}}).encode("utf-8"), b""
+
+    monkeypatch.setattr(app_actions, "_communicate_action_process", _fake_communicate)
+
+    with caplog.at_level("WARNING"):
+        result, run = app_actions._run_action_subprocess(
+            action_path=action_path,
+            base=app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+            outbound_hosts=[],
+            request={"payload": {}, "ctx": {}},
+            timeout_seconds=30,
+            cpu_quota_percent=50,
+            memory_max_mb=256,
+        )
+
+    assert result == {"status": "ok"}
+    assert run["isolation"] == "subprocess-fallback"
+    assert "sandbox_fallback_reason" in run
+    assert len(calls) == 2
+    assert calls[0][0] == "/usr/bin/systemd-run"
+    assert calls[1][0] == "/usr/bin/deno"
+    assert "falling back to plain subprocess" in caplog.text.lower()
 
 
 # --- Fresh-run regression fixes (latexflowfreshtrace) ---

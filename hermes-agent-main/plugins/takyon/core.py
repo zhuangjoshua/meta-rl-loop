@@ -7383,6 +7383,56 @@ def _runtime_capabilities(names: Iterable[str] | None = None) -> dict[str, Any]:
             path = pip_path or (f"{sys.executable} -m pip" if version else None)
         elif clean == "python":
             version = _command_version([sys.executable, "--version"])
+        elif clean == "systemd-run" and path:
+            version = _command_version([path, "--version"])
+            capability: dict[str, Any] = {
+                "available": True,
+                "path": path,
+                "version": version,
+            }
+            if platform.system() != "Linux":
+                capability["available"] = False
+                capability["error"] = "user-scoped systemd-run sandbox is supported only on Linux"
+            else:
+                uid = os.getuid()
+                runtime_dir = Path("/run/user") / str(uid)
+                probe_env = _runtime_env({
+                    "XDG_RUNTIME_DIR": str(runtime_dir),
+                    "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+                })
+                try:
+                    probe = subprocess.run(
+                        [
+                            path,
+                            "--user",
+                            "--scope",
+                            "--quiet",
+                            "-p",
+                            "CPUQuota=20%",
+                            "-p",
+                            "MemoryMax=16M",
+                            "-p",
+                            "TasksMax=8",
+                            "--",
+                            "/bin/true",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        env=probe_env,
+                    )
+                except Exception as exc:
+                    capability["available"] = False
+                    capability["error"] = f"user-scoped systemd-run probe failed: {exc}"
+                else:
+                    detail = (probe.stderr or probe.stdout or "").strip()
+                    if probe.returncode != 0:
+                        capability["available"] = False
+                        capability["error"] = detail or "user-scoped systemd-run probe failed"
+                    else:
+                        capability["probe"] = "user-scope-ok"
+            capabilities[clean] = capability
+            continue
         elif path:
             version = _command_version([path, "--version"])
         capabilities[clean] = {
@@ -16590,12 +16640,21 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
                 })
             elif ecosystem in {"actions", "app-actions", "app_actions"}:
                 capabilities = _runtime_capabilities(("deno", "systemd-run"))
+                require_systemd_scope = _normalized_host_role() == "operator"
+                deno_ready = bool(capabilities.get("deno", {}).get("available"))
+                sandbox_ready = bool(capabilities.get("systemd-run", {}).get("available"))
+                success = deno_ready and (sandbox_ready if require_systemd_scope else True)
+                error = None
+                if not deno_ready:
+                    error = "deno runtime is unavailable"
+                elif require_systemd_scope and not sandbox_ready:
+                    error = "operator host requires a working user-scoped systemd-run sandbox for product actions"
                 ensure_results.append({
                     "ecosystem": ecosystem,
-                    "success": bool(capabilities.get("deno", {}).get("available")),
+                    "success": success,
                     "installed": False,
                     "capabilities": capabilities,
-                    "error": None if capabilities.get("deno", {}).get("available") else "deno runtime is unavailable",
+                    "error": error,
                 })
             else:
                 ensure_results.append({

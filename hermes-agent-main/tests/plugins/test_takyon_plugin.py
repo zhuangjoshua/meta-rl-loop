@@ -324,6 +324,57 @@ def test_runtime_capability_check_reports_requested_commands():
     assert "definitely_missing_takyon_test_binary" in result["missing_capabilities"]
 
 
+def test_runtime_capabilities_probe_user_scoped_systemd_run(monkeypatch):
+    monkeypatch.setattr(
+        takyon_core,
+        "_resolve_runtime_executable",
+        lambda name: "/usr/bin/systemd-run" if name == "systemd-run" else None,
+    )
+    monkeypatch.setattr(takyon_core, "_command_version", lambda command: "255")
+    monkeypatch.setattr(takyon_core.platform, "system", lambda: "Linux")
+
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="Failed to connect to bus")
+
+    monkeypatch.setattr(takyon_core.subprocess, "run", _fake_run)
+
+    capabilities = takyon_core._runtime_capabilities(("systemd-run",))
+
+    assert capabilities["systemd-run"]["available"] is False
+    assert capabilities["systemd-run"]["error"] == "Failed to connect to bus"
+    assert calls[0][0][:3] == ["/usr/bin/systemd-run", "--user", "--scope"]
+
+
+def test_action_runtime_capability_check_requires_working_user_scope_on_operator(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setattr(
+        takyon_core,
+        "_runtime_capabilities",
+        lambda requested: {
+            "deno": {"available": True, "path": "/usr/bin/deno", "version": "2.8.3"},
+            "systemd-run": {
+                "available": False,
+                "path": "/usr/bin/systemd-run",
+                "version": "255",
+                "error": "Failed to connect to bus",
+            },
+        },
+    )
+
+    result = json.loads(
+        handle_business_check_runtime_capabilities(
+            {"ecosystems": ["actions"], "capabilities": ["deno", "systemd-run"]}
+        )
+    )
+
+    ensure = result["ensure"][0]
+    assert ensure["success"] is False
+    assert "requires a working user-scoped systemd-run sandbox" in ensure["error"]
+
+
 def test_product_publish_target_defaults_to_business_subdomain():
     assert _product_publish_target("latexflow") == "https://latexflow.fourmanifold.com/"
 

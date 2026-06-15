@@ -73,9 +73,26 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   if ! id -u takyon >/dev/null 2>&1; then
     useradd --system --user-group --home-dir '$REMOTE_ROOT' --shell /usr/sbin/nologin takyon
   fi
+  takyon_uid=\"\$(id -u takyon)\"
   if id -nG takyon | grep -qw docker; then
     gpasswd -d takyon docker >/dev/null 2>&1 || deluser takyon docker >/dev/null 2>&1 || true
   fi
+  loginctl enable-linger takyon
+  install -d /etc/systemd/system/user@.service.d
+  cat >/etc/systemd/system/user@.service.d/delegate.conf <<'EOF'
+[Service]
+Delegate=cpu cpuset io memory pids
+EOF
+  systemctl daemon-reload
+  systemctl restart \"user@\${takyon_uid}.service\"
+  runuser -u takyon -- env \
+    XDG_RUNTIME_DIR=\"/run/user/\${takyon_uid}\" \
+    DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/\${takyon_uid}/bus\" \
+    systemd-run --user --scope --quiet \
+      -p CPUQuota=20% \
+      -p MemoryMax=64M \
+      -p TasksMax=8 \
+      -- /bin/true
   chown takyon:takyon '$REMOTE_ROOT'
   chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
   systemctl enable docker >/dev/null

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 import re
@@ -27,6 +28,7 @@ _ACTION_STDOUT_LIMIT = 256 * 1024
 _ACTION_STDERR_LIMIT = 16 * 1024
 _ACTION_MIN_INTERVAL_SECONDS = 15 * 60
 _ACTION_CONTEXT_PREFIX = "/api/takyon/apps/{business}"
+_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _ACTION_TRIGGER_ALIASES = {
     "user": "http",
     "manual": "http",
@@ -34,6 +36,13 @@ _ACTION_TRIGGER_ALIASES = {
     "cron": "schedule",
     "scheduled": "schedule",
 }
+_SYSTEMD_SCOPE_START_FAILURE_MARKERS = (
+    "Failed to start transient scope unit",
+    "Failed to connect to bus",
+    "Interactive authentication required",
+    "Access denied",
+    "No medium found",
+)
 
 _DEFAULT_CONFIG = {
     "rails_base_url": "",
@@ -76,6 +85,7 @@ await Deno.stdout.write(new TextEncoder().encode(JSON.stringify({ ok: true, resu
 
 _active_business_runs: set[str] = set()
 _active_business_runs_lock = threading.Lock()
+_LOGGER = logging.getLogger(__name__)
 
 
 class AppActionError(RuntimeError):
@@ -110,6 +120,56 @@ class ActionResultTooLarge(AppActionError):
 class RailsBase:
     origin: str
     hostport: str
+
+
+def _normalized_host_role() -> str:
+    return str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
+
+
+def _operator_host_requires_action_sandbox() -> bool:
+    return _normalized_host_role() == "operator"
+
+
+def _systemd_user_manager_env() -> dict[str, str]:
+    uid = os.getuid()
+    runtime_dir = Path("/run/user") / str(uid)
+    return {
+        "XDG_RUNTIME_DIR": str(runtime_dir),
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+    }
+
+
+def _is_systemd_scope_start_failure(detail: str) -> bool:
+    text = str(detail or "").strip()
+    if not text:
+        return False
+    return any(marker in text for marker in _SYSTEMD_SCOPE_START_FAILURE_MARKERS)
+
+
+def _communicate_action_process(
+    command: list[str],
+    *,
+    request_bytes: bytes,
+    timeout_seconds: int,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=dict(env) if env else None,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=request_bytes, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            proc.kill()
+        raise ActionTimeout(f"action exceeded the {timeout_seconds}s deadline") from exc
+    return proc.returncode, stdout, stderr
 
 
 def _is_pg_conn(conn: Any) -> bool:
@@ -1202,13 +1262,19 @@ def _run_action_subprocess(
             str(runner_path),
             action_path.resolve().as_uri(),
         ]
+        sandbox_required = _operator_host_requires_action_sandbox()
         isolation = "subprocess"
         command = list(deno_command)
+        proc_env: dict[str, str] | None = None
+        fallback_reason: str | None = None
         systemd_run = shutil.which("systemd-run")
         if platform.system() == "Linux" and systemd_run:
-            isolation = "systemd-scope"
+            proc_env = dict(os.environ)
+            proc_env.update(_systemd_user_manager_env())
+            isolation = "systemd-user-scope"
             command = [
                 systemd_run,
+                "--user",
                 "--scope",
                 "--quiet",
                 "-p",
@@ -1220,36 +1286,54 @@ def _run_action_subprocess(
                 "--",
                 *deno_command,
             ]
-        proc = subprocess.Popen(
+        elif sandbox_required:
+            raise ActionConfigError("operator host requires product actions to run inside a user-scoped systemd sandbox")
+        else:
+            fallback_reason = "user-scoped systemd sandbox unavailable on this host"
+            _LOGGER.warning("App action sandbox unavailable; falling back to plain subprocess: %s", fallback_reason)
+        returncode, stdout, stderr = _communicate_action_process(
             command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+            request_bytes=request_bytes,
+            timeout_seconds=timeout_seconds,
+            env=proc_env,
         )
-        try:
-            stdout, stderr = proc.communicate(input=request_bytes, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                proc.kill()
-            raise ActionTimeout(f"action exceeded the {timeout_seconds}s deadline") from exc
         stderr_text = stderr.decode("utf-8", errors="replace")
         if len(stdout) > _ACTION_STDOUT_LIMIT:
             raise ActionResultTooLarge("action stdout exceeded 256 KB")
-        if proc.returncode != 0:
+        if returncode != 0 and proc_env and _is_systemd_scope_start_failure(
+            stderr_text.strip() or stdout.decode("utf-8", errors="replace").strip()
+        ):
+            detail = stderr_text.strip() or stdout.decode("utf-8", errors="replace").strip() or "failed to create user-scoped systemd sandbox"
+            if sandbox_required:
+                raise ActionConfigError(f"operator host requires the user-scoped systemd sandbox for product actions: {detail[:_ACTION_STDERR_LIMIT]}")
+            fallback_reason = detail[:_ACTION_STDERR_LIMIT]
+            _LOGGER.warning("App action sandbox unavailable; falling back to plain subprocess: %s", fallback_reason)
+            isolation = "subprocess-fallback"
+            command = list(deno_command)
+            proc_env = None
+            returncode, stdout, stderr = _communicate_action_process(
+                command,
+                request_bytes=request_bytes,
+                timeout_seconds=timeout_seconds,
+            )
+            stderr_text = stderr.decode("utf-8", errors="replace")
+        elif fallback_reason:
+            isolation = "subprocess-fallback"
+        if returncode != 0:
             detail = stderr_text.strip() or stdout.decode("utf-8", errors="replace").strip() or "action subprocess failed"
             raise AppActionError(detail[:_ACTION_STDERR_LIMIT])
         payload = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
         if not isinstance(payload, Mapping) or payload.get("ok") is not True:
             raise AppActionError("action runner returned an invalid payload")
-        return payload.get("result"), {
+        metadata = {
             "command": command,
             "timeout_seconds": timeout_seconds,
             "isolation": isolation,
             "stderr": stderr_text[:_ACTION_STDERR_LIMIT],
         }
+        if fallback_reason:
+            metadata["sandbox_fallback_reason"] = fallback_reason
+        return payload.get("result"), metadata
 
 
 def _acquire_business_run(business_slug: str) -> None:
