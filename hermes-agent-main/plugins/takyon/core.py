@@ -11768,6 +11768,127 @@ class TakyonStore:
             "guidance": "This result comes from the committed canonical workspace hydrated from durable storage.",
         }
 
+    def _track_workspace_revision(self, slug: str, revision: int) -> None:
+        normalized = _slugify(slug)
+        resolved_revision = max(0, int(revision or 0))
+        self._workspace_sync_cache.add(normalized)
+        self._workspace_revision_cache[normalized] = resolved_revision
+        if self._workspace_root_override is not None:
+            self._workspace_base_revision[normalized] = resolved_revision
+            _write_workspace_base_revisions(
+                self._workspace_root_override,
+                self._workspace_base_revision,
+            )
+
+    def _workspace_manifest_files(self, backend: Any, slug: str, revision: int) -> dict[str, str]:
+        from . import storage
+
+        resolved_revision = int(revision or 0)
+        if resolved_revision <= 0:
+            return {}
+        try:
+            manifest = storage.read_workspace_manifest(backend, slug, resolved_revision)
+        except Exception as exc:
+            raise TakyonError(
+                f"cannot read workspace manifest for business:{slug} at r{resolved_revision}: {exc}"
+            ) from exc
+        files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+        return {
+            str(path): str(digest)
+            for path, digest in files.items()
+            if str(path).strip() and str(digest).strip()
+        }
+
+    def _rebase_business_workspace_to_head(
+        self,
+        *,
+        backend: Any,
+        slug: str,
+        workspace: Path,
+        base_revision: int,
+        current_head: int,
+        candidate_files: Mapping[str, str],
+    ) -> tuple[int, dict[str, str]]:
+        from . import storage
+
+        normalized = _slugify(slug)
+        workspace_root = workspace.resolve()
+        base_files = self._workspace_manifest_files(backend, normalized, base_revision)
+        head_files = self._workspace_manifest_files(backend, normalized, current_head)
+        local_changed = {
+            rel
+            for rel in set(base_files).union(candidate_files)
+            if candidate_files.get(rel) != base_files.get(rel)
+        }
+        upstream_changed = {
+            rel
+            for rel in set(base_files).union(head_files)
+            if head_files.get(rel) != base_files.get(rel)
+        }
+        conflicts = sorted(
+            rel
+            for rel in local_changed.intersection(upstream_changed)
+            if candidate_files.get(rel) != head_files.get(rel)
+        )
+        if conflicts:
+            preview = ", ".join(conflicts[:5])
+            suffix = " ..." if len(conflicts) > 5 else ""
+            raise TakyonError(
+                f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
+                f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
+            )
+
+        local_overrides: dict[str, bytes | None] = {}
+        for rel in sorted(local_changed):
+            target = (workspace_root / rel).resolve()
+            if workspace_root not in (target, *target.parents):
+                raise TakyonError("workspace file escaped business root during stale-base rehydrate")
+            if rel in candidate_files:
+                try:
+                    local_overrides[rel] = target.read_bytes()
+                except OSError as exc:
+                    raise TakyonError(
+                        f"cannot snapshot local workspace change {rel!r} before stale-base rehydrate: {exc}"
+                    ) from exc
+            else:
+                local_overrides[rel] = None
+
+        if current_head > 0:
+            storage.materialize_workspace_revision(
+                backend,
+                normalized,
+                current_head,
+                workspace_root,
+                delete_local=True,
+            )
+        else:
+            shutil.rmtree(workspace_root, ignore_errors=True)
+            workspace_root.mkdir(parents=True, exist_ok=True)
+
+        for rel, payload in local_overrides.items():
+            target = (workspace_root / rel).resolve()
+            if workspace_root not in (target, *target.parents):
+                raise TakyonError("workspace file escaped business root during stale-base reapply")
+            if payload is None:
+                try:
+                    if target.exists():
+                        target.unlink()
+                except OSError as exc:
+                    raise TakyonError(
+                        f"cannot remove stale-base deleted file {rel!r} during rehydrate: {exc}"
+                    ) from exc
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.write_bytes(payload)
+            except OSError as exc:
+                raise TakyonError(
+                    f"cannot restore local workspace change {rel!r} after stale-base rehydrate: {exc}"
+                ) from exc
+
+        self._track_workspace_revision(normalized, current_head)
+        return current_head, storage.workspace_source_digests(workspace_root)
+
     def _commit_business_workspace_revision(
         self,
         conn: sqlite3.Connection,
@@ -11792,26 +11913,21 @@ class TakyonStore:
         workspace.mkdir(parents=True, exist_ok=True)
         current_head = self._business_head_revision_from_conn(conn, normalized)
         base_revision = current_head if expected_base_revision is None else int(expected_base_revision)
-        if base_revision != current_head:
-            raise TakyonError(
-                f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to r{base_revision}; re-hydrate before committing"
-            )
         candidate_files = storage.workspace_source_digests(workspace)
+        if base_revision != current_head:
+            current_head, candidate_files = self._rebase_business_workspace_to_head(
+                backend=backend,
+                slug=normalized,
+                workspace=workspace,
+                base_revision=base_revision,
+                current_head=current_head,
+                candidate_files=candidate_files,
+            )
+            base_revision = current_head
         if current_head > 0:
-            try:
-                current_manifest = storage.read_workspace_manifest(backend, normalized, current_head)
-            except Exception:
-                current_manifest = {}
-            current_files = current_manifest.get("files") if isinstance(current_manifest.get("files"), dict) else {}
+            current_files = self._workspace_manifest_files(backend, normalized, current_head)
             if current_files == candidate_files:
-                self._workspace_sync_cache.add(normalized)
-                self._workspace_revision_cache[normalized] = current_head
-                if self._workspace_root_override is not None:
-                    self._workspace_base_revision[normalized] = current_head
-                    _write_workspace_base_revisions(
-                        self._workspace_root_override,
-                        self._workspace_base_revision,
-                    )
+                self._track_workspace_revision(normalized, current_head)
                 return current_head
         next_revision = current_head + 1
         manifest = storage.write_workspace_revision(
@@ -11842,14 +11958,7 @@ class TakyonStore:
             "UPDATE businesses SET head_revision = ?, updated_at = ? WHERE slug = ?",
             (next_revision, _now(), normalized),
         )
-        self._workspace_sync_cache.add(normalized)
-        self._workspace_revision_cache[normalized] = next_revision
-        if self._workspace_root_override is not None:
-            self._workspace_base_revision[normalized] = next_revision
-            _write_workspace_base_revisions(
-                self._workspace_root_override,
-                self._workspace_base_revision,
-            )
+        self._track_workspace_revision(normalized, next_revision)
         return next_revision
 
     def _sync_business_workspace_remote(self, slug: str) -> str:

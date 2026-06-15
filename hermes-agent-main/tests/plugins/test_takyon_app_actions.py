@@ -21,6 +21,10 @@ class _SQLiteStore:
         yield self._conn
 
 
+def _store_commit(store, scope: str, operations: list[dict], key: str):
+    return store.commit(scope=scope, operations=operations, idempotency_key=key, reason="test", actor="test")
+
+
 def test_actions_runtime_registry_entry_is_canonical():
     rail = takyon_core.PRODUCT_RUNTIME_RAILS["actions"]
 
@@ -1254,6 +1258,150 @@ def test_scoped_worker_sync_keeps_product_site_authority(tmp_path, monkeypatch, 
 
     assert status == "synced"
     assert "product/site/index.html" in manifest["files"]
+
+
+def test_scoped_workspace_commit_rehydrates_stale_base_for_non_conflicting_files(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(tmp_path, database_url=pg_store_dsn)
+    _store_commit(
+        store,
+        "business:mergebox",
+        [{"action": "business.upsert", "business": "mergebox", "name": "Mergebox"}],
+        "init-mergebox",
+    )
+    _store_commit(
+        store,
+        "business:mergebox",
+        [
+            {
+                "action": "artifact.write",
+                "business": "mergebox",
+                "path": "product/site/src/screens/support.tsx",
+                "content": "<main>scaffold support</main>\n",
+            }
+        ],
+        "seed-mergebox-support",
+    )
+
+    with takyon_core._mounted_canonical_business_workspace(store, "mergebox", owner_label="mergebox-test") as (
+        home,
+        backend,
+        base_revision,
+    ):
+        scoped = takyon_core._scoped_workspace_store(
+            store,
+            root=home,
+            backend_override=backend,
+            base_revision_by_slug={"mergebox": base_revision},
+        )
+        _store_commit(
+            store,
+            "business:mergebox",
+            [
+                {
+                    "action": "artifact.write",
+                    "business": "mergebox",
+                    "path": "product/site/actions/save-intake.ts",
+                    "content": "export default async () => ({ ok: true });\n",
+                }
+            ],
+            "canonical-add-action-file",
+        )
+
+        _store_commit(
+            scoped,
+            "business:mergebox",
+            [
+                {
+                    "action": "artifact.write",
+                    "business": "mergebox",
+                    "path": "product/site/src/screens/support.tsx",
+                    "content": "<main>real support</main>\n",
+                }
+            ],
+            "scoped-replace-support-after-stale-base",
+        )
+
+        canonical_root = store._business_root("mergebox")
+        scoped_root = scoped._business_root("mergebox", sync=False)
+        assert (canonical_root / "product" / "site" / "actions" / "save-intake.ts").read_text(encoding="utf-8") == (
+            "export default async () => ({ ok: true });\n"
+        )
+        assert (canonical_root / "product" / "site" / "src" / "screens" / "support.tsx").read_text(encoding="utf-8") == (
+            "<main>real support</main>\n"
+        )
+        assert (scoped_root / "product" / "site" / "actions" / "save-intake.ts").read_text(encoding="utf-8") == (
+            "export default async () => ({ ok: true });\n"
+        )
+        assert scoped._workspace_base_revision["mergebox"] == store._business_head_revision("mergebox")
+
+
+def test_scoped_workspace_commit_blocks_same_file_stale_conflict(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    store = takyon_core.TakyonStore(tmp_path, database_url=pg_store_dsn)
+    _store_commit(
+        store,
+        "business:conflictbox",
+        [{"action": "business.upsert", "business": "conflictbox", "name": "Conflictbox"}],
+        "init-conflictbox",
+    )
+    _store_commit(
+        store,
+        "business:conflictbox",
+        [
+            {
+                "action": "artifact.write",
+                "business": "conflictbox",
+                "path": "product/site/src/screens/support.tsx",
+                "content": "<main>base support</main>\n",
+            }
+        ],
+        "seed-conflictbox-support",
+    )
+
+    with takyon_core._mounted_canonical_business_workspace(store, "conflictbox", owner_label="conflictbox-test") as (
+        home,
+        backend,
+        base_revision,
+    ):
+        scoped = takyon_core._scoped_workspace_store(
+            store,
+            root=home,
+            backend_override=backend,
+            base_revision_by_slug={"conflictbox": base_revision},
+        )
+        _store_commit(
+            store,
+            "business:conflictbox",
+            [
+                {
+                    "action": "artifact.write",
+                    "business": "conflictbox",
+                    "path": "product/site/src/screens/support.tsx",
+                    "content": "<main>canonical support</main>\n",
+                }
+            ],
+            "canonical-update-support",
+        )
+
+        with pytest.raises(takyon_core.TakyonError, match="conflicting files changed in both places"):
+            _store_commit(
+                scoped,
+                "business:conflictbox",
+                [
+                    {
+                        "action": "artifact.write",
+                        "business": "conflictbox",
+                        "path": "product/site/src/screens/support.tsx",
+                        "content": "<main>scoped support</main>\n",
+                    }
+                ],
+                "scoped-update-support-after-stale-base",
+            )
+
+        assert (store._business_root("conflictbox") / "product" / "site" / "src" / "screens" / "support.tsx").read_text(
+            encoding="utf-8"
+        ) == "<main>canonical support</main>\n"
 
 
 def test_business_file_truth_metadata_labels_canonical_vs_working_product_source():
