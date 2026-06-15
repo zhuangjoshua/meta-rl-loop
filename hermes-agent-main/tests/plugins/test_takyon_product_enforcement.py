@@ -414,11 +414,12 @@ def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
 
     markers = takyon_core._scaffold_visible_shell_markers(site)
 
+    # support.tsx is seeded as real, shippable content and is intentionally NOT gated as a
+    # blank scaffold shell, so it must not appear in the visible-shell markers.
     assert [marker["path"] for marker in markers] == [
         "src/screens/landing.tsx",
         "src/screens/app-home.tsx",
         "src/screens/profile.tsx",
-        "src/screens/support.tsx",
     ]
     assert all(marker["issue"] == "scaffold_visible_shell" for marker in markers)
 

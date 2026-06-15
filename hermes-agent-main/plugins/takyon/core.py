@@ -8059,11 +8059,14 @@ def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> 
 
 
 _SCAFFOLD_PLACEHOLDER_TOKENS_PATH = Path(__file__).resolve().parent / "subuser_app_kit" / "scaffold" / "src" / "tokens.css"
+# Customer-visible screens whose scaffold ships as a BLANK aria-hidden placeholder and so
+# must be rewritten before publish. support.tsx is deliberately seeded as real, shippable
+# FAQ/privacy/terms/articles content (scaffold/src/screens/support.tsx), not a blank shell,
+# so an untouched-but-real support page is acceptable to ship and must NOT be gated here.
 _SCAFFOLD_VISIBLE_SCREEN_PATHS: tuple[str, ...] = (
     "src/screens/landing.tsx",
     "src/screens/app-home.tsx",
     "src/screens/profile.tsx",
-    "src/screens/support.tsx",
 )
 _SCAFFOLD_VISIBLE_SCREEN_SENTINEL = "data-takyon-scaffold"
 

@@ -88,7 +88,7 @@ function SupportLayout({
   children: ReactNode;
 }) {
   return (
-    <main className="min-h-screen bg-background" data-takyon-scaffold="support">
+    <main className="min-h-screen bg-background">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-10 px-6 py-12 sm:px-8 sm:py-16">
         <header className="flex flex-col gap-6">
           <div className="flex flex-wrap items-center gap-3">
