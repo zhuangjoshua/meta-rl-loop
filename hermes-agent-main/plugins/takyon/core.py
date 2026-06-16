@@ -19702,7 +19702,11 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
     store = _store()
     try:
         business = _slugify(str(args.get("business") or ""))
-        plan_key = _file_slug(str(args.get("plan_key") or ""), "plan")
+        # `price_key` is a common frontend synonym for the app plan identifier; accept it so a
+        # product whose generated checkout call names the field price_key still resolves the same
+        # plan. The value is validated against app_plan_policies below, so this widens only the
+        # accepted parameter name, not what plans are reachable.
+        plan_key = _file_slug(str(args.get("plan_key") or args.get("price_key") or ""), "plan")
         if not plan_key:
             raise TakyonError("plan_key is required")
         customer_email = _normalize_email(str(args.get("customer_email"))) if args.get("customer_email") else None
