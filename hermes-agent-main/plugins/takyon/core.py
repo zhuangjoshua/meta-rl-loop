@@ -2011,13 +2011,24 @@ def _starter_plan_shape_payload(plans: list[dict[str, Any]] | None) -> list[dict
 
 
 def _subuser_public_env_value(*names: str) -> str:
+    resolved_names: list[str] = []
     for raw_name in names:
         name = str(raw_name or "").strip()
         if not name:
             continue
+        resolved_names.append(name)
         direct = str(os.getenv(name) or "").strip()
         if direct:
             return direct
+    if not resolved_names:
+        return ""
+    try:
+        mirrored = str(safebox.first_env_backed_value(*resolved_names) or "").strip()
+    except Exception:
+        mirrored = ""
+    if mirrored:
+        return mirrored
+    for name in resolved_names:
         try:
             mirrored = str(safebox.read_env_backed_value(name) or "").strip()
         except Exception:
@@ -18314,7 +18325,8 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
     sub-user by ``supabase_user_id`` (adopting a legacy email row on first Google login), mint the
     SAME 30-day ``app_session`` magic-link mints, and bootstrap the free entitlement on first login.
     ``validate_session`` and everything downstream are unchanged — only the credential differs.
-    Requires the Postgres runtime + ``SUPABASE_JWT_SECRET`` configured."""
+    Requires the Postgres runtime plus Supabase project config readable through Safebox
+    (``SUPABASE_URL`` and a public/browser key; ``SUPABASE_JWT_SECRET`` is legacy fallback only)."""
     store = _store()
     try:
         business = _slugify(str(args.get("business") or ""))
@@ -19696,6 +19708,14 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
         customer_email = _normalize_email(str(args.get("customer_email"))) if args.get("customer_email") else None
         success_url = str(args.get("success_url") or "").strip()
         cancel_url = str(args.get("cancel_url") or "").strip()
+        if not success_url or not cancel_url:
+            # The product frontend may not supply redirect URLs (e.g. a hand-rolled subscribe
+            # button that bypasses the shared client's checkout() default). Derive them from the
+            # business's SERVER-AUTHORITATIVE canonical product URL — never from a client-supplied
+            # origin (which would be an open-redirect) — so checkout works for every business.
+            base = _product_publish_target(business).rstrip("/")
+            success_url = success_url or f"{base}/app?checkout=success"
+            cancel_url = cancel_url or f"{base}/app?checkout=cancel"
         if not success_url or not cancel_url:
             raise TakyonError("success_url and cancel_url are required")
         with store._connect() as conn:
